@@ -3,7 +3,13 @@ name = "uratori"
 version = "0.1.0"
 description = "A definition engine: figures, readings and projections compiled from versioned definitions, computed incrementally over facts."
 readme = "README.md"
-license = "FSL-1.1-ALv2"
+# BUSL, not Apache or FSL: production use is granted for everything except the
+# one thing worth preventing, and unlike FSL the prohibited space is *named* in
+# the binding text -- the Additional Use Grant in LICENSE spells out
+# project-management / software-delivery insights, so a competitor cannot read
+# ambiguity into "products we offer". Each release converts to Apache-2.0 two
+# years after it ships.
+license = "BUSL-1.1"
 license-files = ["LICENSE"]
 authors = [{ name = "Sean Freitag" }]
 keywords = ["definitions", "metrics", "figures", "calculation-engine", "facts"]

@@ -1,16 +1,17 @@
 # uratori (裏取り)
 
 [![CI](https://github.com/cowboygneox/uratori/actions/workflows/ci.yml/badge.svg)](https://github.com/cowboygneox/uratori/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](LICENSE)
 
 **A definition engine you can deploy.** Write what your numbers *mean* in a
 small definition language; push facts at the engine; read back computed,
 versioned, explainable answers -- over HTTP, over a websocket, or in-process.
 
 裏付け (*urazuke*) is the backing a claim has; 裏取り (*uratori*) is the act of
-going and getting it. This engine grew out of a standup board whose whole
-premise is that no number on screen is unexplained; uratori is that board's
-calculation core with the product carved away.
+going and getting it. This engine grew out of [urazuke](https://urazuke.com),
+a standup board whose whole premise is that no number on screen is
+unexplained; uratori is that board's calculation core with the product carved
+away.
 
 ---
 
@@ -137,7 +138,10 @@ with other suites.
 
 ## License
 
-[FSL-1.1-ALv2](LICENSE) -- the Functional Source License: use it for
-anything except building a competing product or service, and each release
-becomes Apache-2.0 two years on. Read the license itself; it is a page,
-and the page is the point.
+[BUSL-1.1](LICENSE): production use is granted for anything *except* offering
+this engine, hosted or embedded, inside a product or service for
+project-management or software-delivery insights -- the space
+[urazuke](https://urazuke.com) occupies; the Additional Use Grant in the
+LICENSE names it in full. Internal tools and embedding in products outside
+that space are fine. Each release becomes plain Apache 2.0 two years after it
+ships.
