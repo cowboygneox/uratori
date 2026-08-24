@@ -16,8 +16,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Dependencies resolved from the manifest alone, before the source is copied,
-# so editing the engine does not reinstall pydantic and uvicorn.
-COPY pyproject.toml ./
+# so editing the engine does not reinstall pydantic and uvicorn. README and
+# LICENSE ride along because the manifest names them: hatchling refuses to
+# build metadata for files it cannot see.
+COPY pyproject.toml README.md LICENSE ./
 COPY uratori/__init__.py ./uratori/__init__.py
 RUN pip install --prefix=/install ".[server]"
 
