@@ -148,5 +148,5 @@ domain; and using or embedding it in a product or service for
 project-management or software-delivery insights, the space
 [urazuke](https://urazuke.com) occupies. The Additional Use Grant in the
 LICENSE names both in full. Internal tools and embedding in products outside
-that space are fine. Each release becomes plain Apache 2.0 two years after it
-ships.
+that space are fine. Each release becomes plain Apache 2.0 four years after
+it ships.

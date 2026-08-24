@@ -7,8 +7,8 @@ readme = "README.md"
 # one thing worth preventing, and unlike FSL the prohibited space is *named* in
 # the binding text -- the Additional Use Grant in LICENSE spells out
 # project-management / software-delivery insights, so a competitor cannot read
-# ambiguity into "products we offer". Each release converts to Apache-2.0 two
-# years after it ships.
+# ambiguity into "products we offer". Each release converts to Apache-2.0 four
+# years after it ships -- the longest window BUSL permits.
 license = "BUSL-1.1"
 license-files = ["LICENSE"]
 authors = [{ name = "Sean Freitag" }]
