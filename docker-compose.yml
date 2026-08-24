@@ -1,0 +1,41 @@
+# The slick start: `docker compose up` from a checkout gives a running engine
+# on http://localhost:8080 with its database beside it. Then:
+#
+#   curl -X PUT localhost:8080/schema      -d @your-schema.json  -H 'content-type: application/json'
+#   curl -X PUT localhost:8080/definitions -d '{"source": "..."}' -H 'content-type: application/json'
+#   curl -X POST localhost:8080/tenants/t1/facts -d '{"writes": {...}}' -H 'content-type: application/json'
+#   curl localhost:8080/tenants/t1/results
+#
+# To run the published image instead of building, replace `build: .` with
+# `image: cowboygneox/uratori:latest`.
+#
+# No URATORI_TOKEN here, deliberately: this file is the local playground. A
+# deployment that anything else can reach sets one.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: uratori
+      POSTGRES_USER: uratori
+      POSTGRES_PASSWORD: uratori
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "uratori", "-d", "uratori"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - uratori-data:/var/lib/postgresql/data
+
+  uratori:
+    build: .
+    environment:
+      DATABASE_URL: postgres://uratori:uratori@postgres:5432/uratori
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  uratori-data:

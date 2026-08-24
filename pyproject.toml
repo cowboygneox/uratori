@@ -1,0 +1,100 @@
+[project]
+name = "uratori"
+version = "0.1.0"
+description = "A definition engine: figures, readings and projections compiled from versioned definitions, computed incrementally over facts."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Sean Freitag" }]
+keywords = ["definitions", "metrics", "figures", "calculation-engine", "facts"]
+requires-python = ">=3.12"
+dependencies = [
+    # The one runtime dependency, and it is the wire: every answer the engine
+    # serves is a pydantic model, so a host gets a schema (and, through it,
+    # generated client types) rather than a dict it has to describe twice.
+    "pydantic>=2.9",
+]
+
+[project.optional-dependencies]
+postgres = [
+    "asyncpg>=0.30",
+]
+server = [
+    # The deployable service: the engine behind HTTP and a websocket. Kept out
+    # of the core dependencies so an embedding host pays for none of it.
+    "asyncpg>=0.30",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx>=0.28",
+    # Pinned rather than floored, for the reason the host project pins them: an
+    # unpinned checker means the local run and the CI run are different
+    # programs, and the first symptom is a build that fails on a file nobody
+    # touched.
+    "mypy==2.3.1",
+    "ruff==0.16.4",
+    "asyncpg>=0.30",
+    # asyncpg ships no py.typed. Without the stubs every row read is `Any`, and
+    # the strict checker has nothing to say about the Postgres store -- which is
+    # where a typo becomes a silently empty result.
+    "asyncpg-stubs>=0.30",
+]
+
+[project.urls]
+Homepage = "https://github.com/cowboygneox/uratori"
+Documentation = "https://github.com/cowboygneox/uratori/tree/main/docs"
+Source = "https://github.com/cowboygneox/uratori"
+Issues = "https://github.com/cowboygneox/uratori/issues"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["uratori"]
+
+# The same strictness the host project runs, for the same reason: this package
+# is, by volume, a compiler over closed unions, and `assert_never` plus a strict
+# mypy is what makes a forgotten match arm a type error rather than a figure
+# that silently answers None.
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+disallow_any_explicit = false
+plugins = ["pydantic.mypy"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    # A line of prose in a docstring is allowed to run long; the code is not,
+    # and E501 already covers that.
+    "E501",
+    # PEP 695 `type X = ...` over `X: TypeAlias = ...`. Both are correct; the
+    # explicit form is kept because an alias here is usually followed by a
+    # docstring explaining what the type *means*.
+    "UP040",
+    "UP047",
+    # Collapsing a nested `if` sometimes loses type narrowing that the arms were
+    # carrying, and its autofix does exactly that.
+    "SIM102",
+    "SIM114",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# One event loop for the whole session, as in the host project: a loop per test
+# hands the second test connections bound to a loop that has already closed.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning"]
