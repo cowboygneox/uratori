@@ -8,17 +8,22 @@ Licensed Work:        uratori
                       The Licensed Work is (c) 2026 Sean Freitag.
 
 Additional Use Grant: You may make production use of the Licensed Work,
-                      provided such use does not include offering the
-                      Licensed Work to third parties, on a hosted or
-                      embedded basis, as part of a product or service that
-                      provides insights, analytics, metrics, reporting, or
-                      status or roadmap boards for project management,
-                      software delivery, or engineering work -- including
-                      any product or service built on data drawn from issue
+                      provided such use does not include either:
+
+                      (a) offering the Licensed Work to third parties as a
+                      hosted or managed service, where the service provides
+                      users with access to any substantial set of the
+                      features or functionality of the Licensed Work; or
+
+                      (b) using or embedding the Licensed Work in a product
+                      or service, offered to third parties, that provides
+                      insights, analytics, metrics, reporting, or status or
+                      roadmap boards for project management, software
+                      delivery, or engineering work -- including any such
+                      product or service built on data drawn from issue
                       trackers or version control systems -- or that
                       otherwise competes with urazuke
-                      (https://urazuke.com) or with the Licensed Work
-                      itself.
+                      (https://urazuke.com).
 
 Change Date:          Two years from the date the Licensed Work is
                       published.

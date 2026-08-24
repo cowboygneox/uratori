@@ -39,7 +39,8 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, 
 
 from ..engine.activity import shown_changes
 from ..facade import DEFAULT_TRAILING, RunReport, Uratori
-from ..lang.check import CheckError, compile_source
+from ..lang.check import compile_source
+from ..lang.lex import DefinitionError
 from ..lang.plan import Library
 from ..results import Result
 from ..schema import Schema
@@ -224,7 +225,7 @@ def create_app(
         if source:
             try:
                 library = compile_source(source, schema)
-            except CheckError as refusal:
+            except DefinitionError as refusal:
                 raise HTTPException(
                     status_code=422,
                     detail=(
@@ -254,7 +255,7 @@ def create_app(
             )
         try:
             library = compile_source(body.source, s.world.schema)
-        except CheckError as refusal:
+        except DefinitionError as refusal:
             raise HTTPException(status_code=422, detail=str(refusal)) from refusal
         await db.save_world(s.pool, s.world.schema_document, body.source)
         s.world = World(
@@ -425,9 +426,14 @@ def create_app(
             # logged credential is a stored one.
             offered = socket.headers.get("authorization", "")
             if not hmac.compare_digest(offered, f"Bearer {s.token}"):
-                # Closed before accept, with the 4401 convention: a socket that
-                # accepts and then drops reads as a network fault, and the
-                # client retries for ever against an auth problem.
+                # Accepted, then closed with 4401, and the order matters:
+                # uvicorn renders a close-before-accept as a bare 403
+                # handshake rejection, which a browser's WebSocket API cannot
+                # tell from a network fault -- so a client retrying network
+                # faults would retry an auth problem for ever. Accepting
+                # first is what delivers the code; nothing is sent in
+                # between, so nothing leaks.
+                await socket.accept()
                 await socket.close(code=4401)
                 return
         await socket.accept()

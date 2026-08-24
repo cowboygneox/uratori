@@ -213,8 +213,10 @@ index code_change.merged_by_day from (author_account_id through team_person.acco
 index code_change.authored_in   from (author_account_id through team_person.accounts.account_id, connection_id)
 ```
 
-A parenthesised `from` takes up to two parts and keys each bucket
-`<subject>@<rest>`. This is what lets a figure be per-person *and* per-day, or
+A parenthesised `from` keys each bucket `<subject>@<rest>`; the parts can be
+several, but a figure may only fan out of an index carrying at most two -- a
+subject and one more is all a value key can hold, and the checker says so at
+the figure, not the index. This is what lets a figure be per-person *and* per-day, or
 per-person *and* per-source, without the engine learning a second scope
 dimension. Because `@` joins the halves, a key value containing `@` is refused
 outright rather than encoded -- a subject that decomposes into the wrong pair

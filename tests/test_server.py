@@ -107,6 +107,24 @@ async def test_definitions_are_refused_in_the_checkers_own_words(server: Server)
     assert health["ready"] is False, "a refused load must leave nothing half-taught"
 
 
+async def test_a_definition_that_does_not_even_parse_is_still_a_422(server: Server) -> None:
+    """The 422 promise covers the whole compile, not just the checker. A
+    missing colon is the first mistake a new author makes, and it fails one
+    layer before the checker -- in the lexer or parser. A route that caught
+    only `CheckError` turned exactly that mistake into a bare 500, with the
+    parser's message (which names the line) discarded into the server log
+    where the author cannot see it."""
+    await server.http.put("/schema", json=COURIER_WORLD.to_document())
+    refused = await server.http.put(
+        "/definitions", json={"source": "this is not a definition\n"}
+    )
+    assert refused.status_code == 422, refused.text
+    assert "line 1" in refused.json()["detail"]
+
+    health = (await server.http.get("/health")).json()
+    assert health["ready"] is False, "a refused load must leave nothing half-taught"
+
+
 async def test_taught_fed_and_asked_end_to_end(server: Server) -> None:
     versions = await _teach(server.http)
     # The versions the server reports are the ones this build compiled locally

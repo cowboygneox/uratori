@@ -1,0 +1,14 @@
+# The build needs pyproject.toml, README.md, LICENSE and uratori/ -- nothing
+# else. A developer checkout otherwise ships a ~130 MB context (.venv is most
+# of it) and bakes __pycache__ into the image.
+.git/
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+**/__pycache__/
+dist/
+docs/
+tests/
+.github/

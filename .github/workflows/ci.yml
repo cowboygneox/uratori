@@ -16,8 +16,20 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    # Semver only: a looser glob (v2, v1.0-beta) would slip past the semver
+    # tag rules below and publish nothing but a sha tag, silently.
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   pull_request:
+
+permissions:
+  contents: read
+
+# Two quick merges must not race for `latest`: runs on the same ref queue up
+# behind each other instead. Never cancelled -- a half-published image is
+# worse than a late one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -57,6 +69,10 @@ jobs:
       packages: write
     env:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      # Both secrets or neither: with only the username set, login-action
+      # throws "Password required" and takes the GHCR publish down with it.
+      # (`secrets` is unavailable in step `if:`s, hence the env hoist.)
+      DOCKERHUB_ENABLED: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
@@ -71,7 +87,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
-        if: github.event_name == 'push' && env.DOCKERHUB_USERNAME != ''
+        if: github.event_name == 'push' && env.DOCKERHUB_ENABLED == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ env.DOCKERHUB_USERNAME }}
@@ -85,12 +101,25 @@ jobs:
           # login, so a fork publishes under its own namespace or not at all.
           images: |
             ghcr.io/${{ github.repository }}
-            name=docker.io/${{ env.DOCKERHUB_USERNAME }}/uratori,enable=${{ env.DOCKERHUB_USERNAME != '' }}
+            name=docker.io/${{ env.DOCKERHUB_USERNAME }}/uratori,enable=${{ env.DOCKERHUB_ENABLED == 'true' }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+
+      # /health must report the tag a deploy pulled, or the "deploy check"
+      # the docs sell is comparing two spellings of the same build: releases
+      # strip the v (image tag 0.2.0, not v0.2.0), main pushes use the same
+      # 7-char sha the image tag carries.
+      - name: App version
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=sha-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -101,6 +130,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            APP_VERSION=${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('sha-{0}', github.sha) }}
+            APP_VERSION=${{ steps.ver.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

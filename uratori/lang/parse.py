@@ -269,12 +269,12 @@ class _Parser:
 
         if self._at_word("through"):
             self._next()
-            target = self._name("a fact kind and path, e.g. urazuke_person.accounts.accountId")
+            target = self._name("a fact kind and path, e.g. team_person.accounts.accountId")
             kind, _, rest = target.partition(".")
             if not rest:
                 raise self._error(
                     f'"{target}" needs a path: `through <fact kind>.<path>`, e.g. '
-                    "`through urazuke_person.accounts.accountId`"
+                    "`through team_person.accounts.accountId`"
                 )
             through = Through(kind=kind, path=rest)
 
@@ -387,7 +387,7 @@ class _Parser:
     def _figure(self) -> FigureDecl:
         line = self._peek().line
         self._keyword("figure")
-        name = self._name("a figure name, e.g. urazuke_person.open_mrs")
+        name = self._name("a figure name, e.g. team_person.open_mrs")
         self._prefix_of(name, "a figure", line)
 
         across: str | None = None
@@ -787,7 +787,7 @@ class _Parser:
     def _reading(self) -> ReadingDecl:
         line = self._peek().line
         self._keyword("reading")
-        name = self._name("a reading name, e.g. urazuke_person.to_merge")
+        name = self._name("a reading name, e.g. team_person.to_merge")
         self._prefix_of(name, "a reading", line)
         self._punct("(")
         args: list[str] = []

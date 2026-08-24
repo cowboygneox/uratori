@@ -62,6 +62,7 @@ from .ast import (
     ValueDecl,
 )
 from .hash import version_of
+from .lex import DefinitionError
 from .parse import parse
 from .plan import (
     CompiledIndex,
@@ -74,7 +75,7 @@ from .plan import (
 )
 
 
-class CheckError(Exception):
+class CheckError(DefinitionError):
     def __init__(self, message: str, line: int) -> None:
         super().__init__(f"line {line}: {message}")
         self.message = message
@@ -434,7 +435,7 @@ class _Checker:
         that mean different things yields the **empty set**, which is a figure
         reading nought for everybody rather than an error anybody sees:
 
-            m = work_issue.assigned_to:{urazuke_person} & code_change.open
+            m = work_issue.assigned_to:{team_person} & code_change.open
 
         compiles, runs, and reports that nobody is doing anything, for ever.
         """
@@ -1308,7 +1309,7 @@ class _Checker:
                     r.line,
                 )
             # A banded read binds the word, whatever the figure's own unit is:
-            # `band of urazuke_person.wip` is a level over a count.
+            # `band of team_person.wip` is a level over a count.
             unit: FigureUnit = "level" if r.band else source.unit
             if unit == "moment":
                 moments.add(r.name)

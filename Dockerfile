@@ -25,6 +25,12 @@ RUN pip install --prefix=/install ".[server]"
 
 COPY uratori/ ./uratori/
 
+# Install the real package over the stub the dependency layer built from.
+# Without this, site-packages holds an __init__.py whose imports cannot
+# resolve, and the image only boots because WORKDIR happens to shadow it --
+# any derived image or `workingDir:` elsewhere fails at the first import.
+RUN pip install --prefix=/install --no-deps .
+
 # -------------------------------------------------------------- runtime ----
 FROM python:3.12-slim AS runtime
 WORKDIR /app
@@ -47,7 +53,6 @@ RUN apt-get update \
  && useradd -u 1001 -g 1001 -M -s /usr/sbin/nologin uratori
 
 COPY --from=build /install /usr/local
-COPY --from=build /app/uratori ./uratori
 
 EXPOSE 8080
 
@@ -55,8 +60,10 @@ EXPOSE 8080
 # username it has no way to resolve.
 USER 1001
 
+# ${PORT}, not a literal: PORT is a documented knob, and a hardcoded probe
+# would mark every re-ported container unhealthy for ever.
 HEALTHCHECK --interval=60s --timeout=5s --start-period=25s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:8080/health || exit 1
+  CMD curl -fsS "http://127.0.0.1:${PORT}/health" || exit 1
 
 # tini reaps zombies and forwards signals, so a rollout stops promptly instead
 # of waiting out the grace period on every deploy.

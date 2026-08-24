@@ -74,8 +74,11 @@ string lands in every access log on the way. `DATABASE_URL` names a Postgres
 database of uratori's own; it refuses one that belongs to something else, and
 it migrates itself at boot.
 
-Images are published to [Docker Hub](https://hub.docker.com/r/cowboygneox/uratori)
-and mirrored at `ghcr.io/cowboygneox/uratori`.
+Images live on [Docker Hub](https://hub.docker.com/r/cowboygneox/uratori) as
+`cowboygneox/uratori` and on GHCR as `ghcr.io/cowboygneox/uratori`, built for
+amd64 and arm64. If your Postgres is a container on the same machine, the
+`DATABASE_URL` host is `host.docker.internal`, not `localhost` -- inside the
+container, `localhost` is the container.
 
 ## Documentation
 
@@ -89,7 +92,8 @@ and mirrored at `ghcr.io/cowboygneox/uratori`.
 
 ## The library
 
-The service is a thin wrapper; everything is importable:
+The service is a thin wrapper; everything is importable. In sketch (the
+runnable version, line by line, is [the library guide](docs/library.md)):
 
 ```python
 from uratori import Schema, Uratori, MemoryEngineStore, MemoryFactStore, compile_source
@@ -138,10 +142,11 @@ with other suites.
 
 ## License
 
-[BUSL-1.1](LICENSE): production use is granted for anything *except* offering
-this engine, hosted or embedded, inside a product or service for
-project-management or software-delivery insights -- the space
-[urazuke](https://urazuke.com) occupies; the Additional Use Grant in the
-LICENSE names it in full. Internal tools and embedding in products outside
+[BUSL-1.1](LICENSE): production use is granted for anything *except* two
+things -- offering the engine itself as a hosted or managed service, in any
+domain; and using or embedding it in a product or service for
+project-management or software-delivery insights, the space
+[urazuke](https://urazuke.com) occupies. The Additional Use Grant in the
+LICENSE names both in full. Internal tools and embedding in products outside
 that space are fine. Each release becomes plain Apache 2.0 two years after it
 ships.

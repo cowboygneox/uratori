@@ -155,25 +155,27 @@ def test_a_malformed_frame_is_ignored_not_fatal(pg_dsn: str) -> None:
             assert socket.receive_json()["type"] == "pong"
 
 
-def test_the_token_gates_the_stream_before_accept(pg_dsn: str) -> None:
+def test_the_token_gates_the_stream_with_a_close_code_a_client_can_read(pg_dsn: str) -> None:
     """An inverted or forgotten gate here is every tenant's figures pushed to
-    whoever connects. Closed with 4401 before accept, so a client retrying a
-    network fault can tell it is an auth problem; the token travels in the
-    header only, because a query string lands in every access log between
-    here and the client."""
+    whoever connects. The refusal must arrive as close code 4401 *after* the
+    handshake: uvicorn renders a close-before-accept as a bare 403 handshake
+    rejection, which a browser's WebSocket API cannot tell from a network
+    fault -- so a client retrying network faults would retry an auth problem
+    for ever, which is the exact failure 4401 exists to prevent. The token
+    travels in the header only, because a query string lands in every access
+    log between here and the client."""
     with _service(pg_dsn, token="s3cret") as client:
-        with pytest.raises(WebSocketDisconnect) as refused, client.websocket_connect("/stream"):
-            pass
-        assert refused.value.code == 4401
+        with client.websocket_connect("/stream") as socket:
+            with pytest.raises(WebSocketDisconnect) as refused:
+                socket.receive_json()
+            assert refused.value.code == 4401
 
         # The query-param path must NOT work: a token in a URL is a token in
         # every access log between here and the client.
-        with (
-            pytest.raises(WebSocketDisconnect) as refused,
-            client.websocket_connect("/stream?token=s3cret"),
-        ):
-            pass
-        assert refused.value.code == 4401
+        with client.websocket_connect("/stream?token=s3cret") as socket:
+            with pytest.raises(WebSocketDisconnect) as refused:
+                socket.receive_json()
+            assert refused.value.code == 4401
 
         _teach_and_feed(client, headers={"Authorization": "Bearer s3cret"})
         with client.websocket_connect(

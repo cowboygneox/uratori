@@ -50,6 +50,11 @@ figure shop_courier.load_band:
 EOF
 ```
 
+(`load_band` computes its word in `calculate:`, so the word *is* the value.
+A figure can also carry a `band:` block beside a numeric value, which is
+what populates a `Result`'s `level` and `banded` -- see
+[the language guide](language.md).)
+
 The [definition language](language.md) is its own document; here it is only
 cargo.
 
@@ -68,7 +73,7 @@ A missing or wrong token is a `401` with
 credential is a credential in every probe log.
 
 The websocket is gated by the same header, checked **before** the handshake
-is accepted -- a bad token closes the socket with code `4401` and no frames.
+is authenticated -- a bad token closes the socket with code `4401` and no frames.
 The token travels in the header **only**, on HTTP and on the socket alike; a
 `?token=` query parameter is ignored and refused, because a query string lands
 in every access and proxy log between the server and the client, and a logged
@@ -179,6 +184,9 @@ jq -Rs '{source: .}' couriers.fig |
   curl -s -X PUT "$BASE/definitions" -H "$AUTH" -H 'Content-Type: application/json' -d @-
 ```
 
+(`jq` is doing the one fiddly part -- turning a file into a JSON string with
+the newlines escaped; any JSON encoder does the same.)
+
 The body is `{"source": "<the .fig text>"}` -- your definitions as written,
 concatenated, the same text you commit. The server compiles it; source is the
 truth and the compiled plans are its consequence, never something a client
@@ -187,17 +195,19 @@ uploads directly.
 Responses:
 
 - `409` when no schema is declared yet (definitions compile against it).
-- `422` with the checker's message, verbatim -- e.g.
-  `"not a fact kind"` when a definition names a kind the schema does not
-  declare. A refused load changes nothing: the previously loaded definitions
-  (or the untaught state) stand whole, and `/health` still says so.
+- `422` with the compiler's message, verbatim, whichever layer refused --
+  the parser's (`line 1: expected "index", "measure", …` for text that does
+  not parse) or the checker's (`"not a fact kind"` when a definition names a
+  kind the schema does not declare). A refused load changes nothing: the
+  previously loaded definitions (or the untaught state) stand whole, and
+  `/health` still says so.
 - `200` with the compiled library:
 
 ```json
 {
   "figures": [
-    {"name": "shop_courier.carrying", "version": "b3f9…"},
-    {"name": "shop_courier.load_band", "version": "91ce…"}
+    {"name": "shop_courier.carrying", "version": "7a65feeb434b"},
+    {"name": "shop_courier.load_band", "version": "9d51b23584ee"}
   ],
   "readings": [],
   "projections": [],
@@ -316,7 +326,7 @@ posts for different tenants overlap.
   "written": 4,
   "deleted": 0,
   "changed": 2,
-  "rebuilt": [],
+  "rebuilt": ["shop_courier.carrying", "shop_courier.load_band"],
   "covered": ["shop_courier", "shop_order"],
   "shown": [
     {"figure": "shop_courier.load_band", "subject_id": "c1", "kind": "moved",
@@ -338,7 +348,7 @@ posts for different tenants overlap.
 | `rebuilt` | Figure names rebuilt from scratch this pass (a moved dial, a redeploy, a deletion, `full`). A figure recomputed to the value it already held writes nothing and appears nowhere; `rebuilt` is how a rebuild and a no-op stay distinguishable from outside. |
 | `covered` | The fact kinds this pass actually read, sorted. A webhook covers almost nothing and a reconcile covers everything, and the difference says which values were *confirmed* unchanged rather than merely not checked. |
 | `shown` | A **ranked sample** of the movements, capped at 40, for an activity log. See below. |
-| `results` | The re-served `Result` for everything the pass moved -- plus every projection, always, because the clock is one of a projection's inputs. Byte for byte the same objects `GET /tenants/{t}/results` returns and the websocket pushes; there is no run-only shape to drift. |
+| `results` | The re-served `Result` for everything the pass moved -- plus every projection, always, because the clock is one of a projection's inputs. The same objects `GET /tenants/{t}/results` returns and the websocket pushes; there is no run-only shape to drift. (One spelling difference: HTTP responses write absent fields as `null`, the socket omits them -- treat both as absent.) |
 
 Each entry in `shown` is one movement, rendered at the instant it happened
 against the tenant's dials as they stood, and never re-derived -- a log line
@@ -464,7 +474,7 @@ A served figure from the courier world:
 {
   "kind": "figure",
   "name": "shop_courier.carrying",
-  "version": "b3f9…",
+  "version": "7a65feeb434b",
   "at": "2026-08-24T12:00:03.214000+00:00",
   "zone": null,
   "unit": "count",
@@ -563,7 +573,7 @@ the spelling -- the field is `frm`.
 | `trailing` | The window asked for, in days. |
 | `frm`, `to` | The actual ISO dates it resolved to. |
 | `zone` | The calendar it resolved in. |
-| `mean`, `median`, `worst`, `total`, `count` | The statistics the reading declares; each is a number or `null`. |
+| `mean`, `median`, `worst`, `total`, `count` | The statistics the reading declares; each is a number or `null`. A definition's `sum` arrives on the wire as `total` -- the rename happens here, nowhere else. |
 | `series` | Per-day values, when the definition asked for them -- the one non-scalar statistic, and it exists so a sparkline is a definition's answer rather than the client slicing a range and computing ten means. |
 | `display` | Each statistic above, rendered, keyed by statistic name. Rendered on the server because rendering a duration is a division, and a division is a calculation. |
 | `sample` | How many values took part. For a count figure this is *days that contributed*, not records -- a different number of similar magnitude, which is why it is named rather than left to be inferred. |
@@ -597,19 +607,23 @@ subject as Good, with list order the only symptom.
 ## The websocket: `/stream`
 
 Subscribe to a tenant; receive its current answers, then every answer that
-moves -- the same `Result` objects the routes return, byte for byte, delivered
-one per moved definition. What the socket adds is only *when*.
+moves -- the same `Result` objects the routes return, delivered one per moved
+definition. What the socket adds is only *when*. One spelling difference: the
+socket omits absent fields where HTTP writes `null`; a client must treat a
+missing key and a `null` alike, as *absent*, never as zero.
 
 ```
 ws://localhost:8080/stream
 ```
 
-Auth first, before the handshake is accepted: when `URATORI_TOKEN` is set,
-the `Authorization: Bearer` **header** must be right or the socket closes
-with code `4401` and no frames. Closed before accept deliberately -- a socket
-that accepts and then drops reads as a network fault, and the client retries
-for ever against an auth problem; `4401` says which it is. A token in the
-query string does not work, on purpose (see Authentication).
+Auth first: when `URATORI_TOKEN` is set, the `Authorization: Bearer`
+**header** must be right or the socket closes with code `4401` and no
+frames. The handshake is accepted and then immediately closed, deliberately:
+a rejected handshake surfaces in a browser's WebSocket API as the same
+opaque failure a network fault does, and a client retrying network faults
+would retry an auth problem for ever -- `4401` as a close code says which it
+is, and nothing travels between accept and close. A token in the query
+string does not work, on purpose (see Authentication).
 
 ### Frames the client sends
 

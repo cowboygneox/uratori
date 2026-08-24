@@ -116,7 +116,16 @@ class Engine:
                 changes.extend(await self._remove_departed(tenant, settings))
             changes.extend(await self._backfill(tenant, settings))
 
+        # `covered` is what the host re-dates evidence on, so it must name
+        # the kinds this pass *read*, not the kinds the batch happened to
+        # mention. A full pass recomputed every figure from every fact its
+        # definitions can see; reporting the batch instead tells the host a
+        # batch-less reconcile confirmed nothing. The warm path stays exactly
+        # the batch -- widening it there would re-date evidence that was
+        # never checked, which is the narrowed-population sin in reverse.
         covered = frozenset(written or {}) | frozenset(deleted or {})
+        if full:
+            covered |= _kinds_read(lib)
         return Outcome(changes=tuple(changes), covered=covered, rebuilt=rebuilt)
 
     # -------------------------------------------------------------- pending --
@@ -616,6 +625,24 @@ class Engine:
     def _indexes_over(self, kind: str) -> list[CompiledIndex]:
         return [i for i in self._library.indexes.values() if i.kind == kind]
 
+
+
+def _kinds_read(lib: Library) -> frozenset[str]:
+    """Every fact kind a full pass over this library reads: each index's
+    source kind, each kind an index resolves `through`, each measure's kind.
+    Subject kinds appear only if something reads them -- names resolve at
+    serve time, so a kind nobody indexes or measures is genuinely unread."""
+    from ..lang.check import _index_fields
+
+    kinds = {index.kind for index in lib.indexes.values()}
+    kinds |= {
+        part.through.kind
+        for index in lib.indexes.values()
+        for part in _index_fields(index.spec)
+        if part.through is not None
+    }
+    kinds |= {measure.kind for measure in lib.measures.values()}
+    return frozenset(kinds)
 
 
 def _parts_of(index: CompiledIndex) -> list[Any]:

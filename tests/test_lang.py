@@ -1573,3 +1573,23 @@ projection team_person.card:
 """,
         "declares no band",
     )
+
+
+def test_every_compile_refusal_is_a_definition_error() -> None:
+    """The public contract for an embedding host: one except clause catches a
+    definition that cannot load, whichever layer refused it. Without a shared
+    base, a host guards its boot path with `except CheckError` and a missing
+    colon -- which fails one layer earlier, in the parser -- crashes straight
+    through the guard it thought it had."""
+    # Imported from the package root deliberately: the *public* surface is
+    # what a host writes its except clause against.
+    from uratori import DefinitionError
+
+    with pytest.raises(DefinitionError) as syntax:
+        compile_source("this is not a definition\n")
+    assert isinstance(syntax.value, SyntaxError_)
+    assert "line 1" in str(syntax.value)
+
+    with pytest.raises(DefinitionError) as meaning:
+        compile_source("index nothing.here from nowhere\n")
+    assert isinstance(meaning.value, CheckError)

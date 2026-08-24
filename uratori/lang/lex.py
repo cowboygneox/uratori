@@ -37,7 +37,15 @@ class Token:
     column: int
 
 
-class SyntaxError_(Exception):
+class DefinitionError(Exception):
+    """A definition that cannot load, whichever layer refused it. The public
+    contract for a host's except clause: `SyntaxError_` (lexer and parser) and
+    `CheckError` (checker) are both this, so one guard covers the whole
+    compile -- a host that caught only the checker would let a missing colon
+    crash straight through the boot path it thought it had guarded."""
+
+
+class SyntaxError_(DefinitionError):
     """A definition that does not lex. Named with a trailing underscore so it
     cannot be confused with the builtin, which means something else entirely."""
 

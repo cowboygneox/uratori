@@ -108,9 +108,11 @@ asyncio.run(main())
 Step by step:
 
 - **`compile_source(source, schema)`** checks and lowers the definitions into
-  a `Library`. A bad definition raises `CheckError` with the line and the
-  reason in the checker's own words -- this is the same compile the service
-  runs behind `PUT /definitions`, so what compiles here runs there.
+  a `Library`. A bad definition raises a `DefinitionError` with the line and
+  the reason -- `SyntaxError_` from the lexer or parser, `CheckError` from
+  the checker, and one `except DefinitionError` catches the lot. This is the
+  same compile the service runs behind `PUT /definitions`, so what compiles
+  here runs there.
 - **`Uratori(schema=..., library=..., store=..., facts=...)`** takes the four
   things a host declares: the world, the compiled definitions, an
   `EngineStore` for the engine's own state, and a `FactSource` for records.

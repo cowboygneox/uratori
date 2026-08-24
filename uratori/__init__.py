@@ -17,6 +17,7 @@ from .engine.change import Change, Outcome
 from .engine.engine import Engine
 from .facade import DEFAULT_TRAILING, Listener, RunReport, Uratori
 from .lang.check import CheckError, compile_source
+from .lang.lex import DefinitionError, SyntaxError_
 from .lang.plan import Library, Value
 from .results import (
     Availability,
@@ -51,6 +52,7 @@ __all__ = [
     "BucketChange",
     "Change",
     "CheckError",
+    "DefinitionError",
     "Engine",
     "EngineStore",
     "FactRow",
@@ -70,6 +72,7 @@ __all__ = [
     "Schema",
     "StoredValue",
     "Subject",
+    "SyntaxError_",
     "Unavailable",
     "Unit",
     "Uratori",

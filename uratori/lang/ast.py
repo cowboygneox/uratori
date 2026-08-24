@@ -31,7 +31,7 @@ coarser grain as well would be two answers to one question.
 
 @dataclass(frozen=True)
 class Through:
-    """`through urazuke_person.accounts.accountId` -- bucket by the id of the
+    """`through team_person.accounts.accountId` -- bucket by the id of the
     record that owns this value rather than by the value itself.
 
     A merge request carries a provider account id, and a person is one or more
@@ -148,7 +148,7 @@ class ByAge:
 
 @dataclass(frozen=True)
 class ByComposite:
-    """`from (authorAccountId through urazuke_person.accounts.accountId, mergedAt by day)`
+    """`from (authorAccountId through team_person.accounts.accountId, mergedAt by day)`
     -- one bucket per combination, keyed `<subject>@<rest>`.
 
     This is what lets a figure be per-person *and* per-day without the engine
@@ -204,7 +204,7 @@ class IndexDecl:
 
 @dataclass(frozen=True)
 class BucketScope:
-    """`code_change.authored_in:{urazuke_person}` -- one bucket per subject."""
+    """`code_change.authored_in:{team_person}` -- one bucket per subject."""
 
     variable: str
 
@@ -634,7 +634,7 @@ CalcExpr: TypeAlias = (
 
 @dataclass(frozen=True)
 class Combine:
-    """`sources = urazuke_person.open_mrs_by_source over urazuke_connection`
+    """`sources = team_person.open_mrs_by_source over data_connection`
 
     One figure read by another. Its own block rather than an entry in `depends`,
     because the two bind different kinds of thing: a `depends` set is a set of
@@ -677,7 +677,7 @@ class FigureDecl:
     display: str
     calculate: CalcExpr
     across: str | None = None
-    """`across urazuke_connection` -- a second dimension, one value per pair.
+    """`across data_connection` -- a second dimension, one value per pair.
 
     A fact kind, exactly as the scope is, and it binds a second variable of its
     own name. That symmetry is the design: a dimension is not a new kind of
@@ -742,7 +742,7 @@ class FigureDecl:
 
 @dataclass(frozen=True)
 class WindowedSource:
-    """`merged = urazuke_person.time_to_merge in range`
+    """`merged = team_person.time_to_merge in range`
 
     Deliberately not a set expression. A figure's `depends` composes buckets
     with set arithmetic, and every one of those operations is about *which
@@ -973,7 +973,7 @@ class ReadDecl:
     name: str
     figure: str
     band: bool = False
-    """`wip_band = band of urazuke_person.wip` -- the figure's band, not its number.
+    """`wip_band = band of team_person.wip` -- the figure's band, not its number.
 
     Explicit rather than implied by the binding's name, and explicit rather than
     bound automatically alongside the value. A read that silently produced two

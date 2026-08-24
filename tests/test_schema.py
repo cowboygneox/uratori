@@ -287,7 +287,30 @@ figure shop_courier.carrying:
     assert moved.get("shop_courier.carrying") == 1.0
 
 
-def test_every_declared_list_survives_the_document_round_trip() -> None:
+async def test_a_full_pass_reports_the_kinds_it_read_as_covered() -> None:
+    """`covered` is the difference between *confirmed unchanged* and *not
+    checked* -- a host re-dates its evidence on it. A full reconcile computes
+    every figure from every fact it can read, so it must report the kinds the
+    library reads; reporting the batch's kinds instead tells the host that a
+    batch-less rebuild confirmed nothing, and nothing ever re-dates."""
+    engine, facts = _facade()
+    facts.put("t1", "shop_courier", "c1", {"name": "Aki"})
+    facts.put("t1", "shop_order", "o1", {"ref": "A-1", "courier_id": "c1", "status": "riding"})
+
+    first = await engine.run("t1", written={"shop_order": ["o1"]})
+    assert "shop_order" in first.outcome.covered
+
+    full = await engine.run("t1", full=True)
+    assert full.outcome.covered == frozenset({"shop_order"}), (
+        "a full pass read every shop_order to recompute both figures; an "
+        "empty `covered` claims the reconcile confirmed nothing"
+    )
+
+    # The control: a warm, batch-less pass read nothing and must say so --
+    # widening `covered` on the cheap path would re-date evidence that was
+    # never confirmed.
+    idle = await engine.run("t1")
+    assert idle.outcome.covered == frozenset()
     """The round trip must carry all four settings lists, not whichever ones a
     convenient fixture happened to populate: a list dropped by `to_document`
     reaches the service empty, every definition naming one of its dials is

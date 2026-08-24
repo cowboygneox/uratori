@@ -23,6 +23,11 @@ docker run -p 8080:8080 \
   cowboygneox/uratori:latest
 ```
 
+If that Postgres is itself a container on the same machine, the host in
+`DATABASE_URL` is `host.docker.internal` (or the two containers share a
+network) -- `localhost` inside the engine's container is the engine's
+container.
+
 Or clone the repository and bring up an engine with its database beside it:
 
 ```bash
@@ -48,9 +53,10 @@ and recreated freely.
 
 ## Images and tags
 
-Images are published to [Docker Hub](https://hub.docker.com/r/cowboygneox/uratori)
-as `cowboygneox/uratori` and mirrored at `ghcr.io/cowboygneox/uratori`, built
-for both `linux/amd64` and `linux/arm64`.
+Images live on [Docker Hub](https://hub.docker.com/r/cowboygneox/uratori) as
+`cowboygneox/uratori` and on GHCR as `ghcr.io/cowboygneox/uratori`, built for
+both `linux/amd64` and `linux/arm64`. CI publishes on every push to `main`
+and on every release tag.
 
 | Tag | Published when | Meaning |
 |---|---|---|
@@ -126,8 +132,8 @@ lands in every access log and proxy log between the client and the server, and
 a logged credential is a stored one -- so the server simply never reads one
 from a URL, and a request that offers its token any other way gets a 401. The
 websocket at `/stream` follows the same rule: the token goes in the
-`Authorization` header of the upgrade request, and a bad or missing one closes
-the socket with code 4401 *before* accepting it, so an auth failure reads as
+`Authorization` header of the upgrade request, and a bad or missing one
+closes the socket with code 4401 and no frames, so an auth failure reads as
 an auth failure rather than as a network fault a client would retry for ever.
 
 ## One worker, one replica
@@ -200,7 +206,7 @@ spec:
     spec:
       containers:
         - name: uratori
-          image: cowboygneox/uratori:1.0.0   # pin a release or a sha-<commit>
+          image: cowboygneox/uratori:0.1.0   # pin a release or a sha-<commit>
           ports:
             - containerPort: 8080
           envFrom:
