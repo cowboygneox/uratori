@@ -3,7 +3,7 @@ name = "uratori"
 version = "0.1.0"
 description = "A definition engine: figures, readings and projections compiled from versioned definitions, computed incrementally over facts."
 readme = "README.md"
-license = "Apache-2.0"
+license = "FSL-1.1-ALv2"
 license-files = ["LICENSE"]
 authors = [{ name = "Sean Freitag" }]
 keywords = ["definitions", "metrics", "figures", "calculation-engine", "facts"]

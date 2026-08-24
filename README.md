@@ -1,7 +1,7 @@
 # uratori (裏取り)
 
 [![CI](https://github.com/cowboygneox/uratori/actions/workflows/ci.yml/badge.svg)](https://github.com/cowboygneox/uratori/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg)](LICENSE)
 
 **A definition engine you can deploy.** Write what your numbers *mean* in a
 small definition language; push facts at the engine; read back computed,
@@ -101,13 +101,15 @@ facts = MemoryFactStore()
 engine = Uratori(schema=schema, library=library, store=MemoryEngineStore(), facts=facts)
 engine.subscribe(lambda tenant, outcome, results: ...)   # every movement, served
 
+facts.put("t1", "shop_courier", "c1", {"name": "Aki"})
 facts.put("t1", "shop_order", "o1", {"ref": "A-1", "courier_id": "c1", "status": "riding"})
-report = await engine.run("t1", written={"shop_order": ["o1"]})
+report = await engine.run("t1", written={"shop_courier": ["c1"], "shop_order": ["o1"]})
 ```
 
-Stores are protocols: `uratori.store.postgres` ships the default pair
-(`pip install uratori[postgres]`), the in-memory pair is complete and shipped,
-and a parity suite keeps the two one behaviour.
+Stores are protocols: `uratori.store.postgres` ships the default pair (the
+`postgres` extra; install from a checkout for now -- PyPI is planned), the
+in-memory pair is complete and shipped, and a parity suite keeps the two one
+behaviour.
 
 ## The rules it inherits
 
@@ -135,4 +137,7 @@ with other suites.
 
 ## License
 
-[Apache-2.0](LICENSE).
+[FSL-1.1-ALv2](LICENSE) -- the Functional Source License: use it for
+anything except building a competing product or service, and each release
+becomes Apache-2.0 two years on. Read the license itself; it is a page,
+and the page is the point.
