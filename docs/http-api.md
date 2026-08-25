@@ -85,6 +85,11 @@ credential is a stored one.
 With `URATORI_TOKEN` unset, no route checks anything. That mode is for a
 network that is itself the boundary; do not expose it further.
 
+One carve-out lives beside these routes: the [built-in UI](ui.md) at `/ui/`,
+which is unauthenticated by design and therefore off by default the moment a
+token is set. Its JSON under `/ui/api/*` serves that page and is not part of
+this API's contract -- integrate against the routes documented here.
+
 ## Errors, uniformly
 
 Every refusal is JSON with a `detail` field:

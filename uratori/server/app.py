@@ -25,27 +25,24 @@ Design decisions a reader should not have to rediscover:
 """
 
 
-import asyncio
 import hmac
 import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from typing import Annotated, Any
 
-import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 
 from ..engine.activity import shown_changes
-from ..facade import DEFAULT_TRAILING, RunReport, Uratori
+from ..facade import DEFAULT_TRAILING, RunReport
 from ..lang.check import compile_source
 from ..lang.lex import DefinitionError
 from ..lang.plan import Library
 from ..results import Evidence, Result
-from ..schema import Schema
-from ..store.postgres import PostgresEngineStore, PostgresFactStore
+from ..store.postgres import PostgresFactStore
 from . import db
+from . import ui as builtin_ui
 from .contract import (
     Ack,
     DeclarationRef,
@@ -63,44 +60,10 @@ from .contract import (
     TenantRemoved,
     schema_out,
 )
-from .hub import Client, Hub
+from .hub import Client
+from .runtime import State, World, facade_for, ready, state_of
 
 log = logging.getLogger("uratori.server")
-
-
-@dataclass
-class World:
-    """What this deployment has been taught, held compiled in memory."""
-
-    schema: Schema
-    schema_document: dict[str, Any]
-    source: str | None
-    library: Library | None
-    refusal: str | None = None
-    """Why `library` is None when a source IS stored: this build's compiler
-    refused it (an upgrade across a language change). Carried so `_ready` can
-    say the truth -- "no definitions have been loaded" points the operator at
-    the wrong fix when the real one is a corrected PUT /definitions."""
-
-
-class State:
-    """Typed app state -- `app.state` is `Any`, and `Any` is how a renamed
-    attribute becomes a request-time AttributeError instead of a mypy error."""
-
-    def __init__(self, pool: "asyncpg.Pool[Any]", token: str | None, version: str) -> None:
-        self.pool = pool
-        self.token = token
-        self.version = version
-        self.world: World | None = None
-        self.hub = Hub()
-        self.locks: dict[str, asyncio.Lock] = {}
-
-    def lock_for(self, tenant: str) -> asyncio.Lock:
-        held = self.locks.get(tenant)
-        if held is None:
-            held = asyncio.Lock()
-            self.locks[tenant] = held
-        return held
 
 
 def create_app(
@@ -109,12 +72,21 @@ def create_app(
     token: str | None = None,
     version: str | None = None,
     pg_schema: str | None = None,
+    ui: bool | None = None,
+    frame_ancestors: str | None = None,
 ) -> FastAPI:
     """Build the service. Parameters override the environment, for tests and
-    for embedding; production reads DATABASE_URL / URATORI_TOKEN / APP_VERSION."""
+    for embedding; production reads DATABASE_URL / URATORI_TOKEN / APP_VERSION,
+    plus URATORI_UI / URATORI_UI_FRAME_ANCESTORS for the built-in UI."""
     resolved_dsn = dsn or os.environ.get("DATABASE_URL")
     resolved_token = token if token is not None else os.environ.get("URATORI_TOKEN")
     resolved_version = version or os.environ.get("APP_VERSION", "dev")
+    resolved_ui = (
+        ui if ui is not None else _ui_default(os.environ.get("URATORI_UI"), resolved_token)
+    )
+    resolved_ancestors = (
+        frame_ancestors or os.environ.get("URATORI_UI_FRAME_ANCESTORS") or "'self'"
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -167,9 +139,6 @@ def create_app(
 
     app = FastAPI(title="uratori", version=resolved_version, lifespan=lifespan)
 
-    def state(request: Request) -> State:
-        return request.app.state.uratori  # type: ignore[no-any-return]
-
     async def authed(request: Request) -> None:
         expected = request.app.state.uratori.token
         if expected is None:
@@ -178,46 +147,12 @@ def create_app(
         if not hmac.compare_digest(header, f"Bearer {expected}"):
             raise HTTPException(status_code=401, detail="Bad or missing bearer token")
 
-    S = Annotated[State, Depends(state)]
+    S = Annotated[State, Depends(state_of)]
     auth = Depends(authed)
 
-    def _ready(s: State) -> tuple[World, Library]:
-        """The world, or the 409 that explains what is missing.
-
-        409 rather than 500: an unconfigured server is a state the client can
-        fix (declare a schema, load definitions), and it must be told which.
-        """
-        if s.world is None:
-            raise HTTPException(status_code=409, detail="No schema has been declared yet")
-        if s.world.library is None:
-            if s.world.refusal is not None:
-                # Definitions ARE stored; saying "none loaded" would send the
-                # operator hunting a data loss when the fix is a re-PUT.
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "The stored definitions do not compile under this build: "
-                        f"{s.world.refusal}. PUT /definitions with corrected source."
-                    ),
-                )
-            raise HTTPException(status_code=409, detail="No definitions have been loaded yet")
-        return s.world, s.world.library
-
-    def _facade(s: State, world: World, library: Library) -> Uratori:
-        facade = Uratori(
-            schema=world.schema,
-            library=library,
-            store=PostgresEngineStore(s.pool),
-            facts=PostgresFactStore(s.pool),
-        )
-
-        # The socket is fed through the same hook an embedding host gets, so
-        # a listener bug is caught by whichever of the two hits it first.
-        async def push(tenant: str, _outcome: Any, results: tuple[Result, ...]) -> None:
-            await s.hub.publish(tenant, results)
-
-        facade.subscribe(push)
-        return facade
+    # `ready` and `facade_for` live in runtime.py, shared with the built-in
+    # UI's router, so the two surfaces cannot disagree about what "taught"
+    # means or how the facade is wired.
 
     # ------------------------------------------------------------- health --
 
@@ -290,7 +225,7 @@ def create_app(
 
     @app.get("/definitions", response_model=LibraryOut, dependencies=[auth])
     async def get_definitions(s: S) -> LibraryOut:
-        _world, library = _ready(s)
+        _world, library = ready(s)
         return _library_out(library)
 
     @app.put("/definitions", response_model=LibraryOut, dependencies=[auth])
@@ -334,7 +269,7 @@ def create_app(
         fact table is what the departed-subject sweep walks -- both need the
         table to already say what the batch said.
         """
-        world, library = _ready(s)
+        world, library = ready(s)
         facts = PostgresFactStore(s.pool)
         async with s.lock_for(tenant):
             for kind, keys in body.deletes.items():
@@ -351,31 +286,54 @@ def create_app(
                 if changed:
                     moved[kind] = changed
             settings = await db.load_settings(s.pool, tenant)
-            report = await _facade(s, world, library).run(
+            report = await facade_for(s, world, library).run(
                 tenant,
                 settings,
                 written=moved,
                 deleted={k: list(v) for k, v in body.deletes.items()},
                 full=body.full,
             )
-        return _run_out(
-            report,
-            world,
-            library,
-            settings,
-            written=written,
-            deleted=sum(len(v) for v in body.deletes.values()),
-        )
+            out = _run_out(
+                report,
+                world,
+                library,
+                settings,
+                written=written,
+                deleted=sum(len(v) for v in body.deletes.values()),
+            )
+            await _record(s, tenant, "facts", full=body.full, out=out)
+        return out
 
     @app.post("/tenants/{tenant}/runs", response_model=RunOut, dependencies=[auth])
     async def post_run(tenant: str, body: RunIn, s: S) -> RunOut:
         """A pass with no new facts: pick up a settings change, a redeployed
         definition, or (with `full`) rebuild everything from what is stored."""
-        world, library = _ready(s)
+        world, library = ready(s)
         async with s.lock_for(tenant):
             settings = await db.load_settings(s.pool, tenant)
-            report = await _facade(s, world, library).run(tenant, settings, full=body.full)
-        return _run_out(report, world, library, settings, written=0, deleted=0)
+            report = await facade_for(s, world, library).run(tenant, settings, full=body.full)
+            out = _run_out(report, world, library, settings, written=0, deleted=0)
+            await _record(s, tenant, "run", full=body.full, out=out)
+        return out
+
+    async def _record(s: State, tenant: str, cause: str, *, full: bool, out: RunOut) -> None:
+        """Freeze the pass into the run log, inside the tenant's lock so the
+        log's order is the order the passes actually ran in. The log is data,
+        not a UI feature -- it records whether or not the UI is mounted,
+        because the question it answers ("what did that fact cascade to")
+        is asked after the fact by definition."""
+        await db.record_run(
+            s.pool,
+            tenant,
+            cause,
+            full=full,
+            written=out.written,
+            deleted=out.deleted,
+            changed=out.changed,
+            rebuilt=out.rebuilt,
+            covered=out.covered,
+            shown=[c.model_dump() for c in out.shown],
+        )
 
     def _run_out(
         report: RunReport,
@@ -420,8 +378,8 @@ def create_app(
         s: S,
         trailing: Annotated[list[int] | None, Query()] = None,
     ) -> list[Result]:
-        world, library = _ready(s)
-        facade = _facade(s, world, library)
+        world, library = ready(s)
+        facade = facade_for(s, world, library)
         return list(
             await facade.results(
                 tenant,
@@ -437,8 +395,8 @@ def create_app(
         s: S,
         trailing: Annotated[list[int] | None, Query()] = None,
     ) -> Result:
-        world, library = _ready(s)
-        facade = _facade(s, world, library)
+        world, library = ready(s)
+        facade = facade_for(s, world, library)
         try:
             result = await facade.answer(
                 tenant,
@@ -467,8 +425,8 @@ def create_app(
         declaration that stores; the facade's refusals each say where the
         evidence actually lives, and they travel as the 404 detail.
         """
-        world, library = _ready(s)
-        facade = _facade(s, world, library)
+        world, library = ready(s)
+        facade = facade_for(s, world, library)
         try:
             answer = await facade.evidence(
                 tenant, name, subject, await db.load_settings(s.pool, tenant)
@@ -539,7 +497,7 @@ def create_app(
                 # never renders from a partial world while waiting for a pass.
                 world = s.world
                 if world is not None and world.library is not None:
-                    facade = _facade(s, world, world.library)
+                    facade = facade_for(s, world, world.library)
                     results = await facade.results(
                         frame.tenant, await db.load_settings(s.pool, frame.tenant)
                     )
@@ -553,7 +511,31 @@ def create_app(
         finally:
             await s.hub.leave(client)
 
+    if resolved_ui:
+        app.include_router(builtin_ui.router(resolved_ancestors))
+
     return app
+
+
+def _ui_default(env: str | None, token: str | None) -> bool:
+    """Whether to mount the built-in UI when the caller did not say.
+
+    The UI is unauthenticated by design, so the default follows the token: an
+    open server gets the UI, a token-protected one does not -- mounting an
+    open window beside a locked door would hand every fact and figure to
+    anyone who can reach the port. `URATORI_UI` overrides in either direction,
+    and a value that is neither a yes nor a no is refused at boot rather than
+    guessed at: a typo'd `URATORI_UI=fales` silently meaning "the default"
+    would surface as a security surprise, not a config error.
+    """
+    if env is None:
+        return token is None
+    value = env.strip().lower()
+    if value in {"1", "true", "on", "yes"}:
+        return True
+    if value in {"0", "false", "off", "no"}:
+        return False
+    raise RuntimeError(f"URATORI_UI={env!r} is neither a yes nor a no")
 
 
 def _parse(raw: str) -> Subscribe | None:
