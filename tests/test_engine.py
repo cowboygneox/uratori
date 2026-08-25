@@ -600,6 +600,66 @@ async def test_an_empty_population_is_an_empty_page_and_not_an_absence() -> None
     assert [r.id for r in control_rows] == ["c2"]
 
 
+GATED = compile_source(
+    """
+# One row per change, with the parked ones off the page.
+projection code_change.active_board:
+    field:
+        key = title as text
+        parked = parked as flag
+    omit when parked == 1
+
+# The board, in one row.
+summarise code_change.board_size over code_change.active_board:
+    count changes
+"""
+)
+
+
+async def test_an_omitted_row_is_off_the_page_and_out_of_the_summary() -> None:
+    """`omit` decides *on the page* once, before the summary, the sort and the
+    limit. A summary still counting a row the gate dropped would put three on
+    the tile over a page showing two -- a discrepancy no reader can check,
+    because the third row is visible nowhere."""
+    from uratori.facade import Uratori
+
+    facts = MemoryFactStore()
+    facts.put(TENANT, "code_change", "c1", {"title": "c1", "parked": "false"})
+    facts.put(TENANT, "code_change", "c2", {"title": "c2", "parked": "true"})
+    facade = Uratori(
+        schema=WORLD, library=GATED, store=MemoryEngineStore(), facts=facts
+    )
+
+    result = await facade.answer(TENANT, "code_change.active_board")
+    assert result is not None
+    assert [subject.id for subject in result.subjects] == ["c1"]
+    assert result.summary is not None
+    assert result.summary.values["changes"] == 1
+
+
+async def test_an_omit_the_engine_cannot_answer_keeps_the_row() -> None:
+    """The gate drops a row on evidence, never on the absence of it. A record
+    missing the field the condition reads has not been shown to be parked, and
+    dropping it would narrow the population by a cheap path -- a page that
+    quietly loses a row corrects itself never, because nothing downstream can
+    see what is not there."""
+    from uratori.facade import Uratori
+
+    facts = MemoryFactStore()
+    facts.put(TENANT, "code_change", "c3", {"title": "c3"})
+    # The control that makes the survival attributable: a record the gate CAN
+    # answer, dropped in the same pass. Without it this test passes with the
+    # gate disabled entirely.
+    facts.put(TENANT, "code_change", "c4", {"title": "c4", "parked": "true"})
+    facade = Uratori(
+        schema=WORLD, library=GATED, store=MemoryEngineStore(), facts=facts
+    )
+
+    result = await facade.answer(TENANT, "code_change.active_board")
+    assert result is not None
+    assert [subject.id for subject in result.subjects] == ["c3"]
+
+
 GROWN_BY_ONE_INDEX = """
 index code_change.closed where state == "closed"
 

@@ -1077,6 +1077,46 @@ Unlike every other piece of prose in the language, **a flag's templates are
 in the version hash**: a figure's display describes a number that did not
 move, but a flag's sentence is the whole content of that row.
 
+### `omit` -- a row-level gate
+
+```
+    omit when parked == 1
+```
+
+`omit when <comparison>` drops a row when the condition holds, at the moment
+the row is assembled. It exists for the one narrowing `from` cannot say: a
+population whose membership moves with the clock. `from` filters through
+stored buckets, and a bucket resolved against the clock at reindex time goes
+stale between reindexes -- which is why age indexes are refused there. The
+gate reads the row's own computed values instead, at the same single instant
+every value reads, so "starts more than thirty days out" is decided fresh on
+every ask and can never be stale.
+
+The example names a `value`, not a raw span, on purpose. A gate is usually
+several judgements -- too far out, *and* nobody working it, *and* nothing
+delivered under it -- and the condition grammar refuses conjunctions, so the
+judgement lives in a ladder `value` (`parked`) whose rungs a reader can
+argue with one at a time, and the gate tests its word. A raw
+`days_until_start > 30` is the shape review rejects on sight: a start pushed
+to next quarter with the due date left behind is the common data error, and
+a start-only gate hides exactly the row that needs attention.
+
+An omitted row is off the page *and out of the summary* -- the counts are
+over the rows a reader can see, for the same reason `from` removes its
+records from them. The gate runs before the summary, the sort and the limit.
+
+The condition is one comparison or presence test, never a conjunction, like
+a flag's `when`: two conditions that must both hold are a ladder `value`
+tested here by its word. **A condition the engine cannot answer keeps the
+row.** A flag's unknown does not fire because a flag is a claim; the gate's
+unknown does not drop because dropping on the absence of evidence would
+narrow the population by a cheap path, and a page quietly short one row
+corrects itself never.
+
+`omit` is the definition of *on the page* as surely as `from` is, so it is
+part of the projection's version hash: a projection that starts omitting
+rows cites differently, and its summary follows.
+
 ### `sort` and `limit`
 
 `sort by <binding> ascending|descending`, over anything bound except a moment.
@@ -1090,12 +1130,11 @@ that is just a sorted list.
 Sort and limit are applied *after* any summary is computed, so a summary is
 always about the whole population and never the page.
 
-> **Honesty note.** The grammar also accepts a `from <set expression>` line,
-> intended to narrow which records get rows, and it is hashed. The current
-> serving path does not honour it -- every collected record of the
-> projection's kind gets a row. Until that changes, leave `from` unwritten;
-> a narrowing that is declared and not applied is exactly the lie this
-> language exists to prevent.
+> A previous edition of this page warned that `from` was accepted and hashed
+> but not honoured by the serving path. That has changed: the population is
+> filtered through its stored buckets on every serve, gated by the index-set
+> version so a page whose buckets were built under a different library
+> answers `behind-deploy` rather than serving rows silently missing.
 
 ---
 

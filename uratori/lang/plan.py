@@ -166,6 +166,10 @@ class ProjectPlan:
     values: tuple[tuple[str, CalcExpr, FigureUnit], ...] = ()
     flags: tuple[FlagDecl, ...] = ()
     frm: SetExpr | None = None
+    omit: Condition | None = None
+    """The row-level gate: a row it holds for is off the page and out of the
+    summary. Unknown keeps the row -- see the declaration's own note."""
+
     sort: SortDecl | None = None
     limit: int | None = None
     joins: tuple[Join, ...] = ()

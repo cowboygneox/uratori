@@ -1483,6 +1483,12 @@ class _Checker:
         for flag in d.flags:
             self._flag(flag, bound, d.name, "projection")
 
+        if d.omit is not None:
+            # The same row language a flag's `when` speaks, checked the same
+            # way: a gate naming nothing would judge every row by a value that
+            # is never there, keep them all, and read as a rule being enforced.
+            self._condition(d.omit, bound, d.name, "projection")
+
         if d.sort is not None:
             if d.sort.name not in bound:
                 raise CheckError(
@@ -1502,7 +1508,11 @@ class _Checker:
                 d.line,
             )
 
-        settings = sorted({p for _, e, _ in values for p in _settings_in(e)} | _flag_settings(d.flags))
+        settings = sorted(
+            {p for _, e, _ in values for p in _settings_in(e)}
+            | _flag_settings(d.flags)
+            | _condition_settings(d.omit)
+        )
         for path in settings:
             if path not in self._schema.project_settings:
                 raise CheckError(
@@ -1520,6 +1530,7 @@ class _Checker:
             values=tuple(values),
             flags=d.flags,
             frm=d.frm,
+            omit=d.omit,
             sort=d.sort,
             limit=d.limit,
             joins=tuple(joins),  # type: ignore[arg-type]
@@ -1885,9 +1896,16 @@ def _zone_settings(indexes: list[str], compiled: dict[str, CompiledIndex]) -> se
 def _flag_settings(flags: tuple[FlagDecl, ...]) -> set[str]:
     out: set[str] = set()
     for f in flags:
-        out |= _settings_in(f.when.left)
-        if f.when.right is not None:
-            out |= _settings_in(f.when.right)
+        out |= _condition_settings(f.when)
+    return out
+
+
+def _condition_settings(c: Condition | None) -> set[str]:
+    if c is None:
+        return set()
+    out = _settings_in(c.left)
+    if c.right is not None:
+        out |= _settings_in(c.right)
     return out
 
 
@@ -2215,6 +2233,10 @@ def _project_hash(plan: ProjectPlan, indexes: dict[str, CompiledIndex]) -> objec
         "reads": [[n, f, b] for n, f, _, b in plan.reads],
         "values": [[n, _calc_hash(e), u] for n, e, u in plan.values],
         "flags": [_flag_hash(f) for f in plan.flags],
+        # `omit` decides who is on the page as surely as `from` does, so it
+        # moves the version the same way. `canonical` drops the key when it is
+        # None, which keeps every gateless projection on its historic hash.
+        "omit": _cond_hash(plan.omit),
         "sort": ([plan.sort.name, plan.sort.direction] if plan.sort is not None else None),
         "limit": plan.limit,
     }

@@ -915,17 +915,25 @@ async def project_rows(
             )
 
     joins = await _joined(facts, tenant, plan)
+    # A None is a row the plan's `omit` gate dropped. Filtered here, before
+    # the summary, the sort and the limit ever see the list -- the gate is the
+    # definition of *on the page*, and a summary counting a row no page shows
+    # is a tile nobody can check.
     rows = [
-        project(
-            plan,
-            record.key,
-            record.value,
-            {f: v for f, v in values.get(record.key, {}).items()},
-            joins,
-            settings,
-            at_ms,
-        )
+        row
         for record in records
+        if (
+            row := project(
+                plan,
+                record.key,
+                record.value,
+                {f: v for f, v in values.get(record.key, {}).items()},
+                joins,
+                settings,
+                at_ms,
+            )
+        )
+        is not None
     ]
     return rows, Ok(), missing
 

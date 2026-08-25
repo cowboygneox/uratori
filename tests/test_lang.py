@@ -1131,6 +1131,100 @@ projection work_issue.capped:
     )
 
 
+OMITTED = """
+# One row per change, with the parked ones off the page.
+projection code_change.active_board:
+    field:
+        key = title as text
+        parked = parked as flag
+    omit when parked == 1
+"""
+
+
+def test_an_omit_gate_moves_the_projection_version() -> None:
+    """`omit` is the definition of *on the page* as surely as `from` is, so a
+    projection that starts omitting rows must cite differently -- otherwise two
+    different pages carry one version on library.json, the surface a review
+    reads, and the row that vanished is traceable to nothing.
+
+    Two comparisons, deliberately. Gated-vs-gateless alone would pass a hash
+    that recorded only the gate's *presence* -- under which `parked == 1` and
+    `parked == 0` cite identically, and inverting the entire page ships with
+    an unmoved version. The second comparison is the one that pins the
+    condition itself."""
+    gated = compile_ok(OMITTED).projection("code_change.active_board")
+    control = compile_ok(
+        OMITTED.replace("    omit when parked == 1\n", "")
+    ).projection("code_change.active_board")
+    inverted = compile_ok(
+        OMITTED.replace("omit when parked == 1", "omit when parked == 0")
+    ).projection("code_change.active_board")
+    assert gated is not None and control is not None and inverted is not None
+    assert gated.omit is not None
+    assert gated.version != control.version
+    assert gated.version != inverted.version
+
+
+def test_an_omit_naming_nothing_would_judge_every_row_by_a_missing_value() -> None:
+    refuses(
+        """
+# d
+projection work_issue.ghosted:
+    field:
+        key = key as text
+    omit when ghost == 1
+""",
+        '"ghost", which nothing binds',
+    )
+
+
+def test_an_omit_reading_a_dial_registers_it_and_an_unknown_dial_is_refused() -> None:
+    """The gate's condition may compare against a tenant dial, and the dial
+    has to land in the plan's settings the way a value's or a flag's would --
+    an unregistered dial would evaluate to nothing, the gate would never
+    fire, and a narrowing everyone can read on library.json would silently
+    not happen: the exact class of lie the checker exists for."""
+    lib = compile_ok(
+        """
+# d
+projection work_issue.aged:
+    field:
+        status_changed = statusChangedAt as date
+    value:
+        age_days in days = days from status_changed to now
+    omit when age_days >= thresholds.longWipDays
+"""
+    )
+    plan = lib.projection("work_issue.aged")
+    assert plan is not None
+    assert "thresholds.longWipDays" in plan.settings
+
+    refuses(
+        """
+# d
+projection work_issue.misdialed:
+    field:
+        status_changed = statusChangedAt as date
+    value:
+        age_days in days = days from status_changed to now
+    omit when age_days >= thresholds.nope
+""",
+        "not a setting a projection may name",
+    )
+
+
+def test_a_second_omit_would_leave_two_gates_racing_for_the_page() -> None:
+    """Two conditions that must both hold are a `value` that is a ladder,
+    tested by its word -- the same answer the flag grammar gives."""
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(
+            BASE
+            + OMITTED
+            + "    omit when parked == 0\n"
+        )
+    assert 'more than one "omit"' in caught.value.message
+
+
 def test_a_flag_placeholder_naming_nothing_would_print_the_word_undefined() -> None:
     refuses(
         """

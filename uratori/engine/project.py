@@ -71,7 +71,13 @@ def project(
     joins: Mapping[tuple[str, str], Mapping[str, list[Mapping[str, Any]]]],
     settings: Mapping[str, Any],
     at_ms: float,
-) -> ProjectedRow:
+) -> ProjectedRow | None:
+    """One record's row, or None when the plan's `omit` gate holds for it.
+
+    None rather than a marked row, so a caller cannot forget to drop it -- a
+    row that travels with an "omitted" flag is a row a screen will render the
+    day someone reads the list and not the flag.
+    """
     values: dict[str, Value] = {}
     units: dict[str, FigureUnit] = {}
     moments: dict[str, float | None] = {}
@@ -105,6 +111,15 @@ def project(
     for name, expr, unit in plan.values:
         values[name] = _eval(expr, values, moments, settings, at_ms)
         units[name] = unit
+
+    if plan.omit is not None and holds(plan.omit, values, settings, at_ms) is True:
+        # `is True`, never `is not False`: `holds` answers three ways, and a
+        # gate the engine cannot answer keeps the row. A record that has not
+        # been shown to satisfy the gate has not earned removal -- dropping on
+        # the absence of evidence would narrow the population by a cheap
+        # path, and a page quietly short one row corrects itself never. (The
+        # flag path states the mirror rule: an unknown does not *fire*.)
+        return None
 
     flags = tuple(
         rendered

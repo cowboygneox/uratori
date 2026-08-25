@@ -1080,6 +1080,7 @@ class _Parser:
         reads: list[ReadDecl] = []
         values: list[ValueDecl] = []
         flags: list[FlagDecl] = []
+        omit: Condition | None = None
         sort: SortDecl | None = None
         limit: int | None = None
         seen: set[str] = set()
@@ -1104,6 +1105,18 @@ class _Parser:
                 # Not `once`: a row earns as many sentences as its state
                 # deserves, and each carries an indented body of its own.
                 flags.append(self._flag())
+            elif word == "omit":
+                # One gate, like one sort: a second `omit` would be a
+                # conjunction wearing a clause's syntax, and the answer to
+                # needing one is the answer the flag grammar gives -- a value
+                # that is a ladder, tested here by its word.
+                self._once(seen, "omit", name)
+                self._next()
+                self._keyword("when")
+                left = self._calc_expr()
+                op, right = self._condition_tail()
+                omit = Condition(left=left, op=op, right=right)
+                self._end_of_line()
             elif word == "sort":
                 self._once(seen, "sort", name)
                 sort = self._sort()
@@ -1115,8 +1128,8 @@ class _Parser:
                 self._end_of_line()
             else:
                 raise self._error(
-                    'expected "from", "field", "read", "value", "flag", "sort" or "limit", '
-                    f"got {self._describe()}"
+                    'expected "from", "field", "read", "value", "flag", "omit", "sort" or '
+                    f'"limit", got {self._describe()}'
                 )
             self._skip_newlines()
 
@@ -1136,6 +1149,7 @@ class _Parser:
             reads=tuple(reads),
             values=tuple(values),
             flags=tuple(flags),
+            omit=omit,
             sort=sort,
             limit=limit,
             line=line,

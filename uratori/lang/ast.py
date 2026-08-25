@@ -1130,6 +1130,15 @@ class ProjectDecl:
     reads: tuple[ReadDecl, ...] = ()
     values: tuple[ValueDecl, ...] = ()
     flags: tuple[FlagDecl, ...] = ()
+    omit: Condition | None = None
+    """A row-level gate over the computed values, decided when the row is
+    assembled -- which is what `from` cannot say: a population is stored
+    buckets, and membership that moves with the clock goes stale between
+    reindexes. The gate may read the clock for the same reason a value may:
+    a projection stores nothing. A condition the engine cannot answer keeps
+    the row -- dropping on the absence of evidence would narrow a population
+    by a cheap path."""
+
     sort: SortDecl | None = None
     limit: int | None = None
     """Refused without a sort. A limit with no order returns an arbitrary subset
