@@ -130,9 +130,9 @@ async def test_taught_fed_and_asked_end_to_end(server: Server) -> None:
     # The versions the server reports are the ones this build compiled locally
     # -- the check a host runs to know the server serves what was reviewed.
     local = compile_source(COURIER_SOURCE, COURIER_WORLD)
-    assert versions["figures"] == [
-        {"name": p.name, "version": p.version} for p in local.figures
-    ]
+    assert {d["name"]: d["version"] for d in versions["figures"]} == {
+        p.name: p.version for p in local.figures
+    }
 
     pushed = await server.http.post(
         "/tenants/t1/facts",
@@ -649,3 +649,157 @@ summarise shop_order.live_flow over shop_order.live_board:
     summary = after.json()["summary"]
     assert summary is not None
     assert summary["values"]["riding"] == 1
+
+
+# ------------------------------------------------------- the described library --
+
+
+async def test_the_definitions_route_serves_the_library_described(server: Server) -> None:
+    """GET /definitions is the review surface AND the only way an API-only
+    host can show its readers what a number means: every declaration of all
+    six kinds, each carrying its prose, its formula, and the names it rests
+    on. A host that had to import this package to render a catalogue would
+    be embedding the engine to describe the engine -- the exact coupling the
+    service exists to end."""
+    await _teach(server.http)
+    got = await server.http.get("/definitions")
+    assert got.status_code == 200, got.text
+    body = got.json()
+
+    by_name = {d["name"]: d for d in body["figures"]}
+    carrying = by_name["shop_courier.carrying"]
+    assert carrying["declaration"] == "figure"
+    assert carrying["version"], "a figure without a version is not citable"
+    assert carrying["prose"] == "How many orders this courier is carrying right now."
+    assert "count(mine)" in carrying["source"]
+    assert carrying["prose"] not in carrying["source"], "prose and formula must be told apart"
+    assert "display" not in carrying["source"], "the display template is presentation, not formula"
+    assert carrying["kind"] == "shop_courier"
+    assert carrying["unit"] == "count"
+    assert carrying["display"] == "{value} orders in hand"
+    assert carrying["grain"] is None and carrying["across"] is None
+    assert carrying["indexes"] == ["shop_order.carried_by", "shop_order.open"]
+    assert carrying["reads"] == []
+    assert carrying["banded"] is False
+
+    band = by_name["shop_courier.load_band"]
+    assert band["reads"] == ["shop_courier.carrying"], (
+        "a rollup's derivation is the figure it combines; without it the "
+        "catalogue cannot say what the word rests on"
+    )
+    assert band["settings"] == ["limits.carrying.over"]
+
+    indexes = {d["name"]: d for d in body["indexes"]}
+    carried = indexes["shop_order.carried_by"]
+    assert carried["declaration"] == "group", "a fan-out is a group, and the word carries it"
+    assert carried["version"] is None, (
+        "groups and filters are hashed into their readers, not versioned alone"
+    )
+    assert carried["kind"] == "shop_order"
+    assert carried["id_space"] == "shop_order"
+    assert "from courier_id" in carried["source"]
+    assert indexes["shop_order.open"]["declaration"] == "filter"
+
+    # The versions are the same ones the compile reports -- one review
+    # surface, whether read as JSON here or compiled locally by a build.
+    local = compile_source(COURIER_SOURCE, COURIER_WORLD)
+    assert {d["name"]: d["version"] for d in body["figures"]} == {
+        p.name: p.version for p in local.figures
+    }
+
+
+async def test_the_described_library_covers_reading_projection_and_summary(
+    server: Server,
+) -> None:
+    """The three kinds the courier fixture lacks, described the same way --
+    pinned separately so the shape cannot rot into a figures-only feature."""
+    world = COURIER_WORLD.to_document()
+    world["bucket_settings"] = ["tenant.timezone"]
+    world["defaults"] = {**world["defaults"], "tenant": {"hoursPerDay": 8, "timezone": "UTC"}}
+    put = await server.http.put("/schema", json=world)
+    assert put.status_code == 200, put.text
+    grown = (
+        COURIER_SOURCE
+        + """
+group shop_order.delivered_by_day from (courier_id, delivered_at by day in tenant.timezone)
+
+measure shop_order.riding_seconds = delivered_at - picked_up_at
+
+# Every delivery's ride time, day by day.
+figure shop_courier.ride_times:
+    display "{shop_courier} rides"
+    depends:
+        done = shop_order.delivered_by_day:{shop_courier}
+    calculate:
+        list(shop_order.riding_seconds over done)
+
+# The typical ride, over a window.
+reading shop_courier.typical_ride(range):
+    display "{value}"
+    depends:
+        rides = shop_courier.ride_times in range
+    calculate:
+        mean(rides)
+
+# Orders still on the road.
+projection shop_order.board:
+    from shop_order.open
+
+    field:
+        ref = ref as text
+
+# The board, in one row.
+summarise shop_order.flow over shop_order.board:
+    count riding
+"""
+    )
+    put = await server.http.put("/definitions", json={"source": grown})
+    assert put.status_code == 200, put.text
+    body = (await server.http.get("/definitions")).json()
+
+    reading = {d["name"]: d for d in body["readings"]}["shop_courier.typical_ride"]
+    assert reading["declaration"] == "reading"
+    assert reading["mode"] == "window"
+    assert reading["reads"] == ["shop_courier.ride_times"], (
+        "a reading's evidence lives in the figure it summarises; the "
+        "catalogue must say which"
+    )
+    assert reading["prose"] == "The typical ride, over a window."
+
+    day_figure = {d["name"]: d for d in body["figures"]}["shop_courier.ride_times"]
+    assert day_figure["grain"] == "day", (
+        "a host needs the grain to keep time-keyed figures off card surfaces"
+    )
+
+    projection = {d["name"]: d for d in body["projections"]}["shop_order.board"]
+    assert projection["declaration"] == "projection"
+    assert projection["kind"] == "shop_order"
+    assert projection["indexes"] == ["shop_order.open"], (
+        "the population's indexes are what the page is drawn from"
+    )
+    assert "from shop_order.open" in projection["source"]
+
+    summary = {d["name"]: d for d in body["summaries"]}["shop_order.flow"]
+    assert summary["over"] == "shop_order.board", (
+        "a summary means nothing without the projection it counts"
+    )
+
+    measure = {d["name"]: d for d in body["measures"]}["shop_order.riding_seconds"]
+    assert measure["declaration"] == "measure"
+    assert measure["kind"] == "shop_order"
+    assert measure["version"] is None
+
+
+async def test_the_described_library_names_the_fields_a_declaration_reads(
+    server: Server,
+) -> None:
+    """The paths are what a host's own drift guard needs: "every field my
+    definitions read exists on the records I collect" is the host's claim to
+    hold, and it can only hold it without compiling anything if the wire says
+    which fields those are."""
+    await _teach(server.http)
+    body = (await server.http.get("/definitions")).json()
+
+    carried = {d["name"]: d for d in body["indexes"]}["shop_order.carried_by"]
+    assert carried["fields"] == ["courier_id"]
+    assert carried["through"] == []
