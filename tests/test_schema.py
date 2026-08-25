@@ -29,8 +29,8 @@ COURIER_WORLD = Schema(
 )
 
 COURIER_SOURCE = '''
-index shop_order.carried_by from courier_id
-index shop_order.open where status != "delivered"
+group shop_order.carried_by from courier_id
+filter shop_order.open where status != "delivered"
 
 # How many orders this courier is carrying right now.
 figure shop_courier.carrying:
@@ -117,7 +117,7 @@ def test_the_closed_world_is_the_schema_not_the_engine() -> None:
     superset -- the exact wrong reason."""
     with pytest.raises(CheckError, match="not a fact kind"):
         compile_source(
-            'index work_issue.active where active == true\n', COURIER_WORLD
+            'filter work_issue.active where active == true\n', COURIER_WORLD
         )
 
 
@@ -254,8 +254,8 @@ async def test_a_moved_through_kind_record_escalates_to_full() -> None:
         name_fields={"shop_courier": "name", "shop_order": "ref"},
     )
     source = '''
-index shop_order.carried_by from courier_ref through shop_courier.handles
-index shop_order.open where status != "delivered"
+group shop_order.carried_by from courier_ref through shop_courier.handles
+filter shop_order.open where status != "delivered"
 
 # How many orders this courier is carrying right now.
 figure shop_courier.carrying:

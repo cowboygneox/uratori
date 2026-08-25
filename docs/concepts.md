@@ -35,7 +35,7 @@ relates to a courier: `"o1"` and `"o2"` carry `"c1"`, so they are Aki's, and
 `"o3"` is Bo's. `status` says which orders are still in hand -- two riding,
 one delivered. Nothing in the records marks those fields as special.
 *Declaring* that `courier_id` correlates orders to couriers, and that
-undelivered means open, is exactly what an index does
+undelivered means open, is exactly what a group and a filter do
 ([Definitions](#definitions-and-the-compile), below); read that way, these
 five records already hold the page's number: Aki is carrying two orders, Bo
 none.
@@ -100,12 +100,12 @@ days. A host that renders efforts must carry it in `defaults`.
 ## Definitions and the compile
 
 Definitions are written in a small language (`.fig` files, by convention) and
-compiled against the schema into a `Library`. Six kinds of declaration exist;
-the courier world uses the first four:
+compiled against the schema into a `Library`. Seven kinds of declaration
+exist; the courier world uses the first four:
 
 ```
-index shop_order.carried_by from courier_id
-index shop_order.open where status != "delivered"
+group shop_order.carried_by from courier_id
+filter shop_order.open where status != "delivered"
 
 measure shop_order.effort = handling_seconds in effort
 
@@ -135,11 +135,12 @@ The `#` lines above each figure are its *explanation*. The compile attaches
 that comment run as the declaration's customer-facing doc, served wherever
 the number is cited, and refuses a figure, reading, projection or summary
 that arrives without one -- a number nobody explained is a number nobody can
-defend. Indexes and measures may carry one but are not required to: they are
-plumbing, not numbers a reader meets.
+defend. Groups, filters and measures may carry one but are not required to:
+they are plumbing, not numbers a reader meets.
 
-- **Indexes** bucket records: `carried_by` files each order under its
-  courier, `open` files the undelivered ones. An index is the only way a
+- **Groups** bucket records by a field, one bucket per value: `carried_by`
+  files each order under its courier. **Filters** hold the records matching a
+  test: `open` holds the undelivered ones. Together they are the only way a
   definition reaches a population.
 - **Measures** read quantities off records, with a declared unit, so a number
   is never a bare float of unknown meaning.
@@ -273,11 +274,11 @@ Some situations rebuild a figure from all facts rather than incrementally:
   every deleting pass to full: correct in every branch by construction, and a
   full recompute is a fair price on the rare pass that reports something
   gone.
-- **A moved record of a kind indexes only resolve *through* runs full**, for
+- **A moved record of a kind groups only resolve *through* runs full**, for
   the same reason from the other direction. Consider
-  `index shop_order.carried_by from courier_ref through shop_courier.handles`:
+  `group shop_order.carried_by from courier_ref through shop_courier.handles`:
   orders name a courier by handle, and the courier record is how handles map
-  to couriers. No index is over `shop_courier` itself, so when a courier's
+  to couriers. No group or filter is over `shop_courier` itself, so when a courier's
   handle changes, the warm path sees the write and rebuilds nothing -- and
   every order that resolved through the old handle stays filed under the old
   answer. The origin project shipped exactly this bug. These moves are rare
@@ -317,7 +318,7 @@ what a dial is set to -- one boundary means one truth.)
 
 | List | Read from | Moving it invalidates |
 |---|---|---|
-| `bucket_settings` | index clauses (`by day in tenant.timezone`) | the tenant's whole bucketed history -- day boundaries moved, so every membership is suspect |
+| `bucket_settings` | a group's `by day in ...` and a filter's `older/younger than ...` | the tenant's whole bucketed history -- day boundaries moved, so every membership is suspect |
 | `figure_settings` | figure calculations | one stored value per subject, for each figure naming the dial |
 | `reading_settings` | reading statistics and bands | nothing stored -- the next read evaluates under the new dial |
 | `project_settings` | projection values and flags | nothing stored -- rows are assembled when asked |

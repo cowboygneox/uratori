@@ -3,7 +3,7 @@
 Deliberately close to the source text: the parser's job is to say what was
 written, and every decision about whether it *means* anything belongs in
 `check.py`. Keeping them apart is what lets the checker produce errors that
-name a rule ("no index called code_change.opne") rather than a position.
+name a rule ("no group or filter called code_change.opne") rather than a position.
 
 Every node is a frozen dataclass and every union is closed. `check.py` and
 `evaluate.py` match over them with `assert_never` in the default arm, so adding
@@ -94,8 +94,8 @@ class IndexField:
 
     Split out so a composite can reuse it verbatim. A one-part composite and a
     field index are the same thing; both spellings exist because
-    `index code_change.open from state` should not have to be written as a
-    tuple.
+    `group code_change.by_author from authorAccountId` should not have to be
+    written as a tuple.
     """
 
     field: str

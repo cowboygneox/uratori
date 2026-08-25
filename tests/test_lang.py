@@ -23,18 +23,18 @@ from .world import compile_source
 
 # A minimal preamble every fixture can build on.
 BASE = """
-index work_issue.assigned_to from assigneeAccountId through team_person.accounts.accountId
-index work_issue.active where active == true
-index work_issue.sized where estimateSeconds is set
-index work_issue.stuck where statusChangedAt older than thresholds.longWipDays
-index work_issue.in_container from containerId
-index code_change.open where state == "open"
-index code_change.by_source from connectionId
-index code_change.authored_in from (authorAccountId through team_person.accounts.accountId, connectionId)
-index code_change.merged_by_day from (authorAccountId through team_person.accounts.accountId, mergedAt by day in tenant.timezone)
-index code_review_request.asked_of from reviewerAccountId through team_person.accounts.accountId
-index code_review_request.pending where pending == true
-index work_issue.delivered_by_day from (assigneeAccountId through team_person.accounts.accountId, completedAt by day in tenant.timezone)
+group work_issue.assigned_to from assigneeAccountId through team_person.accounts.accountId
+filter work_issue.active where active == true
+filter work_issue.sized where estimateSeconds is set
+filter work_issue.stuck where statusChangedAt older than thresholds.longWipDays
+group work_issue.in_container from containerId
+filter code_change.open where state == "open"
+group code_change.by_source from connectionId
+group code_change.authored_in from (authorAccountId through team_person.accounts.accountId, connectionId)
+group code_change.merged_by_day from (authorAccountId through team_person.accounts.accountId, mergedAt by day in tenant.timezone)
+group code_review_request.asked_of from reviewerAccountId through team_person.accounts.accountId
+filter code_review_request.pending where pending == true
+group work_issue.delivered_by_day from (assigneeAccountId through team_person.accounts.accountId, completedAt by day in tenant.timezone)
 
 measure code_change.open_seconds = mergedAt - createdAt
 measure work_issue.estimate = estimateSeconds in effort
@@ -89,7 +89,7 @@ def test_the_base_library_compiles() -> None:
 def test_a_hash_inside_a_string_is_not_a_comment() -> None:
     """Naive comment stripping would truncate the label and still compile, so
     the sentence would simply be cut in half on screen."""
-    lib = compile_source(BASE + '\nindex code_change.hashed where title == "fix #12"\n')
+    lib = compile_source(BASE + '\nfilter code_change.hashed where title == "fix #12"\n')
     spec = lib.indexes["code_change.hashed"].spec
     assert isinstance(spec, ByPredicate)
     assert spec.value == "fix #12"
@@ -114,6 +114,131 @@ def test_indentation_that_matches_no_block_is_refused_rather_than_guessed() -> N
     assert "does not match any enclosing block" in caught.value.message
 
 
+# ----------------------------------------------------------- vocabulary --
+
+
+def test_index_is_refused_by_name_with_both_replacements() -> None:
+    """One keyword covered two different questions -- fanning records out by a
+    field, and narrowing to the records matching a test. A `.fig` written
+    against the old spelling should say what to change, not fail as "expected
+    a declaration" -- so the assertion pins the pointer's own words, which the
+    generic expected-a-declaration fallback (quoting both keywords too) would
+    not satisfy."""
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source("index work_issue.active where active == true\n")
+    assert '"index" split into "group" and "filter"' in caught.value.message
+    assert "`group code_change.by_author from ...`" in caught.value.message
+    assert "`filter code_change.open where ...`" in caught.value.message
+
+
+def test_index_is_refused_by_name_after_other_declarations_too() -> None:
+    """The pointer must fire wherever the old keyword appears, not only at the
+    top of the file -- mid-document the parser arrives here through a
+    different path, after dedents and newlines."""
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(BASE + "\nindex work_issue.late where active == true\n")
+    assert '"index" split into "group" and "filter"' in caught.value.message
+
+
+def test_a_group_that_narrows_is_refused_and_pointed_at_filter() -> None:
+    """`group x where ...` would compile to a single bucket wearing a keyword
+    that says it fans out, and every later reader trusts the keyword. The
+    assertion pins the direction of the advice: both messages mention both
+    keywords, so `"filter" in message` alone would pass with the advice
+    written backwards."""
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source("group work_issue.broken where active == true\n")
+    assert "write `filter work_issue.broken where ...`" in caught.value.message
+
+
+def test_a_filter_that_fans_out_is_refused_and_pointed_at_group() -> None:
+    """The mirror image: `filter x from ...` would bucket by every value of
+    the field under a keyword that promises one bucket."""
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source("filter work_issue.broken from containerId\n")
+    assert "write `group work_issue.broken from ...`" in caught.value.message
+
+
+def test_the_cross_shape_pointer_carries_a_keyed_as_along() -> None:
+    """Following the advice must not silently drop the id-space claim -- a
+    filter rewritten without its `keyed as` compiles and then intersects as
+    the wrong id space, which is the empty-set failure the clause exists to
+    prevent."""
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source("group code_review.broken keyed as code_change where a == true\n")
+    assert (
+        "write `filter code_review.broken keyed as code_change where ...`"
+        in caught.value.message
+    )
+
+
+def test_a_group_with_no_tail_is_refused_expecting_from() -> None:
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source("group work_issue.broken containerId\n")
+    assert 'expected "from" after the group name' in caught.value.message
+
+
+def test_a_filter_with_no_tail_is_refused_expecting_where() -> None:
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source("filter work_issue.broken active == true\n")
+    assert 'expected "where" after the filter name' in caught.value.message
+
+
+def test_each_shape_compiles_under_its_own_keyword() -> None:
+    """The control for the refusals above: the same declarations, each under
+    the right word, produce the shapes `index` used to -- `keyed as` and
+    `label` included, since both ride on the shared production."""
+    lib = compile_ok(
+        '\ngroup code_review.extra_by keyed as code_change from authorAccountId label "by"'
+        '\nfilter work_issue.extra_open where active == true label "open"\n'
+    )
+    assert lib.indexes["code_review.extra_by"].bucketed
+    assert lib.indexes["code_review.extra_by"].id_space == "code_change"
+    assert lib.indexes["code_review.extra_by"].label == "by"
+    assert not lib.indexes["work_issue.extra_open"].bucketed
+    assert lib.indexes["work_issue.extra_open"].label == "open"
+
+
+def test_the_rename_left_every_version_where_it_was() -> None:
+    """The keyword split is vocabulary only, so it must not move a single
+    stored value. These literals were computed on the tree before the split,
+    when the same specs were written `index` -- between them they hash a
+    filter, a group with a `through` hop, and a composite with `by day in` a
+    zone, so a change to any part of the compiled spec fails here as a moved
+    version, which in production is every tenant's history orphaned."""
+    lib = compile_ok()
+    assert lib.figure("team_person.wip").version == "d7fe57cb385c"
+    assert lib.figure("team_person.time_to_merge").version == "31cafa78b3bd"
+
+
+def test_a_groups_checker_messages_speak_the_group_word() -> None:
+    """`_decl_word`'s two branches are messages-only, so nothing structural
+    fails if a group is reported as a filter -- only the author's vocabulary.
+    The filter word is pinned by the age-setting refusal above; this pins the
+    group word through the zone refusal."""
+    refuses(
+        "\ngroup code_change.by_bad_day from (authorAccountId, mergedAt by day in flow.leadTimeDays)\n",
+        "not a setting a group may name",
+    )
+
+
+def test_a_groups_comment_is_served_as_its_prose() -> None:
+    """`declaration_prose` misses and no-prose both answer the empty string,
+    so only a group that *has* a comment can prove the source scan recognises
+    the `group` header -- if it still looked for `index`, the explanation
+    would silently vanish from the definition-source route."""
+    from uratori.lang.source import declaration_prose, declaration_source
+
+    lib = compile_source(
+        BASE.replace(
+            "group work_issue.in_container from containerId",
+            "# Which container holds it.\ngroup work_issue.in_container from containerId",
+        )
+    )
+    assert declaration_prose(lib, "work_issue.in_container") == "Which container holds it."
+    assert declaration_source(lib, "work_issue.in_container") is not None
+
+
 # ---------------------------------------------------------------- kinds --
 
 
@@ -132,29 +257,29 @@ figure nonsense_thing.count:
     )
 
 
-# ---------------------------------------------------------------- index --
+# ------------------------------------------------------------- group/filter --
 
 
-def test_an_index_may_only_name_a_bucket_setting() -> None:
+def test_an_age_filter_may_only_name_a_bucket_setting() -> None:
     """Moving one re-buckets a tenant's whole history, which is why the list is
     short and closed."""
     refuses(
-        "\nindex code_change.late where mergedAt older than flow.leadTimeDays\n",
-        "not a setting an index may name",
+        "\nfilter code_change.late where mergedAt older than flow.leadTimeDays\n",
+        "not a setting a filter may name",
     )
 
 
-def test_the_control_an_age_index_over_a_bucket_setting_compiles() -> None:
-    compile_ok("\nindex code_change.late where mergedAt older than thresholds.staleChangeDays\n")
+def test_the_control_an_age_filter_over_a_bucket_setting_compiles() -> None:
+    compile_ok("\nfilter code_change.late where mergedAt older than thresholds.staleChangeDays\n")
 
 
-def test_two_indexes_may_not_disagree_about_a_kinds_id_space() -> None:
+def test_two_declarations_may_not_disagree_about_a_kinds_id_space() -> None:
     """Otherwise the guard is defeated by writing a second index and leaving the
     clause off, which is the quietest possible way to lose it."""
     refuses(
         """
-index code_review.a keyed as code_change where wasApproved == true
-index code_review.b keyed as work_issue where wasApproved == false
+filter code_review.a keyed as code_change where wasApproved == true
+filter code_review.b keyed as work_issue where wasApproved == false
 """,
         "has one id space",
     )
@@ -958,7 +1083,7 @@ reading team_person.counted(range):
     )
 
 
-def test_a_live_reading_needs_exactly_one_scope_bucketed_index() -> None:
+def test_a_live_reading_needs_exactly_one_scope_bucketed_group() -> None:
     """With none there are no subjects at all, and the empty case -- what
     somebody with nothing looks like -- would hold the whole board's answer."""
     refuses(
@@ -971,7 +1096,7 @@ reading team_person.unscoped():
     calculate:
         count(w)
 """,
-        "fanned out by 0 indexes",
+        "fanned out by 0 groups",
     )
 
 
@@ -1081,7 +1206,7 @@ def test_a_projection_is_still_refused_when_it_is_not_a_keyword_at_all() -> None
     `projct` to write `projection` -- true, unhelpful, and hiding the typo."""
     with pytest.raises(SyntaxError_) as caught:
         compile_source(BASE + PROJECTION.replace("projection ", "projekt "))
-    assert 'expected "index"' in caught.value.message
+    assert 'expected "group"' in caught.value.message
     assert '"projection"' in caught.value.message
 
 
@@ -1296,20 +1421,20 @@ def test_a_projection_may_declare_the_population_it_is_over() -> None:
     assert set(plan.indexes) == {"work_issue.active", "work_issue.sized"}
 
 
-def test_a_projection_population_may_only_name_an_index() -> None:
+def test_a_projection_population_may_only_name_a_filter() -> None:
     """A projection has no depends block, so a bare name in `from` can only be
     a typo -- and resolving it to the empty set would empty the page while
     looking like a complete one."""
     refuses(
         PROJECTION.replace("    field:", "    from live\n    field:", 1),
-        "not an index",
+        "not a declared filter",
     )
 
 
-def test_a_projection_population_needs_an_index_that_exists() -> None:
+def test_a_projection_population_needs_a_filter_that_exists() -> None:
     refuses(
         PROJECTION.replace("    field:", "    from work_issue.imaginary\n    field:", 1),
-        "no index called",
+        "no group or filter called",
     )
 
 
@@ -1356,14 +1481,14 @@ def test_a_population_refusal_reaches_the_right_operand_of_a_set_op() -> None:
     )
 
 
-def test_a_projection_population_refuses_an_age_index() -> None:
+def test_a_projection_population_refuses_an_age_filter() -> None:
     """An age bucket is resolved against the clock at reindex time, so a
     population read from one is as stale as the last reconcile -- and no
     pointer covers an index only a `from` reads, so moving the dial it names
     would change nothing until the next full sync."""
     refuses(
         PROJECTION.replace("    field:", "    from work_issue.stuck\n    field:", 1),
-        "buckets by age against the clock",
+        "narrows by age against the clock",
     )
 
 
@@ -1447,8 +1572,8 @@ def test_redefining_an_index_a_population_reads_moves_the_projections_version() 
     first = compile_source(BASE + with_from)
     second = compile_source(
         BASE.replace(
-            "index work_issue.active where active == true",
-            "index work_issue.active where active == false",
+            "filter work_issue.active where active == true",
+            "filter work_issue.active where active == false",
         )
         + with_from
     )
@@ -1468,8 +1593,8 @@ def test_a_population_indexes_label_does_not_move_a_version() -> None:
     first = compile_source(BASE + with_from).projection("work_issue.item")
     second = compile_source(
         BASE.replace(
-            "index work_issue.active where active == true",
-            'index work_issue.active where active == true label "underway"',
+            "filter work_issue.active where active == true",
+            'filter work_issue.active where active == true label "underway"',
         )
         + with_from
     ).projection("work_issue.item")
@@ -1569,7 +1694,7 @@ def test_an_index_definition_moves_the_version_of_every_figure_that_reads_it() -
     though the figure's own text is untouched."""
     first = compile_ok().figure("team_person.wip")
     second = compile_source(
-        BASE.replace('index work_issue.active where active == true', 'index work_issue.active where active == false')
+        BASE.replace('filter work_issue.active where active == true', 'filter work_issue.active where active == false')
     ).figure("team_person.wip")
     assert first is not None and second is not None
     assert first.version != second.version
@@ -1580,8 +1705,8 @@ def test_an_index_label_does_not_move_a_version() -> None:
     first = compile_ok().figure("team_person.wip")
     second = compile_source(
         BASE.replace(
-            "index work_issue.active where active == true",
-            'index work_issue.active where active == true label "underway"',
+            "filter work_issue.active where active == true",
+            'filter work_issue.active where active == true label "underway"',
         )
     ).figure("team_person.wip")
     assert first is not None and second is not None
@@ -1845,7 +1970,7 @@ def test_every_compile_refusal_is_a_definition_error() -> None:
     assert "line 1" in str(syntax.value)
 
     with pytest.raises(DefinitionError) as meaning:
-        compile_source("index nothing.here from nowhere\n")
+        compile_source("group nothing.here from nowhere\n")
     assert isinstance(meaning.value, CheckError)
 
 
@@ -1857,8 +1982,8 @@ def test_every_compile_refusal_is_a_definition_error() -> None:
 # spelling is gone: prose buried in the block hid the directives it sat among.
 
 EXPLAINED = """
-index work_issue.assigned_to from assigneeAccountId through team_person.accounts.accountId
-index work_issue.active where active == true
+group work_issue.assigned_to from assigneeAccountId through team_person.accounts.accountId
+filter work_issue.active where active == true
 
 # How much is in flight right now.
 figure team_person.wip:
@@ -2049,7 +2174,7 @@ def test_an_index_may_not_take_a_figures_name() -> None:
     by name alone, would serve the index's one-liner where the figure's
     formula belongs, beside prose that came from the figure."""
     refuses(
-        "\nindex team_person.wip where active == true\n",
+        "\nfilter team_person.wip where active == true\n",
         "team_person.wip",
         "already",
     )
@@ -2132,9 +2257,9 @@ def test_an_indexs_comment_serves_as_prose_without_being_required() -> None:
 
     lib = compile_source(
         EXPLAINED.replace(
-            "index work_issue.active where active == true",
+            "filter work_issue.active where active == true",
             "# Only work someone is actively doing.\n"
-            "index work_issue.active where active == true",
+            "filter work_issue.active where active == true",
         )
     )
     assert (
@@ -2152,7 +2277,7 @@ def test_a_full_width_comment_inside_a_block_does_not_truncate_the_served_formul
 
     lib = compile_source(
         EXPLAINED.replace("    calculate:", "# only active work counts here\n    calculate:")
-        + "\n# About sizing.\nindex work_issue.sized where estimateSeconds is set\n"
+        + "\n# About sizing.\nfilter work_issue.sized where estimateSeconds is set\n"
     )
     formula = declaration_source(lib, "team_person.wip") or ""
     assert "count(mine)" in formula
@@ -2164,7 +2289,7 @@ def test_a_full_width_comment_inside_a_block_does_not_truncate_the_served_formul
 # A composite whose tail is a quarter-hour rather than a day, and a count
 # figure over it. Every test below builds on these two.
 QUARTER = """
-index code_change.merged_by_quarter from (authorAccountId through team_person.accounts.accountId, mergedAt by 15 minutes in tenant.timezone)
+group code_change.merged_by_quarter from (authorAccountId through team_person.accounts.accountId, mergedAt by 15 minutes in tenant.timezone)
 
 # d
 figure team_person.merge_rate:
@@ -2184,7 +2309,7 @@ def test_a_sub_day_truncation_is_the_figures_grain() -> None:
     lib = compile_ok(
         QUARTER
         + """
-index code_change.merged_by_minute from (authorAccountId through team_person.accounts.accountId, mergedAt by minute in tenant.timezone)
+group code_change.merged_by_minute from (authorAccountId through team_person.accounts.accountId, mergedAt by minute in tenant.timezone)
 
 # d
 figure team_person.merge_minutes:
@@ -2212,12 +2337,12 @@ def test_a_grain_nobody_asked_for_is_refused_by_name() -> None:
     with pytest.raises(SyntaxError_) as caught:
         compile_source(
             BASE
-            + "index code_change.by_five from (authorAccountId, mergedAt by 5 minutes)\n"
+            + "group code_change.by_five from (authorAccountId, mergedAt by 5 minutes)\n"
         )
     assert "not a truncation" in caught.value.message
 
     with pytest.raises(SyntaxError_):
-        compile_source(BASE + "index code_change.by_week from (authorAccountId, mergedAt by week)\n")
+        compile_source(BASE + "group code_change.by_week from (authorAccountId, mergedAt by week)\n")
 
 
 def test_hour_is_a_grouping_at_read_and_not_a_stored_grain() -> None:
@@ -2226,7 +2351,7 @@ def test_hour_is_a_grouping_at_read_and_not_a_stored_grain() -> None:
     pointed downward."""
     with pytest.raises(SyntaxError_) as caught:
         compile_source(
-            BASE + "index code_change.by_hour from (authorAccountId, mergedAt by hour)\n"
+            BASE + "group code_change.by_hour from (authorAccountId, mergedAt by hour)\n"
         )
     assert "not a truncation" in caught.value.message
 
@@ -2550,7 +2675,7 @@ def test_a_keyed_as_kinds_projection_may_filter_through_its_own_index() -> None:
     lib = compile_source(
         BASE
         + """
-index code_review.approving keyed as code_change where wasApproved == true
+filter code_review.approving keyed as code_change where wasApproved == true
 
 # The approvals on record.
 projection code_review.approvals:
