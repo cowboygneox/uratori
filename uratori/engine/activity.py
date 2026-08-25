@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from ..lang.ast import FigureUnit
 from ..lang.plan import Library
@@ -55,7 +55,7 @@ class RenderedChange:
 
     figure: str
     subject_id: str
-    kind: str
+    kind: Literal["moved", "removed"]
     label: str
     before_display: str
     after_display: str

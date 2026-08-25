@@ -78,6 +78,13 @@ warn_unreachable = true
 disallow_any_explicit = false
 plugins = ["pydantic.mypy"]
 
+# Constructor calls are part of the contract: without these two, a misspelled
+# optional field in a model construction is silently dropped by pydantic and
+# invisible to mypy -- exactly the shape of bug the wire models exist to refuse.
+[tool.pydantic-mypy]
+init_typed = true
+init_forbid_extra = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

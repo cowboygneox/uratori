@@ -1388,7 +1388,12 @@ class _Checker:
                 "nothing would rebuild it. Name a predicate or a presence index instead.",
                 expr.line,
             )
-        if idx.id_space != kind:
+        # Compared in id space, not raw kind: a `keyed as` kind's record keys
+        # ARE the other kind's ids, so an index over its own records -- or any
+        # index in that shared space -- holds exactly the keys its rows carry.
+        # Comparing raw kinds refused those legitimate pages with a message
+        # stating the opposite of the truth.
+        if idx.id_space != self._keyed.get(kind, kind):
             raise CheckError(
                 f"projection {d.name} is over {kind} and its population reads "
                 f"{expr.index}, whose members are {idx.id_space} ids. Ids from another "

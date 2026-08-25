@@ -1249,6 +1249,19 @@ def test_a_projection_population_must_hold_ids_of_its_own_kind() -> None:
     )
 
 
+def test_a_population_refusal_reaches_the_right_operand_of_a_set_op() -> None:
+    """The walker must descend both sides: checked left-only, `a | wrong`
+    compiles, the union resolves against ids of another space, and the page
+    is empty while looking complete -- the exact failure class every arm
+    exists to refuse."""
+    refuses(
+        PROJECTION.replace(
+            "    field:", "    from work_issue.active | code_change.open\n    field:", 1
+        ),
+        "whose members are",
+    )
+
+
 def test_a_projection_population_refuses_an_age_index() -> None:
     """An age bucket is resolved against the clock at reindex time, so a
     population read from one is as stale as the last reconcile -- and no
@@ -1298,6 +1311,20 @@ def test_a_summary_hashes_its_projections_version() -> None:
     )
     assert first is not None and second is not None
     assert first.version != second.version
+
+
+def test_a_projection_with_no_population_keeps_its_historic_version() -> None:
+    """The `from_indexes` key is dropped from the hash when there is no
+    `from` (`canonical` drops None-valued keys), so every projection and
+    summary written before populations existed keeps its version -- pinned as
+    literals, because the alternative is every deployed library.json moving
+    for no semantic reason and nothing here noticing."""
+    lib = compile_ok(SUMMARY)
+    item = lib.projection("work_issue.item")
+    backlog = lib.summary("work_issue.backlog")
+    assert item is not None and backlog is not None
+    assert item.version == "b59d90e17c81", "the pre-population hash of PROJECTION"
+    assert backlog.version == "45dabf0dbc72", "the pre-population hash of SUMMARY"
 
 
 def test_a_projection_population_is_part_of_its_version() -> None:
@@ -2417,3 +2444,26 @@ reading team_person.throughput(range):
     daily = compile_source(BASE + reading_with("day")).reading("team_person.throughput")
     assert hourly is not None and daily is not None
     assert hourly.version != daily.version
+
+
+def test_a_keyed_as_kinds_projection_may_filter_through_its_own_index() -> None:
+    """`keyed as` says a kind's record keys ARE another kind's ids, so an
+    index over its own records holds exactly the keys its rows carry and the
+    population resolves row for row. Compared by raw kind this was refused --
+    with a message claiming every row would be filtered away, the opposite of
+    the truth. The id-space rule itself still stands: the test above holds a
+    plain kind to it."""
+    lib = compile_source(
+        BASE
+        + """
+index code_review.approving keyed as code_change where wasApproved == true
+
+# The approvals on record.
+projection code_review.approvals:
+    from code_review.approving
+
+    field:
+        change = changeId as text
+"""
+    )
+    assert lib.projection("code_review.approvals") is not None

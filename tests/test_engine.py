@@ -681,6 +681,11 @@ async def test_a_failed_reindex_is_retried_rather_than_recorded_as_built() -> No
 
     engine, facts, store = build()
     await seed(facts)
+    # A closed record that predates the deploy and is never named in any
+    # written batch: the warm path buckets written records itself, so only a
+    # record like this distinguishes "the wholesale rebuild ran" from "the
+    # deltas happened to cover everything".
+    change(facts, "c8:0", "gitlab:ada", "c1", state="closed")
     await engine.run(TENANT, DEFAULTS, full=True)
 
     grown = compile_source(LIB_SOURCE + GROWN_BY_ONE_INDEX)
@@ -704,6 +709,186 @@ async def test_a_failed_reindex_is_retried_rather_than_recorded_as_built() -> No
     assert plan is not None
     rows, state, _ = await project_rows(store, facts, grown, TENANT, plan, DEFAULTS, 0.0)
     assert state.ok is True
-    assert {r.id for r in rows} == {"c9:1", "c9:2"}, (
-        "the failed rebuild was recorded as done, so the retry never happened"
+    assert {r.id for r in rows} == {"c8:0", "c9:1", "c9:2"}, (
+        "the failed rebuild was recorded as done, so the retry never happened "
+        "-- c8:0 is the tell, since no delta ever named it"
     )
+
+
+async def test_a_cold_pass_that_reads_no_index_still_builds_a_new_population() -> None:
+    """The cold path's reindex was gated on `full or any(p.indexes for p in
+    pending)`. A deploy that moves a dial only a combined figure reads makes
+    exactly one figure pending, and that figure reads no index -- so without
+    the index-set trigger the cold pass would record nothing rebuilt, the
+    gate would go green, and the projection would serve Ok over buckets that
+    were never built: a confident empty page."""
+    from copy import deepcopy
+
+    from uratori.engine.serve import project_rows
+
+    engine, facts, store = build()
+    await seed(facts)
+    change(facts, "c8:0", "gitlab:ada", "c1", state="closed")
+    await engine.run(TENANT, DEFAULTS, full=True)
+
+    grown = compile_source(LIB_SOURCE + GROWN_BY_ONE_INDEX)
+    moved = deepcopy(dict(DEFAULTS))
+    moved["thresholds"]["wip"]["warn"] = 4  # pending: wip_level alone, no indexes
+
+    upgraded = Engine(store, facts, grown, WORLD)
+    await upgraded.run(TENANT, moved)
+
+    plan = grown.projection("code_change.archived")
+    assert plan is not None
+    rows, state, _ = await project_rows(store, facts, grown, TENANT, plan, moved, 0.0)
+    assert state.ok is True
+    assert {r.id for r in rows} == {"c8:0"}, (
+        "the cold pass skipped the rebuild, so the page is not the population"
+    )
+
+
+async def test_redefining_a_population_index_rebuilds_its_buckets() -> None:
+    """The index-set version must hash the *specs*, not the names. Hashed by
+    name alone, redefining an existing index leaves the version unchanged, no
+    rebuild triggers, the gate stays green -- and the page filters through
+    buckets built under the old meaning, which is a narrowed population with
+    an Ok state over it."""
+    from uratori.engine.serve import project_rows
+
+    engine, facts, store = build()
+    await seed(facts)
+    change(facts, "c8:0", "gitlab:ada", "c1", state="closed")
+    await engine.run(TENANT, DEFAULTS, full=True)
+
+    grown = compile_source(LIB_SOURCE + GROWN_BY_ONE_INDEX)
+    await Engine(store, facts, grown, WORLD).run(TENANT, DEFAULTS)
+
+    # The same index name, redefined to mean the opposite population.
+    redefined_source = LIB_SOURCE + GROWN_BY_ONE_INDEX.replace(
+        'where state == "closed"', 'where state == "merged"'
+    )
+    change(facts, "c9:9", "gitlab:ada", "c1", state="merged")
+    redefined = compile_source(redefined_source)
+    await Engine(store, facts, redefined, WORLD).run(TENANT, DEFAULTS)
+
+    plan = redefined.projection("code_change.archived")
+    assert plan is not None
+    rows, state, _ = await project_rows(store, facts, redefined, TENANT, plan, DEFAULTS, 0.0)
+    assert state.ok is True
+    assert {r.id for r in rows} == {"c9:9"}, (
+        "the page is still the old predicate's records: the redefinition "
+        "moved no version, so nothing rebuilt the buckets"
+    )
+
+
+# ---------------------------------------------------- empty time buckets --
+
+
+GRAINED = compile_source(
+    """
+index code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
+index code_change.by_author from author_account_id through team_person.accounts.account_id
+
+measure code_change.open_seconds = merged_at - created_at
+
+# Every merge's duration, day by day.
+figure team_person.merge_spans:
+    display "{team_person} spans"
+    depends:
+        merged = code_change.merged_by_day:{team_person}
+    calculate:
+        list(code_change.open_seconds over merged)
+
+# Every merge span this person owns, kept whole.
+figure team_person.span_list:
+    display "{team_person} spans held"
+    depends:
+        mine = code_change.by_author:{team_person}
+    calculate:
+        list(code_change.open_seconds over mine)
+"""
+)
+
+
+async def test_a_time_bucket_with_every_member_gated_off_is_an_absent_subject() -> None:
+    """A day something merged but nothing could be measured (the record
+    carries no created_at, so the span is unanswerable) is a day with no
+    evidence -- the subject must be absent, not a stored empty list. Storing
+    the list is what made the cold pass and the removal pass report that
+    difference at each other for ever."""
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    person(facts, "p1", "Ada Kensit", ["jira:ada", "gitlab:ada"])
+    facts.put(
+        TENANT,
+        "code_change",
+        "c1",
+        # merged_at buckets the record into a day; created_at is missing, so
+        # the span measure answers None for it and the day's list is empty.
+        {"title": "c1", "author_account_id": "gitlab:ada", "merged_at": "2026-01-02T03:04:05Z"},
+    )
+
+    engine = Engine(store, facts, GRAINED, WORLD)
+    outcome = await engine.run(TENANT, DEFAULTS, full=True)
+
+    plan = GRAINED.figure("team_person.merge_spans")
+    assert plan is not None
+    assert await store.values(TENANT, plan.name, plan.version) == [], (
+        "the empty day was stored instead of being absent"
+    )
+    assert [c for c in outcome.changes if c.figure == plan.name] == []
+
+
+async def test_full_passes_over_an_empty_time_bucket_stay_silent() -> None:
+    """The flip-flop this fix removes: store [] on one pass, remove it on the
+    next, store it again -- a change stream that reports the same non-event
+    for ever. Three full passes must leave the subject absent and passes two
+    and three must say nothing about the figure."""
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    person(facts, "p1", "Ada Kensit", ["jira:ada", "gitlab:ada"])
+    facts.put(
+        TENANT,
+        "code_change",
+        "c1",
+        {"title": "c1", "author_account_id": "gitlab:ada", "merged_at": "2026-01-02T03:04:05Z"},
+    )
+    engine = Engine(store, facts, GRAINED, WORLD)
+    plan = GRAINED.figure("team_person.merge_spans")
+    assert plan is not None
+
+    for attempt in range(3):
+        outcome = await engine.run(TENANT, DEFAULTS, full=True)
+        assert await store.values(TENANT, plan.name, plan.version) == []
+        assert [c for c in outcome.changes if c.figure == plan.name] == [], (
+            f"pass {attempt + 1} reported movement over a day that has none"
+        )
+
+
+async def test_a_roster_subjects_empty_list_is_a_measured_value_not_an_absence() -> None:
+    """The control that keeps the absence rule narrow: a roster-scoped subject
+    exists whatever their queue holds, so an empty list is a measured "none of
+    it" -- stored, served, and quiet on the next pass. Removing it instead
+    would make "nothing measured" indistinguishable from "never computed"."""
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    person(facts, "p1", "Ada Kensit", ["jira:ada", "gitlab:ada"])
+
+    engine = Engine(store, facts, GRAINED, WORLD)
+    plan = GRAINED.figure("team_person.span_list")
+    assert plan is not None
+
+    first = await engine.run(TENANT, DEFAULTS, full=True)
+    held = await store.value(TENANT, plan.name, plan.version, "p1")
+    assert held is not None
+    assert held.value == []
+    assert held.members == ()
+    mine = [c for c in first.changes if c.figure == plan.name and c.subject == "p1"]
+    assert [c.kind for c in mine] == ["moved"], "a measured nought arrives as a movement"
+
+    second = await engine.run(TENANT, DEFAULTS, full=True)
+    assert [c for c in second.changes if c.figure == plan.name] == [], (
+        "an unchanged empty list must not be re-reported"
+    )
+    still = await store.value(TENANT, plan.name, plan.version, "p1")
+    assert still is not None and still.value == []

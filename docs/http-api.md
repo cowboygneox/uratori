@@ -473,11 +473,13 @@ curl -s "$BASE/tenants/t1/evidence/shop_courier.carrying?subject=c1" -H "$AUTH"
   "subject": "c1",
   "state": {"ok": true},
   "display": "2",
+  "note": null,
   "members": [
-    {"key": "o1", "title": "A-1", "url": "https://shop/o1", "held": true, "display": null},
-    {"key": "o2", "title": "A-2", "url": "https://shop/o2", "held": true, "display": null}
+    {"key": "o1", "title": "A-1", "url": "https://shop/o1", "held": true, "display": null, "figure": null},
+    {"key": "o2", "title": "A-2", "url": "https://shop/o2", "held": true, "display": null, "figure": null}
   ],
   "parts": false,
+  "source": null,
   "kind": "shop_order"
 }
 ```
@@ -487,12 +489,16 @@ through the schema's `name_fields` and `url_fields`; `held: false` means the
 store was asked for this record and does not have it -- deleted at the source,
 or never collected -- and the member is listed anyway, because a list quietly
 shorter than the value beside it breaks the one check this payload exists to
-enable. `display` is the member's own measurement, rendered: only a `list`
-figure has one per record (a count deliberately serves none -- a "1" beside
+enable. (When a figure's members span more than one fact kind there is no one
+table to ask, so no lookup is made: the keys are served bare and `held` stays
+true, because "not held" is a claim only a lookup can earn.) `display` is the
+member's own measurement, rendered: of the record-citing figures only a
+`list` has one per record (a count deliberately serves none -- a "1" beside
 each record would be a number nothing computed). For a rollup, `parts` is
-true and the members are the stored cells it read, each naming its source
-`figure`, because a total's evidence is its parts and re-listing the records
-underneath would re-derive the number a second way.
+true and the members are the stored cells it read -- each naming its source
+`figure` and carrying that cell's own value as its `display` -- because a
+total's evidence is its parts and re-listing the records underneath would
+re-derive the number a second way.
 
 When the figure is unavailable the response carries its `state` and no
 members -- an empty list under an `ok` state would read as "this value cites

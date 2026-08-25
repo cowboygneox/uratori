@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from ..lang.ast import Count, Extreme, ListOf, SetExpr, SetIndex, SetOp, SetRef
 from ..lang.ast import Sum as LangSum
@@ -285,14 +285,7 @@ async def serve_evidence(
             return None
         return format_value(values[position], plan.unit, settings)
 
-    common = {
-        "figure": plan.name,
-        "version": plan.version,
-        "subject": subject,
-        "state": state,
-        "display": format_value(stored.value, plan.unit, settings),
-        "note": note,
-    }
+    display = format_value(stored.value, plan.unit, settings)
 
     if plan.combines:
         # A rollup: its evidence is the cells it read, not the records
@@ -336,7 +329,12 @@ async def serve_evidence(
                     )
                 )
         return Evidence(
-            **common,
+            figure=plan.name,
+            version=plan.version,
+            subject=subject,
+            state=state,
+            display=display,
+            note=note,
             members=members,
             parts=True,
             source=sources[0] if len(sources) == 1 else None,
@@ -372,13 +370,30 @@ async def serve_evidence(
                     display=measurement(position),
                 )
             )
-        return Evidence(**common, members=members, kind=kind)
+        return Evidence(
+            figure=plan.name,
+            version=plan.version,
+            subject=subject,
+            state=state,
+            display=display,
+            note=note,
+            members=members,
+            kind=kind,
+        )
 
     # The members span more than one fact kind (a ladder over sets of two
     # kinds), so there is no one table to look titles up in. The keys are
     # served bare with nothing claimed about them -- `held` stays True because
     # "not held" is a claim, and no lookup was made that could earn it.
-    return Evidence(**common, members=[EvidenceMember(key=k) for k in stored.members])
+    return Evidence(
+        figure=plan.name,
+        version=plan.version,
+        subject=subject,
+        state=state,
+        display=display,
+        note=note,
+        members=[EvidenceMember(key=k) for k in stored.members],
+    )
 
 
 def _field_of(value: Mapping[str, Any] | None, field: str | None) -> str | None:
@@ -589,7 +604,7 @@ def _window(
         total=stats.get("total"),
         count=stats.get("count"),
         series=series_of(sample) if wants_series and not unmet else None,
-        series_by=series_by if wants_series and not unmet else None,
+        series_by=_series_grain(series_by) if wants_series and not unmet else None,
         display=rendered,
         sample=len(sample.values),
         days_covered=sample.days_covered,
@@ -712,6 +727,20 @@ def _flag(rendered: RenderedFlag) -> Any:
         action=rendered.action,
         severity="attention" if rendered.severity == "attention" else "info",
     )
+
+
+_SERIES_GRAINS: frozenset[str] = frozenset({"15 minutes", "hour", "day"})
+
+
+def _series_grain(by: str | None) -> Literal["15 minutes", "hour", "day"] | None:
+    """Checked against the closed set rather than cast, the `_unit` bargain:
+    a grain off the list is a bug in the planner, and this says so instead of
+    passing it through to a typed client that cannot handle the word."""
+    if by is None:
+        return None
+    if by not in _SERIES_GRAINS:
+        raise ValueError(f"{by} is not a series grain this contract can carry")
+    return by  # type: ignore[return-value]
 
 
 _UNITS: frozenset[str] = frozenset(

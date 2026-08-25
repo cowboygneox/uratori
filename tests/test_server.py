@@ -578,3 +578,74 @@ async def test_a_projection_population_is_enforced_over_http(server: Server) -> 
     assert [s["id"] for s in result["subjects"]] == ["o1"], (
         "the delivered order got a row: the population was not enforced"
     )
+
+
+async def test_a_new_population_index_holds_the_page_behind_deploy_until_a_pass(
+    server: Server,
+) -> None:
+    """The gate, over HTTP: between a definitions deploy that adds a
+    population index and the tenant's next pass, the buckets do not exist,
+    and an Ok page there would be a confident zero. The answer must be the
+    honest absence -- and the next pass, even one carrying no facts, must
+    repair it."""
+    await _teach(server.http)
+    pushed = await server.http.post(
+        "/tenants/t1/facts",
+        json={
+            "writes": {
+                "shop_courier": COURIER,
+                "shop_order": {
+                    "o1": {"ref": "A-1", "courier_id": "c1", "status": "riding"},
+                    "o2": {"ref": "A-2", "courier_id": "c1", "status": "delivered"},
+                },
+            }
+        },
+    )
+    assert pushed.status_code == 200, pushed.text
+
+    # The deploy introduces a NEW index -- one no pass has bucketed yet. (A
+    # `from` over an index the last pass already built serves immediately;
+    # the control for that is the enforcement test above.)
+    grown = (
+        COURIER_SOURCE
+        + """
+
+index shop_order.underway where status == "riding"
+
+# Orders being ridden right now.
+projection shop_order.live_board:
+    from shop_order.underway
+
+    field:
+        ref = ref as text
+
+# The live board, in one row.
+summarise shop_order.live_flow over shop_order.live_board:
+    count riding
+"""
+    )
+    put = await server.http.put("/definitions", json={"source": grown})
+    assert put.status_code == 200, put.text
+
+    held = await server.http.get("/tenants/t1/results/shop_order.live_board")
+    assert held.status_code == 200
+    state = held.json()["state"]
+    assert state["ok"] is False
+    assert state["because"] == "behind-deploy"
+    assert held.json()["subjects"] == []
+    # And no summary beside the absence: `summarise` is total, so a summary
+    # served here would be a confident table of noughts under a state saying
+    # the page is not available -- on exactly the screen the gate protects.
+    assert held.json()["summary"] is None
+
+    ran = await server.http.post("/tenants/t1/runs", json={})
+    assert ran.status_code == 200, ran.text
+
+    after = await server.http.get("/tenants/t1/results/shop_order.live_board")
+    assert after.status_code == 200
+    assert after.json()["state"]["ok"] is True
+    assert [s["id"] for s in after.json()["subjects"]] == ["o1"]
+    # The control: once the page is real, the summary counts its rows.
+    summary = after.json()["summary"]
+    assert summary is not None
+    assert summary["values"]["riding"] == 1

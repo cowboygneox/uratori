@@ -127,12 +127,15 @@ async def test_values_round_trip_with_every_stored_shape(
         ("nothing", None),
     ]
     for subject, value in cases:
-        await s.save(tenant, "fig", "v1", subject, value, ["e1", "e2"], f"label-{subject}")
+        # Deliberately NOT in lexical order: members are a positional citation
+        # (values[i] measures members[i]), so a store that sorted or otherwise
+        # reordered them would pair the right numbers with the wrong records.
+        await s.save(tenant, "fig", "v1", subject, value, ["e2", "e1"], f"label-{subject}")
     for subject, value in cases:
         held = await s.value(tenant, "fig", "v1", subject)
         assert held is not None
         assert held.value == value
-        assert held.members == ("e1", "e2")
+        assert held.members == ("e2", "e1")
         assert held.label == f"label-{subject}"
 
     assert [v.subject for v in await s.values(tenant, "fig", "v1")] == [

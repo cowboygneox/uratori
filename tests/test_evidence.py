@@ -141,9 +141,11 @@ async def _evidence(store: MemoryEngineStore, facts: MemoryFactStore, name: str,
 
 async def test_each_member_carries_its_record_and_its_own_measurement() -> None:
     """The row a reader clicked said "1.0h, 2.0h"; this is what says the first
-    hour was `c1` and the second was `c2`. The members travel in stored order
-    because the pairing is positional -- reordering here would print the right
-    numbers under the wrong merge requests."""
+    hour was `c2` and the second was `c1`. The members are stored out of
+    lexical order on purpose: the pairing is positional, so a serve path that
+    sorted -- or a store that reordered -- would print the right numbers under
+    the wrong merge requests, and a fixture already in sorted order could
+    never catch it."""
     store, facts = MemoryEngineStore(), MemoryFactStore()
     await store.set_buckets(TENANT, "code_change.merged_by_day", "c1", ["p1@2026-08-20"])
     await _ready(store, "team_person.time_to_merge")
@@ -154,7 +156,7 @@ async def test_each_member_carries_its_record_and_its_own_measurement() -> None:
         version,
         "p1@2026-08-20",
         [3600.0, 7200.0],
-        ("c1", "c2"),
+        ("c2", "c1"),
         "Aki",
     )
     facts.put(TENANT, "code_change", "c1", {"title": "Fix the parser", "url": "https://git/1"})
@@ -167,9 +169,9 @@ async def test_each_member_carries_its_record_and_its_own_measurement() -> None:
     assert evidence.version == version
     assert evidence.kind == "code_change"
     assert evidence.display == "1.0h, 2.0h"
-    assert [m.key for m in evidence.members] == ["c1", "c2"]
-    assert [m.title for m in evidence.members] == ["Fix the parser", "Widen the lexer"]
-    assert [m.url for m in evidence.members] == ["https://git/1", "https://git/2"]
+    assert [m.key for m in evidence.members] == ["c2", "c1"]
+    assert [m.title for m in evidence.members] == ["Widen the lexer", "Fix the parser"]
+    assert [m.url for m in evidence.members] == ["https://git/2", "https://git/1"]
     assert [m.display for m in evidence.members] == ["1.0h", "2.0h"]
     assert all(m.held for m in evidence.members)
     assert evidence.parts is False
@@ -540,3 +542,159 @@ summarise work_issue.backlog over work_issue.card:
 
     with pytest.raises(LookupError, match=re.escape("No figure called no.such")):
         await facade.evidence(TENANT, "no.such", "p1")
+
+
+async def test_evidence_behind_a_deploy_says_so_rather_than_vanishing() -> None:
+    """behind-deploy is the state a reader actually hits: they clicked a row
+    rendered before a deploy landed. The answer must carry that state with no
+    members -- falling through to "nothing stored" would read as the value
+    never having existed, when it exists at a version this build no longer
+    serves."""
+    store, facts = MemoryEngineStore(), MemoryFactStore()
+    plan = LIB.figure("team_person.time_to_merge")
+    assert plan is not None
+    await store.set_pointer(
+        TENANT,
+        plan.name,
+        Pointer(version="an-older-build", settings_fingerprint=""),
+    )
+    await store.save(
+        TENANT, plan.name, "an-older-build", "p1@2026-08-20", [3600.0], ("c1",), "Aki"
+    )
+
+    evidence = await _evidence(store, facts, plan.name, "p1@2026-08-20")
+
+    assert evidence is not None
+    assert evidence.state.ok is False
+    assert evidence.state.because == "behind-deploy"
+    assert evidence.members == []
+    assert evidence.display is None
+
+
+async def test_members_spanning_two_fact_kinds_are_served_bare_and_claim_nothing() -> None:
+    """Arithmetic over sets of two kinds has no one table to look titles up
+    in. The keys are served with nothing claimed about them -- and `held`
+    stays True, because "not held" is a claim only a lookup can earn. The
+    load-bearing half: a record that WOULD resolve in one of the kinds still
+    gets no title, proving no lookup was attempted rather than one that
+    happened to miss."""
+    mixed = compile_source(
+        """
+index code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
+index work_issue.active where active == true
+
+# How much busier the board is than this person.
+figure team_person.context_gap:
+    display "{team_person} gap"
+    unit count
+
+    depends:
+        merged = code_change.merged_by_day:{team_person}
+        busy = work_issue.active
+    calculate:
+        count(busy) - count(merged)
+"""
+    )
+    plan = mixed.figure("team_person.context_gap")
+    assert plan is not None
+    store, facts = MemoryEngineStore(), MemoryFactStore()
+    await store.set_buckets(TENANT, "code_change.merged_by_day", "c1", ["p1"])
+    await store.set_pointer(
+        TENANT,
+        plan.name,
+        Pointer(
+            version=plan.version,
+            settings_fingerprint=settings_fingerprint(dict(DEFAULTS), list(plan.settings)),
+        ),
+    )
+    await store.save(TENANT, plan.name, plan.version, "p1", 1, ("c1", "i1"), "Aki")
+    facts.put(TENANT, "work_issue", "i1", {"title": "Live incident"})
+    facts.put(TENANT, "code_change", "c1", {"title": "Fix the parser"})
+
+    evidence = await serve_evidence(store, facts, mixed, WORLD, TENANT, plan, DEFAULTS, "p1")
+
+    assert evidence is not None
+    assert evidence.kind is None
+    assert evidence.parts is False
+    assert [m.key for m in evidence.members] == ["c1", "i1"]
+    assert all(m.title is None and m.url is None for m in evidence.members), (
+        "a title looked up despite the mixed kinds would be a guess about "
+        "which table the key belongs to"
+    )
+    assert all(m.held for m in evidence.members)
+
+
+async def test_a_kind_with_no_name_field_serves_bare_keys_still_held() -> None:
+    """`held` and `title` are separate claims: the record IS here, the schema
+    just declares no field to name it by. Conflating them would mark every
+    record of an unnamed kind as missing."""
+    from dataclasses import replace
+
+    store, facts = MemoryEngineStore(), MemoryFactStore()
+    await store.set_buckets(TENANT, "work_issue.delivered_by_day", "i1", ["p1@2026-08-20"])
+    await _ready(store, "team_person.delivered_issues")
+    plan = LIB.figure("team_person.delivered_issues")
+    assert plan is not None
+    await store.save(TENANT, plan.name, plan.version, "p1@2026-08-20", 1, ("i1",), "Aki")
+    facts.put(TENANT, "work_issue", "i1", {"title": "Live incident"})
+
+    nameless = replace(WORLD, name_fields={}, url_fields={})
+    evidence = await serve_evidence(
+        store, facts, LIB, nameless, TENANT, plan, DEFAULTS, "p1@2026-08-20"
+    )
+
+    (member,) = evidence.members
+    assert member.title is None
+    assert member.held is True
+
+
+async def test_a_part_whose_source_left_the_library_is_listed_and_marked() -> None:
+    """A build can serve a rollup whose plan names a source the loaded library
+    no longer compiles. The honest degradation is the one a deleted part
+    gets: listed, held False, no measurement -- never dropped, and never a
+    crash that takes the whole citation down."""
+    smaller = compile_source(
+        """
+index work_issue.assigned from assignee_account_id through team_person.accounts.account_id
+
+measure work_issue.rework = rework_seconds in effort
+
+# Rework on what this person carries, added up.
+figure team_person.rework_effort:
+    display "{team_person} rework"
+    depends:
+        mine = work_issue.assigned:{team_person}
+    calculate:
+        sum(work_issue.rework over mine)
+"""
+    )
+    plan = LIB.figure("team_person.rework_share")
+    assert plan is not None
+    store, facts = MemoryEngineStore(), MemoryFactStore()
+    await store.set_buckets(TENANT, "work_issue.assigned", "i1", ["p1"])
+    rework = smaller.figure("team_person.rework_effort")
+    assert rework is not None
+    await store.save(TENANT, rework.name, rework.version, "p1", 3600.0, ("i1",), "Aki")
+    await store.set_pointer(
+        TENANT,
+        plan.name,
+        Pointer(
+            version=plan.version,
+            settings_fingerprint=settings_fingerprint(dict(DEFAULTS), list(plan.settings)),
+        ),
+    )
+    await store.save(TENANT, plan.name, plan.version, "p1", 0.25, ("p1",), "Aki")
+
+    evidence = await serve_evidence(store, facts, smaller, WORLD, TENANT, plan, DEFAULTS, "p1")
+
+    assert evidence is not None
+    assert evidence.parts is True
+    by_figure = {m.figure: m for m in evidence.members}
+    # The source still in the library serves normally -- the control.
+    survivor = by_figure["team_person.rework_effort"]
+    assert survivor.held is True
+    assert survivor.display == "1.0h"
+    gone = by_figure["team_person.planned_effort"]
+    assert gone.held is False
+    assert gone.display is None
+    assert gone.key == "p1"

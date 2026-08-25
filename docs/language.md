@@ -917,7 +917,7 @@ Without it, every record of the projection's kind gets a row. With it, the
 page is a declared population:
 
 ```
-# Only the work still in flight.
+# Everything in flight, plus anything sized enough to plan.
 projection work_issue.board:
     from work_issue.active | work_issue.sized
 
@@ -957,7 +957,12 @@ the way a figure's pointer gates it: the engine records which index set a
 tenant last bucketed under, only after the rebuild actually ran, and a
 projection whose population was bucketed under a different index set (or
 never) answers `behind-deploy` (or `never-computed`) rather than an `ok` page
-with records silently missing. A population that matches nothing is served
+with records silently missing. (A kind with no records at all still answers
+`nothing-collected` first -- that is a claim about the sync, and it comes
+before any question about buckets.) The recorded version covers the library's
+whole index set, so a deploy that changes *any* index holds every `from`
+page in that state until the tenant's next pass -- a short, honest absence,
+traded deliberately against a page that cannot silently be wrong. A population that matches nothing is served
 `ok` with no rows -- records were collected, and the empty page is the
 population's truthful answer.
 
