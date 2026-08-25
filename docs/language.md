@@ -118,12 +118,14 @@ The pieces:
   cost, and a third of its declarations rendered bare with their explanation
   stranded a single blank line up. **Two blanks** is a detached paragraph,
   and adopting it would attach prose the author never aimed here. And a
-  **banner** -- a line of dashes (`# ----------`), or a dash rule naming a
-  file (`# ---- board.fig ----`) -- is a file rule, not prose, and ends the
-  run: it is
-  what a concatenating build writes between two `.fig` files, and without the
-  exception the first declaration in every file would adopt the previous
-  file's banner as its explanation. (`# --- see the note below` is prose --
+  **banner** -- a line of dashes (`# ----------`), a dash rule naming a
+  file (`# ---- board.fig ----`), or a section rule with a dash run at both
+  ends (`# ------------- reviews --`) -- is a rule line, not prose, and ends
+  the run: the first is
+  what a concatenating build writes between two `.fig` files, the last is
+  what a long file draws between its own regions, and without the
+  exception the declaration under either would adopt the rule above it as
+  its explanation. (`# --- see the note below` is prose --
   the pattern is a *rule*, not any comment that starts with dashes.) The
   explanation is deliberately outside
   the version hash: rewording one must not fork a version and recompute every

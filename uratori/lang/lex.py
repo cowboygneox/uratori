@@ -96,12 +96,15 @@ def _strip_comment(raw: str) -> str:
     return "".join(out)
 
 
-# The rule a concatenating build draws between two .fig files: a line of
-# dashes, bare or carrying a file name. Deliberately NOT any comment that
-# merely starts with dashes -- `# --- see the note below` is somebody's
-# writing, and a pattern that swallowed it refused explanations while telling
-# the author to write exactly what they had written.
-_BANNER = re.compile(r"^#\s*-{3,}\s*$|^#\s*-{3,}.*\.fig")
+# A rule line, in the three shapes real files draw them: the banner a
+# concatenating build writes between two .fig files (bare dashes, or dashes
+# carrying a file name), and the section rule a long file draws between its
+# own regions (`# ------------- reviews --` -- a dash run at BOTH ends).
+# Deliberately NOT any comment that merely starts with dashes -- `# --- see
+# the note below` is somebody's writing, and a pattern that swallowed it
+# refused explanations while telling the author to write exactly what they
+# had written.
+_BANNER = re.compile(r"^#\s*-{3,}\s*$|^#\s*-{3,}.*\.fig|^#\s*-{3,}.*-{2,}\s*$")
 
 
 def _is_prose(line: str) -> bool:

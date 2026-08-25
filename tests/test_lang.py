@@ -2097,7 +2097,7 @@ def test_a_dashed_aside_is_prose_but_a_dash_rule_is_not() -> None:
     assert figure is not None
     assert figure.doc == "--- see the note below"
 
-    for rule in ("# ----------", "# ---- board.fig ----"):
+    for rule in ("# ----------", "# ---- board.fig ----", "# ------------- reviews --"):
         with pytest.raises(SyntaxError_):
             compile_source(
                 EXPLAINED.replace("# How much is in flight right now.", rule)
