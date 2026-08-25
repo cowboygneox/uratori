@@ -215,44 +215,73 @@ Responses:
   kind the schema does not declare). A refused load changes nothing: the
   previously loaded definitions (or the untaught state) stand whole, and
   `/health` still says so.
-- `200` with the compiled library:
+- `200` with the library, **described**: every declaration of all six kinds,
+  each carrying its prose, its formula, and the names it rests on. One entry
+  of each shape, abridged:
 
 ```json
 {
   "figures": [
-    {"name": "shop_courier.carrying", "version": "7a65feeb434b"},
-    {"name": "shop_courier.load_band", "version": "9d51b23584ee"}
+    {
+      "name": "shop_courier.carrying",
+      "declaration": "figure",
+      "version": "7a65feeb434b",
+      "prose": "How many orders this courier is carrying right now.",
+      "source": "figure shop_courier.carrying:\n    depends:\n        mine = shop_order.carried_by:{shop_courier} & shop_order.open\n    calculate:\n        count(mine)",
+      "display": "{value} orders in hand",
+      "unit": "count",
+      "kind": "shop_courier",
+      "grain": null,
+      "across": null,
+      "banded": false,
+      "indexes": ["shop_order.carried_by", "shop_order.open"],
+      "measures": [],
+      "reads": [],
+      "settings": []
+    }
   ],
   "readings": [],
   "projections": [],
   "summaries": [],
-  "indexes": 2,
-  "measures": 0
+  "indexes": [
+    {
+      "name": "shop_order.carried_by",
+      "declaration": "group",
+      "version": null,
+      "prose": "",
+      "source": "group shop_order.carried_by from courier_id",
+      "kind": "shop_order",
+      "id_space": "shop_order",
+      "fields": ["courier_id"],
+      "through": []
+    }
+  ],
+  "measures": []
 }
 ```
 
-`figures`, `readings`, `projections` and `summaries` list each declaration's
-name and **version** -- the content hash of its semantics (prose edits do not
-fork it; see [Concepts](concepts.md)). `indexes` (the groups and filters,
-counted together under the engine's collective key) and `measures` are
-counts, since neither is served by name.
+(Fields a declaration's kind has no use for are `null`/empty rather than
+invented; the wire carries them all.) `version` is the content hash of the
+declaration's semantics -- prose edits do not fork it (see
+[Concepts](concepts.md)); a group, filter or measure has none of its own
+because it is hashed into every reader's. `prose` is the `#` explanation
+above the declaration and `source` is the formula as written with the
+display template stripped -- the split a Data screen renders, served here so
+a host never needs the engine's code to describe the engine's library.
+`indexes` (the collective key groups and filters travel under), `measures`
+and `reads` are what a declaration rests on, one hop -- enough to draw a
+derivation pane by following names -- and `fields`/`through` are the record
+paths it reads, enough for a host to hold its own drift guard ("every path
+my definitions read exists on the records I collect") without compiling
+anything.
 
-The versions are the review surface. Compile the same source yourself, in
-your build, with the same package the image ships (`pip install
-git+https://github.com/cowboygneox/uratori` -- a verification tool for CI,
-not an API to build on) --
-
-```python
-from uratori import Schema, compile_source
-library = compile_source(open("couriers.fig").read(), schema)
-mine = {p.name: p.version for p in library.figures}
-```
-
--- and assert the map the server returned matches yours. That check is how
-"the server runs what I reviewed" becomes a fact rather than a hope: a
-mismatch means the server compiled different text, or a different engine
-release changed a definition's meaning, and either is worth stopping a deploy
-for. Every `Result` cites one of these versions.
+The versions are the review surface, and the check is pure API: start the
+same image your deploy pins against a scratch database, `PUT /schema` and
+`PUT /definitions` with the text you reviewed, and assert the version map it
+answers matches the one your production server reports. A mismatch means the
+server compiled different text, or a different engine release changed a
+definition's meaning, and either is worth stopping a deploy for. Every
+`Result` cites one of these versions.
 
 ### `GET /definitions`
 

@@ -45,7 +45,7 @@ from . import db
 from . import ui as builtin_ui
 from .contract import (
     Ack,
-    DeclarationRef,
+    DeclarationOut,
     DefinitionsIn,
     Envelope,
     FactsIn,
@@ -566,15 +566,124 @@ def _parse(raw: str) -> Subscribe | None:
 
 
 def _library_out(library: Library) -> LibraryOut:
+    """The library, described -- see `DeclarationOut` for why this is rich.
+
+    Prose and formula come from the same scanners an embedding host would
+    call (`declaration_prose`/`declaration_source`), so the HTTP door and the
+    library door describe one library identically and cannot drift.
+    """
+    from ..lang.check import _index_fields
+    from ..lang.source import declaration_prose, declaration_source
+
+    def described(name: str, **fields: Any) -> DeclarationOut:
+        return DeclarationOut(
+            name=name,
+            prose=declaration_prose(library, name),
+            source=declaration_source(library, name) or "",
+            **fields,
+        )
+
+    def measure_unit(shape: str, unit: str | None) -> str | None:
+        # A duration or a moment is its own unit; only a field measure
+        # declares one (`in effort`).
+        if shape == "duration":
+            return "duration"
+        if shape == "moment":
+            return "moment"
+        return unit
+
     return LibraryOut(
-        figures=[DeclarationRef(name=p.name, version=p.version) for p in library.figures],
-        readings=[DeclarationRef(name=p.name, version=p.version) for p in library.readings],
-        projections=[
-            DeclarationRef(name=p.name, version=p.version) for p in library.projections
+        figures=[
+            described(
+                p.name,
+                declaration="figure",
+                version=p.version,
+                display=p.display,
+                unit=p.unit,
+                kind=p.scope,
+                grain=p.grain,
+                across=p.across,
+                banded=p.band is not None,
+                indexes=list(p.indexes),
+                measures=list(p.measures),
+                reads=list(p.reads),
+                settings=sorted({*p.settings, *p.band_settings}),
+            )
+            for p in library.figures
         ],
-        summaries=[DeclarationRef(name=p.name, version=p.version) for p in library.summaries],
-        indexes=len(library.indexes),
-        measures=len(library.measures),
+        readings=[
+            described(
+                p.name,
+                declaration="reading",
+                version=p.version,
+                display=p.display,
+                unit=p.unit,
+                kind=p.scope,
+                mode=p.mode,
+                banded=p.band is not None,
+                indexes=list(p.indexes),
+                measures=[p.live_measure] if p.live_measure else [],
+                reads=[p.source] if p.source else [],
+                settings=list(p.settings),
+            )
+            for p in library.readings
+        ],
+        projections=[
+            described(
+                p.name,
+                declaration="projection",
+                version=p.version,
+                kind=p.kind,
+                indexes=list(p.indexes),
+                reads=list(p.figures),
+                settings=list(p.settings),
+                fields=[path for _name, path, _type, _join in p.fields],
+                through=sorted({f"{j.kind}.{j.path}" for j in p.joins}),
+            )
+            for p in library.projections
+        ],
+        summaries=[
+            described(
+                p.name,
+                declaration="summary",
+                version=p.version,
+                over=p.over,
+                settings=list(p.settings),
+            )
+            for p in library.summaries
+        ],
+        indexes=[
+            described(
+                i.name,
+                # The declaration word carries the split: a group fans out,
+                # a filter narrows to one bucket.
+                declaration="group" if i.bucketed else "filter",
+                kind=i.kind,
+                id_space=i.id_space,
+                display=i.label,
+                fields=[part.field for part in _index_fields(i.spec)],
+                through=sorted(
+                    f"{part.through.kind}.{part.through.path}"
+                    for part in _index_fields(i.spec)
+                    if part.through is not None
+                ),
+            )
+            for i in library.indexes.values()
+        ],
+        measures=[
+            described(
+                m.name,
+                declaration="measure",
+                kind=m.kind,
+                unit=measure_unit(m.shape, m.unit),
+                fields=[
+                    path
+                    for path in (m.field_path, m.moment, m.later, m.earlier)
+                    if path is not None
+                ],
+            )
+            for m in library.measures.values()
+        ],
     )
 
 

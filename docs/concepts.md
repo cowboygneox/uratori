@@ -62,17 +62,18 @@ when the definitions are compiled, and when the engine is constructed -- and
 never threaded through individual calls, because two call sites disagreeing
 about the world is a class of bug the object exists to make unwritable.
 
-```python
-from uratori import Schema
-
-WORLD = Schema(
-    kinds=frozenset({"shop_order", "shop_courier"}),
-    name_fields={"shop_courier": "name", "shop_order": "ref"},
-    url_fields={"shop_order": "url"},
-    figure_settings=("limits.carrying.over",),
-    defaults={"tenant": {"hoursPerDay": 8}, "limits": {"carrying": {"over": 3}}},
-)
+```json
+{
+  "kinds": ["shop_courier", "shop_order"],
+  "name_fields": {"shop_courier": "name", "shop_order": "ref"},
+  "url_fields": {"shop_order": "url"},
+  "figure_settings": ["limits.carrying.over"],
+  "defaults": {"tenant": {"hoursPerDay": 8}, "limits": {"carrying": {"over": 3}}}
+}
 ```
+
+(As JSON because that is the wire: this exact document is what `PUT /schema`
+takes, and what `GET /schema` answers back.)
 
 Four things live here, and each is a decision the host owns:
 
