@@ -688,6 +688,12 @@ async def test_the_definitions_route_serves_the_library_described(server: Server
         "catalogue cannot say what the word rests on"
     )
     assert band["settings"] == ["limits.carrying.over"]
+    assert band["band_settings"] == [], (
+        "load_band computes its word in calculate:, so the dial is a value "
+        "dial -- the split matters because band-only dials never force a "
+        "rebuild, and a description that unioned them would tell a host to "
+        "pay for one"
+    )
 
     indexes = {d["name"]: d for d in body["indexes"]}
     carried = indexes["shop_order.carried_by"]
@@ -714,16 +720,24 @@ async def test_the_described_library_covers_reading_projection_and_summary(
     """The three kinds the courier fixture lacks, described the same way --
     pinned separately so the shape cannot rot into a figures-only feature."""
     world = COURIER_WORLD.to_document()
-    world["bucket_settings"] = ["tenant.timezone"]
-    world["defaults"] = {**world["defaults"], "tenant": {"hoursPerDay": 8, "timezone": "UTC"}}
+    world["kinds"] = sorted([*world["kinds"], "shop_review", "shop_queue"])
+    world["bucket_settings"] = ["tenant.timezone", "limits.staleDays"]
+    world["defaults"] = {
+        **world["defaults"],
+        "tenant": {"hoursPerDay": 8, "timezone": "UTC"},
+        "limits": {**world["defaults"]["limits"], "staleDays": 3},
+    }
     put = await server.http.put("/schema", json=world)
     assert put.status_code == 200, put.text
     grown = (
         COURIER_SOURCE
         + """
 group shop_order.delivered_by_day from (courier_id, delivered_at by day in tenant.timezone)
+filter shop_order.stale where picked_up_at older than limits.staleDays
+filter shop_review.signed_off keyed as shop_order where approved == true
 
 measure shop_order.riding_seconds = delivered_at - picked_up_at
+measure shop_order.waiting_seconds = now - requested_at
 
 # Every delivery's ride time, day by day.
 figure shop_courier.ride_times:
@@ -740,13 +754,23 @@ reading shop_courier.typical_ride(range):
         rides = shop_courier.ride_times in range
     calculate:
         mean(rides)
+        series(rides)
 
-# Orders still on the road.
+# What is waiting right now.
+reading shop_courier.queue():
+    display "{value}"
+    depends:
+        waits = shop_order.waiting_seconds over (shop_order.carried_by:{shop_courier} & shop_order.open)
+    calculate:
+        count(waits)
+
+# Orders still on the road, named for their queue.
 projection shop_order.board:
     from shop_order.open
 
     field:
         ref = ref as text
+        queue_name = name from queue_id through shop_queue.id as text
 
 # The board, in one row.
 summarise shop_order.flow over shop_order.board:
@@ -788,6 +812,59 @@ summarise shop_order.flow over shop_order.board:
     assert measure["declaration"] == "measure"
     assert measure["kind"] == "shop_order"
     assert measure["version"] is None
+    assert measure["unit"] == "duration", "a span between two moments is a duration"
+    assert measure["fields"] == ["delivered_at", "picked_up_at"]
+
+    clock = {d["name"]: d for d in body["measures"]}["shop_order.waiting_seconds"]
+    assert clock["fields"] == ["requested_at"], (
+        "`now` is the clock, not a record field -- a drift guard told to look "
+        "for a field called now alarms for ever"
+    )
+
+    live = {d["name"]: d for d in body["readings"]}["shop_courier.queue"]
+    assert live["mode"] == "live"
+    assert live["measures"] == ["shop_order.waiting_seconds"]
+    assert live["statistics"] == ["count"]
+
+    window = {d["name"]: d for d in body["readings"]}["shop_courier.typical_ride"]
+    assert window["statistics"] == ["mean", "series"], (
+        "the statistics a reading calculates are what a host may bind columns "
+        "to; the others are absent from its answers, not zero"
+    )
+
+    board = {d["name"]: d for d in body["projections"]}["shop_order.board"]
+    assert board["fields"] == ["ref", "queue_id"], (
+        "a joined field reads OUR record through its local linking path; "
+        "serving the other kind's path here broke the drift guard both ways"
+    )
+    assert board["through"] == ["shop_queue.id"]
+
+    stale = {d["name"]: d for d in body["indexes"]}["shop_order.stale"]
+    assert stale["declaration"] == "filter"
+    assert stale["settings"] == ["limits.staleDays"], (
+        "an age filter rests on its threshold dial; a host reading the "
+        "declaration alone must not conclude it rests on nothing"
+    )
+
+    by_day = {d["name"]: d for d in body["indexes"]}["shop_order.delivered_by_day"]
+    assert by_day["settings"] == ["tenant.timezone"]
+    assert by_day["grain"] == "day", "the declaration that carries the truncation says so"
+
+    keyed = {d["name"]: d for d in body["indexes"]}["shop_review.signed_off"]
+    assert keyed["kind"] == "shop_review"
+    assert keyed["id_space"] == "shop_order", (
+        "`keyed as` is the whole difference between kind and id space; serving "
+        "kind in both slots would hide it"
+    )
+
+    # Every declaration serves a formula. A blank one means the source
+    # scanner missed a declaration shape -- the absence-that-says-nothing
+    # this payload must never ship.
+    for entry in (
+        *body["figures"], *body["readings"], *body["projections"],
+        *body["summaries"], *body["indexes"], *body["measures"],
+    ):
+        assert entry["source"].strip(), f"{entry['name']} serves a blank formula"
 
 
 async def test_the_described_library_names_the_fields_a_declaration_reads(

@@ -222,7 +222,7 @@ Responses:
       "declaration": "figure",
       "version": "7a65feeb434b",
       "prose": "How many orders this courier is carrying right now.",
-      "source": "figure shop_courier.carrying:\n    depends:\n        mine = shop_order.carried_by:{shop_courier} & shop_order.open\n    calculate:\n        count(mine)",
+      "source": "figure shop_courier.carrying:\n    depends:\n        mine = shop_order.carried_by:{shop_courier} & shop_order.open\n\n    calculate:\n        count(mine)",
       "display": "{value} orders in hand",
       "unit": "count",
       "kind": "shop_courier",

@@ -73,7 +73,9 @@ about the world is a class of bug the object exists to make unwritable.
 ```
 
 (As JSON because that is the wire: this exact document is what `PUT /schema`
-takes, and what `GET /schema` answers back.)
+takes. `GET /schema` answers it back with every absent list made explicit --
+`bucket_settings: []` and friends -- so a diff against what you sent compares
+shapes, not omissions.)
 
 Four things live here, and each is a decision the host owns:
 

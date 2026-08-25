@@ -90,7 +90,7 @@ database beside it. Then teach it and feed it:
 | Verb | What it does |
 |---|---|
 | `PUT /schema`, `GET /schema` | Declare (or replace) the world; read it back. A replacement is refused whole if the loaded definitions no longer compile under it. |
-| `PUT /definitions`, `GET /definitions` | Compile and load source (a bad definition is a 422 in the checker's own words); read back names and versions. |
+| `PUT /definitions`, `GET /definitions` | Compile and load source (a bad definition is a 422 in the checker's own words); read back the library described -- names, versions, prose, formulas and what each rests on. |
 | `PUT /tenants/{t}/settings` | Store a tenant's sparse dial document. |
 | `POST /tenants/{t}/facts` | Apply writes/deletes (with the provider's own stamps as the stale-write guard), run the pass, get back counts, a ranked change sample, and the re-served `Result`s. |
 | `POST /tenants/{t}/runs` | A pass with no new facts (a moved dial, `{"full": true}` to rebuild). |

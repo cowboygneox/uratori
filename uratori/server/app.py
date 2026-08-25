@@ -32,7 +32,7 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -573,15 +573,61 @@ def _library_out(library: Library) -> LibraryOut:
     call (`declaration_prose`/`declaration_source`), so the HTTP door and the
     library door describe one library identically and cannot drift.
     """
+    from ..lang.ast import ByAge
     from ..lang.check import _index_fields
     from ..lang.source import declaration_prose, declaration_source
 
-    def described(name: str, **fields: Any) -> DeclarationOut:
+    def described(
+        name: str,
+        *,
+        declaration: Literal[
+            "group", "filter", "measure", "figure", "reading", "projection", "summary"
+        ],
+        version: str | None = None,
+        display: str | None = None,
+        unit: str | None = None,
+        kind: str | None = None,
+        id_space: str | None = None,
+        mode: Literal["window", "live"] | None = None,
+        grain: Literal["day", "minute", "15 minutes"] | None = None,
+        across: str | None = None,
+        banded: bool | None = None,
+        over: str | None = None,
+        indexes: list[str] | None = None,
+        measures: list[str] | None = None,
+        reads: list[str] | None = None,
+        settings: list[str] | None = None,
+        band_settings: list[str] | None = None,
+        statistics: list[str] | None = None,
+        fields: list[str] | None = None,
+        through: list[str] | None = None,
+    ) -> DeclarationOut:
+        # Spelled out rather than **kwargs, so pydantic-mypy's init guard
+        # reaches every call site: routed through Any, a misspelled field
+        # here was silently dropped at runtime and invisible to the checker.
         return DeclarationOut(
             name=name,
             prose=declaration_prose(library, name),
             source=declaration_source(library, name) or "",
-            **fields,
+            declaration=declaration,
+            version=version,
+            display=display,
+            unit=unit,
+            kind=kind,
+            id_space=id_space,
+            mode=mode,
+            grain=grain,
+            across=across,
+            banded=banded,
+            over=over,
+            indexes=indexes or [],
+            measures=measures or [],
+            reads=reads or [],
+            settings=settings or [],
+            band_settings=band_settings or [],
+            statistics=statistics or [],
+            fields=fields or [],
+            through=through or [],
         )
 
     def measure_unit(shape: str, unit: str | None) -> str | None:
@@ -608,7 +654,8 @@ def _library_out(library: Library) -> LibraryOut:
                 indexes=list(p.indexes),
                 measures=list(p.measures),
                 reads=list(p.reads),
-                settings=sorted({*p.settings, *p.band_settings}),
+                settings=list(p.settings),
+                band_settings=list(p.band_settings),
             )
             for p in library.figures
         ],
@@ -626,6 +673,7 @@ def _library_out(library: Library) -> LibraryOut:
                 measures=[p.live_measure] if p.live_measure else [],
                 reads=[p.source] if p.source else [],
                 settings=list(p.settings),
+                statistics=[stat.fn for stat in p.calculate],
             )
             for p in library.readings
         ],
@@ -638,7 +686,16 @@ def _library_out(library: Library) -> LibraryOut:
                 indexes=list(p.indexes),
                 reads=list(p.figures),
                 settings=list(p.settings),
-                fields=[path for _name, path, _type, _join in p.fields],
+                # For a joined field the path on OUR record is the join's
+                # linking field; the declared path is read off the other
+                # kind and travels in `through`. Serving the remote path
+                # under `fields` broke the drift guard both ways: a false
+                # alarm on the other kind's field, and blindness to the
+                # local one going missing.
+                fields=[
+                    join.field if join is not None else path
+                    for _name, path, _type, join in p.fields
+                ],
                 through=sorted({f"{j.kind}.{j.path}" for j in p.joins}),
             )
             for p in library.projections
@@ -662,14 +719,30 @@ def _library_out(library: Library) -> LibraryOut:
                 kind=i.kind,
                 id_space=i.id_space,
                 display=i.label,
-                fields=[part.field for part in _index_fields(i.spec)],
+                grain=next(
+                    (part.truncate for part in parts if part.truncate is not None), None
+                ),
+                fields=[part.field for part in parts],
                 through=sorted(
-                    f"{part.through.kind}.{part.through.path}"
-                    for part in _index_fields(i.spec)
-                    if part.through is not None
+                    {
+                        f"{part.through.kind}.{part.through.path}"
+                        for part in parts
+                        if part.through is not None
+                    }
+                ),
+                # The dials this declaration itself reads: an age filter's
+                # threshold, a time bucket's calendar. Moving one re-buckets
+                # a tenant's whole history, and a host reading the
+                # declaration alone must not conclude it rests on nothing.
+                settings=sorted(
+                    {
+                        *(part.zone for part in parts if part.zone is not None),
+                        *([i.spec.setting] if isinstance(i.spec, ByAge) else []),
+                    }
                 ),
             )
             for i in library.indexes.values()
+            for parts in [_index_fields(i.spec)]
         ],
         measures=[
             described(
@@ -677,10 +750,12 @@ def _library_out(library: Library) -> LibraryOut:
                 declaration="measure",
                 kind=m.kind,
                 unit=measure_unit(m.shape, m.unit),
+                # `now` is the clock, not a field: a drift guard told to
+                # look for a record field called "now" alarms for ever.
                 fields=[
                     path
                     for path in (m.field_path, m.moment, m.later, m.earlier)
-                    if path is not None
+                    if path is not None and path != "now"
                 ],
             )
             for m in library.measures.values()

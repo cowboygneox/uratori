@@ -104,12 +104,27 @@ class DeclarationOut(BaseModel):
     stored-day source, a projection's read figures."""
 
     settings: list[str] = Field(default_factory=list)
+    band_settings: list[str] = Field(default_factory=list)
+    """A figure's band-only dials, apart from `settings` deliberately: the
+    stored value's fingerprint covers `settings` alone, so moving a dial only
+    the band reads re-words the served level without forcing a rebuild -- a
+    host asking "which figures must rebuild when this dial moves?" must not
+    be told these."""
+
+    statistics: list[str] = Field(default_factory=list)
+    """A reading's calculated statistics (mean, worst, series, ...). The
+    others are absent from its answers, not zero -- a host binding a column
+    to one the definition never calculates renders a dash for ever, and this
+    list is what lets it refuse that at build time."""
 
     fields: list[str] = Field(default_factory=list)
-    """The record field paths this declaration reads off `kind` -- an index's
-    bucketing fields, a measure's operands, a projection's row fields. Served
-    so a host can hold its own drift guard ("every path a definition reads
-    exists on the records I collect") without compiling anything."""
+    """The record field paths this declaration reads off `kind` -- a group's
+    or filter's bucketing fields, a measure's record operands (never the
+    clock: `now` is not a field), a projection's row fields (for a joined
+    field, the LOCAL path that identifies the other record -- the remote path
+    lives in `through`). Served so a host can hold its own drift guard
+    ("every path a definition reads exists on the records I collect")
+    without compiling anything."""
 
     through: list[str] = Field(default_factory=list)
     """Identity hops, as `kind.path`: the relations an index resolves through
