@@ -41,8 +41,8 @@ what a definition declares. The host has told the engine the two kinds,
 `shop_order` and `shop_courier`, and one dial, `limits.carrying.over`:
 
 ```
-index shop_order.carried_by from courier_id
-index shop_order.open where status != "delivered"
+group shop_order.carried_by from courier_id
+filter shop_order.open where status != "delivered"
 
 # How many orders this courier is carrying right now.
 figure shop_courier.carrying:
@@ -59,8 +59,8 @@ figure shop_courier.carrying:
         otherwise "ok"
 ```
 
-Reading it back: the first index puts every order in a bucket per courier --
-`o1` and `o2` land in Aki's, `o3` in Bo's; the second holds whichever orders
+Reading it back: the group puts every order in a bucket per courier --
+`o1` and `o2` land in Aki's, `o3` in Bo's; the filter holds whichever orders
 are not yet delivered, which excludes `o3`. The figure intersects the two for
 each courier and counts what is left, so Aki reads 2 and Bo reads 0 -- a
 measured nought, not a blank -- and the band turns each count into a word by
@@ -81,10 +81,10 @@ Indentation is significant, Python-style, because the point of the language is
 that somebody who does not write code can read a definition and say whether it
 is right. Braces would cost a line of noise per block for no gain.
 
-Keywords are **not reserved**. `index`, `figure`, `depends` and the rest come
-out of the lexer as ordinary names and the parser matches on their text -- a
-reserved word list is a thing that grows and then collides with somebody's
-index called `display`.
+Keywords are **not reserved**. `group`, `filter`, `figure`, `depends` and the
+rest come out of the lexer as ordinary names and the parser matches on their
+text -- a reserved word list is a thing that grows and then collides with
+somebody's filter called `display`.
 
 There is **no line continuation**. Every statement is one line. A set
 expression that wants to wrap should be split into named sets instead.
@@ -110,8 +110,8 @@ The pieces:
   explanation. Write `#` comment lines directly above the declaration -- they
   are the customer-facing definition, rendered wherever the number is cited,
   and a figure nobody can read is the thing this language exists to
-  prevent. (A `# ----` rule line is a file banner, not prose.)"* An index or
-  a measure may carry one and is not made to. Three
+  prevent. (A `# ----` rule line is a file banner, not prose.)"* A group, a
+  filter or a measure may carry one and is not made to. Three
   rules decide which lines belong. The run is unindented `#` lines, and may
   sit at most **one blank line**
   above the header -- the origin project measured what strict contiguity
@@ -141,12 +141,12 @@ The pieces:
 - **Names** may contain dots, and the dot is meaningful. Every declaration is
   named `<fact kind>.<name>` -- `shop_courier.carrying` -- because a citation
   is `name@version` and the prefix says what the definition is about. Inside
-  an expression, a *dotted* name is a settings path or an index, and a *bare*
-  name is something the definition bound above; nothing else can produce
+  an expression, a *dotted* name is a settings path, a group or a filter,
+  and a *bare* name is something the definition bound above; nothing else can produce
   either shape, so a typo is reported with the list of what was actually
   bound.
 
-**One namespace covers all six declaration kinds.** Two definitions sharing a
+**One namespace covers all seven declaration kinds.** Two definitions sharing a
 name would make a citation ambiguous, so the checker refuses the second
 whatever kind it is.
 
@@ -160,11 +160,12 @@ a real constraint on naming, better stated than discovered.
 
 ---
 
-## Six declarations
+## Seven declarations
 
 | | Answers | Stores |
 |---|---|---|
-| `index` | which records are in which set | buckets |
+| `group` | which records belong to which subject | one bucket per value |
+| `filter` | which records pass a test | one bucket |
 | `measure` | a quantity read off one record | nothing |
 | `figure` | one value per subject | values |
 | `reading` | a statistic over stored days, or over records right now | nothing |
@@ -180,34 +181,37 @@ that may name it store nothing.
 
 ---
 
-## `index` -- which records
+## `group` and `filter` -- which records
 
 ```
-index shop_order.carried_by from courier_id
-index shop_order.open where status != "delivered"
-index work_issue.sized where estimate_seconds is set
-index work_issue.stuck where status_changed_at older than thresholds.longWipDays
-index work_issue.assigned_to from assignee_account_id through team_person.accounts.account_id
-index code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
-index code_review.approved keyed as code_change where was_approved == true
+group shop_order.carried_by from courier_id
+filter shop_order.open where status != "delivered"
+filter work_issue.sized where estimate_seconds is set
+filter work_issue.stuck where status_changed_at older than thresholds.longWipDays
+group work_issue.assigned_to from assignee_account_id through team_person.accounts.account_id
+group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
+filter code_review.approved keyed as code_change where was_approved == true
 ```
 
-An index is named `<fact kind>.<name>`; the prefix is the kind whose records
-it buckets. There are two shapes, because they answer different questions. A
-**field** index (`from`) buckets every record by the value of one field, so it
+Both are named `<fact kind>.<name>`; the prefix is the kind whose records
+they bucket. Two keywords, because they answer different questions. A
+**group** (`from`) buckets every record by the value of one field, so it
 *fans a figure out* -- one bucket per courier, per person, per repository. A
-**predicate** index (`where`) is a single bucket holding whatever matches, so
-it *narrows*. Intersecting the two is how a per-subject figure gets both at
-once, as `carrying` did above.
+**filter** (`where`) is a single bucket holding whatever matches, so it
+*narrows*. Intersecting the two is how a per-subject figure gets both at
+once, as `carrying` did above. One keyword (`index`) covered both for a
+while, and the word answered neither question -- each shape now wears the
+verb it performs, and writing one shape under the other's keyword is refused
+with directions.
 
-An optional trailing `label "still open"` names how to say the index in a
-sentence. It is prose: the fallback is mechanical and ugly, which is the
+An optional trailing `label "still open"` names how to say the declaration in
+a sentence. It is prose: the fallback is mechanical and ugly, which is the
 prompt to write one, and it never touches the version hash.
 
 ### `through` -- the identity hop
 
 ```
-index work_issue.assigned_to from assignee_account_id through team_person.accounts.account_id
+group work_issue.assigned_to from assignee_account_id through team_person.accounts.account_id
 ```
 
 A record often carries a foreign id rather than the id of the subject a board
@@ -260,17 +264,18 @@ The dial an age clause names must be one of the schema's **bucket settings**
 (see [Settings dials](#settings-dials) below), because turning it re-buckets a
 tenant's whole history.
 
-### Composite indexes: time buckets and pairs
+### Composite groups: time buckets and pairs
 
 ```
-index code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
-index code_change.authored_in   from (author_account_id through team_person.accounts.account_id, connection_id)
+group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
+group code_change.authored_in   from (author_account_id through team_person.accounts.account_id, connection_id)
 ```
 
 A parenthesised `from` keys each bucket `<subject>@<rest>`; the parts can be
-several, but a figure may only fan out of an index carrying at most two -- a
+several, but a figure may only fan out of a group carrying at most two -- a
 subject and one more is all a value key can hold, and the checker says so at
-the figure, not the index. This is what lets a figure be per-person *and* per-day, or
+the figure, not the group. This is what lets a figure be per-person *and*
+per-day, or
 per-person *and* per-source, without the engine learning a second scope
 dimension. Because `@` joins the halves, a key value containing `@` is refused
 outright rather than encoded -- a subject that decomposes into the wrong pair
@@ -291,7 +296,7 @@ in the calendar the definition names, exactly as a day key is the local date.
 Because the calendar is applied when the bucket is written, grouping a label
 into its hour or its day at read time is prefix truncation: no zone
 arithmetic happens on a read, and a grouped point can never disagree with the
-day a `by day` index would have filed the same event under. When the clocks
+day a `by day` group would have filed the same event under. When the clocks
 go back, the repeated hour's two passes share their labels and their records
 share a bucket -- the honest answer about a quarter-hour that occurred twice;
 keying by UTC instead would put every local midnight mid-bucket in most of
@@ -307,12 +312,12 @@ downward too -- `hour` is refused as a truncation because a range over
 quarter-hours produces it, so it exists only as a [series
 grouping](#statistics). Other minute counts wait for a definition to ask,
 exactly as `percentile` does. The grain is in the version hash the way every
-index spec is: minutes and quarter-hours store values that mean different
-things, and reusing them across the change would file a quarter's count under
+group and filter spec is: minutes and quarter-hours store values that mean
+different things, and reusing them across the change would file a quarter's count under
 a minute's key.
 
 Whether the second part is a time bucket or a dimension decides what the
-figure over the index must declare -- see [time-keyed
+figure over the group must declare -- see [time-keyed
 figures](#time-keyed-figures) and
 [`across`](#across----a-second-dimension).
 
@@ -324,15 +329,15 @@ their sets can be intersected and the answer means something. `keyed as`
 declares that sharing:
 
 ```
-index code_review.approved keyed as code_change where was_approved == true
+filter code_review.approved keyed as code_change where was_approved == true
 ```
 
 Declared rather than inferred, because the failure it guards is silent:
 intersecting ids that mean different things yields the empty set, and an
 empty set is a figure reading zero for everybody rather than an error anybody
-sees. Every index over one kind must agree about that kind's id space --
-otherwise the guard could be defeated by writing a second index and leaving
-the clause off, which is the quietest possible way to lose it.
+sees. Every group and filter over one kind must agree about that kind's id
+space -- otherwise the guard could be defeated by writing a second declaration
+and leaving the clause off, which is the quietest possible way to lose it.
 
 `keyed as` is deliberately **not** in the version hash: it decides what the
 checker permits, not what the arithmetic produces.
@@ -419,36 +424,36 @@ explanation it is deliberately outside the version hash.
 
 ### `depends` -- sets of record ids
 
-Each line binds a name to a set expression over indexes:
+Each line binds a name to a set expression over groups and filters:
 
 ```
     depends:
         mine = work_issue.assigned_to:{team_person} & work_issue.active
 ```
 
-- `index:{scope}` addresses a field index's bucket for this subject. Writing
-  a field index *without* the bucket is refused: read unbucketed it looks for
+- `group:{scope}` addresses a group's bucket for this subject. Writing a
+  group *without* the bucket is refused: read unbucketed it looks for
   a bucket keyed by the empty string, finds nothing, and the figure reads
-  zero for everybody. Addressing a predicate index *with* one is refused for
+  zero for everybody. Addressing a filter *with* one is refused for
   the mirror-image reason -- it has only the one bucket.
 - `&`, `|` and `-` are intersection, union and difference. They share one
   precedence level and associate left to right; parenthesise anything you
   would have to think about.
 - A bare name refers to a set bound on an earlier line.
 
-There is **no filter here, on purpose**. `depends` may narrow only by set
-membership, never by record contents, because a predicate over contents
-cannot narrow what the figure subscribes to and would therefore be a
+There is **no inline predicate here, on purpose**. `depends` may narrow only
+by set membership, never by record contents, because a predicate over
+contents cannot narrow what the figure subscribes to and would therefore be a
 declaration that lies. This is the language's one safety property, and the
-checker upholds it: anything a figure wants to filter by must be an index,
-where the subscription machinery can see it.
+checker upholds it: anything a figure wants to narrow by must be a declared
+filter, where the subscription machinery can see it.
 
 Two structural rules, both refused with the failure named:
 
 - **One id space per set.** Intersecting `team_person`-bucketed work items
   with `code_change` ids is empty, for everybody, for ever, with nothing
   thrown. Use `keyed as` if two kinds genuinely share ids.
-- **Exactly one index addressed by `:{scope}`** across all the sets. With
+- **Exactly one group addressed by `:{scope}`** across all the sets. With
   none the figure has no subjects at all and would compute a board-wide total
   attributed to nobody; with two, a value would be keyed by two different
   things.
@@ -591,7 +596,7 @@ The rules around it:
 
 ### Time-keyed figures
 
-A figure whose scope index ends in a `by day`, `by minute` or `by 15 minutes`
+A figure whose scope group ends in a `by day`, `by minute` or `by 15 minutes`
 part stores one value per subject *per bucket*:
 
 ```
@@ -626,7 +631,7 @@ figure team_person.open_mrs_by_source across data_connection:
         count(mine)
 ```
 
-When a composite index's second part is a dimension rather than a date, the
+When a composite group's second part is a dimension rather than a date, the
 figure must say so with `across <fact kind>`. A dimension is not a new kind of
 thing -- it is a **second subject**, with a roster, a name field and an id
 space the checker already knows how to reason about (the kind must have a
@@ -637,7 +642,7 @@ downstream is silently wrong -- the display template renders the variable as
 literal text and a generated sentence describes the whole population beside a
 number that is a slice of it.
 
-**A pair's roster is the index, never a cross product.** Crossing every
+**A pair's roster is the group, never a cross product.** Crossing every
 person with every source would write a nought against pairs that
 categorically cannot hold a record. The consequence: a pair reads a real `0`
 once it has *ever* appeared, and is absent until then.
@@ -759,7 +764,7 @@ source form encode the same fact twice, deliberately -- written `(range)`
 over a live source, a reading would accept a window, ignore it, and return
 today's answer under a heading saying thirty days, so the checker requires
 the two to agree. The set expression follows a figure's rules: exactly one
-index addressed by `:{scope}`, and the measure may not be a field measure.
+group addressed by `:{scope}`, and the measure may not be a field measure.
 
 > **Honesty note.** Live readings compile, are checked, and are versioned,
 > but the standalone engine does not yet serve them: `answer()` raises
@@ -928,42 +933,43 @@ projection work_issue.board:
 ```
 
 `from` is the definition of *on the page*, written where a reader can check
-it -- so which records get a row is part of the projection's version, index
-specs included: redefining an index a population reads moves the projection's
-version (and its summary's), the same way a live reading's indexes move its.
-A population hashed by index names alone would let two different pages cite
-identically.
+it -- so which records get a row is part of the projection's version, filter
+specs included: redefining a filter a population reads moves the projection's
+version (and its summary's), the same way a live reading's groups and filters
+move its. A population hashed by filter names alone would let two different
+pages cite identically.
 
 It speaks the set language a figure's `depends` speaks -- `&`, `|`, `-` over
-index names -- with rules of its own, because there is no subject here:
+declared names -- with rules of its own, because there is no subject here:
 `from` decides which records *become* rows, so nothing exists yet to scope a
 bucket by, and there is no depends block for a bare name to refer to. Each
 refusal is a case that would otherwise resolve to the empty set, and an empty
 population is not an error anybody sees -- it is a page with no rows that
 looks like a complete one:
 
-- **Only indexes**, never bare names.
-- **Only predicate and presence indexes** -- a single bucket, read whole. A
-  fan-out index read whole looks for a bucket keyed by the empty string and
+- **Only declared filters**, never bare names.
+- **Only predicate and presence filters** -- a single bucket, read whole. A
+  group read whole looks for a bucket keyed by the empty string and
   finds nothing; a scoped bucket (`:{...}`) has no row to be scoped by.
-- **No age indexes.** Age buckets are resolved against the clock at reindex
-  time, and no figure pointer covers an index only a `from` reads -- moving
+- **No age filters.** Age buckets are resolved against the clock at reindex
+  time, and no figure pointer covers a filter only a `from` reads -- moving
   the dial it names would change who is on the page with nothing rebuilding
   it.
-- **The index's id space must be the projection's kind.** Ids from another
+- **The filter's id space must be the projection's kind.** Ids from another
   space match no record of this kind, so every row would be filtered away
   with nothing thrown.
 
-The buckets a `from` filters through are stored state, so serving is gated
-the way a figure's pointer gates it: the engine records which index set a
+The buckets a `from` narrows through are stored state, so serving is gated
+the way a figure's pointer gates it: the engine records which index set (the
+library's groups and filters together) a
 tenant last bucketed under, only after the rebuild actually ran, and a
 projection whose population was bucketed under a different index set (or
 never) answers `behind-deploy` (or `never-computed`) rather than an `ok` page
 with records silently missing. (A kind with no records at all still answers
 `nothing-collected` first -- that is a claim about the sync, and it comes
 before any question about buckets.) The recorded version covers the library's
-whole index set, so a deploy that changes *any* index holds every `from`
-page in that state until the tenant's next pass -- a short, honest absence,
+whole index set, so a deploy that changes *any* group or filter holds every
+`from` page in that state until the tenant's next pass -- a short, honest absence,
 traded deliberately against a page that cannot silently be wrong. A population that matches nothing is served
 `ok` with no rows -- records were collected, and the empty page is the
 population's truthful answer.
@@ -982,8 +988,8 @@ definition.
 `epic_start = start_date from container_id through work_container.id as text`
 -- find the `work_container` whose `id` matches this record's `container_id`,
 and read `start_date` off it. The `through` phrase is byte for byte the one
-an index uses, so a reader who has learned one has learned both. **Anything
-other than exactly one match is nothing**: an index resolves a relation to
+a group uses, so a reader who has learned one has learned both. **Anything
+other than exactly one match is nothing**: a group resolves a relation to
 every owner on purpose, but a field holds one value, so the choice is between
 picking a winner and admitting there is no answer -- and picking the first in
 sorted order would be stable and still a fabrication, about the wrong record.
@@ -1089,7 +1095,7 @@ move, but a flag's sentence is the whole content of that row.
 the row is assembled. It exists for the one narrowing `from` cannot say: a
 population whose membership moves with the clock. `from` filters through
 stored buckets, and a bucket resolved against the clock at reindex time goes
-stale between reindexes -- which is why age indexes are refused there. The
+stale between reindexes -- which is why age filters are refused there. The
 gate reads the row's own computed values instead, at the same single instant
 every value reads, so "starts more than thirty days out" is decided fresh on
 every ask and can never be stale.
@@ -1218,7 +1224,7 @@ costs** (see [Concepts](concepts.md) for the host's side of this):
 
 | List | Named by | Turning it costs |
 |---|---|---|
-| bucket settings | an index's `by day in ...` and `older/younger than ...` | re-bucketing a tenant's whole history |
+| bucket settings | a group's `by day in ...` and a filter's `older/younger than ...` | re-bucketing a tenant's whole history |
 | figure settings | a figure's `calculate` and `band:` | recomputing one value per subject |
 | reading settings | a reading's `band ... against ...` | nothing -- a reading stores nothing |
 | projection settings | a projection's or summary's values and flag conditions | nothing |
@@ -1256,7 +1262,7 @@ version in the diff.
 Two properties, both held by construction and by test:
 
 - **Prose does not change the hash.** Explanations, display templates and
-  index labels are all out: rewording an explanation never forks a version
+  group and filter labels are all out: rewording an explanation never forks a version
   and never recomputes a stored value.
 - **Neither does anything incidental.** Keys are sorted at every depth, line
   numbers are excluded, and absent optional parts are dropped -- so a
@@ -1269,7 +1275,7 @@ What *is* hashed, and why each one had to be:
 
 | In the hash | Because |
 |---|---|
-| the full spec of every index a definition reads | changing what `code_change.open` *means* changes what the figure counts, though the figure's own text is untouched |
+| the full spec of every group and filter a definition reads | changing what `code_change.open` *means* changes what the figure counts, though the figure's own text is untouched |
 | the full spec of every measure it names | the same integer reading "5d" or "5" is a scale change |
 | the calculation, ladders and all | it is the number |
 | `across` | one value per subject becomes one per pair; the stored values mean something else |
@@ -1281,7 +1287,8 @@ What *is* hashed, and why each one had to be:
 | a projection's flag templates | a flag's sentence is the whole content of that row |
 | a summary's counts, totals, values, flags and its **projection's version** | rename what a row value means and every count moves |
 
-What deliberately is not: explanations, `display` templates, index labels,
+What deliberately is not: explanations, `display` templates, group and
+filter labels,
 `keyed as` (it decides what the checker permits, not what the arithmetic
 produces), declaration positions, and the schema itself -- a version is the
 hash of a definition's semantics, and the same definition under two hosts is
@@ -1292,8 +1299,8 @@ name, not its version**. A reading is not stored, so which figure version it
 read is a fact about the evaluation and travels on the response -- a reading
 citing a moved figure is visible rather than silently re-versioned. A *live*
 reading is the exception: it has no source on the wire, so its own version is
-the only provenance token there is, and it hashes the resolved index and
-measure specs.
+the only provenance token there is, and it hashes the resolved group, filter
+and measure specs.
 
 ---
 
@@ -1315,23 +1322,23 @@ The ones most worth recognising, in the checker's own words:
 - *"...needs a prefix: a figure is named `<fact kind>.<what>`..."* -- every
   declaration carries its kind, because a citation is `name@version`.
 - *"...is already a figure. A reading needs its own name..."* -- one
-  namespace across all six kinds.
-- *"there is no index called ... Declared: ..."* / *"...is not a set defined
-  in depends. Defined: ..."* -- a typo, answered with what was actually
-  bound.
+  namespace across all seven kinds.
+- *"there is no group or filter called ... Declared: ..."* / *"...is not a
+  set defined in depends. Defined: ..."* -- a typo, answered with what was
+  actually bound.
 - *"...buckets by ..., so it needs a bucket: write `X:{kind}`"* and *"...is a
-  predicate index, so it has a single bucket and cannot be addressed per
-  subject"* -- the two ways to mis-address an index, each of which would
-  otherwise read a bucket keyed by the empty string and answer zero for
+  filter, so it has a single bucket and cannot be addressed per
+  subject"* -- the two ways to mis-address a group or a filter, each of which
+  would otherwise read a bucket keyed by the empty string and answer zero for
   everybody.
-- *"set ... combines indexes over A and B. A set is a set of ids..."* -- two
+- *"set ... combines record sets over A and B. A set is a set of ids..."* -- two
   id spaces in one expression; the intersection is empty for ever. `keyed as`
   is the fix when the sharing is real.
 - *"...applies M, which reads K, to a set holding K2 ids. Every lookup would
   miss..."* -- a measure over the wrong kind: the same silence one layer
   along.
-- *"...names no index addressed by `{scope}`, so it has no subjects"* /
-  *"...is fanned out by more than one index"* -- exactly one index fans a
+- *"...names no group addressed by `{scope}`, so it has no subjects"* /
+  *"...is fanned out by more than one group"* -- exactly one group fans a
   figure out.
 - *"...has both a depends and a combine block"* -- two populations, one
   calculation, no rule for how they relate.
@@ -1349,8 +1356,8 @@ The ones most worth recognising, in the checker's own words:
 - *"figure ... has no explanation. Write `#` comment lines directly above the
   declaration..."* (from the parser) -- the explanation is the
   customer-facing definition, so the four rendered kinds are refused without
-  one; an index or a measure may go unexplained, because neither is served to
-  a reader on its own.
+  one; a group, a filter or a measure may go unexplained, because none is
+  served to a reader on its own.
 - *"there is no figure called ... A figure may only read one declared before
   it..."* -- ordering, and the cycle guard.
 - *"...reads X as a single value, but X is split across ..."* / *"...adds up
@@ -1359,9 +1366,9 @@ The ones most worth recognising, in the checker's own words:
 - *"reading ... summarises stored values, so it must declare (range)"* /
   *"reading ... measures records as they stand, so it takes no arguments"* --
   the windowed/live distinction, encoded twice on purpose.
-- *"...is not time-keyed -- its scope index must end in a `by day`, `by
-  minute` or `by 15 minutes` part..."* -- only a time-keyed figure has a
-  range to read over.
+- *"...is not time-keyed -- the group that fans it out must end in a `by
+  day`, `by minute` or `by 15 minutes` part..."* -- only a time-keyed figure
+  has a range to read over.
 - *"the figure under ... stores a count, so mean(...) is a mean per day
   wearing a label that says per record"* -- only `sum` over counts.
 - *"...calculates both a sum and a distribution"* -- two numbers a reader can
@@ -1382,8 +1389,8 @@ The ones most worth recognising, in the checker's own words:
 - *"summary ... binds 'x', which is already a value of ..."* / *"Only a
   number may be summed"* / *"...reads 'x', which nothing binds"* -- the
   summary's namespace and typing rules.
-- *"...is not a setting an index may name. Those are: ..."* (and the
-  calculation, band and projection variants) -- the four settings lists, each
+- *"...is not a setting a group may name. Those are: ..."* (and the
+  filter, calculation, band and projection variants) -- the four settings lists, each
   enforced at the position that pays its cost.
 
 ---
@@ -1405,6 +1412,6 @@ construct nobody has checked.
 | aggregation in a projection | those are figures, and this engine claims one way to compute a number |
 | a general `max(<measure> over <set>)` | `latest` / `earliest` are the narrow case a definition wanted |
 | arbitrary text | a figure that could return any string would be a template engine with a version hash |
-| a filter in `depends` | it would let a declaration lie about what it reads |
+| an inline predicate in `depends` | it would let a declaration lie about what it reads; narrowing is a declared filter's job |
 | `work_hours` as a threshold unit | as shipped it was a synonym for `hours`; doing it honestly is a working calendar |
 | negative literals | a negative threshold is a dial; a negative value is a subtraction |

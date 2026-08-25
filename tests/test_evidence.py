@@ -27,13 +27,13 @@ TENANT = "t1"
 
 LIB = compile_source(
     """
-index code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
-index work_issue.delivered_by_day from (assignee_account_id through team_person.accounts.account_id, completed_at by day in tenant.timezone)
-index code_change.authored_in from (author_account_id through team_person.accounts.account_id, connection_id)
-index code_change.open where state == "open"
-index code_review.approved keyed as code_change where was_approved == true
-index work_issue.active where active == true
-index work_issue.assigned from assignee_account_id through team_person.accounts.account_id
+group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
+group work_issue.delivered_by_day from (assignee_account_id through team_person.accounts.account_id, completed_at by day in tenant.timezone)
+group code_change.authored_in from (author_account_id through team_person.accounts.account_id, connection_id)
+filter code_change.open where state == "open"
+filter code_review.approved keyed as code_change where was_approved == true
+filter work_issue.active where active == true
+group work_issue.assigned from assignee_account_id through team_person.accounts.account_id
 
 measure code_change.open_seconds = merged_at - created_at
 measure work_issue.estimate = estimate_seconds in effort
@@ -482,9 +482,9 @@ async def test_the_facades_refusals_each_say_where_the_evidence_lives() -> None:
 
     lib = compile_source(
         """
-index code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
-index code_review_request.asked_of from reviewer_account_id through team_person.accounts.account_id
-index code_review_request.pending where pending == true
+group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
+group code_review_request.asked_of from reviewer_account_id through team_person.accounts.account_id
+filter code_review_request.pending where pending == true
 
 measure code_change.open_seconds = merged_at - created_at
 measure code_review_request.waiting_seconds = now - requested_at
@@ -580,8 +580,8 @@ async def test_members_spanning_two_fact_kinds_are_served_bare_and_claim_nothing
     happened to miss."""
     mixed = compile_source(
         """
-index code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
-index work_issue.active where active == true
+group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
+filter work_issue.active where active == true
 
 # How much busier the board is than this person.
 figure team_person.context_gap:
@@ -655,7 +655,7 @@ async def test_a_part_whose_source_left_the_library_is_listed_and_marked() -> No
     crash that takes the whole citation down."""
     smaller = compile_source(
         """
-index work_issue.assigned from assignee_account_id through team_person.accounts.account_id
+group work_issue.assigned from assignee_account_id through team_person.accounts.account_id
 
 measure work_issue.rework = rework_seconds in effort
 

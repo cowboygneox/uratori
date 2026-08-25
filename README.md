@@ -15,8 +15,8 @@ review, and the engine computes exactly what is written -- nothing else
 computes anything:
 
 ```
-index shop_order.carried_by from courier_id
-index shop_order.open where status != "delivered"
+group shop_order.carried_by from courier_id
+filter shop_order.open where status != "delivered"
 
 # How many orders this courier is carrying right now.
 figure shop_courier.carrying:
@@ -59,8 +59,9 @@ your app ──facts──▶ uratori ──Results──▶ your screens
 - **A `Schema`** declares your world once: which fact kinds exist, which field
   carries a record's human name, which settings dials a definition may read,
   and their defaults.
-- **Definitions** (`.fig`) declare what to compute: *indexes* bucket records,
-  *measures* read quantities off them, *figures* are stored per-subject values
+- **Definitions** (`.fig`) declare what to compute: *groups* bucket records
+  by a field, *filters* narrow them to whatever passes a test, *measures*
+  read quantities off them, *figures* are stored per-subject values
   recomputed incrementally as facts move, *readings* summarise stored days,
   *projections* assemble live rows at the instant they are asked.
 - **Results** are one envelope for every answer, with the definition's version
@@ -118,7 +119,7 @@ container, `localhost` is the container.
 | [Concepts](docs/concepts.md) | Facts, schemas, definitions, versions, tenants -- the model in full. |
 | [Setup](docs/setup.md) | Deploying the container: environment, database, token, health, upgrades. |
 | [HTTP & websocket API](docs/http-api.md) | Every route and frame, with request and response shapes. |
-| [The definition language](docs/language.md) | Writing `.fig`: indexes, measures, figures, readings, projections. |
+| [The definition language](docs/language.md) | Writing `.fig`: groups, filters, measures, figures, readings, projections. |
 
 ## The rules it inherits
 

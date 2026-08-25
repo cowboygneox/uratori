@@ -48,13 +48,13 @@ from .world import DEFAULTS, compile_source
 # --------------------------------------------------------------- buckets --
 
 BASE = """
-index work_issue.assigned_to from assignee_account_id through team_person.accounts.account_id
-index work_issue.active where active == true
-index work_issue.stuck where status_changed_at older than thresholds.longWipDays
-index work_issue.fresh where status_changed_at younger than thresholds.longWipDays
-index work_issue.by_day from (assignee_account_id through team_person.accounts.account_id, completed_at by day in tenant.timezone)
-index work_issue.by_quarter from (assignee_account_id through team_person.accounts.account_id, completed_at by 15 minutes in tenant.timezone)
-index work_issue.by_minute from (assignee_account_id through team_person.accounts.account_id, completed_at by minute in tenant.timezone)
+group work_issue.assigned_to from assignee_account_id through team_person.accounts.account_id
+filter work_issue.active where active == true
+filter work_issue.stuck where status_changed_at older than thresholds.longWipDays
+filter work_issue.fresh where status_changed_at younger than thresholds.longWipDays
+group work_issue.by_day from (assignee_account_id through team_person.accounts.account_id, completed_at by day in tenant.timezone)
+group work_issue.by_quarter from (assignee_account_id through team_person.accounts.account_id, completed_at by 15 minutes in tenant.timezone)
+group work_issue.by_minute from (assignee_account_id through team_person.accounts.account_id, completed_at by minute in tenant.timezone)
 
 measure work_issue.estimate = estimate_seconds in effort
 measure work_issue.moved = moment updated_at
@@ -609,7 +609,7 @@ def test_a_set_may_not_mix_two_id_spaces() -> None:
     The rule was written on the plan and enforced nowhere."""
     refuses(
         """
-index code_change.open where state == "open"
+filter code_change.open where state == "open"
 
 # d
 figure team_person.mixed:
@@ -619,7 +619,7 @@ figure team_person.mixed:
     calculate:
         count(m)
 """,
-        "combines indexes over",
+        "combines record sets over",
     )
 
 
@@ -629,7 +629,7 @@ def test_a_measure_must_be_over_the_same_kind_as_the_set_it_is_applied_to() -> N
     checks a measure's path against its *own* kind's specimen."""
     refuses(
         """
-index code_review_request.asked_of from reviewer_account_id through team_person.accounts.account_id
+group code_review_request.asked_of from reviewer_account_id through team_person.accounts.account_id
 
 # d
 figure team_person.wrong:
