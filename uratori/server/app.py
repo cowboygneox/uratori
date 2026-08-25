@@ -87,6 +87,10 @@ def create_app(
     resolved_ancestors = (
         frame_ancestors or os.environ.get("URATORI_UI_FRAME_ANCESTORS") or "'self'"
     )
+    if any(forbidden in resolved_ancestors for forbidden in ("\r", "\n")):
+        # The value is pasted into a response header; a newline in it would
+        # let configuration smuggle arbitrary headers past every proxy.
+        raise RuntimeError("URATORI_UI_FRAME_ANCESTORS must not contain newlines")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -321,19 +325,29 @@ def create_app(
         log's order is the order the passes actually ran in. The log is data,
         not a UI feature -- it records whether or not the UI is mounted,
         because the question it answers ("what did that fact cascade to")
-        is asked after the fact by definition."""
-        await db.record_run(
-            s.pool,
-            tenant,
-            cause,
-            full=full,
-            written=out.written,
-            deleted=out.deleted,
-            changed=out.changed,
-            rebuilt=out.rebuilt,
-            covered=out.covered,
-            shown=[c.model_dump() for c in out.shown],
-        )
+        is asked after the fact by definition.
+
+        A logging failure is swallowed, loudly: by the time this runs the
+        facts and values are committed, so raising would answer 500 for a
+        pass that happened -- and the retry that provokes would find nothing
+        changed, log a quiet run, and bury the real cascade for good. A hole
+        in the log is the smaller lie, and the error log says where it is.
+        """
+        try:
+            await db.record_run(
+                s.pool,
+                tenant,
+                cause,
+                full=full,
+                written=out.written,
+                deleted=out.deleted,
+                changed=out.changed,
+                rebuilt=out.rebuilt,
+                covered=out.covered,
+                shown=[c.model_dump() for c in out.shown],
+            )
+        except Exception:
+            log.exception("the pass for %s ran but could not be recorded", tenant)
 
     def _run_out(
         report: RunReport,
@@ -528,7 +542,10 @@ def _ui_default(env: str | None, token: str | None) -> bool:
     guessed at: a typo'd `URATORI_UI=fales` silently meaning "the default"
     would surface as a security surprise, not a config error.
     """
-    if env is None:
+    if env is None or env.strip() == "":
+        # Empty is how compose files and manifests spell "unset"
+        # (`- URATORI_UI=` or an `-e URATORI_UI` pass-through of nothing);
+        # refusing it would fail boots that never chose anything.
         return token is None
     value = env.strip().lower()
     if value in {"1", "true", "on", "yes"}:

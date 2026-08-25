@@ -33,6 +33,21 @@ async function get(path) {
   return { ok: response.ok, status: response.status, body };
 }
 
+function safeDecode(text) {
+  // A hand-typed '%zz' in the hash must land on the index, not a stuck page.
+  try { return decodeURIComponent(text); } catch { return null; }
+}
+
+function safeUrl(candidate) {
+  // Evidence URLs come out of stored provider records; only a fetchable
+  // scheme may become a clickable link on this (unauthenticated) origin.
+  try {
+    const parsed = new URL(candidate, location.href);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.href;
+  } catch { /* not a URL at all */ }
+  return null;
+}
+
 function problem(answer, sentence) {
   const detail = answer.body && answer.body.detail ? answer.body.detail : `HTTP ${answer.status}`;
   return el('div', { class: 'notice problem' }, sentence, ' ', el('span', { class: 'mono' }, detail));
@@ -64,6 +79,7 @@ async function loadTenants() {
   );
   if (!names.length) {
     tenantSelect.append(el('option', { value: '' }, '(none yet)'));
+    localStorage.removeItem('uratori.tenant'); // a stale choice must not outlive its tenant
   } else if (names.includes(tenant())) {
     tenantSelect.value = tenant();
   } else {
@@ -110,7 +126,15 @@ async function render() {
   drawTabs();
   const hash = location.hash || '#/definitions';
   const [, route, ...rest] = hash.split('/');
-  const argument = rest.length ? decodeURIComponent(rest.join('/')) : null;
+  // The query is split off BEFORE decoding. Decoding the whole tail first
+  // would turn an encoded '&' or '=' inside a search term or a fact key back
+  // into query syntax -- a cursor that skips records, a search answering a
+  // different question.
+  const raw = rest.join('/');
+  const cut = raw.indexOf('?');
+  const path = cut === -1 ? raw : raw.slice(0, cut);
+  const params = new URLSearchParams(cut === -1 ? '' : raw.slice(cut + 1));
+  const argument = path ? safeDecode(path) : null;
   view.replaceChildren(el('p', { class: 'faint' }, 'loading…'));
 
   if (world === null) {
@@ -123,7 +147,7 @@ async function render() {
 
   // flat(Infinity): a view may return nested arrays of nodes, and a nested
   // array handed to replaceChildren renders as "[object HTMLDivElement]".
-  if (route === 'facts') view.replaceChildren(...(await factsView(argument)).flat(Infinity));
+  if (route === 'facts') view.replaceChildren(...(await factsView(argument, params)).flat(Infinity));
   else if (route === 'activity') view.replaceChildren(...(await activityView()).flat(Infinity));
   else view.replaceChildren(...(await definitionsView(argument)).flat(Infinity));
 }
@@ -285,15 +309,27 @@ async function answerSection(declaration) {
 
   const blocks = [];
   if (result.subjects.length === 0) {
-    blocks.push(el('p', { class: 'faint' }, 'Computed, and there are no subjects.'));
+    blocks.push(result.empty
+      ? el('p', { class: 'faint' },
+          'Computed for nobody in particular: ',
+          el('span', { class: 'mono' }, result.empty.display ?? '—'))
+      : el('p', { class: 'faint' }, 'Computed, and there are no subjects.'));
   } else if (result.kind === 'figure') {
+    // The band column exists only when the definition claims to band --
+    // a column of "unknown" under a bandless figure is a stated absence
+    // the definition never made.
     blocks.push(el('table', {},
-      el('tr', {}, el('th', {}, 'subject'), el('th', {}, 'value'), el('th', {}, 'band'), el('th', {})),
+      el('tr', {}, el('th', {}, 'subject'), el('th', {}, 'value'),
+        result.banded ? el('th', {}, 'band') : null, el('th', {})),
       result.subjects.map((subject) => {
         const row = el('tr', {},
-          el('td', {}, subject.name, ' ', el('span', { class: 'faint mono' }, subject.id)),
-          el('td', { class: 'mono' }, subject.display ?? String(subject.value ?? '—')),
-          el('td', { class: 'mono dim' }, subject.level),
+          el('td', {}, subject.name, ' ', el('span', { class: 'faint mono' }, subject.id),
+            subject.dimension
+              ? el('span', { class: 'dim' }, ` × ${subject.dimension}`) : null),
+          // The dash, never the raw number: formatting is the server's job,
+          // and a value with no display has no client-side rescue.
+          el('td', { class: 'mono' }, subject.display ?? '—'),
+          result.banded ? el('td', { class: 'mono dim' }, subject.level) : null,
           el('td', {}, el('button', {
             onclick: () => evidenceRow(row, declaration.name, subject.id),
           }, 'evidence')));
@@ -344,11 +380,15 @@ async function answerSection(declaration) {
 }
 
 async function evidenceRow(row, figure, subject) {
+  if (row.nextSibling && row.nextSibling.classList.contains('expansion')) {
+    row.nextSibling.remove(); // second click folds it back up
+    return;
+  }
   const answer = await get(
     `tenants/${encodeURIComponent(tenant())}/evidence/${encodeURIComponent(figure)}`
     + `?subject=${encodeURIComponent(subject)}`);
-  const holder = el('td', { colspan: '4' });
-  const expansion = el('tr', {}, holder);
+  const holder = el('td', { colspan: String(row.children.length) });
+  const expansion = el('tr', { class: 'expansion' }, holder);
   if (!answer.ok) {
     holder.append(problem(answer, 'No evidence:'));
   } else {
@@ -358,30 +398,29 @@ async function evidenceRow(row, figure, subject) {
         ? `This value cites ${evidence.members.length} ${evidence.parts ? 'parts' : 'records'}:`
         : 'This value cites nothing.'),
       evidence.note ? el('p', { class: 'faint' }, evidence.note) : null,
-      el('ul', {}, evidence.members.map((member) => el('li', { class: 'mono' },
-        member.figure ? el('span', { class: 'faint' }, `${member.figure} · `) : null,
-        member.url
-          ? el('a', { href: member.url, target: '_blank', rel: 'noreferrer' },
-              member.title || member.key)
-          : (member.title || member.key),
-        member.display ? el('span', { class: 'dim' }, ` — ${member.display}`) : null,
-        member.held ? null : el('span', { class: 'faint' }, ' (no longer held)')))));
+      el('ul', {}, evidence.members.map((member) => {
+        const link = member.url ? safeUrl(member.url) : null;
+        return el('li', { class: 'mono' },
+          member.figure ? el('span', { class: 'faint' }, `${member.figure} · `) : null,
+          link
+            ? el('a', { href: link, target: '_blank', rel: 'noreferrer' },
+                member.title || member.key)
+            : (member.title || member.key),
+          member.display ? el('span', { class: 'dim' }, ` — ${member.display}`) : null,
+          member.held ? null : el('span', { class: 'faint' }, ' (no longer held)'));
+      })));
   }
   row.after(expansion);
 }
 
 // --------------------------------------------------------------- facts --
 
-async function factsView(argument) {
+async function factsView(kind, params) {
   if (!tenant()) {
     return [el('h1', {}, 'Facts'),
       el('p', { class: 'faint' }, 'No tenant holds any facts yet.')];
   }
-  if (!argument) return kindListView();
-
-  // "#/facts/<kind>" with an optional "?q=…&after=…" the view keeps for itself.
-  const [kind, query] = argument.split('?');
-  const params = new URLSearchParams(query || '');
+  if (!kind) return kindListView();
   return kindView(kind, params.get('q') || '', params.get('after'), params.get('trail') || '');
 }
 
@@ -507,6 +546,10 @@ async function activityView() {
     !quiet && page.quiet_hidden
       ? ` (${page.quiet_hidden} hidden)` : '');
 
+  // An enum-to-English map with a verbatim fallback: a future cause must
+  // surface as itself, never be mislabelled as one of today's two.
+  const TRIGGERS = { facts: 'facts arrived', run: 'manual run' };
+
   const runs = page.runs.map((run) => {
     const moves = run.shown.map((change) => el('div', {
       class: change.kind === 'removed' ? 'move removed' : 'move',
@@ -516,15 +559,15 @@ async function activityView() {
         href: `#/definitions/${encodeURIComponent(change.figure)}`,
       }, change.figure),
       el('span', { class: 'dim' }, change.label),
+      change.kind === 'removed' ? el('span', { class: 'badge' }, 'removed') : null,
       el('span', { class: 'mono faint' }, change.before_display),
       el('span', { class: 'arrow' }, '→'),
-      el('span', { class: 'after' },
-        change.kind === 'removed' ? 'removed: this subject left the board' : change.after_display)));
+      el('span', { class: 'after' }, change.after_display)));
 
     return el('div', { class: 'run' },
       el('div', { class: 'head' },
         el('span', { class: 'when' }, run.at),
-        el('span', { class: 'badge' }, run.trigger === 'facts' ? 'facts arrived' : 'manual run'),
+        el('span', { class: 'badge' }, TRIGGERS[run.trigger] ?? run.trigger),
         run.full ? el('span', { class: 'badge' }, 'full rebuild') : null,
         el('span', { class: 'dim' },
           `${run.written} written · ${run.deleted} deleted · ${run.changed} moved`),
@@ -536,10 +579,10 @@ async function activityView() {
             el('span', { class: 'mono' }, run.rebuilt.join(', ')))
         : null,
       moves.length ? moves : el('p', { class: 'faint' }, 'No figure moved.'),
-      run.changed > run.shown.length
+      run.not_shown > 0
         ? el('p', { class: 'faint' },
-            `${run.changed - run.shown.length} more moved and are not listed — `
-            + 'the log keeps the largest movements of each pass.')
+            `${run.not_shown} more moved and are not listed — the log stores `
+            + 'a capped sample per pass, removals first, then the heaviest movements.')
         : null);
   });
 
@@ -548,7 +591,11 @@ async function activityView() {
     el('p', { class: 'dim' },
       'Cause before effect: each pass with the movements it caused, frozen ',
       'when they happened. Push a fact and the newest run says what it cascaded to.'),
-    el('div', { class: 'controls' }, toggle),
+    el('div', { class: 'controls' }, toggle,
+      page.total > page.runs.length
+        ? el('span', { class: 'faint' },
+            `showing the newest ${page.runs.length} of ${page.total} runs`)
+        : null),
     runs.length ? runs : el('p', { class: 'faint' }, 'No runs recorded for this tenant.'),
   ];
 }

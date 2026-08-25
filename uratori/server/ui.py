@@ -47,7 +47,6 @@ from ..lang.source import declaration_prose, declaration_source
 from ..results import Evidence, Result
 from ..schema import Schema
 from . import db
-from .contract import ShownChange
 from .runtime import State, facade_for, ready, state_of
 
 STATIC = Path(__file__).parent / "static"
@@ -146,13 +145,25 @@ class RunOutLog(BaseModel):
     written: int
     deleted: int
     changed: int
+    not_shown: int
+    """`changed` minus the rows in `shown` -- computed here so the page can
+    state what the capped sample is missing without doing arithmetic itself."""
+
     rebuilt: list[str]
     covered: list[str]
-    shown: list[ShownChange]
+    shown: list[dict[str, Any]]
+    """The frozen `ShownChange` rows, served exactly as stored. A dict rather
+    than the model on purpose: history written under an older shape must keep
+    serving after the model grows a field, and revalidating frozen rows
+    against the current model would 500 the whole log the day it changes."""
 
 
 class ActivityOut(BaseModel):
     runs: list[RunOutLog]
+    total: int
+    """How many runs match the listing (the whole kept log, not this page) --
+    the honest number beside a limit-capped list."""
+
     quiet_hidden: int
     """How many do-nothing runs the default listing is not showing."""
 
@@ -167,7 +178,8 @@ def router(frame_ancestors: str) -> APIRouter:
 
     @ui.get("/ui", include_in_schema=False)
     async def bare() -> RedirectResponse:
-        return RedirectResponse(url="/ui/", status_code=308)
+        # Relative, so the page survives being proxied under a sub-path.
+        return RedirectResponse(url="ui/", status_code=308)
 
     @ui.get("/ui/", include_in_schema=False)
     async def index() -> FileResponse:
@@ -194,7 +206,7 @@ def router(frame_ancestors: str) -> APIRouter:
 
     # -------------------------------------------------------------- world --
 
-    @ui.get("/ui/api/world", response_model=WorldOut)
+    @ui.get("/ui/api/world", response_model=WorldOut, include_in_schema=False)
     async def world(request: Request) -> WorldOut:
         s = _state(request)
         if s.world is None:
@@ -211,14 +223,14 @@ def router(frame_ancestors: str) -> APIRouter:
 
     # -------------------------------------------------------------- facts --
 
-    @ui.get("/ui/api/tenants", response_model=TenantsOut)
+    @ui.get("/ui/api/tenants", response_model=TenantsOut, include_in_schema=False)
     async def tenants(request: Request) -> TenantsOut:
         s = _state(request)
         return TenantsOut(
             tenants=[TenantOut(**row) for row in await db.list_tenants(s.pool)]
         )
 
-    @ui.get("/ui/api/tenants/{tenant}/facts", response_model=FactKindsOut)
+    @ui.get("/ui/api/tenants/{tenant}/facts", response_model=FactKindsOut, include_in_schema=False)
     async def fact_kinds(tenant: str, request: Request) -> FactKindsOut:
         """Every kind the schema declares, with its stored count -- a kind
         nobody has pushed appears at zero, because "nothing collected" is a
@@ -232,7 +244,7 @@ def router(frame_ancestors: str) -> APIRouter:
             kinds=[KindCount(kind=name, records=counts.get(name, 0)) for name in names]
         )
 
-    @ui.get("/ui/api/tenants/{tenant}/facts/{kind}", response_model=FactPageOut)
+    @ui.get("/ui/api/tenants/{tenant}/facts/{kind}", response_model=FactPageOut, include_in_schema=False)
     async def facts(
         tenant: str,
         kind: str,
@@ -265,7 +277,7 @@ def router(frame_ancestors: str) -> APIRouter:
 
     # ----------------------------------------------------------- activity --
 
-    @ui.get("/ui/api/tenants/{tenant}/activity", response_model=ActivityOut)
+    @ui.get("/ui/api/tenants/{tenant}/activity", response_model=ActivityOut, include_in_schema=False)
     async def activity(
         tenant: str,
         request: Request,
@@ -273,7 +285,7 @@ def router(frame_ancestors: str) -> APIRouter:
         limit: Annotated[int, Query(ge=1, le=200)] = 50,
     ) -> ActivityOut:
         s = _state(request)
-        runs, hidden = await db.page_runs(s.pool, tenant, limit=limit, quiet=quiet)
+        runs, hidden, total = await db.page_runs(s.pool, tenant, limit=limit, quiet=quiet)
         return ActivityOut(
             runs=[
                 RunOutLog(
@@ -284,18 +296,20 @@ def router(frame_ancestors: str) -> APIRouter:
                     written=row["written"],
                     deleted=row["deleted"],
                     changed=row["changed"],
+                    not_shown=max(row["changed"] - len(row["shown"]), 0),
                     rebuilt=row["rebuilt"],
                     covered=row["covered"],
-                    shown=[ShownChange(**c) for c in row["shown"]],
+                    shown=row["shown"],
                 )
                 for row in runs
             ],
+            total=total,
             quiet_hidden=hidden,
         )
 
     # ------------------------------------------------------------ answers --
 
-    @ui.get("/ui/api/tenants/{tenant}/results/{name}", response_model=Result)
+    @ui.get("/ui/api/tenants/{tenant}/results/{name}", response_model=Result, include_in_schema=False)
     async def result(
         tenant: str,
         name: str,
@@ -323,7 +337,7 @@ def router(frame_ancestors: str) -> APIRouter:
             raise HTTPException(status_code=404, detail=f"No definition called {name}")
         return answer
 
-    @ui.get("/ui/api/tenants/{tenant}/evidence/{name}", response_model=Evidence)
+    @ui.get("/ui/api/tenants/{tenant}/evidence/{name}", response_model=Evidence, include_in_schema=False)
     async def evidence(tenant: str, name: str, subject: str, request: Request) -> Evidence:
         s = _state(request)
         world, library = ready(s)
@@ -364,6 +378,12 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
     out: list[DeclarationOut] = []
 
     for name, index in library.indexes.items():
+        edges = [Dependency(type="fact", name=index.kind)]
+        if index.id_space != index.kind:
+            # `keyed as`: the members are another kind's ids, so that kind is
+            # part of what this index rests on.
+            edges.append(Dependency(type="fact", name=index.id_space))
+        edges += _spec_edges(index.spec)
         out.append(
             DeclarationOut(
                 name=name,
@@ -372,9 +392,7 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
                 doc=declaration_prose(library, name),
                 source=declaration_source(library, name),
                 fact_kind=index.kind,
-                rests_on=_dedup(
-                    [Dependency(type="fact", name=index.kind), *_spec_edges(index.spec)]
-                ),
+                rests_on=_dedup(edges),
             )
         )
 
@@ -393,7 +411,13 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
         )
 
     for figure in library.figures:
-        edges: list[Dependency] = [Dependency(type="index", name=n) for n in figure.indexes]
+        # The scope kind first: the subjects, the roster the backfill writes
+        # noughts over, and the labels all come from its records -- a trace
+        # that reached only the kinds the sets read would miss it.
+        edges = [Dependency(type="fact", name=figure.scope)]
+        if figure.across is not None:
+            edges.append(Dependency(type="fact", name=figure.across))
+        edges += [Dependency(type="index", name=n) for n in figure.indexes]
         edges += [Dependency(type="measure", name=n) for n in figure.measures]
         sources = set(figure.reads) | {src for src, _ in figure.combines.values()}
         edges += [Dependency(type="figure", name=n) for n in sorted(sources)]
@@ -414,7 +438,7 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
         )
 
     for reading in library.readings:
-        edges = []
+        edges = [Dependency(type="fact", name=reading.scope)]
         if reading.source is not None:
             edges.append(Dependency(type="figure", name=reading.source))
         if reading.live_measure is not None:

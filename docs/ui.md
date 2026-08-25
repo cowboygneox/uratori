@@ -46,10 +46,15 @@ only a sound posture when it is chosen, so the default follows the token:
 | set | unset | **off** -- a token plus a silently open UI would leak everything the token guards |
 | either | `on` / `off` | what you said |
 
-`URATORI_UI` accepts `on/off/true/false/1/0/yes/no`; anything else refuses to
-boot rather than guessing. Enabling the UI beside a token is a deliberate
-split -- API callers authenticate, UI readers are gated by network reach --
-and turning it on does not loosen the API routes in any way.
+`URATORI_UI` accepts `on/off/true/false/1/0/yes/no` (empty counts as unset);
+anything else refuses to boot rather than guessing. Enabling the UI beside a
+token is a deliberate split -- API callers authenticate, UI readers are gated
+by network reach -- and turning it on does not loosen the API routes
+themselves. Be clear-eyed about what the split grants, though: the UI serves
+*more* data than the token'd API does -- full definition source, the tenant
+list, and the stored records themselves have no API equivalent at all. Anyone
+who can reach the port can read everything, so "behind the firewall" has to
+be true, not aspirational.
 
 `/ui/api/*` is the UI's own contract, versioned with the page it serves, and
 may change between releases without notice. Integrate against the

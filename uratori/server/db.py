@@ -298,10 +298,11 @@ hidden behind `quiet` so the log reads as cause and effect."""
 
 async def page_runs(
     pool: asyncpg.Pool[Any], tenant: str, *, limit: int, quiet: bool
-) -> tuple[list[dict[str, Any]], int]:
-    """Newest runs first, and the honest count of quiet runs a default listing
-    hid -- a filtered list that does not say what it filtered reads as
-    complete."""
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Newest runs first, plus the two counts that keep the listing honest:
+    the true total of runs the filter matches (a limit-capped list under no
+    total reads as complete at every size) and, when quiet runs are being
+    hidden, how many the default view is not showing."""
     where = "tenant_id = $1" if quiet else f"tenant_id = $1 and {_LOUD}"
     rows = await pool.fetch(
         f"""
@@ -314,6 +315,9 @@ async def page_runs(
         """,
         tenant,
         limit,
+    )
+    total = int(
+        await pool.fetchval(f"select count(*) from run_log where {where}", tenant) or 0
     )
     hidden = 0
     if not quiet:
@@ -341,6 +345,7 @@ async def page_runs(
             for row in rows
         ],
         hidden,
+        total,
     )
 
 
@@ -349,6 +354,18 @@ def _loaded(value: Any) -> Any:
 
 
 # ------------------------------------------------------------- browsing --
+
+
+def _contains(q: str) -> str:
+    """`q` as a substring ILIKE pattern, with the pattern language disarmed.
+
+    `%` and `_` are ILIKE's own operators; a reader searching for `PROJ_123`
+    means those five characters, not "PROJ, anything, 123" -- and an unescaped
+    `%` would match the whole table while reporting the count as if it were a
+    real search. Backslash is Postgres's default LIKE escape, so it goes first.
+    """
+    disarmed = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{disarmed}%"
 
 
 async def list_tenants(pool: asyncpg.Pool[Any]) -> list[dict[str, Any]]:
@@ -404,7 +421,7 @@ async def page_facts(
         args.append(after)
         conditions.append(f"key > ${len(args)}")
     if q:
-        args.append(f"%{q}%")
+        args.append(_contains(q))
         conditions.append(f"(key ilike ${len(args)} or value::text ilike ${len(args)})")
     where = " and ".join(conditions)
 
@@ -438,7 +455,7 @@ async def page_facts(
     count_conditions = ["tenant_id = $1", "kind = $2"]
     count_args: list[Any] = [tenant, kind]
     if q:
-        count_args.append(f"%{q}%")
+        count_args.append(_contains(q))
         count_conditions.append(
             f"(key ilike ${len(count_args)} or value::text ilike ${len(count_args)})"
         )

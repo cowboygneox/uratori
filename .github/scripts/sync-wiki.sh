@@ -16,6 +16,7 @@ render() {
       -e 's|](setup\.md|](Setup|g' \
       -e 's|](http-api\.md|](HTTP-API|g' \
       -e 's|](language\.md|](Language|g' \
+      -e 's|](ui\.md|](UI|g' \
       "$root/docs/$1"
 }
 
@@ -23,6 +24,7 @@ render concepts.md > "$wiki/Concepts.md"
 render setup.md    > "$wiki/Setup.md"
 render http-api.md > "$wiki/HTTP-API.md"
 render language.md > "$wiki/Language.md"
+render ui.md       > "$wiki/UI.md"
 
 cat > "$wiki/Home.md" <<'EOF'
 **uratori** (裏取り) makes every number in your product mean something both
@@ -43,6 +45,7 @@ docker run -p 8080:8080 \
 | [Setup](Setup) | Deploying the container: environment, database, token, health, upgrades. |
 | [HTTP & websocket API](HTTP-API) | Every route and frame, with request and response shapes. |
 | [The definition language](Language) | Writing `.fig`: indexes, measures, figures, readings, projections. |
+| [The built-in UI](UI) | The investigation surface at `/ui/`: definitions as written, dependency traces, facts, and the activity log. |
 
 These pages are rendered from
 [`docs/`](https://github.com/cowboygneox/uratori/tree/main/docs) on every
@@ -57,6 +60,7 @@ cat > "$wiki/_Sidebar.md" <<'EOF'
 - [Setup](Setup)
 - [HTTP & websocket API](HTTP-API)
 - [The definition language](Language)
+- [The built-in UI](UI)
 
 [Repository](https://github.com/cowboygneox/uratori)
 EOF
