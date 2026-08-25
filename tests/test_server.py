@@ -98,7 +98,7 @@ async def test_definitions_are_refused_in_the_checkers_own_words(server: Server)
     that flattened them to 'invalid' would send an author looking for a typo."""
     await server.http.put("/schema", json=COURIER_WORLD.to_document())
     refused = await server.http.put(
-        "/definitions", json={"source": "index work_issue.active where active == true\n"}
+        "/definitions", json={"source": "filter work_issue.active where active == true\n"}
     )
     assert refused.status_code == 422
     assert "not a fact kind" in refused.json()["detail"]
@@ -610,7 +610,7 @@ async def test_a_new_population_index_holds_the_page_behind_deploy_until_a_pass(
         COURIER_SOURCE
         + """
 
-index shop_order.underway where status == "riding"
+filter shop_order.underway where status == "riding"
 
 # Orders being ridden right now.
 projection shop_order.live_board:

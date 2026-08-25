@@ -881,8 +881,8 @@ async def project_rows(
             return [], Unavailable(
                 because="never-computed" if built is None else "behind-deploy",
                 detail=(
-                    "this board has not bucketed the population's indexes yet; "
-                    "the next sync will"
+                    "this board has not bucketed the population's groups and "
+                    "filters yet; the next sync will"
                     if built is None
                     else "the population's buckets were built under a previous "
                     "index set; the next sync rebuilds them"

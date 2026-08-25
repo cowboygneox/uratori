@@ -44,7 +44,7 @@ docker run -p 8080:8080 \
 | [Concepts](Concepts) | Facts, schemas, definitions, versions, tenants -- the model in full. Start here. |
 | [Setup](Setup) | Deploying the container: environment, database, token, health, upgrades. |
 | [HTTP & websocket API](HTTP-API) | Every route and frame, with request and response shapes. |
-| [The definition language](Language) | Writing `.fig`: indexes, measures, figures, readings, projections. |
+| [The definition language](Language) | Writing `.fig`: groups, filters, measures, figures, readings, projections. |
 | [The built-in UI](UI) | The investigation surface at `/ui/`: definitions as written, dependency traces, facts, and the activity log. |
 
 These pages are rendered from

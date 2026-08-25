@@ -27,8 +27,8 @@ BASE=http://localhost:8080
 AUTH='Authorization: Bearer s3cret'   # harmless if the server runs tokenless
 
 cat > couriers.fig <<'EOF'
-index shop_order.carried_by from courier_id
-index shop_order.open where status != "delivered"
+group shop_order.carried_by from courier_id
+filter shop_order.open where status != "delivered"
 
 # How many orders this courier is carrying right now.
 figure shop_courier.carrying:
@@ -210,7 +210,7 @@ Responses:
 
 - `409` when no schema is declared yet (definitions compile against it).
 - `422` with the compiler's message, verbatim, whichever layer refused --
-  the parser's (`line 1: expected "index", "measure", …` for text that does
+  the parser's (`line 1: expected "group", "filter", …` for text that does
   not parse) or the checker's (`"not a fact kind"` when a definition names a
   kind the schema does not declare). A refused load changes nothing: the
   previously loaded definitions (or the untaught state) stand whole, and
@@ -233,8 +233,9 @@ Responses:
 
 `figures`, `readings`, `projections` and `summaries` list each declaration's
 name and **version** -- the content hash of its semantics (prose edits do not
-fork it; see [Concepts](concepts.md)). `indexes` and `measures` are counts,
-since neither is served by name.
+fork it; see [Concepts](concepts.md)). `indexes` (the groups and filters,
+counted together under the engine's collective key) and `measures` are
+counts, since neither is served by name.
 
 The versions are the review surface. Compile the same source yourself, in
 your build, with the same package the image ships (`pip install

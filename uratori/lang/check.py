@@ -148,12 +148,12 @@ class _Checker:
         )
 
     def _claim(self, name: str, what: str, line: int) -> None:
-        """One namespace for all six declaration kinds -- indexes and measures
-        included, not just the four rendered ones.
+        """One namespace for all seven declaration kinds -- groups, filters
+        and measures included, not just the four rendered ones.
 
         A citation is `name@version`, so two declarations sharing a name would
         make a citation ambiguous -- and the Data screen addresses a definition
-        by name alone, so an index shadowing a figure would put the index's
+        by name alone, so a filter shadowing a figure would put the filter's
         one-liner on the source pane where the figure's formula belongs.
         """
         held = self._names.get(name)
@@ -179,22 +179,24 @@ class _Checker:
     # ---------------------------------------------------------- id space --
 
     def _id_spaces(self) -> None:
-        """`keyed as` is a property of a fact kind, not of one index.
+        """`keyed as` is a property of a fact kind, not of one declaration.
 
-        Every index over one kind must agree about that kind's id space,
-        otherwise the guard could be defeated by writing a second index and
-        leaving the clause off -- which is the quietest possible way to lose it.
+        Every group and filter over one kind must agree about that kind's id
+        space, otherwise the guard could be defeated by writing a second
+        declaration and leaving the clause off -- which is the quietest
+        possible way to lose it.
         """
         claimed: dict[str, tuple[str, int]] = {}
         for d in self._decls:
             if not isinstance(d, IndexDecl) or d.keyed_as is None:
                 continue
-            self._fact_kind(d.keyed_as, f"index {d.name} is keyed as", d.line)
+            word = _decl_word(d.spec)
+            self._fact_kind(d.keyed_as, f"{word} {d.name} is keyed as", d.line)
             held = claimed.get(d.kind)
             if held is not None and held[0] != d.keyed_as:
                 raise CheckError(
-                    f'index {d.name} says {d.kind} is keyed as "{d.keyed_as}", but another '
-                    f'index says "{held[0]}". A fact kind has one id space.',
+                    f'{word} {d.name} says {d.kind} is keyed as "{d.keyed_as}", but another '
+                    f'declaration says "{held[0]}". A fact kind has one id space.',
                     d.line,
                 )
             claimed[d.kind] = (d.keyed_as, d.line)
@@ -203,26 +205,27 @@ class _Checker:
     # -------------------------------------------------------------- index --
 
     def _index(self, d: IndexDecl) -> None:
-        self._claim(d.name, "index", d.line)
-        self._fact_kind(d.kind, f"index {d.name} is over", d.line)
+        word = _decl_word(d.spec)
+        self._claim(d.name, word, d.line)
+        self._fact_kind(d.kind, f"{word} {d.name} is over", d.line)
 
         for part in _index_fields(d.spec):
             if part.through is not None:
                 self._fact_kind(
-                    part.through.kind, f"index {d.name} resolves through", d.line
+                    part.through.kind, f"{word} {d.name} resolves through", d.line
                 )
             if part.zone is not None and part.zone not in self._schema.bucket_settings:
                 raise CheckError(
-                    f'index {d.name} buckets by {part.truncate} in "{part.zone}", which is not a setting '
-                    f"an index may name. Those are: {', '.join(self._schema.bucket_settings)}. "
+                    f'{word} {d.name} buckets by {part.truncate} in "{part.zone}", which is not a setting '
+                    f"a {word} may name. Those are: {', '.join(self._schema.bucket_settings)}. "
                     "Moving one re-buckets a tenant's whole history, which is why the list is "
                     "short.",
                     d.line,
                 )
         if isinstance(d.spec, ByAge) and d.spec.setting not in self._schema.bucket_settings:
             raise CheckError(
-                f'index {d.name} buckets by age against "{d.spec.setting}", which is not a '
-                f"setting an index may name. Those are: {', '.join(self._schema.bucket_settings)}.",
+                f'{word} {d.name} narrows by age against "{d.spec.setting}", which is not a '
+                f"setting a {word} may name. Those are: {', '.join(self._schema.bucket_settings)}.",
                 d.line,
             )
 
@@ -270,8 +273,8 @@ class _Checker:
 
         if d.sets and d.combines:
             raise CheckError(
-                f"figure {d.name} has both a depends and a combine block. Reading indexes "
-                "and another figure would be two populations arriving at one calculation "
+                f"figure {d.name} has both a depends and a combine block. Reading record "
+                "sets and another figure would be two populations arriving at one calculation "
                 "with no rule for how they relate -- adding a count of records to a total of "
                 "stored values produces a number no definition makes a claim about.",
                 d.line,
@@ -446,7 +449,7 @@ class _Checker:
         spaces = self._spaces_in(expr, defined)
         if len(spaces) > 1:
             raise CheckError(
-                f'set "{set_name}" in figure {d.name} combines indexes over '
+                f'set "{set_name}" in figure {d.name} combines record sets over '
                 f"{' and '.join(sorted(spaces))}. A set is a set of ids, and ids from two "
                 "spaces have nothing in common -- intersecting them is empty and the figure "
                 "reads nought for everybody, with nothing thrown. Use `keyed as` if the two "
@@ -501,14 +504,14 @@ class _Checker:
             idx = self.indexes.get(expr.index)
             if idx is None:
                 raise CheckError(
-                    f'there is no index called "{expr.index}". Declared: '
+                    f'there is no group or filter called "{expr.index}". Declared: '
                     f"{', '.join(sorted(self.indexes)) or 'none'}.",
                     expr.line,
                 )
             if isinstance(expr.bucket, BucketScope):
                 if not idx.bucketed:
                     raise CheckError(
-                        f"{expr.index} is a predicate index, so it has a single bucket and "
+                        f"{expr.index} is a filter, so it has a single bucket and "
                         f"cannot be addressed per subject. Write {expr.index} on its own.",
                         expr.line,
                     )
@@ -527,7 +530,8 @@ class _Checker:
         elif isinstance(expr, SetRef):
             if expr.name not in defined:
                 raise CheckError(
-                    f'"{expr.name}" is not an index and not a set defined above it.', expr.line
+                    f'"{expr.name}" is not a group or filter and not a set defined above it.',
+                    expr.line,
                 )
         elif isinstance(expr, SetOp):
             self._check_set(expr.left, defined, d, line)
@@ -608,7 +612,7 @@ class _Checker:
     def _scope_index(
         self, d: FigureDecl, sets: dict[str, SetExpr], scope: str
     ) -> tuple[str | None, Truncation | None, str | None]:
-        """Exactly one index must fan the figure out, and this works out which.
+        """Exactly one group must fan the figure out, and this works out which.
 
         A rollup has none, and that is legitimate -- its subjects come from the
         roster. Everything else must have exactly one, because two would mean a
@@ -628,7 +632,7 @@ class _Checker:
 
         if not found:
             raise CheckError(
-                f"figure {d.name} names no index addressed by {{{scope}}}, so it has no "
+                f"figure {d.name} names no group addressed by {{{scope}}}, so it has no "
                 "subjects. It would compute one number for nobody.",
                 d.line,
             )
@@ -636,7 +640,7 @@ class _Checker:
         names = {n for n, _ in found}
         if len(names) > 1:
             raise CheckError(
-                f"figure {d.name} is fanned out by more than one index "
+                f"figure {d.name} is fanned out by more than one group "
                 f"({', '.join(sorted(names))}). A value would be keyed by two different "
                 "things.",
                 d.line,
@@ -1031,8 +1035,9 @@ class _Checker:
             raise CheckError(f'there is no figure called "{figure}".', d.line)
         if source.grain is None:
             raise CheckError(
-                f"{source.name} is not time-keyed -- its scope index must end in a `by day`, "
-                "`by minute` or `by 15 minutes` part for there to be a range to read over.",
+                f"{source.name} is not time-keyed -- the group that fans it out must end in "
+                "a `by day`, `by minute` or `by 15 minutes` part for there to be a range to "
+                "read over.",
                 d.line,
             )
         if source.scope != scope:
@@ -1115,21 +1120,21 @@ class _Checker:
                 d.line,
             )
 
-        # A live reading is fanned out by exactly one scope-bucketed index, and
+        # A live reading is fanned out by exactly one scope-bucketed group, and
         # all three ways of getting that wrong compile and produce a plausible
-        # nothing: a predicate index addressed by {scope} misses because its
-        # bucket is keyed by the empty string, a field index read unbucketed
-        # misses the same way, and a set with no scope anywhere produces no
-        # subjects at all while the empty case holds the whole board's queue.
+        # nothing: a filter addressed by {scope} misses because its bucket is
+        # keyed by the empty string, a group read unbucketed misses the same
+        # way, and a set with no scope anywhere produces no subjects at all
+        # while the empty case holds the whole board's queue.
         scoped: list[str] = []
         for name, bucket in _scope_indexes(expr):
             idx = self.indexes.get(name)
             if idx is None:
-                raise CheckError(f'there is no index called "{name}".', d.line)
+                raise CheckError(f'there is no group or filter called "{name}".', d.line)
             if isinstance(bucket, BucketScope):
                 if not idx.bucketed:
                     raise CheckError(
-                        f"{name} is a predicate index, so it has a single bucket and cannot "
+                        f"{name} is a filter, so it has a single bucket and cannot "
                         f"be addressed per subject.",
                         d.line,
                     )
@@ -1143,7 +1148,7 @@ class _Checker:
                 )
         if len(scoped) != 1:
             raise CheckError(
-                f"reading {d.name} is fanned out by {len(scoped)} indexes addressed by "
+                f"reading {d.name} is fanned out by {len(scoped)} groups addressed by "
                 f"{{{scope}}}. Exactly one is needed: with none there are no subjects at all, "
                 "and the empty case -- what somebody with nothing looks like -- would hold "
                 "the whole board's answer attributed to nobody.",
@@ -1351,15 +1356,15 @@ class _Checker:
         if isinstance(expr, SetRef):
             raise CheckError(
                 f'projection {d.name} draws its population from "{expr.name}", which is '
-                "not an index. A projection has no depends block to define a named set, "
-                "so `from` may only combine indexes.",
+                "not a declared filter. A projection has no depends block to define a "
+                "named set, so `from` may only combine predicate and presence filters.",
                 expr.line,
             )
         assert isinstance(expr, SetIndex)
         idx = self.indexes.get(expr.index)
         if idx is None:
             raise CheckError(
-                f'there is no index called "{expr.index}". Declared: '
+                f'there is no group or filter called "{expr.index}". Declared: '
                 f"{', '.join(sorted(self.indexes)) or 'none'}.",
                 expr.line,
             )
@@ -1367,25 +1372,25 @@ class _Checker:
             raise CheckError(
                 f"projection {d.name}'s population scopes {expr.index} to a subject, but "
                 "`from` decides which records become rows, so there is no row to scope a "
-                "bucket by. Only a predicate or a presence index may appear here.",
+                "bucket by. Name the filter on its own.",
                 expr.line,
             )
         if idx.bucketed:
             raise CheckError(
-                f"projection {d.name}'s population reads {expr.index}, which buckets by "
-                f"{' and '.join(p.field for p in _index_fields(idx.spec))} rather than "
+                f"projection {d.name}'s population reads {expr.index}, a group bucketing "
+                f"by {' and '.join(p.field for p in _index_fields(idx.spec))} rather than "
                 "holding a single bucket. Read whole it looks for a bucket keyed by the "
                 "empty string, finds nothing, and the page is empty while looking "
-                "complete. Only a predicate or a presence index may appear in `from`.",
+                "complete. Only a predicate or a presence filter may appear in `from`.",
                 expr.line,
             )
         if isinstance(idx.spec, ByAge):
             raise CheckError(
-                f"projection {d.name}'s population reads {expr.index}, which buckets by "
+                f"projection {d.name}'s population reads {expr.index}, which narrows by "
                 "age against the clock. Membership there is as stale as the last "
-                "reconcile, and no pointer covers an index only a `from` reads -- moving "
+                "reconcile, and no pointer covers a filter only a `from` reads -- moving "
                 "the dial it names would change which records are on the page and "
-                "nothing would rebuild it. Name a predicate or a presence index instead.",
+                "nothing would rebuild it. Name a predicate or a presence filter instead.",
                 expr.line,
             )
         # Compared in id space, not raw kind: a `keyed as` kind's record keys
@@ -1797,6 +1802,20 @@ class _Checker:
 
 
 # ------------------------------------------------------------- helpers --
+
+
+def _decl_word(spec: IndexBy) -> str:
+    """The keyword this declaration was written under.
+
+    For messages only: a refusal should speak the author's vocabulary --
+    "group" for the shapes that fan out, "filter" for the ones that narrow --
+    rather than the implementation's collective term for both.
+    """
+    if isinstance(spec, (ByField, ByComposite)):
+        return "group"
+    if isinstance(spec, (ByPredicate, ByPresence, ByAge)):
+        return "filter"
+    assert_never(spec)
 
 
 def _index_fields(spec: IndexBy) -> list[IndexField]:

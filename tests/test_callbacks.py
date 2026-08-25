@@ -15,8 +15,8 @@ from uratori import MemoryEngineStore, MemoryFactStore, Uratori
 from .world import WORLD, compile_source
 
 SOURCE = '''
-index work_issue.active where active == true
-index work_issue.assigned_to from assignee_account_id through team_person.accounts.account_id
+filter work_issue.active where active == true
+group work_issue.assigned_to from assignee_account_id through team_person.accounts.account_id
 
 # In progress.
 figure team_person.wip:

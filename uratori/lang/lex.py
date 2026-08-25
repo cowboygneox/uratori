@@ -7,10 +7,10 @@ precision.
 
 Two deliberate simplicities:
 
-  - **Keywords are not reserved.** `index`, `figure`, `depends` and the rest
-    come out as name tokens and the parser matches on their text. A reserved
-    word list is a thing that grows and then collides with somebody's index
-    called `display`, and nothing here is ambiguous without it.
+  - **Keywords are not reserved.** `group`, `filter`, `figure`, `depends` and
+    the rest come out as name tokens and the parser matches on their text. A
+    reserved word list is a thing that grows and then collides with somebody's
+    filter called `display`, and nothing here is ambiguous without it.
 
   - **No line continuation.** Every statement is one line. The grammar has no
     construct long enough to need wrapping, and adding continuation before

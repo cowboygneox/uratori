@@ -2,7 +2,7 @@
 
 The parser says what was written. It rejects only what it cannot *represent* --
 a missing colon, a name where a number belongs -- and never what it cannot
-justify. "There is no index called that" and "a ladder may not return a list"
+justify. "There is no group or filter called that" and "a ladder may not return a list"
 are the checker's, because those errors want to name a rule and list the
 alternatives, and a parser has neither the library nor the vocabulary to do it.
 """
@@ -108,7 +108,7 @@ def _explained(decl: Decl, lines: list[str]) -> Decl:
     """Attach the `#` comment run above a declaration as its doc.
 
     The comments are the customer-facing explanation -- one spelling for all
-    six declaration kinds, kept out of the block so the directives a reviewer
+    seven declaration kinds, kept out of the block so the directives a reviewer
     came to check are not buried in prose. The lexer strips comments, so this
     reads the raw lines; the declaration's own line number says where to look.
 
@@ -221,11 +221,11 @@ class _Parser:
             tok = self._peek()
             if tok.kind != "name":
                 raise self._error(
-                    'expected "index", "measure", "figure", "reading", "projection" or '
-                    f'"summarise", got {self._describe()}'
+                    'expected "group", "filter", "measure", "figure", "reading", '
+                    f'"projection" or "summarise", got {self._describe()}'
                 )
-            if tok.value == "index":
-                doc.decls.append(self._index())
+            if tok.value in ("group", "filter"):
+                doc.decls.append(self._index(tok.value))
             elif tok.value == "measure":
                 doc.decls.append(self._measure())
             elif tok.value == "figure":
@@ -247,21 +247,39 @@ class _Parser:
                     "after the thing it produces, and this one produces a projection.",
                     tok.line,
                 )
+            # `index` was one keyword for two different questions, and the name
+            # said neither. Named rather than silently accepted, for the same
+            # reason `project` is: a `.fig` written against the old spelling
+            # should say what to change, not fail as "expected a declaration".
+            elif tok.value == "index":
+                raise self._error(
+                    '"index" split into "group" and "filter". A group fans records '
+                    "out by a field (`group code_change.by_author from ...`); a "
+                    "filter narrows to the records matching a test "
+                    "(`filter code_change.open where ...`).",
+                    tok.line,
+                )
             else:
                 raise self._error(
-                    'expected "index", "measure", "figure", "reading", "projection" or '
-                    f'"summarise", got {self._describe()}'
+                    'expected "group", "filter", "measure", "figure", "reading", '
+                    f'"projection" or "summarise", got {self._describe()}'
                 )
             self._skip_newlines()
         return doc
 
     # ------------------------------------------------------------- index --
 
-    def _index(self) -> IndexDecl:
+    def _index(self, keyword: str) -> IndexDecl:
+        # Two keywords, one production, because the shapes share everything but
+        # the spec: `group` fans records out by a field, `filter` narrows to
+        # the records matching a test. The old `index` covered both, and the
+        # word said neither -- so each keyword now *requires* its own tail,
+        # and wearing the other one is refused by name below.
         line = self._peek().line
-        self._keyword("index")
-        name = self._name("an index name, e.g. code_change.open")
-        kind = self._prefix_of(name, "an index", line)
+        self._keyword(keyword)
+        example = "code_change.by_author" if keyword == "group" else "code_change.open"
+        name = self._name(f"a {keyword} name, e.g. {example}")
+        kind = self._prefix_of(name, f"a {keyword}", line)
 
         # `keyed as` sits next to the name because it qualifies the *kind*
         # rather than the bucketing, and a reader meets it in the order it
@@ -273,17 +291,36 @@ class _Parser:
             self._keyword("as")
             keyed_as = self._name("the fact kind whose ids these records use")
 
+        # The pointer repeats a `keyed as` so following the advice verbatim
+        # does not silently drop the id-space claim.
+        keyed = f" keyed as {keyed_as}" if keyed_as is not None else ""
         spec: IndexBy
-        if self._at_word("from"):
+        if keyword == "group":
+            if self._at_word("where"):
+                raise self._error(
+                    f"a group fans records out by a field, so it takes `from`. "
+                    f"One bucket holding the records that match a test is a "
+                    f"filter -- write `filter {name}{keyed} where ...`."
+                )
+            if not self._at_word("from"):
+                raise self._error(
+                    f'expected "from" after the group name, got {self._describe()}'
+                )
             self._next()
             spec = self._index_from()
-        elif self._at_word("where"):
+        else:
+            if self._at_word("from"):
+                raise self._error(
+                    f"a filter narrows to the records matching a test, so it "
+                    f"takes `where`. Bucketing every record by a field is a "
+                    f"group -- write `group {name}{keyed} from ...`."
+                )
+            if not self._at_word("where"):
+                raise self._error(
+                    f'expected "where" after the filter name, got {self._describe()}'
+                )
             self._next()
             spec = self._index_where()
-        else:
-            raise self._error(
-                f'expected "from" or "where" after the index name, got {self._describe()}'
-            )
 
         label: str | None = None
         if self._at_word("label"):
@@ -650,7 +687,7 @@ class _Parser:
             inner = self._set_expr()
             self._punct(")")
             return inner
-        name = self._name("an index name or a set defined above")
+        name = self._name("a group or filter name, or a set defined above")
         if self._at_op(":"):
             self._next()
             self._punct("{")

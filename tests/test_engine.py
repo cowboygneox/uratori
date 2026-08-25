@@ -32,12 +32,12 @@ from .world import DEFAULTS, WORLD, compile_source
 TENANT = "t1"
 
 LIB_SOURCE = """
-index work_issue.assigned_to from assignee_account_id through team_person.accounts.account_id
-index work_issue.active where active == true
-index code_change.open where state == "open"
-index code_change.by_source from connection_id
-index code_change.authored_in from (author_account_id through team_person.accounts.account_id, connection_id)
-index code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
+group work_issue.assigned_to from assignee_account_id through team_person.accounts.account_id
+filter work_issue.active where active == true
+filter code_change.open where state == "open"
+group code_change.by_source from connection_id
+group code_change.authored_in from (author_account_id through team_person.accounts.account_id, connection_id)
+group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
 
 measure work_issue.estimate = estimate_seconds in effort
 measure code_change.open_seconds = merged_at - created_at
@@ -526,7 +526,7 @@ async def test_a_warm_run_with_no_deletions_does_not_pay_for_the_scan() -> None:
 
 POPULATED = compile_source(
     """
-index code_change.open where state == "open"
+filter code_change.open where state == "open"
 
 # Only the changes still open.
 projection code_change.card:
@@ -661,7 +661,7 @@ async def test_an_omit_the_engine_cannot_answer_keeps_the_row() -> None:
 
 
 GROWN_BY_ONE_INDEX = """
-index code_change.closed where state == "closed"
+filter code_change.closed where state == "closed"
 
 # The changes that were closed.
 projection code_change.archived:
@@ -846,8 +846,8 @@ async def test_redefining_a_population_index_rebuilds_its_buckets() -> None:
 
 GRAINED = compile_source(
     """
-index code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
-index code_change.by_author from author_account_id through team_person.accounts.account_id
+group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
+group code_change.by_author from author_account_id through team_person.accounts.account_id
 
 measure code_change.open_seconds = merged_at - created_at
 
