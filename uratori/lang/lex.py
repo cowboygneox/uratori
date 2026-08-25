@@ -21,11 +21,12 @@ Two deliberate simplicities:
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
 TokenKind: TypeAlias = Literal[
-    "name", "string", "docstring", "number", "op", "newline", "indent", "dedent", "eof"
+    "name", "string", "number", "op", "newline", "indent", "dedent", "eof"
 ]
 
 
@@ -95,35 +96,48 @@ def _strip_comment(raw: str) -> str:
     return "".join(out)
 
 
-def _read_docstring(lines: list[str], start: int, indent: int) -> tuple[str, int]:
-    """Consume a triple-quoted block whole.
+# The rule a concatenating build draws between two .fig files: a line of
+# dashes, bare or carrying a file name. Deliberately NOT any comment that
+# merely starts with dashes -- `# --- see the note below` is somebody's
+# writing, and a pattern that swallowed it refused explanations while telling
+# the author to write exactly what they had written.
+_BANNER = re.compile(r"^#\s*-{3,}\s*$|^#\s*-{3,}.*\.fig")
 
-    Done here rather than in the parser so that indentation *inside* the prose
-    is never mistaken for a block. A docstring is the customer-facing definition
-    and routinely contains indented lists.
+
+def _is_prose(line: str) -> bool:
+    """A comment line, but not the banner between two files.
+
+    Without the banner carve-out, the first declaration in every concatenated
+    file adopts the previous file's banner as its own explanation -- it shows
+    up immediately as a heading that belongs to the wrong file.
     """
-    first = lines[start].strip()
-    if first != '"""' and first.endswith('"""') and len(first) > 3:
-        return first[3:-3].strip(), start + 1
-
-    body: list[str] = []
-    i = start + 1
-    while i < len(lines):
-        stripped = lines[i].strip()
-        if stripped == '"""' or stripped.endswith('"""'):
-            if stripped != '"""':
-                body.append(lines[i].rstrip()[: lines[i].rstrip().rindex('"""')])
-            return _dedent("\n".join(body), indent), i + 1
-        body.append(lines[i])
-        i += 1
-    raise SyntaxError_("a docstring was opened and never closed", start + 1, indent)
+    return line.startswith("#") and not _BANNER.match(line)
 
 
-def _dedent(text: str, indent: int) -> str:
-    out = []
-    for line in text.split("\n"):
-        out.append(line[indent:] if line[:indent].strip() == "" else line.lstrip())
-    return "\n".join(out).strip()
+def prose_above(lines: Sequence[str], header: int) -> str:
+    """The contiguous `#` run directly above line `header` (1-based).
+
+    This is the one implementation of what counts as a declaration's
+    explanation -- the parser attaches docs with it and `source.py` serves
+    prose with it, so the two can never disagree about which lines belong to
+    a declaration.
+
+    Crosses at most one blank line: the origin project measured what strict
+    contiguity cost, and a third of its declarations rendered bare with the
+    explanation stranded a single blank line up. Two blanks is a detached
+    paragraph, and adopting it would attach prose the author never aimed
+    here. A banner also ends the run: what sits above one belongs to the
+    previous file.
+    """
+    i = header - 2
+    if i >= 0 and lines[i].strip() == "":
+        i -= 1
+    run: list[str] = []
+    while i >= 0 and _is_prose(lines[i]):
+        run.append(lines[i].lstrip("#").strip())
+        i -= 1
+    run.reverse()
+    return "\n".join(run).strip()
 
 
 def lex(source: str) -> list[Token]:
@@ -159,11 +173,15 @@ def lex(source: str) -> list[Token]:
 
         body = stripped[indent:]
         if body.startswith('"""'):
-            text, next_line = _read_docstring(lines, lineno - 1, indent)
-            tokens.append(Token("docstring", text, lineno, indent))
-            tokens.append(Token("newline", "", next_line, 0))
-            i = next_line
-            continue
+            # Refused by name rather than left to shatter into string tokens:
+            # this was the language's docstring spelling once, and the author
+            # typing it deserves directions, not "unterminated string".
+            raise SyntaxError_(
+                "a docstring. A declaration's explanation is written as `#` comment "
+                "lines directly above it, not inside the block",
+                lineno,
+                indent,
+            )
 
         _lex_line(body, lineno, indent, tokens)
 

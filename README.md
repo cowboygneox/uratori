@@ -3,9 +3,39 @@
 [![CI](https://github.com/cowboygneox/uratori/actions/workflows/ci.yml/badge.svg)](https://github.com/cowboygneox/uratori/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](LICENSE)
 
-**A definition engine you can deploy.** Write what your numbers *mean* in a
-small definition language; push facts at the engine; read back computed,
-versioned, explainable answers -- over HTTP and over a websocket.
+Your product shows numbers. Ask what one of them actually *means* -- which
+items it counts, why it moved overnight, why two screens disagree -- and the
+answer is usually a dig through code that was never written to be read. The
+people who own a metric cannot read the place it is defined, and the people
+who defined it cannot prove it does what was agreed.
+
+uratori closes that gap. What every number means is written down in a small
+definition language that a product owner can read and an engineer can
+review, and the engine computes exactly what is written -- nothing else
+computes anything:
+
+```
+index shop_order.carried_by from courier_id
+index shop_order.open where status != "delivered"
+
+# How many orders this courier is carrying right now.
+figure shop_courier.carrying:
+    display "{value} orders in hand"
+
+    depends:
+        mine = shop_order.carried_by:{shop_courier} & shop_order.open
+
+    calculate:
+        count(mine)
+```
+
+Those lines are the whole of what the number means: which records count as
+whose, the explanation served wherever the number is cited, the sentence a
+screen prints, and the calculation, in one reviewable place. You feed the engine plain JSON records -- your orders, your couriers,
+whatever your world is made of; uratori calls them **facts** -- and it keeps
+every defined number current as they change, serving each answer with the
+version of the definition that computed it and the evidence behind it, over
+HTTP and over a websocket.
 
 裏付け (*urazuke*) is the backing a claim has; 裏取り (*uratori*) is the act of
 going and getting it. This engine grew out of [urazuke](https://urazuke.com),
@@ -23,6 +53,9 @@ your app ──facts──▶ uratori ──Results──▶ your screens
           schema   definitions (.fig)
 ```
 
+- **Facts** are the plain JSON records you push, in batches. The engine's own
+  change detection decides what moved, and a cascade recomputes exactly the
+  figures that depended on it -- including figures built on other figures.
 - **A `Schema`** declares your world once: which fact kinds exist, which field
   carries a record's human name, which settings dials a definition may read,
   and their defaults.
@@ -30,9 +63,6 @@ your app ──facts──▶ uratori ──Results──▶ your screens
   *measures* read quantities off them, *figures* are stored per-subject values
   recomputed incrementally as facts move, *readings* summarise stored days,
   *projections* assemble live rows at the instant they are asked.
-- **Facts** are plain JSON records, pushed in batches. The engine's own change
-  detection decides what moved, and a cascade recomputes exactly the figures
-  that depended on it -- including figures built on other figures.
 - **Results** are one envelope for every answer, with the definition's version
   (a content hash: the citation) and the evidence behind it. An absence is
   never a zero: a missing answer says *why* it is missing.

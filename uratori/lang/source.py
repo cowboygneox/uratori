@@ -22,18 +22,21 @@ potatoes of the formula"*.
 
 Two functions now, and the split is the same one the screen already draws:
 
-- `declaration_prose` is the explanation -- the `#` lines above the declaration
-  and the `\"\"\"docstring\"\"\"` inside it, which are the same thing written in two
-  places for two kinds of declaration. A figure carries a docstring because the
-  parser demands one; an index and a measure cannot have one, and their comment
-  above *is* their documentation. Both arrive as the description, so a reader
-  never has to know which kind they are looking at to find out what it means.
+- `declaration_prose` is the explanation -- the `#` comment lines above the
+  declaration, the one spelling every declaration kind shares. (The language
+  once also had a docstring inside the block, Python-style; it buried the
+  directives it sat among, and the two spellings meant a reader had to know a
+  declaration's kind to find out what it means.)
 - `declaration_source` is the calculation, with the prose and the `display`
   template removed. `display` is a sentence for a card to print; on a page
   showing the formula it is one more paragraph in the way of it.
 
+`lex.prose_above` is the one implementation of what counts as an explanation;
+the parser attaches docs with it and this module serves prose with it, so the
+two can never disagree about which lines belong to a declaration.
+
 Neither is in the version hash, which is why this can be reorganised freely:
-rewording a docstring must not fork a version and recompute every value.
+rewording an explanation must not fork a version and recompute every value.
 
 ## The scan crosses one blank line
 
@@ -47,6 +50,7 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 
+from .lex import prose_above
 from .plan import Library
 
 _HEADERS = (
@@ -70,25 +74,13 @@ def _lines(source: str) -> tuple[str, ...]:
     return tuple(source.split("\n"))
 
 
-_BANNER = re.compile(r"^#\s*-{3,}")
 _DISPLAY = re.compile(r'^\s*display\s+"')
 
 
-def _is_prose(line: str) -> bool:
-    """A comment line, but not the banner between two files.
+def _locate(library: Library, name: str) -> tuple[tuple[str, ...], int, int] | None:
+    """The lines, and where this declaration's header and body sit.
 
-    The build concatenates the `.fig` files with a `# ---- name.fig ----` rule
-    between them, and without this the first declaration in every file adopts
-    the previous file's banner as its own explanation. It shows up immediately
-    on the Data screen as a heading that belongs to the wrong file.
-    """
-    return line.startswith("#") and not _BANNER.match(line)
-
-
-def _locate(library: Library, name: str) -> tuple[tuple[str, ...], int, int, int] | None:
-    """The lines, and where this declaration's prose, header and body sit.
-
-    Returned as one tuple because both public functions need the same three
+    Returned as one tuple because both public functions need the same
     boundaries, and computing them twice is how the two drift into disagreeing
     about which lines belong to which -- at which point a paragraph is either
     printed under both headings or under neither.
@@ -100,64 +92,48 @@ def _locate(library: Library, name: str) -> tuple[tuple[str, ...], int, int, int
     if at is None:
         return None
 
-    start = at
-    if start > 0 and lines[start - 1].strip() == "" and start > 1 and _is_prose(lines[start - 2]):
-        start -= 1
-    while start > 0 and _is_prose(lines[start - 1]):
-        start -= 1
-    if not any(line.startswith("#") for line in lines[start:at]):
-        start = at
-
+    # A column-0 comment does not end the block: the lexer skips it wherever
+    # it sits, so the block continues past it -- and a scan that stopped there
+    # served a formula with its calculate silently missing. The walk-back then
+    # sheds the trailing comment/blank run, which belongs to whatever comes
+    # next (typically the following declaration's explanation).
     end = at + 1
-    while end < len(lines) and (lines[end].strip() == "" or lines[end][:1].isspace()):
+    while end < len(lines) and (
+        lines[end].strip() == "" or lines[end][:1].isspace() or lines[end].startswith("#")
+    ):
         end += 1
+    while end > at + 1 and (lines[end - 1].strip() == "" or lines[end - 1].startswith("#")):
+        end -= 1
 
-    return lines, start, at, end
+    return lines, at, end
 
 
 def declaration_source(library: Library, name: str) -> str | None:
     """The calculation, and nothing else.
 
-    Everything a reader would call documentation comes out: the comment above,
-    the docstring, and the `display` template. What is left is what the engine
-    actually evaluates, which is the thing somebody clicking "the definition, as
-    written" came to check.
+    The explanation lives above the header, so the block needs only `display`
+    taken out. What is left is what the engine actually evaluates, which is
+    the thing somebody clicking "the definition, as written" came to check.
     """
     found = _locate(library, name)
     if found is None:
         return None
-    lines, _, at, end = found
+    lines, at, end = found
 
-    body: list[str] = []
-    in_doc = False
-    for line in lines[at:end]:
-        stripped = line.strip()
-        if in_doc:
-            # A one-line docstring opens and closes on the same line, so the
-            # close is only a close when it is not also the open.
-            if stripped.endswith('"""'):
-                in_doc = False
-            continue
-        if stripped.startswith('"""'):
-            in_doc = not (len(stripped) > 3 and stripped.endswith('"""'))
-            continue
-        if _DISPLAY.match(line):
-            continue
-        body.append(line)
+    body = [line for line in lines[at:end] if not _DISPLAY.match(line)]
 
-    # A docstring leaves a run of blank lines behind it where the paragraph was.
-    # Trimming them here rather than in the browser keeps the served text and
-    # the rendered text the same thing, which is the whole point of this route.
+    # Removing `display` can leave a run of blank lines where it sat. Trimming
+    # them here rather than in the browser keeps the served text and the
+    # rendered text the same thing, which is the whole point of this route.
     return "\n".join(_collapse(body)).rstrip() or None
 
 
 def _collapse(lines: list[str]) -> list[str]:
     """Squeeze runs of blanks to one, and none directly under the header.
 
-    The header is `figure x:` and the docstring came straight after it, so
-    without the second rule every declaration in the library opens with a gap
-    where the paragraph used to be -- which reads as a formula missing its first
-    line rather than as one with its prose moved.
+    Without the second rule a declaration whose `display` sat first opens with
+    a gap where the template used to be -- which reads as a formula missing its
+    first line rather than as one with a sentence removed.
     """
     out: list[str] = []
     for line in lines:
@@ -171,44 +147,17 @@ def _collapse(lines: list[str]) -> list[str]:
 def declaration_prose(library: Library, name: str) -> str:
     """What this declaration means, in the author's words.
 
-    The comment above it and the docstring inside it, in that order, joined as
-    one paragraph run. Both, rather than whichever the kind happens to have: a
-    figure has a docstring and usually a section comment, an index has only a
-    comment, and a reader should not have to know the difference to find out
-    what a line does.
+    The `#` comment lines above it, via the same `prose_above` the parser
+    attaches docs with, so the two can never disagree about which lines are
+    the explanation.
 
-    Empty string rather than None when there is neither, because the caller
-    puts this in a `doc` field that is already a string for every other kind and
-    a second absent-value spelling would be a second branch on every screen.
+    Empty string rather than None when there is none (an index or a measure
+    may go uncommented), because the caller puts this in a `doc` field that is
+    already a string for every other kind and a second absent-value spelling
+    would be a second branch on every screen.
     """
     found = _locate(library, name)
     if found is None:
         return ""
-    lines, start, at, end = found
-
-    above = [line.lstrip("#").strip() for line in lines[start:at] if _is_prose(line)]
-
-    inside: list[str] = []
-    in_doc = False
-    for line in lines[at:end]:
-        stripped = line.strip()
-        if in_doc:
-            if stripped.endswith('"""'):
-                break
-            inside.append(stripped)
-        elif stripped.startswith('"""'):
-            if len(stripped) > 3 and stripped.endswith('"""'):
-                inside.append(stripped[3:-3].strip())
-                break
-            in_doc = True
-
-    return "\n".join(_paragraphs(above + ([""] if above and inside else []) + inside)).strip()
-
-
-def _paragraphs(lines: list[str]) -> list[str]:
-    """Squeeze blank runs, so two sources joined do not leave a gap between."""
-    out: list[str] = []
-    for line in lines:
-        if line or (out and out[-1]):
-            out.append(line)
-    return out
+    lines, at, _ = found
+    return prose_above(lines, at + 1)

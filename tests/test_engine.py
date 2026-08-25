@@ -43,16 +43,16 @@ index code_change.merged_by_day from (author_account_id through team_person.acco
 measure work_issue.estimate = estimate_seconds in effort
 measure code_change.open_seconds = merged_at - created_at
 
+# In progress.
 figure team_person.wip:
-    \"\"\"In progress.\"\"\"
     display "{team_person} in progress"
     depends:
         mine = work_issue.assigned_to:{team_person} & work_issue.active
     calculate:
         count(mine)
 
+# Load band.
 figure team_person.wip_level:
-    \"\"\"Load band.\"\"\"
     display "{team_person} load"
     combine:
         wip = team_person.wip
@@ -61,24 +61,24 @@ figure team_person.wip_level:
         when wip >= thresholds.wip.warn then "warn"
         otherwise "ok"
 
+# Effort in flight.
 figure team_person.wip_effort:
-    \"\"\"Effort in flight.\"\"\"
     display "{team_person} effort"
     depends:
         mine = work_issue.assigned_to:{team_person} & work_issue.active
     calculate:
         sum(work_issue.estimate over mine)
 
+# Open MRs per source.
 figure team_person.open_mrs_by_source across data_connection:
-    \"\"\"Open MRs per source.\"\"\"
     display "{team_person} open in {data_connection}"
     depends:
         mine = code_change.authored_in:{team_person} & code_change.open
     calculate:
         count(mine)
 
+# Open MRs.
 figure team_person.open_mrs:
-    \"\"\"Open MRs.\"\"\"
     display "{team_person} open MRs"
     combine:
         sources = team_person.open_mrs_by_source over data_connection

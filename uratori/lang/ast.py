@@ -881,7 +881,7 @@ class ReadingDecl:
     """A figure is stored; a reading is evaluated.
 
     Everything else about them is the same shape on purpose -- a mandatory
-    docstring, a display template, a version that is the hash of the semantics --
+    explanation, a display template, a version that is the hash of the semantics --
     because the claim being made is the same claim: this number has a written
     definition and you can cite it.
 
@@ -1148,7 +1148,7 @@ class SummariseDecl:
     Not a block inside `project`, and the rule that a projection aggregates
     nothing is not relaxed by this. A projection answers "one row per record" and
     a summary answers "one row about the population", and those are two
-    definitions with two names, two docstrings, two versions and two entries on
+    definitions with two names, two explanations, two versions and two entries on
     the Data screen. Folding the second into the first would give one name two
     answers, which is exactly what `name@version` exists to prevent.
 

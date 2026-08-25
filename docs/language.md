@@ -22,32 +22,54 @@ that does not compile is refused whole, in the checker's own words.
 
 ## A first definition
 
-A world of couriers and orders. The host has declared two kinds, `shop_order`
-and `shop_courier`, and one dial, `limits.carrying.over`:
+A world of couriers and orders. Facts arrive as plain JSON records, each with
+an identity -- a *kind* and a *key* -- and a body of fields
+([Concepts](concepts.md) carries the full model, over this same dataset):
+
+```
+shop_courier "c1"  { "name": "Aki" }
+shop_courier "c2"  { "name": "Bo" }
+
+shop_order "o1"    { "ref": "A-1", "courier_id": "c1", "status": "riding" }
+shop_order "o2"    { "ref": "A-2", "courier_id": "c1", "status": "riding" }
+shop_order "o3"    { "ref": "B-7", "courier_id": "c2", "status": "delivered" }
+```
+
+The correlations are already in the data -- each order's `courier_id` names a
+courier's key -- but nothing yet says what those fields *mean*. That is
+what a definition declares. The host has told the engine the two kinds,
+`shop_order` and `shop_courier`, and one dial, `limits.carrying.over`:
 
 ```
 index shop_order.carried_by from courier_id
 index shop_order.open where status != "delivered"
 
+# How many orders this courier is carrying right now.
 figure shop_courier.carrying:
-    """How many orders this courier is carrying right now."""
     display "{shop_courier} has {value} orders in hand"
+
     depends:
         mine = shop_order.carried_by:{shop_courier} & shop_order.open
+
     calculate:
         count(mine)
+
     band:
         when value >= limits.carrying.over then "over"
         otherwise "ok"
 ```
 
-Reading it back: the first index puts every order in a bucket per courier; the
-second holds whichever orders are not yet delivered. The figure intersects the
-two for each courier and counts what is left, and the band turns that count
-into a word by comparing it against a dial the host declared. Push an order at
-the engine and the courier's count moves; push the order's delivery and it
-moves back. Nothing else needs writing -- no invalidation, no recomputation
-schedule. The definition *is* the behaviour.
+Reading it back: the first index puts every order in a bucket per courier --
+`o1` and `o2` land in Aki's, `o3` in Bo's; the second holds whichever orders
+are not yet delivered, which excludes `o3`. The figure intersects the two for
+each courier and counts what is left, so Aki reads 2 and Bo reads 0 -- a
+measured nought, not a blank -- and the band turns each count into a word by
+comparing it against a dial the host declared. The `#` line above the header
+is the figure's **explanation** -- attached by the compile, served wherever
+the number is cited, and required. Push another order at the engine and Aki's
+count moves; push `o1`'s delivery and it moves back. Nothing else needs
+writing -- no invalidation, no recomputation schedule. The definition *is*
+the behaviour.
 
 Everything below is that example, taken apart and extended.
 
@@ -67,18 +89,50 @@ index called `display`.
 There is **no line continuation**. Every statement is one line. A set
 expression that wants to wrap should be split into named sets instead.
 
+Blank lines are free, between declarations and inside blocks alike. Directive
+order inside a block is free too -- each directive may appear at most once,
+except `flag` anywhere and a summary's `count` and `total`, and the parser
+accepts them in any order -- so the house
+style spends that freedom on legibility: single-line directives (`display`,
+`unit`, `sort`, `limit`) first and adjacent, then a blank line before each
+directive that owns an indented body.
+
 The pieces:
 
 - **Comments** run from `#` to the end of the line. A `#` inside a string is
   part of the string -- `label "waiting #1"` is not truncated.
+- **Explanations** are comments doing the language's most important job: the
+  run of `#` lines directly above a declaration is attached by the compile as
+  that declaration's explanation -- the customer-facing definition of the
+  number, a product surface rather than a code comment, served wherever the
+  number is cited. Every figure, reading, projection and summarise is refused
+  without one, in these words: *"figure shop_courier.carrying has no
+  explanation. Write `#` comment lines directly above the declaration -- they
+  are the customer-facing definition, rendered wherever the number is cited,
+  and a figure nobody can read is the thing this language exists to
+  prevent. (A `# ----` rule line is a file banner, not prose.)"* An index or
+  a measure may carry one and is not made to. Three
+  rules decide which lines belong. The run is unindented `#` lines, and may
+  sit at most **one blank line**
+  above the header -- the origin project measured what strict contiguity
+  cost, and a third of its declarations rendered bare with their explanation
+  stranded a single blank line up. **Two blanks** is a detached paragraph,
+  and adopting it would attach prose the author never aimed here. And a
+  **banner** -- a line of dashes (`# ----------`), or a dash rule naming a
+  file (`# ---- board.fig ----`) -- is a file rule, not prose, and ends the
+  run: it is
+  what a concatenating build writes between two `.fig` files, and without the
+  exception the first declaration in every file would adopt the previous
+  file's banner as its explanation. (`# --- see the note below` is prose --
+  the pattern is a *rule*, not any comment that starts with dashes.) The
+  explanation is deliberately outside
+  the version hash: rewording one must not fork a version and recompute every
+  stored value. (The old spelling -- a triple-quoted docstring inside the
+  block -- is refused at lex time with directions: *"a docstring. A
+  declaration's explanation is written as `#` comment lines directly above
+  it, not inside the block"*.)
 - **Strings** are double-quoted, on one line, with `\` escaping the next
   character.
-- **Docstrings** are triple-quoted, either on one line
-  (`"""In progress."""`) or spanning several, and are required on every
-  figure, reading, projection and summary. The docstring is the
-  customer-facing definition of the number -- a product surface, not a code
-  comment -- and it is deliberately outside the version hash: fixing a typo
-  must not fork a version and recompute every stored value.
 - **Numbers** are unsigned literals like `3` or `0.25`. There are no negative
   literals; a negative threshold lives in a settings dial, and a negative
   value comes out of subtraction.
@@ -310,13 +364,16 @@ live reading may, and a live reading stores nothing.
 ## `figure` -- one value per subject
 
 ```
+# In progress -- how many work items this person has actively underway.
 figure team_person.wip:
-    """In progress -- how many work items this person has actively underway."""
     display "{team_person}'s work in progress"
+
     depends:
         mine = work_issue.assigned_to:{team_person} & work_issue.active
+
     calculate:
         count(mine)
+
     band:
         when value >= thresholds.wip.over then "over"
         when value >= thresholds.wip.warn then "warn"
@@ -324,16 +381,16 @@ figure team_person.wip:
 ```
 
 A figure is named `<fact kind>.<name>`, and the prefix is its **scope** -- the
-kind of subject it is one-value-per. It requires a docstring (the definition a
-reader is shown), a `display` template (the sentence a movement is reported
-under), exactly one of `depends` or `combine`, and a `calculate` block. `unit`
-and `band` are optional.
+kind of subject it is one-value-per. It requires an explanation (the `#` lines
+above it -- the definition a reader is shown), a `display` template (the
+sentence a movement is reported under), exactly one of `depends` or `combine`,
+and a `calculate` block. `unit` and `band` are optional.
 
 The `display` template is prose, written by convention with the scope kind,
 the `across` kind for a split figure, and `{value}` as placeholders --
-`"{team_person} open in {data_connection}"`. Like the docstring it is stored
+`"{team_person} open in {data_connection}"`. Like the explanation it is stored
 with the definition, where a host's data screen can show it, and like the
-docstring it is deliberately outside the version hash.
+explanation it is deliberately outside the version hash.
 
 ### `depends` -- sets of record ids
 
@@ -469,11 +526,13 @@ one.
 ### `combine` -- a figure reading another figure
 
 ```
+# Open changes, all sources together.
 figure team_person.open_mrs:
-    """Open changes, all sources together."""
     display "{team_person} open changes"
+
     combine:
         sources = team_person.open_mrs_by_source over data_connection
+
     calculate:
         sum(sources)
 ```
@@ -511,11 +570,13 @@ A figure whose scope index ends in a `by day` part stores one value per
 subject *per day*:
 
 ```
+# How long each change merged that day had been open.
 figure team_person.time_to_merge:
-    """How long each change merged that day had been open."""
     display "{team_person} time to merge"
+
     depends:
         merged = code_change.merged_by_day:{team_person}
+
     calculate:
         list(code_change.open_seconds over merged)
 ```
@@ -529,11 +590,13 @@ and cannot be combined as a single value.
 ### `across` -- a second dimension
 
 ```
+# Open changes per source.
 figure team_person.open_mrs_by_source across data_connection:
-    """Open changes per source."""
     display "{team_person} open in {data_connection}"
+
     depends:
         mine = code_change.authored_in:{team_person} & code_change.open
+
     calculate:
         count(mine)
 ```
@@ -595,7 +658,7 @@ forces a rebuild of values it did not affect.
 ## `reading` -- evaluated, never stored
 
 A figure is stored; a reading is evaluated on demand. Everything else about
-them is deliberately the same shape -- a mandatory docstring, a display
+them is deliberately the same shape -- a mandatory explanation, a display
 template, a version that is the hash of the semantics -- because the claim is
 the same claim: this number has a written definition and you can cite it.
 
@@ -604,14 +667,17 @@ There are two kinds, told apart by what `depends` binds.
 ### Windowed: over stored days
 
 ```
+# How long this person's changes took to merge.
 reading team_person.to_merge(range):
-    """How long this person's changes took to merge."""
     display "{team_person} time to merge"
     band low against flow.leadTimeDays
+
     depends:
         merged = team_person.time_to_merge in range
+
     requires:
         at least 3 values in merged
+
     calculate:
         mean(merged)
         worst(merged)
@@ -641,12 +707,14 @@ a mean of means, weighting each person equally instead of each record.
 ### Live: over records, right now
 
 ```
+# Review asks waiting on this person right now.
 reading team_person.pending_reviews():
-    """Review asks waiting on this person right now."""
     display "{team_person} pending reviews"
     band low on count against flow.pendingReviews
+
     depends:
         waiting = code_review_request.waiting_seconds over (code_review_request.asked_of:{team_person} & code_review_request.pending)
+
     calculate:
         count(waiting)
         worst(waiting)
@@ -751,7 +819,7 @@ it; left to the duration path, a count of 3 becomes 3/86400 against a
 threshold in days and every queue bands good for ever.
 
 There is no `work_hours` unit. It once existed, resolved to exactly 3,600
-seconds, and was therefore a synonym for `hours` with a docstring claiming a
+seconds, and was therefore a synonym for `hours` with documentation claiming a
 working day mattered and nothing that made it -- removed rather than left as
 a lie. Doing it properly is a working calendar, not a scale factor.
 
@@ -760,26 +828,29 @@ a lie. Doing it properly is a working calendar, not a scale factor.
 ## `projection` -- one row per record
 
 ```
+# One row per work item: its key, its age, and the sentence it earns.
 projection work_issue.item:
-    """One row per work item: its key, its age, and the sentence it earns."""
+    sort by age_days descending
+    limit 300
+
     field:
         key = key as text
         status_changed = status_changed_at as date
         active = active as flag
         epic_start = start_date from container_id through work_container.id as text
+
     value:
         age_days in days = days from status_changed to now
         stuck in count =
             when active == 0 then 0
             when age_days >= thresholds.longWipDays then 1
             otherwise 0
+
     flag issue-long-wip when stuck == 1:
         label "Stuck {age_days}"
         detail "Has not changed status in {age_days}."
         action "Pick {key} up or put it down."
         severity attention
-    sort by age_days descending
-    limit 300
 ```
 
 The only construct that may read a clock **and** produce prose, and it is
@@ -817,10 +888,11 @@ sorted order would be stable and still a fabrication, about the wrong record.
 ### `read` -- stored figures, per row
 
 ```
+# One row per person: the number, and the word beside it.
 projection team_person.card:
-    """One row per person: the number, and the word beside it."""
     field:
         name = display_name as text
+
     read:
         wip = team_person.wip
         wip_band = band of team_person.wip
@@ -929,15 +1001,17 @@ always about the whole population and never the page.
 ## `summarise` -- one row about the population
 
 ```
+# The backlog, in one row.
 summarise work_issue.backlog over work_issue.item:
-    """The backlog, in one row."""
     count items
     count items_stuck where stuck == 1
     total days_waiting in days = age_days where stuck == 1
+
     value:
         verdict =
             when items_stuck > 0 then "attention"
             otherwise "clear"
+
     flag backlog-stuck when items_stuck > 0:
         label "Stuck work"
         detail "{items_stuck} {items_stuck|item is:items are} sat still."
@@ -1039,8 +1113,9 @@ version in the diff.
 
 Two properties, both held by construction and by test:
 
-- **Prose does not change the hash.** Docstrings, display templates and index
-  labels are all out.
+- **Prose does not change the hash.** Explanations, display templates and
+  index labels are all out: rewording an explanation never forks a version
+  and never recomputes a stored value.
 - **Neither does anything incidental.** Keys are sorted at every depth, line
   numbers are excluded, and absent optional parts are dropped -- so a
   refactor that builds the same plan in a different order, and a new optional
@@ -1064,7 +1139,7 @@ What *is* hashed, and why each one had to be:
 | a projection's flag templates | a flag's sentence is the whole content of that row |
 | a summary's counts, totals, values, flags and its **projection's version** | rename what a row value means and every count moves |
 
-What deliberately is not: docstrings, `display` templates, index labels,
+What deliberately is not: explanations, `display` templates, index labels,
 `keyed as` (it decides what the checker permits, not what the arithmetic
 produces), declaration positions, and the schema itself -- a version is the
 hash of a definition's semantics, and the same definition under two hosts is
@@ -1129,6 +1204,11 @@ The ones most worth recognising, in the checker's own words:
 - *"a `when` ladder must end in `otherwise`"* (from the parser) -- falling
   off the end and stopping on an unknown both render as a dash, and only one
   of them is a claim.
+- *"figure ... has no explanation. Write `#` comment lines directly above the
+  declaration..."* (from the parser) -- the explanation is the
+  customer-facing definition, so the four rendered kinds are refused without
+  one; an index or a measure may go unexplained, because neither is served to
+  a reader on its own.
 - *"there is no figure called ... A figure may only read one declared before
   it..."* -- ordering, and the cycle guard.
 - *"...reads X as a single value, but X is split across ..."* / *"...adds up

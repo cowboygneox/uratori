@@ -30,19 +30,23 @@ cat > couriers.fig <<'EOF'
 index shop_order.carried_by from courier_id
 index shop_order.open where status != "delivered"
 
+# How many orders this courier is carrying right now.
 figure shop_courier.carrying:
-    """How many orders this courier is carrying right now."""
     display "{value} orders in hand"
+
     depends:
         mine = shop_order.carried_by:{shop_courier} & shop_order.open
+
     calculate:
         count(mine)
 
+# Whether a courier is over the carrying limit.
 figure shop_courier.load_band:
-    """Whether a courier is over the carrying limit."""
     display "{value}"
+
     combine:
         carrying = shop_courier.carrying
+
     calculate:
         when carrying >= limits.carrying.over then "over"
         otherwise "ok"
@@ -89,8 +93,10 @@ Every refusal is JSON with a `detail` field:
 - **`404`** -- the resource does not exist (`GET /schema` before a schema is
   declared; `GET .../results/{name}` for a name no definition has).
 - **`409`** -- the server is not yet taught. The detail names the missing
-  step -- `"No schema has been declared yet"` or
-  `"No definitions have been loaded yet"` -- because an unconfigured server is
+  step -- `"No schema has been declared yet"`, `"No definitions have been
+  loaded yet"`, or (after an upgrade whose compiler refuses the stored
+  source) `"The stored definitions do not compile under this build: ..."`
+  quoting the refusal -- because an unconfigured server is
   a state the client can fix, and it must be told which fix. `409` rather than
   `500`, deliberately.
 - **`422`** -- the body was understood and refused. Two shapes: a malformed
@@ -165,7 +171,9 @@ naming the part you are removing.
 
 The schema document and the definitions source are persisted in the server's
 own Postgres; a restarted container comes back taught, recompiling from
-source at boot.
+source at boot. (A build whose compiler refuses the stored source -- an
+upgrade across a language change -- boots unready instead, answering `409`
+with the refusal until corrected definitions are `PUT`.)
 
 ### `GET /schema`
 
@@ -504,7 +512,7 @@ Top level:
 | `zone` | The tenant's calendar timezone, when the definition is anchored to one, so a screen can say *when* rather than printing an instant verbatim. A client cannot work this out: it knows its own timezone, and the board belongs to a team that may not share it. |
 | `unit` | What the values *are* -- see below. |
 | `label` | A heading, rendered by the server. |
-| `doc` | The definition's own docstring. |
+| `doc` | The definition's explanation -- the `#` comment lines written directly above its declaration, served wherever the number is cited. |
 | `state` | `{"ok": true}` or an explained absence -- see below. |
 | `banded` | Whether the definition declares thresholds at all. A property of the definition, never of the data, so it holds its value while `state` is unavailable. Without it, "no thresholds declared" and "banded, but nothing to band yet" are the same word on the wire (`level: "unknown"`), and a screen would print a Band column of stated absences under definitions that never claimed to band. A projection is never banded: any band words it carries travel as row values, cited to the figure whose thresholds produced them. |
 | `subjects` | The rows, **in the server's order**. A client does not sort: sorting is a calculation and the sort key is a definition's answer. |

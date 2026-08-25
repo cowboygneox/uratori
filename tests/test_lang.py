@@ -41,16 +41,16 @@ measure work_issue.estimate = estimateSeconds in effort
 measure work_issue.moved = moment updatedAt
 measure code_review_request.waiting_seconds = now - requestedAt
 
+# In progress.
 figure team_person.wip:
-    \"\"\"In progress.\"\"\"
     display "{team_person} wip"
     depends:
         mine = work_issue.assigned_to:{team_person} & work_issue.active
     calculate:
         count(mine)
 
+# Time to merge.
 figure team_person.time_to_merge:
-    \"\"\"Time to merge.\"\"\"
     display "{team_person} to merge"
     depends:
         merged = code_change.merged_by_day:{team_person}
@@ -95,9 +95,12 @@ def test_a_hash_inside_a_string_is_not_a_comment() -> None:
     assert spec.value == "fix #12"
 
 
-def test_an_unclosed_docstring_is_a_syntax_error() -> None:
-    with pytest.raises(SyntaxError_):
+def test_even_an_unterminated_docstring_is_refused_with_directions() -> None:
+    """Half-typed old syntax must not fall through to "unclosed string": the
+    refusal fires at the opening quotes, so termination never matters."""
+    with pytest.raises(SyntaxError_) as caught:
         compile_source('figure a.b:\n    """unterminated\n')
+    assert "not inside the block" in caught.value.message
 
 
 def test_indentation_that_matches_no_block_is_refused_rather_than_guessed() -> None:
@@ -117,8 +120,8 @@ def test_indentation_that_matches_no_block_is_refused_rather_than_guessed() -> N
 def test_a_figure_over_a_kind_nobody_stores_is_refused_with_the_list() -> None:
     refuses(
         """
+# d
 figure nonsense_thing.count:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = work_issue.active
@@ -165,8 +168,8 @@ def test_a_figure_with_no_scope_index_has_no_subjects() -> None:
     total attributed to no one."""
     refuses(
         """
+# d
 figure team_person.loose:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = work_issue.active
@@ -180,8 +183,8 @@ figure team_person.loose:
 def test_a_field_index_read_without_a_bucket_reads_zero_for_everybody() -> None:
     refuses(
         """
+# d
 figure team_person.unbucketed:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = work_issue.assigned_to
@@ -196,8 +199,8 @@ def test_a_predicate_index_cannot_be_addressed_per_subject() -> None:
     """Its bucket is keyed by the empty string, so it would simply miss."""
     refuses(
         """
+# d
 figure team_person.bad:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = work_issue.active:{team_person}
@@ -211,8 +214,8 @@ figure team_person.bad:
 def test_a_figure_may_not_have_both_depends_and_combine() -> None:
     refuses(
         """
+# d
 figure team_person.mixed:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = work_issue.assigned_to:{team_person}
@@ -228,8 +231,8 @@ figure team_person.mixed:
 def test_a_pair_index_without_across_is_refused_because_every_reader_is_silently_wrong() -> None:
     refuses(
         """
+# d
 figure team_person.pairs:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = code_change.authored_in:{team_person} & code_change.open
@@ -243,8 +246,8 @@ figure team_person.pairs:
 def test_the_control_the_same_figure_with_across_compiles() -> None:
     lib = compile_ok(
         """
+# d
 figure team_person.pairs across data_connection:
-    \"\"\"d\"\"\"
     display "{team_person} in {data_connection}"
     depends:
         m = code_change.authored_in:{team_person} & code_change.open
@@ -261,8 +264,8 @@ def test_a_day_may_not_be_a_dimension() -> None:
     what decides if a reading may roll it up over a range."""
     refuses(
         """
+# d
 figure team_person.days across data_connection:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = code_change.merged_by_day:{team_person}
@@ -276,16 +279,16 @@ figure team_person.days across data_connection:
 def test_a_bare_read_of_a_dimensioned_figure_would_take_whichever_part_sorted_first() -> None:
     refuses(
         """
+# d
 figure team_person.pairs across data_connection:
-    \"\"\"d\"\"\"
     display "{team_person} in {data_connection}"
     depends:
         m = code_change.authored_in:{team_person} & code_change.open
     calculate:
         count(m)
 
+# d
 figure team_person.total:
-    \"\"\"d\"\"\"
     display "x"
     combine:
         s = team_person.pairs
@@ -299,8 +302,8 @@ figure team_person.total:
 def test_a_rollup_of_an_undimensioned_figure_totals_one_value_and_looks_right() -> None:
     refuses(
         """
+# d
 figure team_person.total:
-    \"\"\"d\"\"\"
     display "x"
     combine:
         s = team_person.wip over data_connection
@@ -316,16 +319,16 @@ def test_a_rollups_depth_is_deeper_than_its_parts_so_a_cold_build_orders_them() 
     order stores a nought for everybody and never revisits it."""
     lib = compile_ok(
         """
+# d
 figure team_person.pairs across data_connection:
-    \"\"\"d\"\"\"
     display "{team_person} in {data_connection}"
     depends:
         m = code_change.authored_in:{team_person} & code_change.open
     calculate:
         count(m)
 
+# d
 figure team_person.total:
-    \"\"\"d\"\"\"
     display "x"
     combine:
         s = team_person.pairs over data_connection
@@ -344,16 +347,16 @@ def test_a_figure_may_not_read_one_declared_after_it() -> None:
     cannot be resolved."""
     refuses(
         """
+# d
 figure team_person.first:
-    \"\"\"d\"\"\"
     display "x"
     combine:
         s = team_person.second
     calculate:
         s
 
+# d
 figure team_person.second:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = work_issue.assigned_to:{team_person}
@@ -367,8 +370,8 @@ figure team_person.second:
 def test_a_figure_may_not_read_itself() -> None:
     refuses(
         """
+# d
 figure team_person.loop:
-    \"\"\"d\"\"\"
     display "x"
     combine:
         s = team_person.loop
@@ -387,8 +390,8 @@ def test_a_figure_may_not_list_a_clock_measure() -> None:
     and nothing would ever move it: every number would be real exactly once."""
     refuses(
         """
+# d
 figure team_person.waits:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = code_review_request.asked_of:{team_person}
@@ -402,8 +405,8 @@ figure team_person.waits:
 def test_a_figure_may_not_measure_a_span_of_days() -> None:
     refuses(
         """
+# d
 figure team_person.span:
-    \"\"\"d\"\"\"
     display "x"
     unit days
     depends:
@@ -421,8 +424,8 @@ def test_an_age_index_is_allowed_because_membership_crosses_a_line_once() -> Non
     answer is unchanged."""
     lib = compile_ok(
         """
+# d
 figure team_person.stuck_count:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = work_issue.assigned_to:{team_person} & work_issue.stuck
@@ -439,8 +442,8 @@ figure team_person.stuck_count:
 def test_arithmetic_must_declare_a_unit_because_the_same_operands_mean_two_things() -> None:
     refuses(
         """
+# d
 figure team_person.ratio:
-    \"\"\"d\"\"\"
     display "x"
     combine:
         a = team_person.wip
@@ -455,8 +458,8 @@ figure team_person.ratio:
 def test_a_count_may_not_declare_a_unit_because_a_second_place_is_a_place_to_disagree() -> None:
     refuses(
         """
+# d
 figure team_person.counted:
-    \"\"\"d\"\"\"
     display "x"
     unit count
     depends:
@@ -473,8 +476,8 @@ def test_a_ladder_must_return_a_word_not_a_number() -> None:
     nothing downstream can hold it."""
     refuses(
         """
+# d
 figure team_person.numeric_ladder:
-    \"\"\"d\"\"\"
     display "x"
     combine:
         w = team_person.wip
@@ -489,8 +492,8 @@ figure team_person.numeric_ladder:
 def test_a_ladder_may_not_mix_words_and_numbers() -> None:
     refuses(
         """
+# d
 figure team_person.mixed_ladder:
-    \"\"\"d\"\"\"
     display "x"
     combine:
         w = team_person.wip
@@ -509,8 +512,8 @@ def test_a_ladder_must_end_in_otherwise() -> None:
         compile_source(
             BASE
             + """
+# d
 figure team_person.open_ladder:
-    \"\"\"d\"\"\"
     display "x"
     combine:
         w = team_person.wip
@@ -524,8 +527,8 @@ figure team_person.open_ladder:
 def test_a_word_may_not_be_combined_arithmetically() -> None:
     refuses(
         """
+# d
 figure team_person.level:
-    \"\"\"d\"\"\"
     display "x"
     combine:
         w = team_person.wip
@@ -533,8 +536,8 @@ figure team_person.level:
         when w >= 5 then "over"
         otherwise "ok"
 
+# d
 figure team_person.uses_level:
-    \"\"\"d\"\"\"
     display "x"
     unit count
     combine:
@@ -551,8 +554,8 @@ def test_a_field_measure_may_not_be_listed_and_a_duration_may_not_be_totalled() 
     total is a sum."""
     refuses(
         """
+# d
 figure team_person.listed_field:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = work_issue.assigned_to:{team_person}
@@ -563,8 +566,8 @@ figure team_person.listed_field:
     )
     refuses(
         """
+# d
 figure team_person.summed_duration:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = code_change.merged_by_day:{team_person}
@@ -580,8 +583,8 @@ def test_an_extreme_needs_a_moment_measure() -> None:
     definition has asked for."""
     refuses(
         """
+# d
 figure work_container.biggest:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         c = work_issue.in_container:{work_container}
@@ -598,16 +601,16 @@ def test_both_extreme_directions_exist_and_produce_a_moment() -> None:
     than a paragraph."""
     lib = compile_ok(
         """
+# d
 figure work_container.last_moved:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         c = work_issue.in_container:{work_container}
     calculate:
         latest(work_issue.moved over c)
 
+# d
 figure work_container.first_moved:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         c = work_issue.in_container:{work_container}
@@ -623,8 +626,8 @@ figure work_container.first_moved:
 def test_a_figure_may_only_name_a_figure_setting() -> None:
     refuses(
         """
+# d
 figure team_person.banded:
-    \"\"\"d\"\"\"
     display "x"
     combine:
         w = team_person.wip
@@ -644,16 +647,16 @@ def test_a_reading_may_not_read_a_reading() -> None:
     each person equally instead of each record."""
     refuses(
         """
+# d
 reading team_person.first(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.time_to_merge in range
     calculate:
         mean(m)
 
+# d
 reading team_person.second(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.first in range
@@ -667,8 +670,8 @@ reading team_person.second(range):
 def test_a_windowed_reading_needs_a_day_keyed_source() -> None:
     refuses(
         """
+# d
 reading team_person.nope(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.wip in range
@@ -682,16 +685,16 @@ reading team_person.nope(range):
 def test_a_mean_over_daily_counts_is_a_mean_per_day_wearing_the_wrong_label() -> None:
     refuses(
         """
+# d
 figure team_person.merges:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = code_change.merged_by_day:{team_person}
     calculate:
         count(m)
 
+# d
 reading team_person.per_day(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.merges in range
@@ -707,16 +710,16 @@ def test_the_control_a_sum_over_daily_counts_is_allowed() -> None:
     made counts readable at all."""
     lib = compile_ok(
         """
+# d
 figure team_person.merges:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = code_change.merged_by_day:{team_person}
     calculate:
         count(m)
 
+# d
 reading team_person.shipped(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.merges in range
@@ -732,8 +735,8 @@ def test_a_sum_may_not_sit_beside_a_distribution() -> None:
     claims."""
     refuses(
         """
+# d
 reading team_person.both(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.time_to_merge in range
@@ -756,24 +759,24 @@ def test_an_unwritten_minimum_is_one_value_rather_than_no_floor() -> None:
     narrowed to `mean` would leave a worst-only reading dashing silently."""
     lib = compile_ok(
         """
+# d
 reading team_person.to_merge(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.time_to_merge in range
     calculate:
         mean(m)
 
+# d
 reading team_person.slowest(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.time_to_merge in range
     calculate:
         worst(m)
 
+# d
 reading team_person.typical(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.time_to_merge in range
@@ -792,8 +795,8 @@ def test_the_default_minimum_hashes_like_a_written_one() -> None:
     differently -- the definition's meaning would live outside its hash."""
     bare = compile_ok(
         """
+# d
 reading team_person.to_merge(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.time_to_merge in range
@@ -803,8 +806,8 @@ reading team_person.to_merge(range):
     ).reading("team_person.to_merge")
     written = compile_ok(
         """
+# d
 reading team_person.to_merge(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.time_to_merge in range
@@ -826,8 +829,8 @@ def test_the_floor_is_in_the_version_because_a_looser_one_reads_differently() ->
     def floored(count: int):
         return compile_ok(
             f"""
+# d
 reading team_person.to_merge(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.time_to_merge in range
@@ -846,8 +849,8 @@ reading team_person.to_merge(range):
 def test_a_written_minimum_overrides_the_default_rather_than_stacking() -> None:
     lib = compile_ok(
         """
+# d
 reading team_person.to_merge(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.time_to_merge in range
@@ -867,16 +870,16 @@ def test_a_sum_reading_takes_no_default_minimum() -> None:
     nought -- and a sum of nothing is nought, deliberately."""
     lib = compile_ok(
         """
+# d
 figure team_person.merges:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = code_change.merged_by_day:{team_person}
     calculate:
         count(m)
 
+# d
 reading team_person.shipped(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.merges in range
@@ -893,8 +896,8 @@ def test_a_live_reading_takes_no_default_minimum() -> None:
     """An empty queue is a real reading of nought pending, not a shortfall."""
     lib = compile_ok(
         """
+# d
 reading team_person.queue():
-    \"\"\"d\"\"\"
     display "x"
     depends:
         w = code_review_request.waiting_seconds over (code_review_request.asked_of:{team_person} & code_review_request.pending)
@@ -913,8 +916,8 @@ def test_a_live_reading_takes_no_argument() -> None:
     answer under a heading saying thirty days."""
     refuses(
         """
+# d
 reading team_person.queue(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         w = code_review_request.waiting_seconds over (code_review_request.asked_of:{team_person} & code_review_request.pending)
@@ -928,8 +931,8 @@ reading team_person.queue(range):
 def test_a_windowed_reading_must_declare_range() -> None:
     refuses(
         """
+# d
 reading team_person.nowindow():
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.time_to_merge in range
@@ -943,8 +946,8 @@ reading team_person.nowindow():
 def test_count_is_live_only_because_a_windowed_sample_already_reports_it() -> None:
     refuses(
         """
+# d
 reading team_person.counted(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.time_to_merge in range
@@ -960,8 +963,8 @@ def test_a_live_reading_needs_exactly_one_scope_bucketed_index() -> None:
     somebody with nothing looks like -- would hold the whole board's answer."""
     refuses(
         """
+# d
 reading team_person.unscoped():
-    \"\"\"d\"\"\"
     display "x"
     depends:
         w = code_review_request.waiting_seconds over code_review_request.pending
@@ -977,8 +980,8 @@ def test_a_band_on_a_count_may_not_be_written_in_a_time_unit() -> None:
     threshold in days, and every queue on every board bands good for ever."""
     refuses(
         """
+# d
 reading team_person.queue():
-    \"\"\"d\"\"\"
     display "x"
     band low on count against flow.pendingReviews in minutes
     depends:
@@ -993,8 +996,8 @@ reading team_person.queue():
 def test_a_band_may_only_colour_a_statistic_the_reading_calculates() -> None:
     refuses(
         """
+# d
 reading team_person.to_merge(range):
-    \"\"\"d\"\"\"
     display "x"
     band low on median against flow.reviewLatencyDays
     depends:
@@ -1011,16 +1014,16 @@ def test_an_effort_figure_may_not_be_read_over_a_range() -> None:
     effort would be banded as wall-clock and printed as raw seconds."""
     refuses(
         """
+# d
 figure team_person.effort_by_day:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = work_issue.delivered_by_day:{team_person}
     calculate:
         sum(work_issue.estimate over m)
 
+# d
 reading team_person.effort(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.effort_by_day in range
@@ -1034,8 +1037,8 @@ reading team_person.effort(range):
 # ----------------------------------------------------------- projection --
 
 PROJECTION = """
+# One row per issue.
 projection work_issue.item:
-    \"\"\"One row per issue.\"\"\"
     field:
         key = key as text
         status_changed = statusChangedAt as date
@@ -1087,8 +1090,8 @@ def test_a_projection_may_not_aggregate() -> None:
     compute a number this product claims has exactly one."""
     refuses(
         """
+# d
 projection work_issue.counting:
-    \"\"\"d\"\"\"
     field:
         key = key as text
     value:
@@ -1104,8 +1107,8 @@ def test_a_span_needs_two_declared_moments() -> None:
     there."""
     refuses(
         """
+# d
 projection work_issue.spanless:
-    \"\"\"d\"\"\"
     field:
         opened = createdAt as text
     value:
@@ -1118,8 +1121,8 @@ projection work_issue.spanless:
 def test_a_limit_without_a_sort_returns_an_arbitrary_subset_that_looks_complete() -> None:
     refuses(
         """
+# d
 projection work_issue.capped:
-    \"\"\"d\"\"\"
     field:
         key = key as text
     limit 10
@@ -1131,8 +1134,8 @@ projection work_issue.capped:
 def test_a_flag_placeholder_naming_nothing_would_print_the_word_undefined() -> None:
     refuses(
         """
+# d
 projection work_issue.badflag:
-    \"\"\"d\"\"\"
     field:
         key = key as text
     flag issue-bad when key is something:
@@ -1149,8 +1152,8 @@ def test_a_projection_may_not_read_a_figure_scoped_to_another_kind() -> None:
     nothing -- a column of dashes, on every row, for ever."""
     refuses(
         """
+# d
 projection work_issue.wrong:
-    \"\"\"d\"\"\"
     field:
         key = key as text
     read:
@@ -1163,8 +1166,8 @@ projection work_issue.wrong:
 def test_a_join_is_hashed_because_it_decides_which_record_a_path_is_read_off() -> None:
     a = compile_ok(
         """
+# d
 projection work_issue.joined:
-    \"\"\"d\"\"\"
     field:
         key = key as text
         epic_start = startDate from containerId through work_container.id as text
@@ -1172,8 +1175,8 @@ projection work_issue.joined:
     ).projection("work_issue.joined")
     b = compile_ok(
         """
+# d
 projection work_issue.joined:
-    \"\"\"d\"\"\"
     field:
         key = key as text
         epic_start = startDate as text
@@ -1188,8 +1191,8 @@ projection work_issue.joined:
 SUMMARY = (
     PROJECTION
     + """
+# The backlog, in one row.
 summarise work_issue.backlog over work_issue.item:
-    \"\"\"The backlog, in one row.\"\"\"
     count items
     count items_stuck where stuck == 1
     total days_waiting in days = age_days where stuck == 1
@@ -1229,8 +1232,8 @@ def test_a_summary_may_not_shadow_a_row_value() -> None:
     refuses(
         PROJECTION
         + """
+# d
 summarise work_issue.shadow over work_issue.item:
-    \"\"\"d\"\"\"
     count stuck
 """,
         "already a value of",
@@ -1241,8 +1244,8 @@ def test_a_summary_total_may_only_add_up_a_number() -> None:
     refuses(
         PROJECTION
         + """
+# d
 summarise work_issue.badtotal over work_issue.item:
-    \"\"\"d\"\"\"
     total keys in count = key
 """,
         "Only a number may be summed",
@@ -1255,8 +1258,8 @@ def test_a_summary_value_may_not_read_a_row_value() -> None:
     refuses(
         PROJECTION
         + """
+# d
 summarise work_issue.leaky over work_issue.item:
-    \"\"\"d\"\"\"
     count items
     value:
         wrong in count = age_days + 1
@@ -1268,8 +1271,8 @@ summarise work_issue.leaky over work_issue.item:
 def test_a_summary_needs_a_projection_that_exists() -> None:
     refuses(
         """
+# d
 summarise work_issue.orphan over work_issue.nothing:
-    \"\"\"d\"\"\"
     count items
 """,
         "there is no projection called",
@@ -1284,8 +1287,8 @@ def test_two_declarations_may_not_share_a_name() -> None:
     ambiguous -- and the Data screen addresses a definition by name alone."""
     refuses(
         """
+# d
 figure team_person.wip:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = work_issue.assigned_to:{team_person}
@@ -1300,8 +1303,8 @@ figure team_person.wip:
 
 
 def test_prose_does_not_move_a_version() -> None:
-    """Fixing a typo in a docstring must not fork a version and recompute three
-    hundred values."""
+    """Fixing a typo in an explanation must not fork a version and recompute
+    three hundred values."""
     first = compile_ok().figure("team_person.wip")
     second = compile_source(BASE.replace("In progress.", "In progress, reworded.")).figure(
         "team_person.wip"
@@ -1339,16 +1342,16 @@ def test_a_rollup_hashes_its_sources_version() -> None:
     derived from a definition that no longer exists, for ever, with the
     corrected parts printed underneath it."""
     body = """
+# d
 figure team_person.pairs across data_connection:
-    \"\"\"d\"\"\"
     display "{team_person} in {data_connection}"
     depends:
         m = code_change.authored_in:{team_person} & code_change.OPENSTATE
     calculate:
         count(m)
 
+# d
 figure team_person.total:
-    \"\"\"d\"\"\"
     display "x"
     combine:
         s = team_person.pairs over data_connection
@@ -1368,8 +1371,8 @@ def test_a_band_unit_is_hashed_because_the_same_numbers_read_differently() -> No
     change under a version claiming nothing moved is the one thing a
     content-addressed version must not do."""
     body = """
+# d
 reading team_person.to_merge(range):
-    \"\"\"d\"\"\"
     display "x"
     band low against flow.reviewLatencyDaysUNIT
     depends:
@@ -1387,8 +1390,8 @@ def test_days_written_out_is_the_same_definition_as_days_left_unwritten() -> Non
     """The control: `days` hashes as absent, so a band written before the
     keyword existed keeps its version."""
     body = """
+# d
 reading team_person.to_merge(range):
-    \"\"\"d\"\"\"
     display "x"
     band low against flow.reviewLatencyDaysUNIT
     depends:
@@ -1416,8 +1419,8 @@ reading team_person.to_merge(range):
 # plausible without it.
 
 BANDED = """
+# A count with a band.
 figure team_person.banded:
-    \"\"\"A count with a band.\"\"\"
     display "x"
     depends:
         mine = work_issue.assigned_to:{team_person} & work_issue.active
@@ -1469,8 +1472,8 @@ def test_a_word_cannot_be_banded() -> None:
     through to the bottom rung -- a whole board banded comfortable, silently."""
     refuses(
         """
+# d
 figure team_person.worded:
-    \"\"\"d\"\"\"
     display "x"
     combine:
         w = team_person.wip
@@ -1493,8 +1496,8 @@ def test_a_list_figure_cannot_be_banded() -> None:
     unit is the unit of its members ("duration"), so it never fired."""
     refuses(
         """
+# d
 figure team_person.listed:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         merged = code_change.merged_by_day:{team_person}
@@ -1539,8 +1542,8 @@ def test_a_projection_may_bind_a_bands_word_beside_its_number() -> None:
     lib = compile_ok(
         BANDED
         + """
+# d
 projection team_person.card:
-    \"\"\"d\"\"\"
     field:
         name = display_name as text
     read:
@@ -1564,8 +1567,8 @@ def test_a_projection_may_not_bind_the_band_of_a_figure_that_has_none() -> None:
     and a page that is silently short."""
     refuses(
         """
+# d
 projection team_person.card:
-    \"\"\"d\"\"\"
     field:
         name = display_name as text
     read:
@@ -1593,3 +1596,313 @@ def test_every_compile_refusal_is_a_definition_error() -> None:
     with pytest.raises(DefinitionError) as meaning:
         compile_source("index nothing.here from nowhere\n")
     assert isinstance(meaning.value, CheckError)
+
+
+# ---------------------------------------------------------------- prose --
+
+# A declaration's explanation is written as `#` comment lines directly above
+# it -- one spelling for all six kinds, and the block below the header holds
+# nothing but the directives a reviewer came to check. The docstring-inside
+# spelling is gone: prose buried in the block hid the directives it sat among.
+
+EXPLAINED = """
+index work_issue.assigned_to from assigneeAccountId through team_person.accounts.accountId
+index work_issue.active where active == true
+
+# How much is in flight right now.
+figure team_person.wip:
+    display "{team_person} wip"
+
+    depends:
+        mine = work_issue.assigned_to:{team_person} & work_issue.active
+
+    calculate:
+        count(mine)
+"""
+
+
+def test_the_comment_above_a_figure_is_its_customer_facing_doc() -> None:
+    """The explanation is served wherever the number is cited; a parser that
+    dropped it with the other comments would render every citation blank."""
+    figure = compile_source(EXPLAINED).figure("team_person.wip")
+    assert figure is not None
+    assert figure.doc == "How much is in flight right now."
+
+
+def test_a_docstring_inside_the_block_is_refused_with_directions() -> None:
+    """The old spelling. Refused by name rather than left to shatter into
+    string tokens, so a migrating author is told where the prose now lives
+    instead of being told about an unterminated string."""
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(
+            EXPLAINED.replace(
+                '    display "{team_person} wip"',
+                '    \"\"\"In progress.\"\"\"\n    display "{team_person} wip"',
+            )
+        )
+    assert "not inside the block" in caught.value.message
+
+
+def test_a_figure_with_no_explanation_is_refused() -> None:
+    """The explanation is the customer-facing definition; a figure nobody can
+    read is the thing this language exists to prevent, and it must fail at
+    compile time rather than render a bare name on screen."""
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(EXPLAINED.replace("# How much is in flight right now.\n", ""))
+    assert "team_person.wip" in caught.value.message
+    assert "#" in caught.value.message
+
+
+@pytest.mark.parametrize(
+    ("what", "declaration"),
+    [
+        (
+            "reading team_person.to_merge",
+            """
+reading team_person.to_merge(range):
+    display "x"
+    depends:
+        m = team_person.time_to_merge in range
+    calculate:
+        mean(m)
+""",
+        ),
+        (
+            "projection work_issue.item",
+            """
+projection work_issue.item:
+    field:
+        key = key as text
+""",
+        ),
+        (
+            "summarise work_issue.backlog",
+            """
+# One row per issue.
+projection work_issue.item:
+    field:
+        key = key as text
+
+summarise work_issue.backlog over work_issue.item:
+    count items
+""",
+        ),
+    ],
+)
+def test_every_rendered_kind_requires_an_explanation(what: str, declaration: str) -> None:
+    """All four rendered kinds, not just figures: each is served to a reader,
+    so each unexplained one is refused naming itself. (The summarise case
+    carries an explained projection, so only the summary is at fault -- and
+    the refusal must be the explanation one, not a dangling reference.)"""
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(BASE + declaration)
+    assert what.split()[-1] in caught.value.message
+    assert "no explanation" in caught.value.message
+
+
+def test_the_explanation_may_sit_one_blank_line_up_but_not_two() -> None:
+    """One blank line is how people naturally space a file, and v1 measured
+    what refusing it cost: a third of its declarations rendered bare with the
+    explanation stranded just above. Two blanks is a detached paragraph, and
+    silently adopting it would attach prose the author never aimed here."""
+    one = EXPLAINED.replace(
+        "# How much is in flight right now.\nfigure",
+        "# How much is in flight right now.\n\nfigure",
+    )
+    spaced = compile_source(one).figure("team_person.wip")
+    assert spaced is not None
+    assert spaced.doc == "How much is in flight right now."
+
+    two = EXPLAINED.replace(
+        "# How much is in flight right now.\nfigure",
+        "# How much is in flight right now.\n\n\nfigure",
+    )
+    with pytest.raises(SyntaxError_):
+        compile_source(two)
+
+
+def test_a_file_banner_is_not_an_explanation() -> None:
+    """A build that concatenates .fig files draws a `# ---- name.fig ----`
+    rule between them; without this, the first figure of every file would
+    adopt the previous file's banner as its own explanation."""
+    with pytest.raises(SyntaxError_):
+        compile_source(
+            EXPLAINED.replace("# How much is in flight right now.", "# ---- board.fig ----")
+        )
+
+
+def test_comment_lines_join_as_one_explanation() -> None:
+    stacked = EXPLAINED.replace(
+        "# How much is in flight right now.",
+        "# How much is in flight right now.\n# Only active work counts.",
+    )
+    figure = compile_source(stacked).figure("team_person.wip")
+    assert figure is not None
+    assert figure.doc == "How much is in flight right now.\nOnly active work counts."
+
+
+def test_the_served_prose_and_formula_split_holds_for_comment_explanations() -> None:
+    """`declaration_prose` is what a Data screen shows as the meaning and
+    `declaration_source` is the formula: the explanation must land in the
+    first and stay out of the second, or the reviewer reads prose where they
+    came for arithmetic."""
+    from uratori.lang.source import declaration_prose, declaration_source
+
+    lib = compile_source(EXPLAINED)
+    assert declaration_prose(lib, "team_person.wip") == "How much is in flight right now."
+    formula = declaration_source(lib, "team_person.wip") or ""
+    assert "count(mine)" in formula
+    assert "How much is in flight" not in formula
+    assert "display" not in formula
+
+
+def test_every_rendered_kind_carries_its_comment_as_its_doc() -> None:
+    """Attachment, not just refusal, for all four kinds -- with distinct texts
+    so a cross-wire (every kind served the figure's prose) fails too. Also the
+    control for the refusal test above: explained, all of these compile."""
+    lib = compile_source(
+        BASE
+        + """
+# Days to land a change.
+reading team_person.to_merge(range):
+    display "x"
+
+    depends:
+        m = team_person.time_to_merge in range
+
+    calculate:
+        mean(m)
+
+# One row per issue.
+projection work_issue.item:
+    field:
+        key = key as text
+
+# The backlog, in one row.
+summarise work_issue.backlog over work_issue.item:
+    count items
+"""
+    )
+    reading = lib.reading("team_person.to_merge")
+    projection = lib.projection("work_issue.item")
+    summary = lib.summary("work_issue.backlog")
+    assert reading is not None and projection is not None and summary is not None
+    assert reading.doc == "Days to land a change."
+    assert projection.doc == "One row per issue."
+    assert summary.doc == "The backlog, in one row."
+
+
+def test_an_index_may_not_take_a_figures_name() -> None:
+    """One namespace covers all six kinds, not just the four rendered ones. An
+    index shadowing a figure splits the citation: the source pane, addressed
+    by name alone, would serve the index's one-liner where the figure's
+    formula belongs, beside prose that came from the figure."""
+    refuses(
+        "\nindex team_person.wip where active == true\n",
+        "team_person.wip",
+        "already",
+    )
+
+
+def test_a_measure_may_not_take_a_figures_name_either() -> None:
+    refuses(
+        "\nmeasure team_person.wip = moment updatedAt\n",
+        "team_person.wip",
+        "already",
+    )
+
+
+def test_a_paragraph_break_is_a_bare_hash_not_a_blank_line() -> None:
+    """`#` on its own line is the paragraph spelling. A blank LINE inside the
+    run ends it -- the detached upper half is silently not prose -- and both
+    halves are pinned here so a future "cross blanks anywhere" relaxation has
+    to declare itself."""
+    joined = EXPLAINED.replace(
+        "# How much is in flight right now.",
+        "# How much is in flight right now.\n#\n# Only active work counts.",
+    )
+    two_paragraphs = compile_source(joined).figure("team_person.wip")
+    assert two_paragraphs is not None
+    assert two_paragraphs.doc == "How much is in flight right now.\n\nOnly active work counts."
+
+    split = EXPLAINED.replace(
+        "# How much is in flight right now.",
+        "# A stranded first paragraph.\n\n# How much is in flight right now.",
+    )
+    one_paragraph = compile_source(split).figure("team_person.wip")
+    assert one_paragraph is not None
+    assert one_paragraph.doc == "How much is in flight right now."
+
+
+def test_a_dashed_aside_is_prose_but_a_dash_rule_is_not() -> None:
+    """`# --- see the note below` is somebody's writing; `# ----------` and
+    `# ---- board.fig ----` are rules. A banner pattern that swallowed any
+    three dashes refused explanations that start with a dash -- with a message
+    telling the author to write exactly what they had written."""
+    aside = EXPLAINED.replace(
+        "# How much is in flight right now.", "# --- see the note below"
+    )
+    figure = compile_source(aside).figure("team_person.wip")
+    assert figure is not None
+    assert figure.doc == "--- see the note below"
+
+    for rule in ("# ----------", "# ---- board.fig ----"):
+        with pytest.raises(SyntaxError_):
+            compile_source(
+                EXPLAINED.replace("# How much is in flight right now.", rule)
+            )
+
+
+def test_the_two_refusals_say_what_the_docs_quote() -> None:
+    """docs/language.md quotes both messages verbatim, so the wording is the
+    contract: rewording either must force the doc quote to move with it."""
+    with pytest.raises(SyntaxError_) as no_prose:
+        compile_source(EXPLAINED.replace("# How much is in flight right now.\n", ""))
+    assert no_prose.value.message == (
+        "figure team_person.wip has no explanation. Write `#` comment lines directly "
+        "above the declaration -- they are the customer-facing definition, rendered "
+        "wherever the number is cited, and a figure nobody can read is the thing "
+        "this language exists to prevent. (A `# ----` rule line is a file banner, "
+        "not prose.)"
+    )
+
+    with pytest.raises(SyntaxError_) as inside:
+        compile_source('figure a.b:\n    """d"""\n')
+    assert inside.value.message == (
+        "a docstring. A declaration's explanation is written as `#` comment lines "
+        "directly above it, not inside the block"
+    )
+
+
+def test_an_indexs_comment_serves_as_prose_without_being_required() -> None:
+    """Indexes and measures are plumbing: their comment is documentation when
+    present and an honest empty string when not -- never a refusal."""
+    from uratori.lang.source import declaration_prose
+
+    lib = compile_source(
+        EXPLAINED.replace(
+            "index work_issue.active where active == true",
+            "# Only work someone is actively doing.\n"
+            "index work_issue.active where active == true",
+        )
+    )
+    assert (
+        declaration_prose(lib, "work_issue.active") == "Only work someone is actively doing."
+    )
+    assert declaration_prose(lib, "work_issue.assigned_to") == ""
+
+
+def test_a_full_width_comment_inside_a_block_does_not_truncate_the_served_formula() -> None:
+    """The lexer skips a column-0 comment wherever it sits, so the block
+    continues past it -- and the source pane must agree, or it serves a
+    formula with its calculate silently missing. The trailing case is the
+    control: the NEXT declaration's explanation is not this block's tail."""
+    from uratori.lang.source import declaration_source
+
+    lib = compile_source(
+        EXPLAINED.replace("    calculate:", "# only active work counts here\n    calculate:")
+        + "\n# About sizing.\nindex work_issue.sized where estimateSeconds is set\n"
+    )
+    formula = declaration_source(lib, "team_person.wip") or ""
+    assert "count(mine)" in formula
+    assert "About sizing." not in formula

@@ -18,8 +18,8 @@ SOURCE = '''
 index work_issue.active where active == true
 index work_issue.assigned_to from assignee_account_id through team_person.accounts.account_id
 
+# In progress.
 figure team_person.wip:
-    """In progress."""
     display "{team_person} in progress"
     depends:
         mine = work_issue.assigned_to:{team_person} & work_issue.active

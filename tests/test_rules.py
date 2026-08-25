@@ -46,8 +46,8 @@ measure work_issue.moved = moment updated_at
 measure work_issue.lead = completed_at - created_at
 measure work_issue.waiting = now - created_at
 
+# d
 figure team_person.count:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         mine = work_issue.assigned_to:{team_person} & work_issue.active
@@ -169,8 +169,8 @@ def _readers(
 LADDER = compile_source(
     BASE
     + """
+# d
 figure team_person.band:
-    \"\"\"d\"\"\"
     display "x"
     combine:
         n = team_person.count
@@ -214,8 +214,8 @@ def test_max_propagates_an_absence_rather_than_letting_the_known_side_win() -> N
     plan = compile_source(
         BASE
         + """
+# d
 figure team_person.bigger:
-    \"\"\"d\"\"\"
     display "x"
     unit count
     combine:
@@ -235,8 +235,8 @@ figure team_person.bigger:
 EXTREME = compile_source(
     BASE
     + """
+# d
 figure team_person.last_moved:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         mine = work_issue.assigned_to:{team_person}
@@ -283,8 +283,8 @@ def test_set_difference_removes_the_right_side() -> None:
     plan = compile_source(
         BASE
         + """
+# d
 figure team_person.not_active:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         mine = work_issue.assigned_to:{team_person} - work_issue.active
@@ -309,8 +309,8 @@ def test_the_evidence_of_a_list_lines_up_with_its_values() -> None:
     plan = compile_source(
         BASE
         + """
+# d
 figure team_person.leads:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         mine = work_issue.assigned_to:{team_person}
@@ -389,24 +389,24 @@ def test_an_unsorted_row_goes_last_in_either_direction() -> None:
 READINGS = compile_source(
     BASE
     + """
+# d
 figure team_person.per_day:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         mine = work_issue.by_day:{team_person}
     calculate:
         list(work_issue.lead over mine)
 
+# d
 figure team_person.volume:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         mine = work_issue.by_day:{team_person}
     calculate:
         count(mine)
 
+# d
 reading team_person.speed(range):
-    \"\"\"d\"\"\"
     display "x"
     band low against flow.leadTimeDays
     depends:
@@ -417,16 +417,16 @@ reading team_person.speed(range):
         mean(m)
         worst(m)
 
+# d
 reading team_person.shipped(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.volume in range
     calculate:
         sum(m)
 
+# d
 reading team_person.pace(range):
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = team_person.per_day in range
@@ -561,8 +561,8 @@ def test_a_set_may_not_mix_two_id_spaces() -> None:
         """
 index code_change.open where state == "open"
 
+# d
 figure team_person.mixed:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = work_issue.assigned_to:{team_person} & code_change.open
@@ -581,8 +581,8 @@ def test_a_measure_must_be_over_the_same_kind_as_the_set_it_is_applied_to() -> N
         """
 index code_review_request.asked_of from reviewer_account_id through team_person.accounts.account_id
 
+# d
 figure team_person.wrong:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         m = code_review_request.asked_of:{team_person}
@@ -599,16 +599,16 @@ def test_a_band_with_no_on_needs_the_reading_to_calculate_a_mean() -> None:
     missing data rather than as a broken definition."""
     refuses(
         """
+# d
 figure team_person.spans:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         mine = work_issue.by_day:{team_person}
     calculate:
         list(work_issue.lead over mine)
 
+# d
 reading team_person.worst_only(range):
-    \"\"\"d\"\"\"
     display "x"
     band low against flow.leadTimeDays
     depends:
@@ -627,16 +627,16 @@ def test_a_figure_takes_its_unit_from_the_binding_it_actually_reads() -> None:
     lib = compile_source(
         BASE
         + """
+# d
 figure team_person.effort:
-    \"\"\"d\"\"\"
     display "x"
     depends:
         mine = work_issue.assigned_to:{team_person}
     calculate:
         sum(work_issue.estimate over mine)
 
+# d
 figure team_person.reads_the_count:
-    \"\"\"d\"\"\"
     display "x"
     combine:
         e = team_person.effort

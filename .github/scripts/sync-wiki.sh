@@ -25,10 +25,11 @@ render http-api.md > "$wiki/HTTP-API.md"
 render language.md > "$wiki/Language.md"
 
 cat > "$wiki/Home.md" <<'EOF'
-**uratori** (裏取り) is a definition engine you deploy: write what your
-numbers *mean* in a small definition language, push facts at the engine, and
-read back computed, versioned, explainable answers -- over HTTP and over a
-websocket.
+**uratori** (裏取り) makes every number in your product mean something both
+sides can read: what a number means is written down in a small definition
+language a product owner can review, the engine computes exactly what is
+written, and every answer carries the versioned definition that produced it
+-- over HTTP and over a websocket.
 
 ```bash
 docker run -p 8080:8080 \

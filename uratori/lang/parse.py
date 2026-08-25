@@ -9,6 +9,8 @@ alternatives, and a parser has neither the library nor the vocabulary to do it.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from .ast import (
     AbsenceTest,
     Arith,
@@ -28,6 +30,7 @@ from .ast import (
     Count,
     CountDecl,
     DaysBetween,
+    Decl,
     DeclaredUnit,
     Document,
     DurationMeasure,
@@ -74,7 +77,7 @@ from .ast import (
     ValueDecl,
     WindowedSource,
 )
-from .lex import SyntaxError_, Token, lex
+from .lex import SyntaxError_, Token, lex, prose_above
 
 _DECLARED_UNITS: frozenset[str] = frozenset({"share", "days", "effort", "count", "duration"})
 _DERIVED_UNITS: frozenset[str] = frozenset({"level", "moment"})
@@ -86,7 +89,47 @@ _COMPARISONS: frozenset[str] = frozenset({">=", ">", "<=", "<", "==", "!="})
 
 
 def parse(source: str) -> Document:
-    return _Parser(lex(source)).document()
+    document = _Parser(lex(source)).document()
+    lines = source.split("\n")
+    document.decls = [_explained(d, lines) for d in document.decls]
+    return document
+
+
+_RENDERED: dict[type, str] = {
+    FigureDecl: "figure",
+    ReadingDecl: "reading",
+    ProjectDecl: "projection",
+    SummariseDecl: "summary",
+}
+
+
+def _explained(decl: Decl, lines: list[str]) -> Decl:
+    """Attach the `#` comment run above a declaration as its doc.
+
+    The comments are the customer-facing explanation -- one spelling for all
+    six declaration kinds, kept out of the block so the directives a reviewer
+    came to check are not buried in prose. The lexer strips comments, so this
+    reads the raw lines; the declaration's own line number says where to look.
+
+    The four rendered kinds are refused without one: each is served to a
+    reader, and an unexplained number on screen is the thing this language
+    exists to prevent.
+    """
+    if not isinstance(decl, (FigureDecl, ReadingDecl, ProjectDecl, SummariseDecl)):
+        return decl
+    what = _RENDERED[type(decl)]
+    prose = prose_above(lines, decl.line)
+    if not prose:
+        raise SyntaxError_(
+            f"{what} {decl.name} has no explanation. Write `#` comment lines directly "
+            "above the declaration -- they are the customer-facing definition, rendered "
+            f"wherever the number is cited, and a {what} nobody can read is the thing "
+            "this language exists to prevent. (A `# ----` rule line is a file banner, "
+            "not prose.)",
+            decl.line,
+            0,
+        )
+    return replace(decl, doc=prose)
 
 
 class _Parser:
@@ -399,7 +442,6 @@ class _Parser:
         self._end_of_line()
         self._expect("indent", "an indented block after the figure name")
 
-        doc = self._docstring()
         display = ""
         unit: DeclaredUnit | None = None
         sets: list[NamedSet] = []
@@ -450,14 +492,6 @@ class _Parser:
                 "reported.",
                 line,
             )
-        if not doc:
-            raise self._error(
-                f"figure {name} has no docstring. The docstring is the customer-facing "
-                "definition and is rendered on the Data screen; a figure nobody can read is "
-                "the thing this language exists to prevent.",
-                line,
-            )
-
         if band is not None and not isinstance(band, Ladder):
             raise self._error(
                 f"figure {name}'s band is not a ladder. A band names which of a few words "
@@ -468,7 +502,7 @@ class _Parser:
 
         return FigureDecl(
             name=name,
-            doc=doc,
+            doc="",
             display=display,
             calculate=calculate,
             across=across,
@@ -800,7 +834,6 @@ class _Parser:
         self._end_of_line()
         self._expect("indent", "an indented block after the reading name")
 
-        doc = self._docstring()
         display = ""
         band: Band | None = None
         sets: list[ReadingSet] = []
@@ -835,8 +868,6 @@ class _Parser:
             self._skip_newlines()
 
         self._expect("dedent", "the end of the reading block")
-        if not doc:
-            raise self._error(f"reading {name} has no docstring.", line)
         if not display:
             raise self._error(f"reading {name} has no display template.", line)
         if not calculate:
@@ -844,7 +875,7 @@ class _Parser:
 
         return ReadingDecl(
             name=name,
-            doc=doc,
+            doc="",
             display=display,
             args=tuple(args),
             sets=tuple(sets),
@@ -986,7 +1017,6 @@ class _Parser:
         self._end_of_line()
         self._expect("indent", "an indented block after the projection name")
 
-        doc = self._docstring()
         frm: SetExpr | None = None
         fields: list[FieldDecl] = []
         reads: list[ReadDecl] = []
@@ -1040,12 +1070,9 @@ class _Parser:
                 "row is a bare record id. Name at least the key and the link a screen needs.",
                 line,
             )
-        if not doc:
-            raise self._error(f"projection {name} has no docstring.", line)
-
         return ProjectDecl(
             name=name,
-            doc=doc,
+            doc="",
             frm=frm,
             fields=tuple(fields),
             reads=tuple(reads),
@@ -1246,7 +1273,6 @@ class _Parser:
         self._end_of_line()
         self._expect("indent", "an indented block after the summary name")
 
-        doc = self._docstring()
         counts: list[CountDecl] = []
         totals: list[TotalDecl] = []
         values: list[ValueDecl] = []
@@ -1271,13 +1297,11 @@ class _Parser:
             self._skip_newlines()
 
         self._expect("dedent", "the end of the summary block")
-        if not doc:
-            raise self._error(f"summary {name} has no docstring.", line)
 
         return SummariseDecl(
             name=name,
             over=over,
-            doc=doc,
+            doc="",
             counts=tuple(counts),
             totals=tuple(totals),
             values=tuple(values),
@@ -1316,13 +1340,6 @@ class _Parser:
         return TotalDecl(name=name, of=of, unit=unit, when=when, line=line)
 
     # ------------------------------------------------------------ shared --
-
-    def _docstring(self) -> str:
-        if self._is("docstring"):
-            text = self._next().value
-            self._skip_newlines()
-            return text
-        return ""
 
     def _once(self, seen: set[str], word: str, owner: str) -> None:
         if word in seen:

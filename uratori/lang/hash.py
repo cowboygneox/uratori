@@ -8,7 +8,7 @@ values stay intact to explain any history that references them.
 Two properties this has to have, and both are tested:
 
   - **Prose does not change the hash.** Only the parts that decide the number
-    reach it. Fixing a typo in a docstring must not fork a version and recompute
+    reach it. Fixing a typo in an explanation must not fork a version and recompute
     three hundred values.
   - **Key order does not change the hash.** `canonical` sorts keys at every
     depth, so a refactor that happens to build a plan in a different order does

@@ -366,3 +366,86 @@ async def test_the_bulk_results_route_serves_the_whole_first_paint(server: Serve
         "subscribing now renders a blank board over stored answers"
     )
     assert all(r["state"]["ok"] is True for r in listed.json())
+
+
+async def test_a_boot_across_a_language_change_comes_up_unready_not_crash_looping(
+    pg_dsn: str,
+) -> None:
+    """The stored source was written by an engine whose syntax has since moved
+    on (the docstring removal is exactly such a change). If the boot re-raised
+    the refusal, the upgraded container would crash-loop -- with the only fix,
+    a corrected PUT /definitions, locked out behind the crash. Unready-with-a-
+    schema is a state every client of this API already knows how to repair."""
+    name = f"uratori_srv_{os.urandom(4).hex()}"
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await connection.execute(f"create schema {name}")
+    finally:
+        await connection.close()
+
+    try:
+        app = create_app(dsn=pg_dsn, pg_schema=name, token=None, version="test")
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://uratori") as http:
+                await _teach(http)
+
+        # What an older engine stored: the docstring spelling the language has
+        # since removed. Planted directly because no current build can be made
+        # to store it -- that is the point.
+        stale = 'figure shop_courier.carrying:\n    """d"""\n    display "x"\n'
+        connection = await asyncpg.connect(pg_dsn)
+        try:
+            await connection.execute(
+                f"update {name}.engine_world set source = $1 where id = 1", stale
+            )
+        finally:
+            await connection.close()
+
+        app = create_app(dsn=pg_dsn, pg_schema=name, token=None, version="test")
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://uratori") as http:
+                health = (await http.get("/health")).json()
+                assert health["ready"] is False
+
+                # The 409 must say the truth. "No definitions have been
+                # loaded" would send the operator hunting a data loss when
+                # the stored source is right there, refused by this build.
+                refused = await http.get("/tenants/t1/results")
+                assert refused.status_code == 409
+                assert "do not compile under this build" in refused.json()["detail"]
+
+                # The host's own teach order is schema first, then
+                # definitions, retried forever. If PUT /schema 422s on the
+                # stale stored source, the repair the boot promised is never
+                # reached -- the crash loop just becomes an unready loop.
+                put = await http.put("/schema", json=COURIER_WORLD.to_document())
+                assert put.status_code == 200, put.text
+
+                put = await http.put("/definitions", json={"source": COURIER_SOURCE})
+                assert put.status_code == 200, put.text
+                assert (await http.get("/health")).json()["ready"] is True
+    finally:
+        connection = await asyncpg.connect(pg_dsn)
+        try:
+            await connection.execute(f"drop schema {name} cascade")
+        finally:
+            await connection.close()
+
+
+async def test_a_served_answer_carries_the_definitions_explanation(server: Server) -> None:
+    """The `#` comment above the declaration is the customer-facing definition,
+    and `Result.doc` is the only route it takes to a reader. A wire that
+    dropped it would leave every citation blank -- with the whole suite
+    green, because nothing else reads it."""
+    await _teach(server.http)
+    pushed = await server.http.post(
+        "/tenants/t1/facts",
+        json={"writes": {"shop_courier": COURIER, "shop_order": _orders(2)}},
+    )
+    assert pushed.status_code == 200, pushed.text
+
+    answer = await server.http.get("/tenants/t1/results/shop_courier.carrying")
+    assert answer.status_code == 200
+    assert answer.json()["doc"] == "How many orders this courier is carrying right now."

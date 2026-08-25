@@ -76,6 +76,11 @@ class World:
     schema_document: dict[str, Any]
     source: str | None
     library: Library | None
+    refusal: str | None = None
+    """Why `library` is None when a source IS stored: this build's compiler
+    refused it (an upgrade across a language change). Carried so `_ready` can
+    say the truth -- "no definitions have been loaded" points the operator at
+    the wrong fix when the real one is a corrected PUT /definitions."""
 
 
 class State:
@@ -125,9 +130,29 @@ def create_app(
         if held is not None:
             document, source = held
             schema = SchemaIn(**document).build()
-            library = compile_source(source, schema) if source else None
+            boot_refusal: str | None = None
+            try:
+                library = compile_source(source, schema) if source else None
+            except DefinitionError as refusal:
+                # A stored source an older engine wrote, refused by this
+                # build's compiler -- an upgrade across a language change.
+                # Re-raising would crash-loop the container with the only
+                # fix, a corrected PUT /definitions, locked out behind the
+                # crash; unready-with-a-schema is a state every client
+                # already knows how to repair.
+                library = None
+                boot_refusal = str(refusal)
+                log.error(
+                    "stored definitions no longer compile under this build: %s "
+                    "-- serving unready; PUT /definitions with corrected source",
+                    refusal,
+                )
             state.world = World(
-                schema=schema, schema_document=document, source=source, library=library
+                schema=schema,
+                schema_document=document,
+                source=source,
+                library=library,
+                refusal=boot_refusal,
             )
             log.info(
                 "world restored: %d figures, %d readings",
@@ -165,6 +190,16 @@ def create_app(
         if s.world is None:
             raise HTTPException(status_code=409, detail="No schema has been declared yet")
         if s.world.library is None:
+            if s.world.refusal is not None:
+                # Definitions ARE stored; saying "none loaded" would send the
+                # operator hunting a data loss when the fix is a re-PUT.
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "The stored definitions do not compile under this build: "
+                        f"{s.world.refusal}. PUT /definitions with corrected source."
+                    ),
+                )
             raise HTTPException(status_code=409, detail="No definitions have been loaded yet")
         return s.world, s.world.library
 
@@ -222,22 +257,34 @@ def create_app(
 
         source = s.world.source if s.world is not None else None
         library = s.world.library if s.world is not None else None
+        held_refusal: str | None = None
         if source:
             try:
                 library = compile_source(source, schema)
             except DefinitionError as refusal:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "the loaded definitions do not compile under this schema: "
-                        f"{refusal}"
-                    ),
-                ) from refusal
+                if library is not None:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "the loaded definitions do not compile under this schema: "
+                            f"{refusal}"
+                        ),
+                    ) from refusal
+                # The stored source already failed this build's compiler --
+                # there is no working library the schema could break. Refusing
+                # here would lock the host's own teach order (schema first,
+                # then definitions) out of the repair the boot path promised.
+                library = None
+                held_refusal = str(refusal)
 
         document = body.model_dump()
         await db.save_world(s.pool, document, source)
         s.world = World(
-            schema=schema, schema_document=document, source=source, library=library
+            schema=schema,
+            schema_document=document,
+            source=source,
+            library=library,
+            refusal=held_refusal,
         )
         return Ack(ok=True)
 

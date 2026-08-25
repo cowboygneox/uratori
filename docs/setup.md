@@ -116,7 +116,9 @@ already provides.
 database captures the declared schema, the definitions source, every tenant's
 settings, every fact and every computed value -- restore it, start a
 container, and the server comes back knowing its world, because the
-definitions source is stored and recompiled at boot. There is nothing in the
+definitions source is stored and recompiled at boot (a build whose compiler
+refuses the stored source boots unready rather than crashing; see
+[Upgrading](#upgrading)). There is nothing in the
 container worth backing up.
 
 ## The auth token
@@ -158,7 +160,7 @@ migration pass ran, and any stored world was restored and recompiled.
 |---|---|
 | `ok` | `true` whenever the process answers -- this is the liveness signal. |
 | `version` | The `APP_VERSION` of the running build; compare it to what you deployed. |
-| `ready` | `true` once definitions are compiled and loaded. A freshly booted server with no schema declared says `false`. |
+| `ready` | `true` once definitions are compiled and loaded. `false` on a freshly booted server with no schema declared -- and after an upgrade whose stored definitions the new build's compiler refuses (see [Upgrading](#upgrading)). |
 | `figures`, `readings` | How many of each the loaded library holds. |
 
 `ready: false` is a state, not an error: a new server must accept traffic in
@@ -295,3 +297,12 @@ curl -s localhost:8080/health
 ```
 
 and check that `version` names the build you just deployed.
+
+**If the language itself changed** between the build you ran and the build
+you pulled, the stored source may no longer compile. The server still boots
+-- crash-looping would lock the fix out behind the crash -- and comes up with
+`ready: false`, logging the compiler's refusal; every route that needs
+definitions answers 409 quoting it (*"The stored definitions do not compile
+under this build: ..."*). The repair is the ordinary teach: `PUT /schema` is
+accepted as usual, and `PUT /definitions` with corrected source makes the
+server ready. Release notes name any change that requires this.

@@ -31,16 +31,16 @@ COURIER_SOURCE = '''
 index shop_order.carried_by from courier_id
 index shop_order.open where status != "delivered"
 
+# How many orders this courier is carrying right now.
 figure shop_courier.carrying:
-    """How many orders this courier is carrying right now."""
     display "{value} orders in hand"
     depends:
         mine = shop_order.carried_by:{shop_courier} & shop_order.open
     calculate:
         count(mine)
 
+# Whether a courier is over the carrying limit.
 figure shop_courier.load_band:
-    """Whether a courier is over the carrying limit."""
     display "{value}"
     combine:
         carrying = shop_courier.carrying
@@ -249,8 +249,8 @@ async def test_a_moved_through_kind_record_escalates_to_full() -> None:
 index shop_order.carried_by from courier_ref through shop_courier.handles
 index shop_order.open where status != "delivered"
 
+# How many orders this courier is carrying right now.
 figure shop_courier.carrying:
-    """How many orders this courier is carrying right now."""
     display "{value} orders in hand"
     depends:
         mine = shop_order.carried_by:{shop_courier} & shop_order.open

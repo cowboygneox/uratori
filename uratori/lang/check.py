@@ -146,20 +146,24 @@ class _Checker:
         )
 
     def _claim(self, name: str, what: str, line: int) -> None:
-        """One namespace for all six declaration kinds.
+        """One namespace for all six declaration kinds -- indexes and measures
+        included, not just the four rendered ones.
 
         A citation is `name@version`, so two declarations sharing a name would
         make a citation ambiguous -- and the Data screen addresses a definition
-        by name alone.
+        by name alone, so an index shadowing a figure would put the index's
+        one-liner on the source pane where the figure's formula belongs.
         """
         held = self._names.get(name)
+        article = "an" if what[0] in "aeiou" else "a"
         if held is not None:
             raise CheckError(
-                f"{name} is already {held}. A {what} needs its own name: a citation is "
-                f'"name@version", and two definitions under one name make it ambiguous.',
+                f"{name} is already {held}. {article.capitalize()} {what} needs its own "
+                'name: a citation is "name@version", and two definitions under one name '
+                "make it ambiguous.",
                 line,
             )
-        self._names[name] = f"a {what}"
+        self._names[name] = f"{article} {what}"
 
     def _fact_kind(self, named: str, where: str, line: int) -> str:
         if not self._schema.is_kind(named):
@@ -197,8 +201,7 @@ class _Checker:
     # -------------------------------------------------------------- index --
 
     def _index(self, d: IndexDecl) -> None:
-        if d.name in self.indexes:
-            raise CheckError(f"index {d.name} is declared twice", d.line)
+        self._claim(d.name, "index", d.line)
         self._fact_kind(d.kind, f"index {d.name} is over", d.line)
 
         for part in _index_fields(d.spec):
@@ -233,8 +236,7 @@ class _Checker:
     # ------------------------------------------------------------ measure --
 
     def _measure(self, d: DurationMeasure | FieldMeasure | MomentMeasure) -> None:
-        if d.name in self.measures:
-            raise CheckError(f"measure {d.name} is declared twice", d.line)
+        self._claim(d.name, "measure", d.line)
         self._fact_kind(d.kind, f"measure {d.name} is over", d.line)
 
         if isinstance(d, DurationMeasure):

@@ -7,73 +7,53 @@ that say what every number means. The engine computes those numbers
 incrementally as records move, and serves each one back with the version that
 computed it and the evidence behind it.
 
-This page is the model in full. It uses one running example throughout: a
-courier dispatch service, whose world is orders and couriers, and whose
-screens want to know how loaded each courier is. The other pages assume this
-one: [the definition language](language.md) for writing `.fig`,
+This page is the model in full, starting where the engine starts: with the
+facts. It uses one running example throughout: a courier dispatch service,
+whose world is orders and couriers, and whose screens want to know how loaded
+each courier is. The other pages assume this one:
+[the definition language](language.md) for writing `.fig`,
 [Setup](setup.md) for running the service, and
 [the HTTP & websocket API](http-api.md) for driving it.
 
-## The four rules
-
-Everything below is in service of four rules. They are inherited from the
-project this engine grew out of -- a standup board whose whole premise was
-that no number on screen is unexplained -- and each one was learned by
-watching it fail.
-
-1. **One calculation system.** A number means a definition. There is no second
-   place arithmetic can live: no helper on the way out, no mapping function in
-   a client, no "quick count" beside the real one. Two places computing one
-   number is how they come to disagree, and the disagreement is always
-   discovered by a reader.
-
-2. **Clients compute nothing.** Values arrive rendered beside their
-   magnitudes, and the payload carries no raw collection to recompute from.
-   The predecessor *intended* the browser not to calculate and lost it anyway,
-   because the arrays were in the payload and a client function quietly
-   reduced over them. Here there is nothing to reduce.
-
-3. **An absence is never a zero.** Missing means *not computed*, and every
-   response says why. A dash that might mean "nothing happened" or might mean
-   "nothing was measured" is a dash nobody can act on.
-
-4. **A cheap path may not narrow a population** -- neither the one a
-   calculation runs over nor the one it is reported over. The incremental
-   path exists to be fast, not to be a different calculation; a scoped run
-   must leave exactly the state a full run would.
-
-These are not aspirations. Each is enforced somewhere concrete: rule 1 by the
-checker refusing every second route to a number (a projection may not
-aggregate -- that is a figure's or a reading's job -- and a `sum` may not sit
-beside a `mean` a reader could divide it by), rule 2 by the `Result` shape
-carrying no numeric collections, rule 3 by `state` being a required
-discriminated value rather than a nullable number, rule 4 by escalation to
-full passes whenever the warm path cannot be proven equivalent (see
-[the cascade](#the-incremental-cascade), below).
-
 ## Facts
 
-A fact is a plain JSON record with an identity: a *kind* (`shop_order`), a
-*key* (`"o1"`), and a body of fields the host chose.
+A fact is a plain JSON record with an identity -- a *kind* and a *key* -- and
+a body of fields the host chose. Here is the courier world in full: two
+couriers, three orders.
 
-```json
-{ "ref": "A-1", "courier_id": "c1", "status": "riding" }
+```
+shop_courier "c1"  { "name": "Aki" }
+shop_courier "c2"  { "name": "Bo" }
+
+shop_order "o1"    { "ref": "A-1", "courier_id": "c1", "status": "riding" }
+shop_order "o2"    { "ref": "A-2", "courier_id": "c1", "status": "riding" }
+shop_order "o3"    { "ref": "B-7", "courier_id": "c2", "status": "delivered" }
 ```
 
-That is the whole of what the engine knows about an order. It does not fetch
-facts from anywhere, does not interpret them beyond what definitions read,
-and never writes them -- how records arrive, from which provider, on what
-schedule, is entirely the host's business. The engine's side of the contract
-is narrow on purpose: given every record of a kind (or some records by key),
-compute what the definitions say. There are no filters, no orderings, no
-projections on the read path, because every convenience a fact source grows
-is a way a calculation could start depending on where the records live --
-rule 4, at the storage boundary.
+The correlations are already in the bodies. `courier_id` is how an order
+relates to a courier: `"o1"` and `"o2"` carry `"c1"`, so they are Aki's, and
+`"o3"` is Bo's. `status` says which orders are still in hand -- two riding,
+one delivered. Nothing in the records marks those fields as special.
+*Declaring* that `courier_id` correlates orders to couriers, and that
+undelivered means open, is exactly what an index does
+([Definitions](#definitions-and-the-compile), below); read that way, these
+five records already hold the page's number: Aki is carrying two orders, Bo
+none.
 
-Facts carry their own names. A courier record has a `name` field, and the
-schema (next section) says so; when the engine writes a computed value it
-freezes the subject's rendered name alongside it, so a courier renamed next
-week does not rewrite the history of what they carried.
+That is the whole of what the engine knows. It does not fetch facts from
+anywhere, does not interpret them beyond what definitions read, and never
+writes them -- how records arrive, from which provider, on what schedule, is
+entirely the host's business. The engine's side of the contract is narrow on
+purpose: given every record of a kind (or some records by key), compute what
+the definitions say. There are no filters, no orderings, no projections on
+the read path, because every convenience a fact source grows is a way a
+calculation could start depending on where the records live -- rule 4 of
+[the four rules](#the-four-rules), at the storage boundary.
+
+Facts carry their own names. Aki's record has a `name` field, and the schema
+(next section) says so; when the engine writes a computed value it freezes
+the subject's rendered name alongside it, so a courier renamed next week does
+not rewrite the history of what they carried.
 
 ## The schema
 
@@ -124,23 +104,34 @@ index shop_order.open where status != "delivered"
 
 measure shop_order.effort = handling_seconds in effort
 
+# How many orders this courier is carrying right now.
 figure shop_courier.carrying:
-    """How many orders this courier is carrying right now."""
     display "{value} orders in hand"
+
     depends:
         mine = shop_order.carried_by:{shop_courier} & shop_order.open
+
     calculate:
         count(mine)
 
+# Whether a courier is over the carrying limit.
 figure shop_courier.load_band:
-    """Whether a courier is over the carrying limit."""
     display "{value}"
+
     combine:
         carrying = shop_courier.carrying
+
     calculate:
         when carrying >= limits.carrying.over then "over"
         otherwise "ok"
 ```
+
+The `#` lines above each figure are its *explanation*. The compile attaches
+that comment run as the declaration's customer-facing doc, served wherever
+the number is cited, and refuses a figure, reading, projection or summary
+that arrives without one -- a number nobody explained is a number nobody can
+defend. Indexes and measures may carry one but are not required to: they are
+plumbing, not numbers a reader meets.
 
 - **Indexes** bucket records: `carried_by` files each order under its
   courier, `open` files the undelivered ones. An index is the only way a
@@ -173,15 +164,52 @@ deliberately **not** hashed into versions. A version is the hash of a
 definition's semantics, and the same definition under two hosts is the same
 definition.
 
+## The four rules
+
+Everything on this page is in service of four rules. They are inherited from
+the project this engine grew out of -- a standup board whose whole premise
+was that no number on screen is unexplained -- and each one was learned by
+watching it fail.
+
+1. **One calculation system.** A number means a definition. There is no second
+   place arithmetic can live: no helper on the way out, no mapping function in
+   a client, no "quick count" beside the real one. Two places computing one
+   number is how they come to disagree, and the disagreement is always
+   discovered by a reader.
+
+2. **Clients compute nothing.** Values arrive rendered beside their
+   magnitudes, and the payload carries no raw collection to recompute from.
+   The predecessor *intended* the browser not to calculate and lost it anyway,
+   because the arrays were in the payload and a client function quietly
+   reduced over them. Here there is nothing to reduce.
+
+3. **An absence is never a zero.** Missing means *not computed*, and every
+   response says why. A dash that might mean "nothing happened" or might mean
+   "nothing was measured" is a dash nobody can act on.
+
+4. **A cheap path may not narrow a population** -- neither the one a
+   calculation runs over nor the one it is reported over. The incremental
+   path exists to be fast, not to be a different calculation; a scoped run
+   must leave exactly the state a full run would.
+
+These are not aspirations. Each is enforced somewhere concrete: rule 1 by the
+checker refusing every second route to a number (a projection may not
+aggregate -- that is a figure's or a reading's job -- and a `sum` may not sit
+beside a `mean` a reader could divide it by), rule 2 by the `Result` shape
+carrying no numeric collections, rule 3 by `state` being a required
+discriminated value rather than a nullable number, rule 4 by escalation to
+full passes whenever the warm path cannot be proven equivalent (see
+[the cascade](#the-incremental-cascade), below).
+
 ## Versions
 
 Every definition's version is a content hash of its semantics -- the parts
 that decide the number, canonicalised and hashed. This has two properties,
 both deliberate and both tested:
 
-- **Prose does not fork a version.** Fixing a typo in a docstring must not
-  recompute three hundred stored values. Only what changes the answer changes
-  the hash.
+- **Prose does not fork a version.** Rewording the explanation above a
+  declaration must not recompute three hundred stored values. Only what
+  changes the answer changes the hash.
 - **A changed definition is a new definition, not an edit.** The version is
   part of the key every stored value lives under, so changing a definition is
   a *cache miss*, never an invalidation: the new version simply has no rows
