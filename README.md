@@ -94,6 +94,7 @@ database beside it. Then teach it and feed it:
 | `POST /tenants/{t}/facts` | Apply writes/deletes (with the provider's own stamps as the stale-write guard), run the pass, get back counts, a ranked change sample, and the re-served `Result`s. |
 | `POST /tenants/{t}/runs` | A pass with no new facts (a moved dial, `{"full": true}` to rebuild). |
 | `GET /tenants/{t}/results[/{name}]` | Current answers. |
+| `GET /tenants/{t}/evidence/{name}` | The records behind one stored value: the citation, joined back to the records it names. |
 | `DELETE /tenants/{t}` | Every row the tenant owns, gone; answers the counts, because "ok" is the least useful true thing a destructive route can say. |
 | `WS /stream` | Subscribe to a tenant; get the current answers, then every one that moves. |
 | `GET /health` | `{ok, version, ready, figures, readings}`. |

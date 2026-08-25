@@ -65,6 +65,7 @@ class MemoryEngineStore:
         self._definitions: dict[str, tuple[str, str, str]] = {}
         self._pointers: dict[tuple[str, str], Pointer] = {}
         self._index: dict[tuple[str, str], dict[str, set[str]]] = {}
+        self._index_sets: dict[str, str] = {}
         self._values: dict[tuple[str, str, str, str], StoredValue] = {}
 
     # --------------------------------------------------------- definitions --
@@ -93,6 +94,12 @@ class MemoryEngineStore:
             return False
         self._pointers[(tenant, name)] = pointer
         return True
+
+    async def index_set(self, tenant: str) -> str | None:
+        return self._index_sets.get(tenant)
+
+    async def set_index_set(self, tenant: str, version: str) -> None:
+        self._index_sets[tenant] = version
 
     # ------------------------------------------------------------- indexes --
 

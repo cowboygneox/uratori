@@ -1186,6 +1186,80 @@ projection work_issue.joined:
     assert a.version != b.version
 
 
+def test_a_projection_may_declare_the_population_it_is_over() -> None:
+    """`from` is the definition of "on the page", written in the projection
+    where a reader can check it. The plan must carry both the expression and
+    the indexes it reads, because the engine loads exactly those buckets to
+    resolve the population."""
+    lib = compile_ok(
+        PROJECTION.replace(
+            "    field:", "    from work_issue.active | work_issue.sized\n    field:", 1
+        )
+    )
+    plan = lib.projection("work_issue.item")
+    assert plan is not None
+    assert plan.frm is not None
+    assert set(plan.indexes) == {"work_issue.active", "work_issue.sized"}
+
+
+def test_a_projection_population_may_only_name_an_index() -> None:
+    """A projection has no depends block, so a bare name in `from` can only be
+    a typo -- and resolving it to the empty set would empty the page while
+    looking like a complete one."""
+    refuses(
+        PROJECTION.replace("    field:", "    from live\n    field:", 1),
+        "not an index",
+    )
+
+
+def test_a_projection_population_needs_an_index_that_exists() -> None:
+    refuses(
+        PROJECTION.replace("    field:", "    from work_issue.imaginary\n    field:", 1),
+        "no index called",
+    )
+
+
+def test_a_projection_population_has_no_row_to_scope_a_bucket_by() -> None:
+    """`from` decides which records become rows, so at the moment it is
+    resolved there is no row whose id a scoped bucket could be read under."""
+    refuses(
+        PROJECTION.replace(
+            "    field:", "    from work_issue.in_container:{work_container}\n    field:", 1
+        ),
+        "no row to scope",
+    )
+
+
+def test_a_projection_population_refuses_a_fan_out_index() -> None:
+    """Read whole, a fan-out index looks up a bucket keyed by the empty string
+    and finds nothing -- an empty page that looks like a complete one."""
+    refuses(
+        PROJECTION.replace("    field:", "    from work_issue.in_container\n    field:", 1),
+        "single bucket",
+    )
+
+
+def test_a_projection_population_must_hold_ids_of_its_own_kind() -> None:
+    """Ids from another space match no record of this kind, so every row would
+    be filtered away and the page would be empty for ever, with nothing
+    thrown."""
+    refuses(
+        PROJECTION.replace("    field:", "    from code_change.open\n    field:", 1),
+        "whose members are",
+    )
+
+
+def test_a_projection_population_refuses_an_age_index() -> None:
+    """An age bucket is resolved against the clock at reindex time, so a
+    population read from one is as stale as the last reconcile -- and no
+    pointer covers an index only a `from` reads, so moving the dial it names
+    would change nothing until the next full sync."""
+    refuses(
+        PROJECTION.replace("    field:", "    from work_issue.stuck\n    field:", 1),
+        "buckets by age against the clock",
+    )
+
+
 # ------------------------------------------------------------- summary --
 
 SUMMARY = (
@@ -1224,6 +1298,62 @@ def test_a_summary_hashes_its_projections_version() -> None:
     )
     assert first is not None and second is not None
     assert first.version != second.version
+
+
+def test_a_projection_population_is_part_of_its_version() -> None:
+    """Which records get a row is what the projection *means*, and the summary
+    follows through its projection's version because every count is over the
+    population."""
+    first = compile_ok(SUMMARY)
+    second = compile_ok(
+        SUMMARY.replace("    field:", "    from work_issue.active\n    field:", 1)
+    )
+    for name, fp, sp in (
+        ("work_issue.item", first.projection("work_issue.item"), second.projection("work_issue.item")),
+        ("work_issue.backlog", first.summary("work_issue.backlog"), second.summary("work_issue.backlog")),
+    ):
+        assert fp is not None and sp is not None
+        assert fp.version != sp.version, f"{name} kept its version across a population change"
+
+
+def test_redefining_an_index_a_population_reads_moves_the_projections_version() -> None:
+    """Hashed by name alone, an index redefinition would change which records
+    get a row while library.json -- the review surface -- showed untouched
+    projection and summary versions, and the wire claimed nothing had moved.
+    A live reading hashes its index specs for exactly this reason; the
+    population does the same."""
+    with_from = SUMMARY.replace("    field:", "    from work_issue.active\n    field:", 1)
+    first = compile_source(BASE + with_from)
+    second = compile_source(
+        BASE.replace(
+            "index work_issue.active where active == true",
+            "index work_issue.active where active == false",
+        )
+        + with_from
+    )
+    for name, fp, sp in (
+        ("work_issue.item", first.projection("work_issue.item"), second.projection("work_issue.item")),
+        ("work_issue.backlog", first.summary("work_issue.backlog"), second.summary("work_issue.backlog")),
+    ):
+        assert fp is not None and sp is not None
+        assert fp.version != sp.version, (
+            f"{name} kept its version while the population's index changed meaning"
+        )
+
+
+def test_a_population_indexes_label_does_not_move_a_version() -> None:
+    """The control: a label is prose."""
+    with_from = SUMMARY.replace("    field:", "    from work_issue.active\n    field:", 1)
+    first = compile_source(BASE + with_from).projection("work_issue.item")
+    second = compile_source(
+        BASE.replace(
+            "index work_issue.active where active == true",
+            'index work_issue.active where active == true label "underway"',
+        )
+        + with_from
+    ).projection("work_issue.item")
+    assert first is not None and second is not None
+    assert first.version == second.version
 
 
 def test_a_summary_may_not_shadow_a_row_value() -> None:

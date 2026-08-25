@@ -36,9 +36,9 @@ from typing import Any
 
 from .engine.change import Outcome
 from .engine.engine import Engine
-from .engine.serve import answer_projection, serve_figure, serve_reading
+from .engine.serve import answer_projection, serve_evidence, serve_figure, serve_reading
 from .lang.plan import Library
-from .results import Result
+from .results import Evidence, Result
 from .schema import Schema
 from .store import EngineStore, FactSource
 
@@ -305,3 +305,47 @@ class Uratori:
             )
 
         return None
+
+    async def evidence(
+        self,
+        tenant: str,
+        name: str,
+        subject: str,
+        settings: Mapping[str, Any] | None = None,
+    ) -> Evidence | None:
+        """The citation behind one stored value: the records (or parts) a
+        figure's row was computed from, joined back to what they cite.
+
+        Figures only, because a figure is the only declaration that stores.
+        Anything else raises `LookupError` with a forwarding address -- where
+        the evidence actually lives -- because "no" with no forwarding address
+        dead-ends the exact reader this surface exists for. `None` means the
+        figure is available and this subject has no row.
+        """
+        document = self._schema.settings_for(settings)
+        lib = self._library
+
+        plan = lib.figure(name)
+        if plan is not None:
+            return await serve_evidence(
+                self._store, self._facts, lib, self._schema, tenant, plan, document, subject
+            )
+
+        reading = lib.reading(name)
+        if reading is not None and reading.source is not None:
+            raise LookupError(
+                f"{name} is a reading: it stores nothing and is recomputed when asked. "
+                f"Its windows summarise {reading.source}'s stored days -- the evidence "
+                "lives there."
+            )
+        if reading is not None:
+            raise LookupError(
+                f"{name} is a live reading: it measures records against the clock and "
+                "stores nothing, so there is no stored citation to show."
+            )
+        if lib.projection(name) is not None or lib.summary(name) is not None:
+            raise LookupError(
+                f"{name} is re-evaluated on every request and stores no values; its "
+                "rows are the evidence, and the results route serves them."
+            )
+        raise LookupError(f"No figure called {name}")

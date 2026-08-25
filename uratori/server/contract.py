@@ -26,6 +26,7 @@ class SchemaIn(BaseModel):
 
     kinds: list[str]
     name_fields: dict[str, str] = Field(default_factory=dict)
+    url_fields: dict[str, str] = Field(default_factory=dict)
     bucket_settings: list[str] = Field(default_factory=list)
     figure_settings: list[str] = Field(default_factory=list)
     reading_settings: list[str] = Field(default_factory=list)

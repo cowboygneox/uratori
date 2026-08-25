@@ -97,6 +97,19 @@ class EngineStore(Protocol):
         """Returns whether it actually moved, which is the release event."""
         ...
 
+    async def index_set(self, tenant: str) -> str | None:
+        """The index-set version this tenant last bucketed under.
+
+        Its own pair of methods rather than a `figure_pointer` row: that
+        table's versions name declarations somebody wrote, and the index set
+        is not one -- it is the hash of every index spec together, and it
+        exists for the indexes no figure reads (a projection's `from`), whose
+        arrival or redefinition otherwise moves no pointer at all.
+        """
+        ...
+
+    async def set_index_set(self, tenant: str, version: str) -> None: ...
+
     # ------------------------------------------------------------- indexes --
 
     async def set_buckets(

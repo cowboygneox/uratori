@@ -109,6 +109,25 @@ class PostgresEngineStore:
         )
         return row is not None
 
+    async def index_set(self, tenant: str) -> str | None:
+        held = await self._pool.fetchval(
+            "select version from index_state where tenant_id = $1", tenant
+        )
+        return held if isinstance(held, str) else None
+
+    async def set_index_set(self, tenant: str, version: str) -> None:
+        await self._pool.execute(
+            """
+            insert into index_state (tenant_id, version, moved_at)
+            values ($1, $2, now())
+            on conflict (tenant_id) do update
+              set version = excluded.version, moved_at = now()
+              where index_state.version is distinct from excluded.version
+            """,
+            tenant,
+            version,
+        )
+
     # -------------------------------------------------------------- indexes --
 
     async def set_buckets(
@@ -574,6 +593,16 @@ create table if not exists figure_pointer (
   settings_fingerprint text not null default '',
   moved_at   timestamptz not null default now(),
   primary key (tenant_id, name)
+);
+
+-- Which index set a tenant last bucketed under: the hash of every index spec
+-- together, recorded only after a rebuild actually ran. It exists for the
+-- indexes no figure reads (a projection's population), whose redefinition
+-- moves no figure_pointer row -- see the engine's index-set tracking.
+create table if not exists index_state (
+  tenant_id  text primary key,
+  version    text not null,
+  moved_at   timestamptz not null default now()
 );
 
 create table if not exists figure_index (

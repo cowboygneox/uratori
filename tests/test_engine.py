@@ -31,8 +31,7 @@ from .world import DEFAULTS, WORLD, compile_source
 
 TENANT = "t1"
 
-LIB = compile_source(
-    """
+LIB_SOURCE = """
 index work_issue.assigned_to from assignee_account_id through team_person.accounts.account_id
 index work_issue.active where active == true
 index code_change.open where state == "open"
@@ -85,7 +84,8 @@ figure team_person.open_mrs:
     calculate:
         sum(sources)
 """
-)
+
+LIB = compile_source(LIB_SOURCE)
 
 
 def test_the_inline_library_reads_fields_that_exist() -> None:
@@ -519,3 +519,191 @@ async def test_a_warm_run_with_no_deletions_does_not_pay_for_the_scan() -> None:
     issue(facts, "CX-4", "jira:ada", True)
     outcome = await engine.run(TENANT, DEFAULTS, written={"work_issue": ["CX-4"]})
     assert all(c.kind == "moved" for c in outcome.changes)
+
+
+# ---------------------------------------------------------- population --
+
+
+POPULATED = compile_source(
+    """
+index code_change.open where state == "open"
+
+# Only the changes still open.
+projection code_change.card:
+    from code_change.open
+
+    field:
+        key = title as text
+
+# Every change; the control.
+projection code_change.every:
+    field:
+        key = title as text
+"""
+)
+
+
+def _change(facts: MemoryFactStore, key: str, state: str) -> None:
+    facts.put(TENANT, "code_change", key, {"title": key, "state": state})
+
+
+async def test_a_projection_from_is_the_definition_of_on_the_page() -> None:
+    """A record outside the population produces no row at all. The control
+    beside it is the rule that matters: without `from` every record still gets
+    a row, so what narrows the page is the declared, versioned population and
+    never a cheap path."""
+    from uratori.engine.serve import project_rows
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    _change(facts, "c1", "open")
+    _change(facts, "c2", "merged")
+    await Engine(store, facts, POPULATED, WORLD).run(TENANT, DEFAULTS, full=True)
+
+    filtered = POPULATED.projection("code_change.card")
+    control = POPULATED.projection("code_change.every")
+    assert filtered is not None and control is not None
+
+    rows, state, _ = await project_rows(store, facts, POPULATED, TENANT, filtered, DEFAULTS, 0.0)
+    assert state.ok is True
+    assert [r.id for r in rows] == ["c1"]
+
+    rows, _, _ = await project_rows(store, facts, POPULATED, TENANT, control, DEFAULTS, 0.0)
+    assert {r.id for r in rows} == {"c1", "c2"}
+
+
+async def test_an_empty_population_is_an_empty_page_and_not_an_absence() -> None:
+    """Records were collected, so the projection must answer Ok with no rows.
+    `nothing-collected` here would claim the sync had never run -- and a summary
+    withheld over a board that genuinely has nothing on the page is a headline
+    that never appears."""
+    from uratori.engine.serve import project_rows
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    _change(facts, "c2", "merged")
+    await Engine(store, facts, POPULATED, WORLD).run(TENANT, DEFAULTS, full=True)
+
+    filtered = POPULATED.projection("code_change.card")
+    assert filtered is not None
+    rows, state, _ = await project_rows(store, facts, POPULATED, TENANT, filtered, DEFAULTS, 0.0)
+    assert state.ok is True, "an empty population is a truthful page, not a missing one"
+    assert rows == []
+
+    # The control that makes the emptiness attributable: the same store serves
+    # the unfiltered projection its row, so the engine demonstrably ran and
+    # the empty page above is the population's answer, not an index that was
+    # never built.
+    control = POPULATED.projection("code_change.every")
+    assert control is not None
+    control_rows, _, _ = await project_rows(store, facts, POPULATED, TENANT, control, DEFAULTS, 0.0)
+    assert [r.id for r in control_rows] == ["c2"]
+
+
+GROWN_BY_ONE_INDEX = """
+index code_change.closed where state == "closed"
+
+# The changes that were closed.
+projection code_change.archived:
+    from code_change.closed
+
+    field:
+        head = title as text
+"""
+"""The deploy every test below stages: the same figures to the version, plus
+one index no figure reads and the projection whose `from` reads it."""
+
+
+async def test_a_new_population_index_is_built_by_the_next_sync_not_the_next_full_one() -> None:
+    """A figure notices its indexes changed because their specs are hashed into
+    its version and the moved pointer forces a cold pass. An index read only by
+    a projection's `from` has no figure and no pointer -- so without a trigger
+    of its own, the deploy that adds one serves an empty-then-partial page with
+    confident headline numbers until the next *full* sync: a population
+    narrowed by the rebuild path rather than by the definition."""
+    from uratori.engine.serve import project_rows
+
+    engine, facts, store = build()
+    await seed(facts)
+    await engine.run(TENANT, DEFAULTS, full=True)
+
+    grown = compile_source(LIB_SOURCE + GROWN_BY_ONE_INDEX)
+    change(facts, "c9:1", "gitlab:ada", "c1", state="closed")
+    change(facts, "c9:2", "gitlab:ada", "c1", state="closed")
+    plan = grown.projection("code_change.archived")
+    assert plan is not None
+
+    # Between the deploy and the tenant's first pass the population's buckets
+    # do not exist, and an Ok page here would be a confident zero -- so the
+    # serving path refuses, the way it refuses a figure behind a deploy.
+    early, state, _ = await project_rows(store, facts, grown, TENANT, plan, DEFAULTS, 0.0)
+    assert state.ok is False and early == []
+    assert state.because == "behind-deploy"
+
+    # The delta poll that follows the deploy: one record written, no full pass.
+    upgraded = Engine(store, facts, grown, WORLD)
+    await upgraded.run(TENANT, DEFAULTS, written={"code_change": ["c9:1"]})
+
+    rows, state2, _ = await project_rows(store, facts, grown, TENANT, plan, DEFAULTS, 0.0)
+    assert state2.ok is True
+    assert {r.id for r in rows} == {"c9:1", "c9:2"}, (
+        "the page after a deploy is the population, not whichever records the "
+        "last delta happened to touch"
+    )
+
+
+async def test_a_population_before_any_pass_is_never_computed_rather_than_empty() -> None:
+    """Records collected, engine never run: the honest answer is the same one
+    a figure gives, `never-computed`, not an Ok page with every record
+    silently missing. A board whose scheduler never fires -- no enabled
+    connection, say -- would otherwise show a truthful-looking empty roadmap
+    for ever."""
+    from uratori.engine.serve import project_rows
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    _change(facts, "c1", "open")
+
+    plan = POPULATED.projection("code_change.card")
+    assert plan is not None
+    rows, state, _ = await project_rows(store, facts, POPULATED, TENANT, plan, DEFAULTS, 0.0)
+    assert state.ok is False and rows == []
+    assert state.because == "never-computed"
+
+
+async def test_a_failed_reindex_is_retried_rather_than_recorded_as_built() -> None:
+    """The index-set version is recorded only after the rebuild actually ran.
+    Recorded up front -- in a `finally`, say -- a pass that dies mid-rebuild
+    marks the tenant built, the next pass sees nothing stale, and the
+    population serves over buckets that were never rebuilt until the hourly
+    full sync repairs it in silence."""
+    from uratori.engine.serve import project_rows
+
+    engine, facts, store = build()
+    await seed(facts)
+    await engine.run(TENANT, DEFAULTS, full=True)
+
+    grown = compile_source(LIB_SOURCE + GROWN_BY_ONE_INDEX)
+    change(facts, "c9:1", "gitlab:ada", "c1", state="closed")
+    change(facts, "c9:2", "gitlab:ada", "c1", state="closed")
+
+    upgraded = Engine(store, facts, grown, WORLD)
+    real_reindex = upgraded._reindex
+
+    async def dies(tenant: str, settings: Any) -> None:
+        raise RuntimeError("the database went away mid-rebuild")
+
+    upgraded._reindex = dies  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        await upgraded.run(TENANT, DEFAULTS, written={"code_change": ["c9:1"]})
+    upgraded._reindex = real_reindex  # type: ignore[method-assign]
+
+    await upgraded.run(TENANT, DEFAULTS, written={"code_change": ["c9:2"]})
+
+    plan = grown.projection("code_change.archived")
+    assert plan is not None
+    rows, state, _ = await project_rows(store, facts, grown, TENANT, plan, DEFAULTS, 0.0)
+    assert state.ok is True
+    assert {r.id for r in rows} == {"c9:1", "c9:2"}, (
+        "the failed rebuild was recorded as done, so the retry never happened"
+    )

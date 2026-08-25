@@ -230,6 +230,75 @@ class Subject(BaseModel):
     by a reader noticing."""
 
 
+class EvidenceMember(BaseModel):
+    """One thing a stored value cites: a record, or (for a rollup) a part.
+
+    `display` is this member's own measurement, rendered by the server. Only a
+    `list` figure has one per record; a count deliberately serves none, because
+    a "1" beside each record would be a number nothing computed, printed on the
+    page whose claim is that every number was.
+
+    `held` is a separate claim from `title is None`, and `False` means one
+    thing: the store was asked for this member and does not have it -- deleted
+    at the source, cascaded away, or never collected. The member is listed
+    either way, because a list quietly shorter than the value beside it breaks
+    the one check this payload exists to enable. `True` also covers "no lookup
+    was made" (the mixed-kind fallback), since "not held" is a claim and only
+    a lookup can earn it.
+
+    `figure` is set on a part: the source figure whose stored row this is. Two
+    operands of one calculation are two different claims, and an unlabelled
+    number under a total is not evidence of anything.
+    """
+
+    key: str
+    title: str | None = None
+    url: str | None = None
+    held: bool = True
+    display: str | None = None
+    figure: str | None = None
+
+
+class Evidence(BaseModel):
+    """The citation behind one stored value, made readable.
+
+    The engine stores every value with the record ids it was computed from
+    (`StoredValue.members`); this is that citation joined back to the records,
+    so a day of durations can be traced to the records that produced each one.
+    Fetched on request rather than carried on `Result`: every row of a served
+    figure dragging its members along would make the common read pay for the
+    rare check.
+
+    Per the clients-compute-nothing rule, members carry rendered text and no
+    numbers -- a list of raw measurements on the wire is something a client
+    could reduce over, which is the door `serve.py`'s `_wire` holds shut.
+
+    `parts` says what the members are. A leaf figure cites records of `kind`;
+    a rollup cites the stored cells it read -- one row per (member, source
+    figure) -- because a total's evidence is its parts, and re-listing the
+    records underneath would be re-deriving the number a second way.
+    """
+
+    figure: str
+    version: str
+    subject: str
+    state: Availability
+    display: str | None = None
+    """The stored value as rendered now, so a caller can notice when a rebuild
+    landed between reading the table and opening this."""
+
+    note: str | None = None
+    """A sentence about this citation the members cannot carry themselves --
+    today, that a stored row's measurements and members disagree in length and
+    the measurements are therefore withheld. Server-rendered prose, because
+    the reason must reach the reader and not stop in a code comment."""
+
+    members: list[EvidenceMember] = Field(default_factory=list)
+    parts: bool = False
+    source: str | None = None
+    kind: str | None = None
+
+
 class Result(BaseModel):
     """Every engine answer, over every transport."""
 

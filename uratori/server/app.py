@@ -42,7 +42,7 @@ from ..facade import DEFAULT_TRAILING, RunReport, Uratori
 from ..lang.check import compile_source
 from ..lang.lex import DefinitionError
 from ..lang.plan import Library
-from ..results import Result
+from ..results import Evidence, Result
 from ..schema import Schema
 from ..store.postgres import PostgresEngineStore, PostgresFactStore
 from . import db
@@ -453,6 +453,40 @@ def create_app(
         if result is None:
             raise HTTPException(status_code=404, detail=f"No definition called {name}")
         return result
+
+    @app.get(
+        "/tenants/{tenant}/evidence/{name}", response_model=Evidence, dependencies=[auth]
+    )
+    async def get_evidence(tenant: str, name: str, subject: str, s: S) -> Evidence:
+        """The records behind one stored value.
+
+        The engine has always stored the citation -- every value is written
+        with the record ids it was computed from -- and this serves it: a
+        bucket of durations read "1.0h, 2.0h" and this is what says which
+        records those were. Figures only, because a figure is the only
+        declaration that stores; the facade's refusals each say where the
+        evidence actually lives, and they travel as the 404 detail.
+        """
+        world, library = _ready(s)
+        facade = _facade(s, world, library)
+        try:
+            answer = await facade.evidence(
+                tenant, name, subject, await db.load_settings(s.pool, tenant)
+            )
+        except LookupError as refusal:
+            raise HTTPException(status_code=404, detail=str(refusal)) from refusal
+        if answer is None:
+            plan = library.figure(name)
+            version = plan.version if plan is not None else "?"
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Nothing is stored for {subject} under {name}@{version}. If the "
+                    "row you came from showed a value, a rebuild has landed between "
+                    "the two reads."
+                ),
+            )
+        return answer
 
     # ------------------------------------------------------------ tenants --
 

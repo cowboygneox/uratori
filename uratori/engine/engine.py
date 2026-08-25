@@ -64,11 +64,27 @@ class Engine:
         only thing that can decide what to do about it.
         """
         lib = self._library
-        if not lib.figures:
+        # Not `not lib.figures`: a projection's `from` reads index buckets with
+        # no figure anywhere near them, so a library of indexes and projections
+        # alone still has indexing work to do -- returning early would serve
+        # every such projection an empty page for ever.
+        if not lib.figures and not lib.indexes:
             return Outcome(changes=(), covered=frozenset(), rebuilt=())
 
         pending = await self._pending(tenant, settings)
         cold = bool(pending) or full
+
+        # A figure notices its indexes changed because their specs are hashed
+        # into its version and the stale pointer forces a cold pass. An index
+        # read only by a projection's `from` has no figure and therefore no
+        # pointer -- so its arrival or redefinition has to be noticed here, or
+        # nothing ever builds it and the projection filters through an empty
+        # bucket: an empty-then-partial page with confident headline numbers
+        # until the next *full* sync, over a population nobody chose. The
+        # exact failure class this file's header names, through the rebuild
+        # path instead of the calculation.
+        indexes_version = _index_set_version(lib)
+        stale_indexes = await self._store.index_set(tenant) != indexes_version
 
         changes: list[Change] = []
         rebuilt: tuple[str, ...] = ()
@@ -84,11 +100,12 @@ class Engine:
                     declaration_source(lib, plan.name) or "",
                     {"unit": plan.unit, "scope": plan.scope, "depth": plan.depth},
                 )
-            # Reindex only when a pending figure actually reads an index. Saving
-            # a threshold rebuilds one figure's values and touches no index row;
-            # saving the timezone re-buckets the lot, which is right. The
-            # observable difference is *work*, so it is reported.
-            if full or any(p.indexes for p in pending):
+            # Reindex only when a pending figure actually reads an index, or
+            # the index set itself moved. Saving a threshold rebuilds one
+            # figure's values and touches no index row; saving the timezone
+            # re-buckets the lot, which is right. The observable difference is
+            # *work*, so it is reported.
+            if full or stale_indexes or any(p.indexes for p in pending):
                 await self._reindex(tenant, settings)
             changes.extend(await self._remove_departed(tenant, settings))
             only = None if full else {p.name for p in pending}
@@ -107,6 +124,17 @@ class Engine:
             changes.extend(
                 await self._apply(tenant, settings, written or {}, deleted or {})
             )
+            if stale_indexes:
+                # The index set moved with no figure pointer moving -- an index
+                # only a `from` reads arrived or changed. Rebuild the lot now
+                # rather than waiting for the next full pass: until it is
+                # built, every projection filtering through it serves whichever
+                # records the deltas since the deploy happened to touch. After
+                # `_apply`, deliberately -- `_apply` diffs a record's old
+                # buckets against its new ones to decide whose figures moved,
+                # and a wholesale rebuild beforehand would erase the "old" half
+                # of that comparison and silence the change stream.
+                await self._reindex(tenant, settings)
             if deleted:
                 # A departed *subject* is not a moved bucket, and the warm path
                 # is driven by bucket movement -- so without this a person
@@ -115,6 +143,13 @@ class Engine:
                 # nothing was deleted, which is every ordinary sync.
                 changes.extend(await self._remove_departed(tenant, settings))
             changes.extend(await self._backfill(tenant, settings))
+
+        if stale_indexes:
+            # After the reindex has actually happened, on whichever path ran.
+            # Recorded up front, a pass that dies mid-rebuild marks the tenant
+            # built, and the population serves over buckets that were never
+            # rebuilt until the next full sync repairs it in silence.
+            await self._store.set_index_set(tenant, indexes_version)
 
         # `covered` is what the host re-dates evidence on, so it must name
         # the kinds this pass *read*, not the kinds the batch happened to
@@ -341,7 +376,19 @@ class Engine:
 
         label = await self._label(tenant, plan, subject)
 
-        if isinstance(result.value, list) and not result.value and held is not None:
+        if plan.grain is not None and isinstance(result.value, list) and not result.value:
+            # A bucket every member was gated off is a bucket nothing happened
+            # in, and a time-keyed figure's subjects are the buckets something
+            # happened in -- so the subject is absent, not an empty list.
+            # Removing a held value keeps that true when a record leaves; *not
+            # writing one* keeps the cold pass in agreement -- it used to store
+            # the empty list, so the next full run removed what the previous
+            # run wrote and the two reported that difference at each other for
+            # ever. Time-keyed only: a roster-scoped subject exists regardless
+            # of its population, so its empty list is a measured "none of it"
+            # and is stored like any other nought.
+            if held is None:
+                return None
             await self._store.remove(tenant, plan.name, plan.version, subject)
             return Change(
                 figure=plan.name,
@@ -649,6 +696,23 @@ def _parts_of(index: CompiledIndex) -> list[Any]:
     from ..lang.check import _index_fields  # local import: avoids a cycle at import time
 
     return _index_fields(index.spec)
+
+
+def _index_set_version(library: Library) -> str:
+    """Every index's name and spec, as one version.
+
+    The same `_index_hash` a figure's version is built from, so the two ways of
+    noticing an index changed cannot disagree about what "changed" means. Prose
+    (a label) is not in it. Settings are not either, and that is safe only
+    because the indexes this pointer exists for -- the ones no figure reads --
+    are predicates and presences: the checker refuses age and fan-out indexes
+    to a projection's `from`, and every other reader of an index carries the
+    relevant dials in its own figure's fingerprint.
+    """
+    from ..lang.check import _index_hash  # local import: avoids a cycle at import time
+    from ..lang.hash import version_of
+
+    return version_of([[name, _index_hash(idx)] for name, idx in sorted(library.indexes.items())])
 
 
 def _pointer_for(plan: FigurePlan, settings: Mapping[str, Any]) -> Any:

@@ -68,6 +68,7 @@ from uratori import Schema
 WORLD = Schema(
     kinds=frozenset({"shop_order", "shop_courier"}),
     name_fields={"shop_courier": "name", "shop_order": "ref"},
+    url_fields={"shop_order": "url"},
     figure_settings=("limits.carrying.over",),
     defaults={"tenant": {"hoursPerDay": 8}, "limits": {"carrying": {"over": 3}}},
 )
@@ -83,6 +84,10 @@ Four things live here, and each is a decision the host owns:
 - **Name fields** say which field of a record carries its human-facing name,
   per kind. A kind with no name field renders as its raw id: honest, and ugly
   enough that the checker refuses to split a figure across such a kind.
+  **Url fields** are the same decision for a record's link -- evidence
+  members carry one so a reader can walk from a cited record to the source
+  system. Declared rather than guessed, because a field that happens to be
+  called `url` is a host convention the engine was never taught.
 - **Settings lists** declare which dials definitions may read -- four lists,
   split by cost. More on these [below](#settings-dials).
 - **Defaults** are the shipped settings document, the base every tenant's
@@ -344,6 +349,14 @@ against a threshold. Band levels are the same story: a `level` is a word from
 the definition, mapped to a colour by the renderer and never re-derived from
 a number, because banding in two places is how a card reads Watch while a
 sort weighs the same person as Good.
+
+Behind every stored value sits its **evidence**: the record ids the value was
+computed from, written beside it at compute time. `GET
+/tenants/{t}/evidence/{figure}?subject=...` joins that citation back to the
+records -- titles and links resolved through the schema's name and url fields
+-- so "2 orders in hand" is traceable to the two orders. It is a separate
+fetch rather than a field on `Result`, because every row dragging its members
+along would make the common read pay for the rare check.
 
 ### The four absences
 

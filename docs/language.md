@@ -911,6 +911,56 @@ figures, and offering them in a projection would be a second way to compute a
 number this engine claims has exactly one. One row about the population is a
 [summary](#summarise----one-row-about-the-population).
 
+### `from` -- the population
+
+Without it, every record of the projection's kind gets a row. With it, the
+page is a declared population:
+
+```
+# Only the work still in flight.
+projection work_issue.board:
+    from work_issue.active | work_issue.sized
+
+    field:
+        key = key as text
+```
+
+`from` is the definition of *on the page*, written where a reader can check
+it -- so which records get a row is part of the projection's version, index
+specs included: redefining an index a population reads moves the projection's
+version (and its summary's), the same way a live reading's indexes move its.
+A population hashed by index names alone would let two different pages cite
+identically.
+
+It speaks the set language a figure's `depends` speaks -- `&`, `|`, `-` over
+index names -- with rules of its own, because there is no subject here:
+`from` decides which records *become* rows, so nothing exists yet to scope a
+bucket by, and there is no depends block for a bare name to refer to. Each
+refusal is a case that would otherwise resolve to the empty set, and an empty
+population is not an error anybody sees -- it is a page with no rows that
+looks like a complete one:
+
+- **Only indexes**, never bare names.
+- **Only predicate and presence indexes** -- a single bucket, read whole. A
+  fan-out index read whole looks for a bucket keyed by the empty string and
+  finds nothing; a scoped bucket (`:{...}`) has no row to be scoped by.
+- **No age indexes.** Age buckets are resolved against the clock at reindex
+  time, and no figure pointer covers an index only a `from` reads -- moving
+  the dial it names would change who is on the page with nothing rebuilding
+  it.
+- **The index's id space must be the projection's kind.** Ids from another
+  space match no record of this kind, so every row would be filtered away
+  with nothing thrown.
+
+The buckets a `from` filters through are stored state, so serving is gated
+the way a figure's pointer gates it: the engine records which index set a
+tenant last bucketed under, only after the rebuild actually ran, and a
+projection whose population was bucketed under a different index set (or
+never) answers `behind-deploy` (or `never-computed`) rather than an `ok` page
+with records silently missing. A population that matches nothing is served
+`ok` with no rows -- records were collected, and the empty page is the
+population's truthful answer.
+
 ### `field` -- values off the record
 
 `<name> = <path> as <type>`, where the type is `text`, `date`, `number` or

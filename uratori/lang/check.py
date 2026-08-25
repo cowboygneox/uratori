@@ -1333,10 +1333,76 @@ class _Checker:
 
     # --------------------------------------------------------- projection --
 
+    def _population(self, d: ProjectDecl, kind: str, expr: SetExpr) -> None:
+        """The `from` clause: which records get a row at all.
+
+        The same set language a figure's `depends` speaks, with rules of its
+        own because there is no subject here: `from` decides which records
+        *become* rows, so nothing exists yet to scope a bucket by, and a
+        projection has no depends block for a bare name to refer to. Each
+        refusal below is a case that would otherwise resolve to the empty set
+        -- and an empty population is not an error anybody sees, it is a page
+        with no rows that looks like a complete one.
+        """
+        if isinstance(expr, SetOp):
+            self._population(d, kind, expr.left)
+            self._population(d, kind, expr.right)
+            return
+        if isinstance(expr, SetRef):
+            raise CheckError(
+                f'projection {d.name} draws its population from "{expr.name}", which is '
+                "not an index. A projection has no depends block to define a named set, "
+                "so `from` may only combine indexes.",
+                expr.line,
+            )
+        assert isinstance(expr, SetIndex)
+        idx = self.indexes.get(expr.index)
+        if idx is None:
+            raise CheckError(
+                f'there is no index called "{expr.index}". Declared: '
+                f"{', '.join(sorted(self.indexes)) or 'none'}.",
+                expr.line,
+            )
+        if isinstance(expr.bucket, BucketScope):
+            raise CheckError(
+                f"projection {d.name}'s population scopes {expr.index} to a subject, but "
+                "`from` decides which records become rows, so there is no row to scope a "
+                "bucket by. Only a predicate or a presence index may appear here.",
+                expr.line,
+            )
+        if idx.bucketed:
+            raise CheckError(
+                f"projection {d.name}'s population reads {expr.index}, which buckets by "
+                f"{' and '.join(p.field for p in _index_fields(idx.spec))} rather than "
+                "holding a single bucket. Read whole it looks for a bucket keyed by the "
+                "empty string, finds nothing, and the page is empty while looking "
+                "complete. Only a predicate or a presence index may appear in `from`.",
+                expr.line,
+            )
+        if isinstance(idx.spec, ByAge):
+            raise CheckError(
+                f"projection {d.name}'s population reads {expr.index}, which buckets by "
+                "age against the clock. Membership there is as stale as the last "
+                "reconcile, and no pointer covers an index only a `from` reads -- moving "
+                "the dial it names would change which records are on the page and "
+                "nothing would rebuild it. Name a predicate or a presence index instead.",
+                expr.line,
+            )
+        if idx.id_space != kind:
+            raise CheckError(
+                f"projection {d.name} is over {kind} and its population reads "
+                f"{expr.index}, whose members are {idx.id_space} ids. Ids from another "
+                f"space match no {kind} record, so every row would be filtered away -- "
+                "an empty page that looks like a complete one, with nothing thrown.",
+                expr.line,
+            )
+
     def _projection(self, d: ProjectDecl) -> None:
         self._claim(d.name, "projection", d.line)
         kind = d.name.split(".", 1)[0]
         self._fact_kind(kind, f"projection {d.name} is over", d.line)
+        if d.frm is not None:
+            self._population(d, kind, d.frm)
 
         bound: dict[str, str] = {}
         moments: set[str] = set()
@@ -1457,7 +1523,7 @@ class _Checker:
             settings=tuple(settings),
         )
         self.projections.append(
-            ProjectPlan(**{**plan.__dict__, "version": version_of(_project_hash(plan))})
+            ProjectPlan(**{**plan.__dict__, "version": version_of(_project_hash(plan, self.indexes))})
         )
 
     # ------------------------------------------------------------ summary --
@@ -2111,11 +2177,18 @@ def _versioned_reading(
     return ReadingPlan(**{**plan.__dict__, "version": version_of(body)})
 
 
-def _project_hash(plan: ProjectPlan) -> object:
+def _project_hash(plan: ProjectPlan, indexes: dict[str, CompiledIndex]) -> object:
     return {
         "name": plan.name,
         "kind": plan.kind,
         "from": _set_hash(plan.frm) if plan.frm is not None else None,
+        # The population's index *specs* beside the expression, for the reason
+        # a live reading hashes its own (above): with names alone, redefining
+        # a predicate changes which records get a row while two different
+        # definitions cite identically -- on library.json, the one surface the
+        # review reads, and on the wire. `or None` so a projection with no
+        # `from` stays on its historic hash; `canonical` drops absent keys.
+        "from_indexes": [_index_hash(indexes[n]) for n in plan.indexes] or None,
         "fields": [
             {
                 "name": n,

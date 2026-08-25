@@ -72,6 +72,11 @@ WORLD = Schema(
         "data_connection": "label",
         "config_setting": "path",
     },
+    url_fields={
+        "work_issue": "url",
+        "work_container": "url",
+        "code_change": "url",
+    },
     bucket_settings=("tenant.timezone", *_AGE),
     figure_settings=(
         "thresholds.openChanges.warn",

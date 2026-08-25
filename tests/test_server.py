@@ -241,6 +241,7 @@ async def test_a_schema_change_that_breaks_the_definitions_is_refused_whole(
     # -- but that the loaded definitions name on their first line.
     smaller["kinds"] = ["shop_courier"]
     smaller["name_fields"] = {"shop_courier": "name"}
+    smaller["url_fields"] = {}
     refused = await server.http.put("/schema", json=smaller)
     assert refused.status_code == 422
     assert "do not compile" in refused.json()["detail"]
@@ -276,6 +277,14 @@ async def test_deleting_a_tenant_reports_what_went(server: Server) -> None:
 
     after = (await server.http.get("/tenants/t1/results/shop_courier.carrying")).json()
     assert after["state"]["because"] == "never-computed"
+
+    # The index-set marker is tenant state and must go with the tenant: left
+    # behind, it says "the population's buckets are built" about buckets that
+    # no longer exist -- the exact claim the projection gate trusts.
+    marker = await server.app.state.uratori.pool.fetchval(
+        "select version from index_state where tenant_id = $1", "t1"
+    )
+    assert marker is None
 
 
 async def test_the_token_gates_everything_but_health(pg_dsn: str) -> None:
@@ -449,3 +458,123 @@ async def test_a_served_answer_carries_the_definitions_explanation(server: Serve
     answer = await server.http.get("/tenants/t1/results/shop_courier.carrying")
     assert answer.status_code == 200
     assert answer.json()["doc"] == "How many orders this courier is carrying right now."
+
+
+# ------------------------------------------------------------- evidence --
+
+
+ORDERS_WITH_URLS = {
+    "o1": {"ref": "A-1", "courier_id": "c1", "status": "riding", "url": "https://shop/o1"},
+    "o2": {"ref": "A-2", "courier_id": "c1", "status": "riding", "url": "https://shop/o2"},
+}
+
+BOARD_EXTRA = """
+
+# Orders still on the road.
+projection shop_order.board:
+    from shop_order.open
+
+    field:
+        ref = ref as text
+"""
+
+
+async def test_the_evidence_route_serves_the_records_behind_a_stored_value(
+    server: Server,
+) -> None:
+    """The whole chain over HTTP: the citation stored by the pass, joined back
+    to the records the host pushed, titles and links resolved through the
+    schema's own declarations -- because "the rule is right and the route
+    stopped calling it" is the gap every serving bug lives in."""
+    await _teach(server.http)
+    pushed = await server.http.post(
+        "/tenants/t1/facts",
+        json={"writes": {"shop_courier": COURIER, "shop_order": ORDERS_WITH_URLS}},
+    )
+    assert pushed.status_code == 200, pushed.text
+
+    answer = await server.http.get("/tenants/t1/evidence/shop_courier.carrying?subject=c1")
+    assert answer.status_code == 200, answer.text
+    body = answer.json()
+    assert body["state"]["ok"] is True
+    assert body["kind"] == "shop_order"
+    assert body["display"] == "2"
+    assert [m["key"] for m in body["members"]] == ["o1", "o2"]
+    assert [m["title"] for m in body["members"]] == ["A-1", "A-2"]
+    assert [m["url"] for m in body["members"]] == ["https://shop/o1", "https://shop/o2"]
+    assert all(m["held"] for m in body["members"])
+    # A count's members carry no per-record measurement: a "1" beside each
+    # record would be a number nothing computed.
+    assert [m["display"] for m in body["members"]] == [None, None]
+
+
+async def test_the_evidence_refusals_each_say_where_the_evidence_lives(
+    server: Server,
+) -> None:
+    """Collapsed into one generic "no figure called X", the reader who arrived
+    from a projection row would be told their number does not exist -- when it
+    exists and simply stores nothing."""
+    put = await server.http.put("/schema", json=COURIER_WORLD.to_document())
+    assert put.status_code == 200, put.text
+    put = await server.http.put("/definitions", json={"source": COURIER_SOURCE + BOARD_EXTRA})
+    assert put.status_code == 200, put.text
+
+    projected = await server.http.get("/tenants/t1/evidence/shop_order.board?subject=o1")
+    assert projected.status_code == 404
+    assert "rows are the evidence" in projected.json()["detail"]
+
+    unknown = await server.http.get("/tenants/t1/evidence/no.such?subject=o1")
+    assert unknown.status_code == 404
+    # The body, not just the status: an unmatched path is also a 404, so a
+    # status-only assertion would stay green with the whole route deleted.
+    assert "No figure called no.such" in unknown.json()["detail"]
+
+
+async def test_evidence_for_a_subject_the_store_does_not_hold_is_a_404_with_the_reason(
+    server: Server,
+) -> None:
+    await _teach(server.http)
+    pushed = await server.http.post(
+        "/tenants/t1/facts",
+        json={"writes": {"shop_courier": COURIER, "shop_order": ORDERS_WITH_URLS}},
+    )
+    assert pushed.status_code == 200, pushed.text
+
+    answer = await server.http.get("/tenants/t1/evidence/shop_courier.carrying?subject=c9")
+    assert answer.status_code == 404
+    assert "c9" in answer.json()["detail"]
+
+
+# ------------------------------------------------------------ population --
+
+
+async def test_a_projection_population_is_enforced_over_http(server: Server) -> None:
+    """`from` end to end: the pass that pushes facts is also the pass that
+    buckets the population, so the very first read after it must already be
+    the filtered page -- and a delivered order must never get a row."""
+    put = await server.http.put("/schema", json=COURIER_WORLD.to_document())
+    assert put.status_code == 200, put.text
+    put = await server.http.put("/definitions", json={"source": COURIER_SOURCE + BOARD_EXTRA})
+    assert put.status_code == 200, put.text
+
+    pushed = await server.http.post(
+        "/tenants/t1/facts",
+        json={
+            "writes": {
+                "shop_courier": COURIER,
+                "shop_order": {
+                    "o1": {"ref": "A-1", "courier_id": "c1", "status": "riding"},
+                    "o2": {"ref": "A-2", "courier_id": "c1", "status": "delivered"},
+                },
+            }
+        },
+    )
+    assert pushed.status_code == 200, pushed.text
+
+    answer = await server.http.get("/tenants/t1/results/shop_order.board")
+    assert answer.status_code == 200, answer.text
+    result = answer.json()
+    assert result["state"]["ok"] is True
+    assert [s["id"] for s in result["subjects"]] == ["o1"], (
+        "the delivered order got a row: the population was not enforced"
+    )

@@ -218,6 +218,7 @@ async def remove_tenant(pool: asyncpg.Pool[Any], tenant: str) -> tuple[int, int]
         ("fact", "tenant_id"),
         ("figure_pointer", "tenant_id"),
         ("figure_index", "tenant_id"),
+        ("index_state", "tenant_id"),
         ("figure_value", "tenant_id"),
         ("tenant_settings", "tenant_id"),
     ):

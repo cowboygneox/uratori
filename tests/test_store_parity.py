@@ -53,6 +53,26 @@ async def test_pointers_report_movement_and_only_movement(
     assert (await s.pointers(tenant)) == {"f": Pointer("v1", "fp2")}
 
 
+async def test_the_index_set_pointer_round_trips_per_tenant(
+    store: tuple[EngineStore, str],
+) -> None:
+    """The one pointer that is not a figure's: which index set this tenant
+    last bucketed under. A store that answered another tenant's version --
+    or invented one before the first rebuild -- would let a projection's
+    population serve over buckets a different library built."""
+    s, tenant = store
+    assert await s.index_set(tenant) is None, (
+        "before any rebuild there is no version, and None is what forces the first one"
+    )
+    await s.set_index_set(tenant, "isv1")
+    assert await s.index_set(tenant) == "isv1"
+    await s.set_index_set(tenant, "isv1")
+    assert await s.index_set(tenant) == "isv1"
+    await s.set_index_set(tenant, "isv2")
+    assert await s.index_set(tenant) == "isv2"
+    assert await s.index_set("some-other-tenant") is None
+
+
 async def test_bucket_diffs_are_the_invalidation_signal(
     store: tuple[EngineStore, str],
 ) -> None:

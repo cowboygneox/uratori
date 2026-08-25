@@ -17,11 +17,26 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from ..lang.ast import Count, Extreme, ListOf, SetExpr, SetIndex, SetOp, SetRef
+from ..lang.ast import Sum as LangSum
 from ..lang.plan import FigurePlan, Library, ProjectPlan, ReadingPlan, SummarisePlan, Value
 from ..lang.settings import fingerprint as settings_fingerprint
-from ..results import Level, Ok, Result, Row, Subject, Unavailable, Unit, Window
-from ..store import EngineStore
+from ..results import (
+    Evidence,
+    EvidenceMember,
+    Level,
+    Ok,
+    Result,
+    Row,
+    Subject,
+    Unavailable,
+    Unit,
+    Window,
+)
+from ..schema import Schema
+from ..store import EngineStore, FactSource, StoredValue
 from .buckets import SEPARATOR, day_range, subject_of
+from .engine import _index_set_version  # one hash of the index set, shared deliberately
 from .evaluate import band_of
 from .project import ProjectedRow, RenderedFlag, Summary, format_value
 from .read import (
@@ -212,6 +227,217 @@ def _level_word(word: str | None) -> Level:
     good, which a missing `case` would do if green were the default.
     """
     return word if word is not None else "unknown"
+
+
+# ------------------------------------------------------------ evidence --
+
+
+async def serve_evidence(
+    store: EngineStore,
+    facts: FactSource,
+    library: Library,
+    schema: Schema,
+    tenant: str,
+    plan: FigurePlan,
+    settings: Mapping[str, Any],
+    subject: str,
+) -> Evidence | None:
+    """One stored value's citation, joined back to what it cites.
+
+    Returns `None` when the figure is available and this subject has no row --
+    an address that names nothing, which a route turns into a 404 with the
+    reason. An unavailable figure answers with its state instead, because an
+    empty members list under an Ok state would read as "this value cites
+    nothing": a confident claim about a figure the tenant has never run.
+    """
+    state = await availability(store, library, tenant, plan, settings)
+    if not isinstance(state, Ok):
+        return Evidence(
+            figure=plan.name, version=plan.version, subject=subject, state=state
+        )
+
+    stored = await store.value(tenant, plan.name, plan.version, subject)
+    if stored is None:
+        return None
+
+    # `values[i] measures members[i]` is a contract the evaluator keeps by
+    # construction. A stored row that breaks it -- written by some earlier era
+    # of the engine -- must not be repaired by pairing what aligns: that prints
+    # the right numbers under the wrong records, which is worse than printing
+    # none. The records still list; the measurements are withheld, and `note`
+    # says so -- without it the panel is byte-identical to a healthy count's,
+    # and the reason would exist only in this comment.
+    values: list[float | None] | None = None
+    note: str | None = None
+    if isinstance(stored.value, list):
+        if len(stored.value) == len(stored.members):
+            values = stored.value
+        else:
+            note = (
+                "This row's stored measurements and its citation disagree in length "
+                "-- a row written by an older engine. The records are listed and no "
+                "measurement is shown against any of them, because pairing the ones "
+                "that align would print the right numbers under the wrong records."
+            )
+
+    def measurement(position: int) -> str | None:
+        if values is None or values[position] is None:
+            return None
+        return format_value(values[position], plan.unit, settings)
+
+    common = {
+        "figure": plan.name,
+        "version": plan.version,
+        "subject": subject,
+        "state": state,
+        "display": format_value(stored.value, plan.unit, settings),
+        "note": note,
+    }
+
+    if plan.combines:
+        # A rollup: its evidence is the cells it read, not the records
+        # underneath them -- re-listing those would re-derive the number a
+        # second way, which is the thing writing it over other figures was
+        # meant to delete.
+        #
+        # One row per (member, source), every source, in declaration order.
+        # Taking the first source holding a row and stopping would print the
+        # operand `max` rejected as the sole citation for the one it chose,
+        # and show a quotient's numerator with the denominator invisible.
+        # Each row names its figure, because two operands of one calculation
+        # are two different claims and an unlabelled number under a total is
+        # not evidence of anything.
+        #
+        # A (member, source) pair with no row at the source's live version is
+        # a different claim from a part holding nought ("the cell has gone"
+        # explains a total that looks too big; a nought never does), so it is
+        # listed and marked rather than dropped.
+        sources = list(dict.fromkeys(src for src, _ in plan.combines.values()))
+        members = []
+        for key in stored.members:
+            for name in sources:
+                below = library.figure(name)
+                part: StoredValue | None = (
+                    await store.value(tenant, name, below.version, key)
+                    if below is not None
+                    else None
+                )
+                members.append(
+                    EvidenceMember(
+                        key=key,
+                        figure=name,
+                        title=part.label if part is not None else None,
+                        held=part is not None,
+                        display=(
+                            format_value(part.value, below.unit, settings)
+                            if part is not None and below is not None
+                            else None
+                        ),
+                    )
+                )
+        return Evidence(
+            **common,
+            members=members,
+            parts=True,
+            source=sources[0] if len(sources) == 1 else None,
+        )
+
+    kind = _cited_kind(plan, library)
+    if kind is not None:
+        # A leaf figure: the members are record keys in one fact kind. Which
+        # kind is read off the indexes of the set the calculation actually
+        # names -- not off `scope_index`, which fans the figure out and need
+        # not be what `calculate` counts (a figure scoped by one kind can
+        # count a tenant-wide set of another). And it is the index's
+        # `id_space`, not its `kind`, because `keyed as` buckets one kind's
+        # records under another kind's ids. Either mistake looks the same:
+        # titles looked up in the wrong table, every member marked missing.
+        held = {
+            row.key: row.value
+            for row in await facts.some(tenant, kind, list(stored.members))
+        }
+        name_field = schema.name_fields.get(kind)
+        url_field = schema.url_fields.get(kind)
+        members = []
+        for position, key in enumerate(stored.members):
+            value = held.get(key)
+            title = _field_of(value, name_field)
+            url = _field_of(value, url_field)
+            members.append(
+                EvidenceMember(
+                    key=key,
+                    title=title,
+                    url=url,
+                    held=value is not None,
+                    display=measurement(position),
+                )
+            )
+        return Evidence(**common, members=members, kind=kind)
+
+    # The members span more than one fact kind (a ladder over sets of two
+    # kinds), so there is no one table to look titles up in. The keys are
+    # served bare with nothing claimed about them -- `held` stays True because
+    # "not held" is a claim, and no lookup was made that could earn it.
+    return Evidence(**common, members=[EvidenceMember(key=k) for k in stored.members])
+
+
+def _field_of(value: Mapping[str, Any] | None, field: str | None) -> str | None:
+    """A record's schema-declared field, or nothing -- never a guess."""
+    from .buckets import read_path
+
+    if value is None or field is None:
+        return None
+    found = read_path(value, field)
+    text = found[0] if found else None
+    return text if isinstance(text, str) and text else None
+
+
+def _cited_kind(plan: FigurePlan, library: Library) -> str | None:
+    """The one fact kind a figure's members are keys of, or None.
+
+    Reads the set the calculation names (every record-set shape carries one)
+    and resolves it to the id spaces of the indexes underneath, following
+    references. The ladder and arithmetic shapes name no set, so their
+    members are the union of everything in `depends` -- those resolve only
+    when every set agrees on one id space, which is exactly when a lookup is
+    honest.
+    """
+    calc = plan.calculate
+    if isinstance(calc, (Count, ListOf, Extreme)) or (
+        isinstance(calc, LangSum) and calc.measure is not None
+    ):
+        names = [calc.set]
+    else:
+        names = list(plan.sets)
+
+    spaces: set[str] = set()
+    seen: set[str] = set()
+    for name in names:
+        _spaces_of(plan.sets.get(name), plan.sets, library, spaces, seen)
+    return spaces.pop() if len(spaces) == 1 else None
+
+
+def _spaces_of(
+    expr: SetExpr | None,
+    sets: Mapping[str, SetExpr],
+    library: Library,
+    out: set[str],
+    seen: set[str],
+) -> None:
+    if expr is None:
+        return
+    if isinstance(expr, SetIndex):
+        index = library.indexes.get(expr.index)
+        if index is not None:
+            out.add(index.id_space)
+    elif isinstance(expr, SetRef):
+        if expr.name in seen:
+            return
+        seen.add(expr.name)
+        _spaces_of(sets.get(expr.name), sets, library, out, seen)
+    elif isinstance(expr, SetOp):
+        _spaces_of(expr.left, sets, library, out, seen)
+        _spaces_of(expr.right, sets, library, out, seen)
 
 
 # ------------------------------------------------------------ readings --
@@ -612,6 +838,34 @@ async def project_rows(
             detail=f"no {plan.kind} records have been collected for this board",
         ), []
 
+    if plan.frm is not None:
+        # The discipline a figure's pointer enforces, applied to the
+        # population. The buckets `from` filters through are stored state,
+        # and the engine records the index-set version only after a rebuild
+        # has actually run -- so a mismatch here means the population's
+        # buckets were built by a different library (or never built), and
+        # filtering through them would serve an Ok page with records
+        # silently missing: a confident zero on exactly the screen the
+        # population gate was written for.
+        built = await store.index_set(tenant)
+        if built != _index_set_version(library):
+            return [], Unavailable(
+                because="never-computed" if built is None else "behind-deploy",
+                detail=(
+                    "this board has not bucketed the population's indexes yet; "
+                    "the next sync will"
+                    if built is None
+                    else "the population's buckets were built under a previous "
+                    "index set; the next sync rebuilds them"
+                ),
+            ), []
+
+        # After the emptiness check, deliberately: `nothing-collected` is a
+        # claim about the sync, and a population that matches nothing is a
+        # truthful empty page over records that were collected.
+        wanted = await _population(store, tenant, plan)
+        records = [record for record in records if record.key in wanted]
+
     values: dict[str, dict[tuple[str, bool], Value]] = {}
     missing: list[str] = []
     for _binding, figure_name, _unit, band in plan.reads:
@@ -645,6 +899,37 @@ async def project_rows(
         for record in records
     ]
     return rows, Ok(), missing
+
+
+async def _population(store: EngineStore, tenant: str, plan: ProjectPlan) -> frozenset[str]:
+    """Which records are on the page at all: the projection's `from`, resolved.
+
+    Resolved by the same walker a figure's `depends` runs through, deliberately
+    -- a second implementation of set algebra would be two answers to "who is in
+    this population". The checker has already refused scoped buckets, fan-out
+    indexes and named sets here, so every index is a single bucket, the subject
+    the resolver wants is never read, and the readers beyond buckets are
+    unreachable.
+    """
+    from .evaluate import Readers, _resolve
+
+    members = {name: await store.members(tenant, name, "") for name in plan.indexes}
+
+    def read_bucket(index: str, bucket: str | None) -> frozenset[str]:
+        return members.get(index, frozenset())
+
+    def unreachable(*_: str) -> Any:
+        raise AssertionError("a projection population reads nothing but buckets")
+
+    readers = Readers(
+        buckets=read_bucket,
+        measures=unreachable,
+        moments=unreachable,
+        parts=unreachable,
+        settings=unreachable,
+    )
+    assert plan.frm is not None
+    return _resolve(plan.frm, "", {}, readers)
 
 
 async def _joined(

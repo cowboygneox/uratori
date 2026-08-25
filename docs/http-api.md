@@ -135,6 +135,7 @@ field for field:
 curl -s -X PUT "$BASE/schema" -H "$AUTH" -H 'Content-Type: application/json' -d '{
   "kinds": ["shop_courier", "shop_order"],
   "name_fields": {"shop_courier": "name", "shop_order": "ref"},
+  "url_fields": {"shop_order": "url"},
   "figure_settings": ["limits.carrying.over"],
   "defaults": {"tenant": {"hoursPerDay": 8}, "limits": {"carrying": {"over": 3}}}
 }'
@@ -144,6 +145,7 @@ curl -s -X PUT "$BASE/schema" -H "$AUTH" -H 'Content-Type: application/json' -d 
 |---|---|---|
 | `kinds` | `[string]` | The closed set of fact kinds definitions may name. Each must lex as one identifier (`[A-Za-z_][A-Za-z0-9_]*`): `-` is the language's set-difference operator and `.` would collide with figure names, so a kind containing either is refused with an explanation. |
 | `name_fields` | `{kind: field}` | Which field of a record carries its human name, per kind. The engine freezes this name when a value is written. A name field for a kind not in `kinds` is refused as a typo rather than ignored -- ignoring it would leave the intended kind rendering raw ids for ever while everything looked configured. |
+| `url_fields` | `{kind: field}` | The same decision for a record's link: which field holds the address of the record in the source system, per kind. Evidence members carry it so a reader can walk from a cited record to the source. A kind with no url field serves bare titles -- declared rather than guessed, because a field that happens to be called `url` is a host convention the engine was never taught. Stray kinds are refused, like `name_fields`. |
 | `bucket_settings` | `[string]` | Dial paths a definition may read, split by what turning the dial costs: a bucket setting re-buckets a tenant's whole history... |
 | `figure_settings` | `[string]` | ...a figure setting recomputes one value per subject... |
 | `reading_settings` | `[string]` | ...and a reading or |
@@ -450,6 +452,58 @@ second route would be duplicate arithmetic wearing a shortcut's name.
 - `501` for a reading declared `live` -- declared but not yet servable, and
   "no such definition" and "not built yet" send a caller to different fixes.
 - `400` when the engine refuses the request, in its own words.
+
+### `GET /tenants/{tenant}/evidence/{name}?subject={id}`
+
+The records behind one stored value. The engine stores every value with the
+record ids it was computed from; this joins that citation back to the records,
+so a row reading "1.0h, 2.0h" can be traced to the two records that produced
+it. Fetched on request rather than carried on `Result`, because every row of a
+served figure dragging its members along would make the common read pay for
+the rare check.
+
+```bash
+curl -s "$BASE/tenants/t1/evidence/shop_courier.carrying?subject=c1" -H "$AUTH"
+```
+
+```json
+{
+  "figure": "shop_courier.carrying",
+  "version": "7a65feeb434b",
+  "subject": "c1",
+  "state": {"ok": true},
+  "display": "2",
+  "members": [
+    {"key": "o1", "title": "A-1", "url": "https://shop/o1", "held": true, "display": null},
+    {"key": "o2", "title": "A-2", "url": "https://shop/o2", "held": true, "display": null}
+  ],
+  "parts": false,
+  "kind": "shop_order"
+}
+```
+
+Each member is one thing the value cites. `title` and `url` are resolved
+through the schema's `name_fields` and `url_fields`; `held: false` means the
+store was asked for this record and does not have it -- deleted at the source,
+or never collected -- and the member is listed anyway, because a list quietly
+shorter than the value beside it breaks the one check this payload exists to
+enable. `display` is the member's own measurement, rendered: only a `list`
+figure has one per record (a count deliberately serves none -- a "1" beside
+each record would be a number nothing computed). For a rollup, `parts` is
+true and the members are the stored cells it read, each naming its source
+`figure`, because a total's evidence is its parts and re-listing the records
+underneath would re-derive the number a second way.
+
+When the figure is unavailable the response carries its `state` and no
+members -- an empty list under an `ok` state would read as "this value cites
+nothing", a confident claim about a figure the tenant has never run.
+
+- `200` with the `Evidence` object above.
+- `404` for anything that is not a figure, each naming where the evidence
+  actually lives: a windowed reading forwards to the figure whose stored days
+  it summarises, a live reading stores nothing, a projection's or summary's
+  *rows* are the evidence. Also `404` for a subject with no stored row, with
+  the reason.
 
 ### `DELETE /tenants/{tenant}`
 

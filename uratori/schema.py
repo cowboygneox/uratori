@@ -20,6 +20,11 @@ Four things live here, and each is a decision the host owns:
   kind. The engine freezes a subject's rendered name when a value is written,
   and a kind with no name field renders as its raw id -- honest, and ugly
   enough that the checker refuses to split a figure across such a kind.
+  **Url fields** are the same decision for a record's link: evidence members
+  carry one so a reader can walk from a cited record to the source system,
+  and a kind with no url field serves bare titles. Declared rather than
+  guessed, because a field that happens to be called "url" is a host
+  convention the engine was never taught.
 - **The four settings lists.** Which dials a definition may name, split by what
   turning the dial *costs*: a bucket setting re-buckets a tenant's whole
   history, a figure setting recomputes one value per subject, a reading or
@@ -60,6 +65,7 @@ EFFORT_HOURS_SETTING = "tenant.hoursPerDay"
 class Schema:
     kinds: frozenset[str]
     name_fields: Mapping[str, str] = field(default_factory=dict)
+    url_fields: Mapping[str, str] = field(default_factory=dict)
     bucket_settings: tuple[str, ...] = ()
     figure_settings: tuple[str, ...] = ()
     reading_settings: tuple[str, ...] = ()
@@ -82,6 +88,13 @@ class Schema:
             # renders raw ids for ever while everything looks configured.
             raise ValueError(
                 f"name fields declared for unknown kinds: {', '.join(sorted(strays))}"
+            )
+        stray_urls = set(self.url_fields) - set(self.kinds)
+        if stray_urls:
+            # The same typo, one field over: ignored, the kind it was meant for
+            # serves linkless evidence for ever while everything looks configured.
+            raise ValueError(
+                f"url fields declared for unknown kinds: {', '.join(sorted(stray_urls))}"
             )
 
     def is_kind(self, name: str) -> bool:
@@ -116,6 +129,7 @@ class Schema:
         return {
             "kinds": sorted(self.kinds),
             "name_fields": dict(self.name_fields),
+            "url_fields": dict(self.url_fields),
             "bucket_settings": list(self.bucket_settings),
             "figure_settings": list(self.figure_settings),
             "reading_settings": list(self.reading_settings),
@@ -128,6 +142,7 @@ class Schema:
         return cls(
             kinds=frozenset(document.get("kinds", ())),
             name_fields=dict(document.get("name_fields", {})),
+            url_fields=dict(document.get("url_fields", {})),
             bucket_settings=tuple(document.get("bucket_settings", ())),
             figure_settings=tuple(document.get("figure_settings", ())),
             reading_settings=tuple(document.get("reading_settings", ())),

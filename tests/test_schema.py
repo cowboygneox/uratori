@@ -23,6 +23,7 @@ from uratori.lang.settings import fingerprint
 COURIER_WORLD = Schema(
     kinds=frozenset({"shop_order", "shop_courier"}),
     name_fields={"shop_courier": "name", "shop_order": "ref"},
+    url_fields={"shop_order": "url"},
     figure_settings=("limits.carrying.over",),
     defaults={"tenant": {"hoursPerDay": 8}, "limits": {"carrying": {"over": 3}}},
 )
@@ -128,6 +129,13 @@ def test_a_kind_must_lex_as_one_identifier() -> None:
 def test_a_name_field_for_an_unknown_kind_is_refused() -> None:
     with pytest.raises(ValueError, match="unknown kinds"):
         Schema(kinds=frozenset({"shop_order"}), name_fields={"shop_orders": "ref"})
+
+
+def test_a_url_field_for_an_unknown_kind_is_refused() -> None:
+    """The same typo, one field over: ignored, the kind it was meant for would
+    serve linkless evidence for ever while everything looked configured."""
+    with pytest.raises(ValueError, match="unknown kinds"):
+        Schema(kinds=frozenset({"shop_order"}), url_fields={"shop_orders": "url"})
 
 
 def test_schema_documents_round_trip() -> None:
