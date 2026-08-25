@@ -15,10 +15,8 @@ a screen.
 Definitions compile against a [`Schema`](concepts.md) -- the host's one-time
 declaration of which fact kinds exist, which field carries a record's name,
 and which settings dials a definition may read. Source reaches the engine
-either as a string handed to `compile_source` (see [the Python
-library](library.md)) or over `PUT /definitions` (see [the HTTP
-API](http-api.md)), where a definition that does not compile is refused whole,
-in the checker's own words.
+over `PUT /definitions` (see [the HTTP API](http-api.md)), where a definition
+that does not compile is refused whole, in the checker's own words.
 
 ---
 

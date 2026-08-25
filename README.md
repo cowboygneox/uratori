@@ -5,7 +5,7 @@
 
 **A definition engine you can deploy.** Write what your numbers *mean* in a
 small definition language; push facts at the engine; read back computed,
-versioned, explainable answers -- over HTTP, over a websocket, or in-process.
+versioned, explainable answers -- over HTTP and over a websocket.
 
 裏付け (*urazuke*) is the backing a claim has; 裏取り (*uratori*) is the act of
 going and getting it. This engine grew out of [urazuke](https://urazuke.com),
@@ -88,33 +88,6 @@ container, `localhost` is the container.
 | [Setup](docs/setup.md) | Deploying the container: environment, database, token, health, upgrades. |
 | [HTTP & websocket API](docs/http-api.md) | Every route and frame, with request and response shapes. |
 | [The definition language](docs/language.md) | Writing `.fig`: indexes, measures, figures, readings, projections. |
-| [The Python library](docs/library.md) | Embedding the engine in-process: `Schema`, `Uratori`, stores, callbacks. |
-
-## The library
-
-The service is a thin wrapper; everything is importable. In sketch (the
-runnable version, line by line, is [the library guide](docs/library.md)):
-
-```python
-from uratori import Schema, Uratori, MemoryEngineStore, MemoryFactStore, compile_source
-
-schema = Schema(kinds=frozenset({"shop_order", "shop_courier"}),
-                name_fields={"shop_courier": "name"})
-library = compile_source(open("defs.fig").read(), schema)
-
-facts = MemoryFactStore()
-engine = Uratori(schema=schema, library=library, store=MemoryEngineStore(), facts=facts)
-engine.subscribe(lambda tenant, outcome, results: ...)   # every movement, served
-
-facts.put("t1", "shop_courier", "c1", {"name": "Aki"})
-facts.put("t1", "shop_order", "o1", {"ref": "A-1", "courier_id": "c1", "status": "riding"})
-report = await engine.run("t1", written={"shop_courier": ["c1"], "shop_order": ["o1"]})
-```
-
-Stores are protocols: `uratori.store.postgres` ships the default pair (the
-`postgres` extra; install from a checkout for now -- PyPI is planned), the
-in-memory pair is complete and shipped, and a parity suite keeps the two one
-behaviour.
 
 ## The rules it inherits
 

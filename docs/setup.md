@@ -7,8 +7,7 @@ carries that matters is which build it is. This page takes you from nothing to
 a production-shaped deployment: image, environment, database, token, probes,
 proxy, upgrades.
 
-If you want the engine in-process rather than as a service, none of this
-applies; see [the Python library](library.md). For what to do with the server
+For what to do with the server
 once it is running -- declaring a schema, loading definitions, pushing facts
 -- see the [HTTP & websocket API](http-api.md), and [Concepts](concepts.md)
 for the model behind it.

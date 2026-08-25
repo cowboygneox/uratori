@@ -2,8 +2,7 @@
 
 Every route the service exposes, every frame the socket carries, and the one
 envelope every answer travels in. The service is a thin wrapper over the
-engine ([the Python library](library.md) is the same machinery in-process),
-so nothing here computes anything of its own: HTTP is how a host teaches the
+engine, so nothing here computes anything of its own: HTTP is how a host teaches the
 engine and reads it, and the socket is how a screen hears about movement
 without polling.
 
@@ -222,7 +221,10 @@ name and **version** -- the content hash of its semantics (prose edits do not
 fork it; see [Concepts](concepts.md)). `indexes` and `measures` are counts,
 since neither is served by name.
 
-The versions are the review surface. Compile the same source yourself --
+The versions are the review surface. Compile the same source yourself, in
+your build, with the same package the image ships (`pip install
+git+https://github.com/cowboygneox/uratori` -- a verification tool for CI,
+not an API to build on) --
 
 ```python
 from uratori import Schema, compile_source

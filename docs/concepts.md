@@ -11,9 +11,8 @@ This page is the model in full. It uses one running example throughout: a
 courier dispatch service, whose world is orders and couriers, and whose
 screens want to know how loaded each courier is. The other pages assume this
 one: [the definition language](language.md) for writing `.fig`,
-[the Python library](library.md) for embedding the engine in-process,
-[the HTTP & websocket API](http-api.md) and [Setup](setup.md) for running it
-as a service.
+[Setup](setup.md) for running the service, and
+[the HTTP & websocket API](http-api.md) for driving it.
 
 ## The four rules
 
@@ -299,9 +298,8 @@ identically to an unset one, so a no-op save costs no rebuild.
 
 ## Results
 
-Every answer -- served over HTTP, pushed over the websocket, handed to an
-in-process listener -- is one `Result`, and the same object on each
-transport. The envelope carries the definition's `version` (the citation),
+Every answer -- served over HTTP or pushed over the websocket -- is one
+`Result`, and the same object on either transport. The envelope carries the definition's `version` (the citation),
 `at` (one evaluation instant for the whole response), the tenant's calendar
 `zone`, the `unit` (so a renderer never guesses whether 28,800 seconds is
 "8h" of wall-clock or "1d" of working time), and `subjects`: one row per
@@ -348,6 +346,5 @@ measured, and here is why".
 ## Where next
 
 - Writing definitions: [the definition language](language.md).
-- Running the engine in your own process: [the Python library](library.md).
-- Running it as a service: [Setup](setup.md), then
+- Running the service: [Setup](setup.md), then
   [the HTTP & websocket API](http-api.md).

@@ -1,0 +1,42 @@
+# The wiki is derived from docs/ -- this job is the only writer. It renders
+# the pages with .github/scripts/sync-wiki.sh and pushes them to the wiki's
+# own git repository with the workflow token. Edits made in the wiki UI are
+# overwritten by the next sync, deliberately: two editable copies drift, and
+# the drifted one is always the one a stranger reads.
+name: Wiki
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/scripts/sync-wiki.sh"
+      - ".github/workflows/wiki.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone the wiki
+        run: git clone "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" /tmp/wiki
+
+      - name: Render docs into it
+        run: bash .github/scripts/sync-wiki.sh /tmp/wiki
+
+      - name: Push if anything moved
+        run: |
+          cd /tmp/wiki
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "wiki already current"
+            exit 0
+          fi
+          git commit -m "Render docs/ at ${{ github.sha }}"
+          git push
