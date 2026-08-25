@@ -182,6 +182,32 @@ def day_in(epoch_ms: float, zone: str | None) -> str:
     return moment.date().isoformat()
 
 
+_GRAIN_MINUTES: dict[str, int] = {"minute": 1, "15 minutes": 15}
+
+
+def label_in(epoch_ms: float, zone: str | None, grain: str) -> str:
+    """Which bucket an instant falls in, at a grain, in a named zone.
+
+    A sub-day label is local time truncated to the grain -- `2026-08-25T14:30`
+    -- exactly as a day key is the local date, so grouping a label into its
+    hour or its day is prefix truncation and no zone arithmetic happens at
+    read time. Fixed width per grain, so labels sort lexicographically and the
+    store's range scan works unchanged.
+
+    When the clocks go back the repeated hour's two passes share their labels
+    and their records share a bucket -- the honest answer about a quarter-hour
+    that occurred twice. Keying by UTC instead would put every local midnight
+    mid-bucket, a constant error to avoid a twice-a-year merge.
+    """
+    if grain == "day":
+        return day_in(epoch_ms, zone)
+    moment = datetime.fromtimestamp(epoch_ms / 1000.0, tz=UTC)
+    if zone is not None:
+        moment = moment.astimezone(_zone(zone))
+    step = _GRAIN_MINUTES[grain]
+    return f"{moment.date().isoformat()}T{moment.hour:02d}:{moment.minute - moment.minute % step:02d}"
+
+
 def day_range(at_ms: float, zone: str | None, days: int) -> tuple[str, str]:
     """The trailing window ending today, in the tenant's calendar.
 
@@ -295,13 +321,15 @@ def _keys_for(
         if not raw:
             return []
 
-    if part.truncate == "day":
+    if part.truncate is not None:
         zone = _setting(settings, part.zone) if part.zone is not None else None
         out: list[str] = []
         for value in raw:
             moment = parse_instant(value)
             if moment is not None:
-                out.append(day_in(moment, str(zone) if zone is not None else None))
+                out.append(
+                    label_in(moment, str(zone) if zone is not None else None, part.truncate)
+                )
         return sorted(set(out))
 
     return raw

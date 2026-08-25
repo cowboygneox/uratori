@@ -258,7 +258,7 @@ The dial an age clause names must be one of the schema's **bucket settings**
 (see [Settings dials](#settings-dials) below), because turning it re-buckets a
 tenant's whole history.
 
-### Composite indexes: `by day` and pairs
+### Composite indexes: time buckets and pairs
 
 ```
 index code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
@@ -283,12 +283,35 @@ choice a definition makes rather than a default it falls into -- two figures
 on one card, one cut by UTC days and one by the tenant's, would be two rows
 headed "30d" measuring two different months.
 
-`day` is the only truncation. `week` and `month` are deliberately absent: a
-range over days can produce either, and storing the coarser grain as well
-would be two answers to one question.
+Two sub-day grains exist beside the day: `by minute` and `by 15 minutes`. A
+sub-day label is local time truncated to the grain -- `2026-08-25T14:30` --
+in the calendar the definition names, exactly as a day key is the local date.
+Because the calendar is applied when the bucket is written, grouping a label
+into its hour or its day at read time is prefix truncation: no zone
+arithmetic happens on a read, and a grouped point can never disagree with the
+day a `by day` index would have filed the same event under. When the clocks
+go back, the repeated hour's two passes share their labels and their records
+share a bucket -- the honest answer about a quarter-hour that occurred twice;
+keying by UTC instead would put every local midnight mid-bucket in most of
+the world's zones, a constant error to avoid a twice-a-year merge. The
+spring-forward hour stays a run of holes, which is true -- those wall-clock
+minutes never happened.
 
-Whether the second part is a day or a dimension decides what the figure over
-the index must declare -- see [day-keyed figures](#day-keyed-figures) and
+**The stored grain is the finest the definition claims, and every coarser
+view is derived at read time.** `week` and `month` are deliberately absent as
+truncations: a range over days can produce either, and storing the coarser
+grain as well would be two answers to one question. That argument points
+downward too -- `hour` is refused as a truncation because a range over
+quarter-hours produces it, so it exists only as a [series
+grouping](#statistics). Other minute counts wait for a definition to ask,
+exactly as `percentile` does. The grain is in the version hash the way every
+index spec is: minutes and quarter-hours store values that mean different
+things, and reusing them across the change would file a quarter's count under
+a minute's key.
+
+Whether the second part is a time bucket or a dimension decides what the
+figure over the index must declare -- see [time-keyed
+figures](#time-keyed-figures) and
 [`across`](#across----a-second-dimension).
 
 ### `keyed as` -- a second kind sharing an id space
@@ -561,13 +584,13 @@ The rules around it:
 - The source must be declared **earlier in the source**. That is also why a
   figure cannot read itself.
 - A rollup may total at most one dimensioned figure, and may not read a
-  `level` figure (a word has no arithmetic) or a day-keyed one (it has one
-  value per day, not one per subject) as a single value.
+  `level` figure (a word has no arithmetic) or a time-keyed one (it has one
+  value per bucket, not one per subject) as a single value.
 
-### Day-keyed figures
+### Time-keyed figures
 
-A figure whose scope index ends in a `by day` part stores one value per
-subject *per day*:
+A figure whose scope index ends in a `by day`, `by minute` or `by 15 minutes`
+part stores one value per subject *per bucket*:
 
 ```
 # How long each change merged that day had been open.
@@ -581,11 +604,11 @@ figure team_person.time_to_merge:
         list(code_change.open_seconds over merged)
 ```
 
-Day-keyed is what makes a figure readable over a range -- it is the property
+Time-keyed is what makes a figure readable over a range -- it is the property
 a windowed [reading](#reading----evaluated-never-stored) requires of its
-source. A day is not a dimension: it has no roster and no name, so a
-day-keyed figure cannot also declare `across`, cannot be read by a projection,
-and cannot be combined as a single value.
+source. A bucket of time is not a dimension: it has no roster and no name, so
+a time-keyed figure cannot also declare `across`, cannot be read by a
+projection, and cannot be combined as a single value.
 
 ### `across` -- a second dimension
 
@@ -606,7 +629,7 @@ figure must say so with `across <fact kind>`. A dimension is not a new kind of
 thing -- it is a **second subject**, with a roster, a name field and an id
 space the checker already knows how to reason about (the kind must have a
 name field declared, or every row would be headed by a raw id, and it may not
-equal the scope). Underneath is the same composite key a day-keyed figure
+equal the scope). Underneath is the same composite key a time-keyed figure
 uses; what `across` adds is the *declaration*, without which every reader
 downstream is silently wrong -- the display template renders the variable as
 literal text and a generated sentence describes the whole population beside a
@@ -683,7 +706,7 @@ reading team_person.to_merge(range):
         worst(merged)
 ```
 
-`<figure> in range` summarises a **day-keyed** figure's stored values over a
+`<figure> in range` summarises a **time-keyed** figure's stored values over a
 window of days. The source is not a set expression on purpose: the figure
 already decided the population at write time, so the only narrowing left is
 temporal, and offering set arithmetic here would let a definition re-litigate
@@ -697,7 +720,7 @@ number *means*, so they are written here and hashed here. The engine resolves
 the range to actual dates against the tenant's calendar and reports them on
 the answer, so "the last 30 days" is never the client's guess.
 
-The source figure must share the reading's scope, be day-keyed, and store a
+The source figure must share the reading's scope, be time-keyed, and store a
 number -- an effort figure is refused (the reading path renders count or
 duration, so an effort would be banded as wall-clock and printed as raw
 seconds), as are a word and a moment. And **a reading may only read a
@@ -757,10 +780,33 @@ is one statistic over one bound set.
   nothing is nought, and nought renders; a mean of nothing is unknown.
 - **`count` is live-only**: a windowed reading already reports its sample,
   and for a count figure the two are *different numbers* -- the sample is
-  days that contributed, not records.
-- **`series`** returns the per-day values rather than a scalar. It exists so
+  the buckets that contributed, not records.
+- **`series`** returns the per-point values rather than a scalar. It exists so
   a sparkline is a definition's answer rather than the client slicing a range
   into ten and computing ten means.
+- **`series(...) by <grain>`** groups a sub-day figure's buckets --
+  `15 minutes`, `hour` or `day`. The grain is declared and hashed rather than
+  chosen by the caller, because an hourly series and a daily one differ in
+  what every point *means*. It attaches to `series` alone: the scalar
+  statistics run over the window's raw values whatever the grain is, so a
+  grain on `mean` would either do nothing or make it a mean of group means,
+  weighting each hour equally instead of each record. Over a sub-day source
+  the grain is **required** -- a bare series over ninety days of quarter-hours
+  is 8,640 points under a line that reads like any other sparkline, and that
+  payload choice belongs in the definition. Over a day-keyed source it is
+  **refused** -- a bare series already is the day series, and a second
+  spelling of one thing is a first place for two to disagree. One reading
+  declares one series -- two grains are two readings. A grouped point follows
+  the day series' own rule at the new grain: the mean of a `list` figure's
+  records, the sum of a `count` figure's buckets -- which is also why grouping
+  is defined only for counts and list figures: any other stored scalar would
+  have to be *summed* across buckets, and four quarter-hours at 0.5 becoming
+  an hour at 2.0 is arithmetic no definition claims. A **minute** series is
+  deliberately absent though the minute is a storable grain: over a sparse
+  figure a minute group holds one record, so the point *is* the record -- the
+  raw collection the payload exists to withhold -- and refusing the word is
+  also what makes a finer-than-stored series unwritable, since the finest
+  series grain equals the coarsest sub-day stored grain.
 - **A sum may not sit beside a distribution**: two numbers a reader can
   divide produce a third that no definition claims.
 
@@ -1217,8 +1263,9 @@ The ones most worth recognising, in the checker's own words:
 - *"reading ... summarises stored values, so it must declare (range)"* /
   *"reading ... measures records as they stand, so it takes no arguments"* --
   the windowed/live distinction, encoded twice on purpose.
-- *"...is not day-keyed -- its scope index must end in a `by day` part..."*
-  -- only a day-keyed figure has a range to read over.
+- *"...is not time-keyed -- its scope index must end in a `by day`, `by
+  minute` or `by 15 minutes` part..."* -- only a time-keyed figure has a
+  range to read over.
 - *"the figure under ... stores a count, so mean(...) is a mean per day
   wearing a label that says per record"* -- only `sum` over counts.
 - *"...calculates both a sum and a distribution"* -- two numbers a reader can
@@ -1255,6 +1302,9 @@ construct nobody has checked.
 |---|---|
 | `and` / `or` / `not` | a list of clauses is checkable; a boolean expression is a transliteration |
 | `week` / `month` truncation | a range over days produces either; storing the coarser grain is two answers to one question |
+| `hour` truncation | the same argument pointed downward: a range over quarter-hours produces it, so it is a series grouping at read time |
+| numeric minute counts other than 15 | a truncation is a product decision about grain; nothing has asked for them (the one-minute grain is spelled `by minute`) |
+| a minute-resolution series | over a sparse figure the point *is* the record -- the raw collection the payload exists to withhold |
 | `percentile` | nothing has asked for it |
 | aggregation in a projection | those are figures, and this engine claims one way to compute a number |
 | a general `max(<measure> over <set>)` | `latest` / `earliest` are the narrow case a definition wanted |

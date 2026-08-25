@@ -39,6 +39,7 @@ from .ast import (
     FieldMeasure,
     FigureDecl,
     FlagDecl,
+    GroupGrain,
     IndexBy,
     IndexDecl,
     IndexField,
@@ -323,19 +324,42 @@ class _Parser:
 
         if self._at_word("by"):
             self._next()
-            word = self._name('a truncation, currently only "day"')
-            if word != "day":
-                raise self._error(
-                    f'"{word}" is not a truncation. Only "day" exists: a truncation decides '
-                    "how many values a figure has, so each one is a decision about grain "
-                    "rather than a convenience."
-                )
-            truncate = "day"
+            truncate = self._truncation()
             if self._at_word("in"):
                 self._next()
                 zone = self._name("the setting naming the calendar, e.g. tenant.timezone")
 
         return IndexField(field=path, through=through, truncate=truncate, zone=zone)
+
+    def _truncation(self) -> Truncation:
+        """`by day`, `by minute` or `by 15 minutes` -- the stored grains.
+
+        Everything else is refused by name. `week` and `month` because a range
+        over days produces either; `hour` because a range over quarter-hours
+        does -- coarser grains are groupings at read time, and storing one
+        beside the buckets it is made of would be two answers to one question.
+        Other minute counts wait for a definition to ask.
+        """
+        if self._is("number"):
+            count = self._next().value
+            self._keyword("minutes")
+            if count != "15":
+                raise self._error(
+                    f'"{count} minutes" is not a truncation. The stored grains are "day", '
+                    '"minute" and "15 minutes": a truncation decides how many values a '
+                    "figure has, so each one is a decision about grain rather than a "
+                    "convenience, and no definition has asked for this one."
+                )
+            return "15 minutes"
+        word = self._name('a truncation: "day", "minute" or "15 minutes"')
+        if word in ("day", "minute"):
+            return word  # type: ignore[return-value]
+        raise self._error(
+            f'"{word}" is not a truncation. The stored grains are "day", "minute" and '
+            '"15 minutes". Coarser spans -- an hour, a week, a month -- are produced by '
+            "reading a range over the stored buckets; storing them as well would be two "
+            "answers to one question."
+        )
 
     def _index_where(self) -> IndexBy:
         field = self._name("a field to test")
@@ -1000,11 +1024,45 @@ class _Parser:
             self._punct("(")
             target = self._name("a set defined in depends")
             self._punct(")")
-            out.append(Statistic(fn=fn, set=target, line=line))  # type: ignore[arg-type]
+            by: GroupGrain | None = None
+            if self._at_word("by"):
+                if fn != "series":
+                    raise self._error(
+                        f"only a series takes a grain. {fn}(...) runs over the window's raw "
+                        "values whatever the series grain is, so a grain written on it "
+                        "would be a declaration that does nothing."
+                    )
+                self._next()
+                by = self._group_grain()
+            out.append(Statistic(fn=fn, set=target, by=by, line=line))  # type: ignore[arg-type]
             self._end_of_line()
             self._skip_newlines()
         self._expect("dedent", "the end of the calculate block")
         return out
+
+    def _group_grain(self) -> GroupGrain:
+        if self._is("number"):
+            count = self._next().value
+            self._keyword("minutes")
+            if count != "15":
+                raise self._error(
+                    f'"{count} minutes" is not a series grain. Those are "15 minutes", '
+                    '"hour" and "day".'
+                )
+            return "15 minutes"
+        word = self._name('a series grain: "15 minutes", "hour" or "day"')
+        if word in ("hour", "day"):
+            return word  # type: ignore[return-value]
+        if word == "minute":
+            raise self._error(
+                "a series may not answer at minute resolution, though the minute is a "
+                "storable grain. Over a sparse figure a minute group holds one record, so "
+                "the point is the record -- the raw collection the payload exists to "
+                'withhold. The finest series grain is "15 minutes".'
+            )
+        raise self._error(
+            f'"{word}" is not a series grain. Those are "15 minutes", "hour" and "day".'
+        )
 
     # -------------------------------------------------------- projection --
 

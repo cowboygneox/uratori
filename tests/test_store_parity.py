@@ -149,6 +149,33 @@ async def test_day_ranges_are_inclusive_at_both_ends(
     assert len(under) == 4
 
 
+async def test_sub_day_labels_scan_between_sub_day_bounds(
+    store: tuple[EngineStore, str],
+) -> None:
+    """Every label on a window's final day sorts *after* the bare day string,
+    so the serve path passes `T00:00`/`T23:59` bounds for a sub-day figure.
+    Postgres compares under the database's own collation and the memory store
+    under Python byte order -- this is the one place the two could disagree
+    about a `T`-suffixed bound, so both edges get a value and a control just
+    outside each proves the scan is bounded."""
+    s, tenant = store
+    for label in (
+        "2026-08-17T23:45",  # before the range -- must not leak in
+        "2026-08-18T00:00",  # the first label of the first day
+        "2026-08-20T10:15",  # mid-range
+        "2026-08-24T23:45",  # the last quarter of the final day
+        "2026-08-25T00:00",  # after the range -- must not leak in
+    ):
+        await s.save(tenant, "fig", "v1", f"p1@{label}", 1.0, [], "Aki")
+
+    inside = await s.values_in_range(tenant, "fig", "v1", "2026-08-18T00:00", "2026-08-24T23:59")
+    assert [v.subject for v in inside] == [
+        "p1@2026-08-18T00:00",
+        "p1@2026-08-20T10:15",
+        "p1@2026-08-24T23:45",
+    ]
+
+
 async def test_postgres_fact_upsert_reports_only_what_moved(pg_pool: Any) -> None:
     """The service's change detection: what this returns is what the engine
     recomputes, so an unchanged record reported as moved turns every push into

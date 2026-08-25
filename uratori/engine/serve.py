@@ -24,7 +24,15 @@ from ..store import EngineStore
 from .buckets import SEPARATOR, day_range, subject_of
 from .evaluate import band_of
 from .project import ProjectedRow, RenderedFlag, Summary, format_value
-from .read import Sample, level_of, sample_from_days, series_of, statistics_of, unmet_of
+from .read import (
+    Sample,
+    level_of,
+    sample_from_buckets,
+    sample_from_days,
+    series_of,
+    statistics_of,
+    unmet_of,
+)
 
 
 def now_ms() -> float:
@@ -231,12 +239,27 @@ async def serve_reading(
 
     state = await availability(store, library, tenant, source, settings)
     zone = _zone_of(library, source, settings)
+    grain = source.grain
+    series_by = next((s.by for s in plan.calculate if s.fn == "series"), None)
     widest = max(trailing)
     frm, to = day_range(at, zone, widest)
+    # A sub-day label on the window's final day -- "2026-08-25T14:30" -- sorts
+    # *after* the bare day "2026-08-25", so day-string bounds would silently
+    # drop the current day from every sub-day window: a board reporting the
+    # team has shipped nothing all morning, every morning. "T23:59" is the
+    # largest label a day can carry at any grain.
+    fetch_frm, fetch_to = (frm, to) if grain == "day" else (frm + "T00:00", to + "T23:59")
+
+    def _sample(inside: list[tuple[str, Value]], w_frm: str, w_to: str) -> Sample:
+        if grain == "day":
+            return sample_from_days(inside, w_frm, w_to)  # type: ignore[arg-type]
+        return sample_from_buckets(inside, w_frm, w_to, series_by)  # type: ignore[arg-type]
 
     subjects: list[Subject] = []
     if isinstance(state, Ok):
-        rows = await store.values_in_range(tenant, source.name, source.version, frm, to)
+        rows = await store.values_in_range(
+            tenant, source.name, source.version, fetch_frm, fetch_to
+        )
         by_subject: dict[str, list[tuple[str, Value]]] = {}
         names: dict[str, str] = {}
         for stored in rows:
@@ -249,9 +272,13 @@ async def serve_reading(
             windows: list[Window] = []
             for span in trailing:
                 w_frm, w_to = day_range(at, zone, span)
-                inside = [(d, v) for d, v in days if w_frm <= d <= w_to]
-                sample = sample_from_days(inside, w_frm, w_to)  # type: ignore[arg-type]
-                windows.append(_window(plan, sample, span, w_frm, w_to, zone, settings))
+                # The day prefix of a label is its local day whatever the
+                # grain, so one comparison serves both key shapes.
+                inside = [(d, v) for d, v in days if w_frm <= d[:10] <= w_to]
+                sample = _sample(inside, w_frm, w_to)
+                windows.append(
+                    _window(plan, sample, span, w_frm, w_to, zone, settings, series_by)
+                )
             subjects.append(
                 Subject(
                     id=base,
@@ -261,12 +288,19 @@ async def serve_reading(
                 )
             )
 
-    empty_sample = sample_from_days([], frm, to)
     empty = Subject(
         id="",
         name="",
         windows=[
-            _window(plan, empty_sample, span, *day_range(at, zone, span), zone, settings)
+            _window(
+                plan,
+                _sample([], *day_range(at, zone, span)),
+                span,
+                *day_range(at, zone, span),
+                zone,
+                settings,
+                series_by,
+            )
             for span in trailing
         ],
     )
@@ -295,6 +329,7 @@ def _window(
     to: str,
     zone: str | None,
     settings: Mapping[str, Any],
+    series_by: str | None,
 ) -> Window:
     unmet = unmet_of(plan, sample)
     stats: dict[str, float | None] = statistics_of(plan, sample)
@@ -328,6 +363,7 @@ def _window(
         total=stats.get("total"),
         count=stats.get("count"),
         series=series_of(sample) if wants_series and not unmet else None,
+        series_by=series_by if wants_series and not unmet else None,
         display=rendered,
         sample=len(sample.values),
         days_covered=sample.days_covered,

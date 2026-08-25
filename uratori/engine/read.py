@@ -29,11 +29,17 @@ class Sample:
 
     `days_covered` is a separate claim from the sample size and is reported
     separately: "the queue took no tickets" and "we were not collecting" are
-    opposite findings that produce the same empty list.
+    opposite findings that produce the same empty list. It stays a claim about
+    *days* whatever the stored grain, because "how much of the window has
+    evidence" is a question about the calendar the reader sees, not about how
+    finely the store slices it.
+
+    `points` is the series: one labelled value per bucket of the served grain,
+    holes included.
     """
 
     values: tuple[float, ...]
-    per_day: tuple[tuple[str, float | None], ...]
+    points: tuple[tuple[str, float | None], ...]
     days_covered: int
     days_requested: int
 
@@ -70,13 +76,14 @@ def statistics_of(plan: ReadingPlan, sample: Sample) -> dict[str, float | None]:
 
 
 def series_of(sample: Sample) -> list[float | None]:
-    """One value per day of the range, holes included.
+    """One value per point of the range, holes included.
 
     Holes are `None` rather than nought: a day nobody merged on is not a day
     somebody merged nothing in zero seconds, and a sparkline that drew it as a
-    floor would show a trough that never happened.
+    floor would show a trough that never happened. The same lie is refused per
+    hour and per quarter when the points are grouped finer than a day.
     """
-    return [value for _, value in sample.per_day]
+    return [value for _, value in sample.points]
 
 
 def unmet_of(plan: ReadingPlan, sample: Sample) -> list[str]:
@@ -166,10 +173,107 @@ def sample_from_days(
     ordered = _fill(frm, to, per_day)
     return Sample(
         values=tuple(values),
-        per_day=tuple(ordered),
+        points=tuple(ordered),
         days_covered=covered,
         days_requested=requested,
     )
+
+
+def sample_from_buckets(
+    buckets: Sequence[tuple[str, float | list[float | None] | None]],
+    frm: str,
+    to: str,
+    by: str | None,
+) -> Sample:
+    """Turn sub-day bucket values into a sample, with the series grouped to `by`.
+
+    Grouping touches **only the series**. The scalar statistics run over the
+    raw stored values whatever the grain is -- a mean of the group means would
+    weight each hour equally instead of each record, which is the mean-of-means
+    trap wearing a new grain.
+
+    A group's point follows the day series' own rule at the new grain: the
+    mean of a `list` figure's records, the sum of a `count` figure's buckets --
+    the number a `by day` index would have stored, so the two grains cannot be
+    two answers to one question. A group whose buckets are all absent is a
+    hole, never a nought.
+
+    Labels are local time, so a group is a label prefix: the calendar was
+    decided when the bucket was written.
+    """
+    values: list[float] = []
+    listed: dict[str, list[float]] = {}
+    counted: dict[str, float] = {}
+    days: set[str] = set()
+
+    for label, stored in buckets:
+        if isinstance(stored, list):
+            got = [v for v in stored if v is not None]
+            if got:
+                values.extend(got)
+                days.add(label[:10])
+                if by is not None:
+                    listed.setdefault(_group_of(label, by), []).extend(got)
+        elif isinstance(stored, (int, float)):
+            values.append(float(stored))
+            days.add(label[:10])
+            if by is not None:
+                group = _group_of(label, by)
+                counted[group] = counted.get(group, 0.0) + float(stored)
+
+    points: list[tuple[str, float | None]] = []
+    if by is not None:
+        for label in _labels_between(frm, to, by):
+            if label in listed:
+                points.append((label, statistics.fmean(listed[label])))
+            elif label in counted:
+                points.append((label, counted[label]))
+            else:
+                points.append((label, None))
+
+    return Sample(
+        values=tuple(values),
+        points=tuple(points),
+        days_covered=len(days),
+        days_requested=_days_between(frm, to),
+    )
+
+
+def _group_of(label: str, by: str) -> str:
+    """Which group a bucket label belongs to: prefix truncation, no clocks."""
+    if by == "day":
+        return label[:10]
+    if by == "hour":
+        return label[:13] + ":00"
+    if by == "15 minutes":
+        minute = int(label[14:16])
+        return f"{label[:14]}{minute - minute % 15:02d}"
+    return label
+
+
+def _labels_between(frm: str, to: str, by: str) -> list[str]:
+    """Every group label of the range, in order, so holes are visible.
+
+    Every local day carries the same label set whatever the clocks did: the
+    fall-back day's repeated labels merged at write time, and the
+    spring-forward day's missing hour simply stays a run of holes -- which is
+    true, since those wall-clock minutes never happened.
+    """
+    from datetime import date, timedelta
+
+    steps = {"hour": 60, "15 minutes": 15, "minute": 1}
+    out: list[str] = []
+    day = date.fromisoformat(frm)
+    end = date.fromisoformat(to)
+    while day <= end:
+        if by == "day":
+            out.append(day.isoformat())
+        else:
+            step = steps[by]
+            for minutes in range(0, 1440, step):
+                out.append(f"{day.isoformat()}T{minutes // 60:02d}:{minutes % 60:02d}")
+        day += timedelta(days=1)
+    return out
 
 
 def _days_between(frm: str, to: str) -> int:

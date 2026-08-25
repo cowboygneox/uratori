@@ -147,10 +147,15 @@ class EngineStore(Protocol):
     async def values_in_range(
         self, tenant: str, name: str, version: str, frm: str, to: str
     ) -> list[StoredValue]:
-        """Day-keyed values whose day part falls inside a range.
+        """Time-keyed values whose bucket label falls inside a range.
 
-        The comparison is on the text after the separator, which works because a
-        day is ISO and ISO days sort lexicographically.
+        The comparison is on the text after the separator, which works because
+        every label is fixed-width local ISO time -- `2026-08-23`, or
+        `2026-08-23T14:30` at a sub-day grain -- and those sort
+        lexicographically. The caller supplies bounds in the stored grain's own
+        shape: bare days for a day figure, `T00:00`/`T23:59` suffixes for a
+        sub-day one, since every label on a day sorts after the bare day
+        string.
         """
         ...
 

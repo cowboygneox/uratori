@@ -412,7 +412,7 @@ first paint reads:
 curl -s "$BASE/tenants/t1/results" -H "$AUTH"
 ```
 
-The list carries, in this order: every stored figure (except day-keyed and
+The list carries, in this order: every stored figure (except time-keyed and
 dimension-split ones, which serve by name only -- they are evidence panes, not
 cards, and shipping every stored person-day on the bulk surface would spend
 every pass on history nobody is watching), then every window reading, then
@@ -562,14 +562,14 @@ join.
 
 | Field | Meaning |
 |---|---|
-| `id` | The record's key. For a day-keyed figure the id is `<subject>@<ISO day>`. |
+| `id` | The record's key. For a time-keyed figure the id is `<subject>@<label>` -- the label an ISO day, or local ISO time truncated to the grain (`2026-08-23T14:30`) for a sub-day figure. |
 | `name` | Rendered by the server. For a stored figure this is the name **frozen when the value was written** -- a person renamed next week must not rewrite the history of what they moved. For a live answer (a projection) it is the current one, since there is no history to contradict. |
 | `value` | The magnitude: number, band word, or `null`. It exists for anything *positional* -- a bar's width, a marker's offset. `null` where the underlying value is a collection: a day's measurements arrive as rendered text in `display`, never as a numeric list, because a numeric list is something a client could reduce over and this API's claim is that there is nothing to reduce. |
 | `display` | `value`, rendered by the server. Both travel because they answer different questions -- the number is positional, the text is what a reader sees. Rendering is not the client's job because rendering a duration or an effort is a division against a dial the client does not have, and a client that had the dial would be one step from banding against a threshold. |
 | `windows` | For a reading: the trailing windows, below. Otherwise `null`. |
 | `row` | For a projection: the assembled row, below. Otherwise `null`. |
 | `level` | The band word, from the definition's own thresholds evaluated against the tenant's live dials. See "band words", below. |
-| `dimension` | The other half of a pair when the figure is split across something (or day-keyed) -- present so two rows about one subject are told apart by a field rather than by a reader noticing. |
+| `dimension` | The other half of a pair when the figure is split across something (or time-keyed) -- present so two rows about one subject are told apart by a field rather than by a reader noticing. |
 
 ### `Window` (readings)
 
@@ -584,7 +584,8 @@ the spelling -- the field is `frm`.
 | `frm`, `to` | The actual ISO dates it resolved to. |
 | `zone` | The calendar it resolved in. |
 | `mean`, `median`, `worst`, `total`, `count` | The statistics the reading declares; each is a number or `null`. A definition's `sum` arrives on the wire as `total` -- the rename happens here, nowhere else. |
-| `series` | Per-day values, when the definition asked for them -- the one non-scalar statistic, and it exists so a sparkline is a definition's answer rather than the client slicing a range and computing ten means. |
+| `series` | Per-point values, when the definition asked for them -- the one non-scalar statistic, and it exists so a sparkline is a definition's answer rather than the client slicing a range and computing ten means. |
+| `series_by` | What one series point spans -- `"15 minutes"`, `"hour"` or `"day"` -- when the definition grouped a sub-day figure. Absent (`null`) for a day-keyed source, where a point has always been a day. |
 | `display` | Each statistic above, rendered, keyed by statistic name. Rendered on the server because rendering a duration is a division, and a division is a calculation. |
 | `sample` | How many values took part. For a count figure this is *days that contributed*, not records -- a different number of similar magnitude, which is why it is named rather than left to be inferred. |
 | `days_covered`, `days_requested` | How much of the window actually holds data, against what was asked. |

@@ -116,9 +116,17 @@ class Window(BaseModel):
     total: float | None = None
     count: float | None = None
     series: list[float | None] | None = None
-    """Per-day values, when the definition asked for them. The one statistic
+    """Per-point values, when the definition asked for them. The one statistic
     that is not a scalar; it exists so a sparkline is a definition's answer
     rather than the client slicing a range into ten and computing ten means."""
+
+    series_by: Literal["15 minutes", "hour", "day"] | None = None
+    """What one series point spans, when the definition grouped a sub-day
+    figure. Absent for a day-keyed source, where a point has always been a
+    day. On the wire so a series of 168 points says what it is, rather than
+    leaving the reader to divide -- and a closed union rather than a string,
+    so a new grain is a compile error in a typed client instead of a silently
+    unhandled word."""
 
     display: dict[str, str] = Field(default_factory=dict)
     """Each statistic above, rendered.
@@ -135,9 +143,10 @@ class Window(BaseModel):
     """
 
     sample: int = 0
-    """How many values took part. For a count figure this is *days that
-    contributed*, not records -- a different number of similar magnitude, which
-    is why it is named rather than left to be inferred."""
+    """How many values took part. For a count figure this is *buckets that
+    contributed* (days, for a day-keyed one), not records -- a different number
+    of similar magnitude, which is why it is named rather than left to be
+    inferred."""
 
     days_covered: int = 0
     days_requested: int = 0

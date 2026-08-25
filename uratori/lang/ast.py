@@ -18,16 +18,52 @@ from typing import Literal, TypeAlias
 
 # ---------------------------------------------------------------- index --
 
-Truncation: TypeAlias = Literal["day"]
+Truncation: TypeAlias = Literal["day", "minute", "15 minutes"]
 """`mergedAt by day` -- how a raw value is reduced before it becomes a key.
 
-Only `day` exists, and the restraint is the point: a truncation decides how many
-values a figure has and which one an event lands in, so each new one is a
+Three grains, and the restraint is still the point: a truncation decides how
+many values a figure has and which one an event lands in, so each new one is a
 product decision about grain rather than a convenience. `week` and `month` are
 deliberately absent -- a span over days can produce either, and storing the
-coarser grain as well would be two answers to one question.
+coarser grain as well would be two answers to one question. That argument
+points downward too: `hour` is absent because a range over quarter-hours
+produces it, so it is a *series grouping* at read time rather than a stored
+grain. Other minute counts wait for a definition to ask, exactly as
+`percentile` does.
+
+A sub-day label is local time truncated to the grain -- `2026-08-25T14:30` --
+in the calendar the definition names, exactly as a day key is the local date.
+When the clocks go back the repeated hour's two passes share their labels and
+their records share a bucket, which is the honest answer about a quarter-hour
+that occurred twice; keying by UTC instead would put every local midnight
+mid-bucket, a constant error to avoid a twice-a-year merge.
 """
 
+GroupGrain: TypeAlias = Literal["15 minutes", "hour", "day"]
+"""`series(m) by hour` -- the grain a series' points are grouped to.
+
+Grouping is a claim the reading makes, not a convenience the caller picks: an
+hourly series and a daily one differ in what every point *means*, so the grain
+is written in the definition and hashed into its version. It exists only on
+`series` because the scalar statistics run over the window's raw values
+whatever the grain is -- a grain written on `mean` would either do nothing or
+turn it into a mean of group means, weighting each hour equally instead of
+each record.
+
+**A minute-resolution series is deliberately absent, though the minute is a
+storable grain.** Over a sparse figure a minute group holds one record, so the
+point *is* the record -- ten thousand of them on the wire is the raw
+collection rule 2 exists to withhold, at a size (10,080 points per week per
+subject) that every socket connect and sync push would pay. The finest a
+series says is the quarter-hour.
+
+Because bucket labels are local time, grouping is label truncation: the
+calendar was decided when the bucket was written, and no zone arithmetic
+happens at read time. A series finer than the store would have to invent
+values the store never kept, and dropping `minute` from this union is what
+makes that unwritable rather than refused: the finest series grain equals the
+coarsest sub-day stored grain.
+"""
 
 @dataclass(frozen=True)
 class Through:
@@ -801,6 +837,16 @@ into ten and computing ten means, which is arithmetic nobody could check.
 class Statistic:
     fn: StatisticFn
     set: str
+    by: GroupGrain | None = None
+    """The series grouping, on `series` alone -- see `GroupGrain`.
+
+    Required over a sub-day source, so the payload a series commits to is
+    visible in the definition; refused over a day-keyed one, where a bare
+    series already is the day series and a second spelling of one thing is a
+    first place for two to disagree. Hashed absent-unless-declared, so every
+    reading written before grains existed keeps its version.
+    """
+
     line: int = 0
 
 

@@ -18,6 +18,7 @@ import pytest
 from uratori.engine.buckets import (
     buckets_of,
     day_in,
+    label_in,
     measure_of,
     part_of,
     read_number,
@@ -25,10 +26,22 @@ from uratori.engine.buckets import (
 )
 from uratori.engine.evaluate import Parts, Readers, evaluate, same_value
 from uratori.engine.project import holds, ordered, summarise
-from uratori.engine.read import Sample, level_of, sample_from_days, statistics_of, unmet_of
+from uratori.engine.read import (
+    Sample,
+    level_of,
+    sample_from_buckets,
+    sample_from_days,
+    series_of,
+    statistics_of,
+    unmet_of,
+)
+from uratori.engine.serve import serve_reading
 from uratori.lang.ast import Condition, Number, Part, SortDecl
 from uratori.lang.plan import ProjectPlan
 from uratori.lang.settings import fingerprint, seconds_per
+from uratori.results import Ok
+from uratori.store.base import Pointer
+from uratori.store.memory import MemoryEngineStore
 
 from .world import DEFAULTS, compile_source
 
@@ -40,6 +53,8 @@ index work_issue.active where active == true
 index work_issue.stuck where status_changed_at older than thresholds.longWipDays
 index work_issue.fresh where status_changed_at younger than thresholds.longWipDays
 index work_issue.by_day from (assignee_account_id through team_person.accounts.account_id, completed_at by day in tenant.timezone)
+index work_issue.by_quarter from (assignee_account_id through team_person.accounts.account_id, completed_at by 15 minutes in tenant.timezone)
+index work_issue.by_minute from (assignee_account_id through team_person.accounts.account_id, completed_at by minute in tenant.timezone)
 
 measure work_issue.estimate = estimate_seconds in effort
 measure work_issue.moved = moment updated_at
@@ -107,6 +122,41 @@ def test_an_index_buckets_by_day_in_the_zone_its_definition_names() -> None:
     assert buckets_of(_index("work_issue.by_day"), record, utc, _resolve, NOW) == [
         "person-of-a1@2025-08-24"
     ]
+
+
+def test_a_sub_day_bucket_is_labelled_in_the_tenants_calendar() -> None:
+    """The label is local time truncated to the grain, exactly as a day key is
+    the local date -- so which quarter-hour an event belongs to is decided by
+    the calendar the definition names, not by whichever zone the provider
+    happened to write."""
+    record = {"assignee_account_id": "a1", "completed_at": "2025-08-24T02:26:40Z"}
+    la = {**DEFAULTS, "tenant": {**DEFAULTS["tenant"], "timezone": "America/Los_Angeles"}}
+    utc = {**DEFAULTS, "tenant": {**DEFAULTS["tenant"], "timezone": "UTC"}}
+
+    assert buckets_of(_index("work_issue.by_quarter"), record, la, _resolve, NOW) == [
+        "person-of-a1@2025-08-23T19:15"
+    ]
+    assert buckets_of(_index("work_issue.by_quarter"), record, utc, _resolve, NOW) == [
+        "person-of-a1@2025-08-24T02:15"
+    ]
+    assert buckets_of(_index("work_issue.by_minute"), record, la, _resolve, NOW) == [
+        "person-of-a1@2025-08-23T19:26"
+    ]
+
+
+def test_the_repeated_hour_of_a_fall_back_merges_into_one_labelled_bucket() -> None:
+    """When the clocks go back, 01:30 local happens twice. Both instants carry
+    the same label, so their records share a bucket -- the honest answer to
+    "what happened in the quarter-hour labelled 01:30", which occurred twice.
+    The alternative, keying by UTC, would make every local midnight sit
+    mid-bucket in most of the world's zones."""
+    chicago = {**DEFAULTS, "tenant": {**DEFAULTS["tenant"], "timezone": "America/Chicago"}}
+    cdt = {"assignee_account_id": "a1", "completed_at": "2025-11-02T06:30:00Z"}  # 01:30 CDT
+    cst = {"assignee_account_id": "a1", "completed_at": "2025-11-02T07:30:00Z"}  # 01:30 CST
+
+    first = buckets_of(_index("work_issue.by_quarter"), cdt, chicago, _resolve, NOW)
+    second = buckets_of(_index("work_issue.by_quarter"), cst, chicago, _resolve, NOW)
+    assert first == second == ["person-of-a1@2025-11-02T01:30"]
 
 
 def test_a_key_part_containing_the_separator_is_refused_rather_than_encoded() -> None:
@@ -469,7 +519,7 @@ def test_the_serve_path_reads_both_stored_shapes() -> None:
 def test_a_sum_of_nothing_is_nought_and_a_mean_of_nothing_is_unknown() -> None:
     """Deliberate asymmetry. A queue that took no tickets took no tickets; an
     average of no values is a claim nobody can make."""
-    empty = Sample(values=(), per_day=(), days_covered=0, days_requested=7)
+    empty = Sample(values=(), points=(), days_covered=0, days_requested=7)
 
     speed = READINGS.reading("team_person.speed")
     shipped = READINGS.reading("team_person.shipped")
@@ -484,11 +534,11 @@ def test_a_requirement_names_what_fell_short_rather_than_only_that_it_did() -> N
     lives in a constant nobody can see from the board."""
     plan = READINGS.reading("team_person.speed")
     assert plan is not None
-    short = Sample(values=(1.0,), per_day=(), days_covered=1, days_requested=7)
+    short = Sample(values=(1.0,), points=(), days_covered=1, days_requested=7)
     unmet = unmet_of(plan, short)
     assert unmet and "3" in unmet[0] and "1" in unmet[0]
 
-    enough = Sample(values=(1.0, 2.0, 3.0), per_day=(), days_covered=3, days_requested=7)
+    enough = Sample(values=(1.0, 2.0, 3.0), points=(), days_covered=3, days_requested=7)
     assert unmet_of(plan, enough) == []
 
 
@@ -499,11 +549,11 @@ def test_one_value_renders_and_only_an_empty_window_is_withheld_with_a_reason() 
     plan = READINGS.reading("team_person.pace")
     assert plan is not None
 
-    one = Sample(values=(5.0,), per_day=(), days_covered=1, days_requested=7)
+    one = Sample(values=(5.0,), points=(), days_covered=1, days_requested=7)
     assert unmet_of(plan, one) == []
     assert statistics_of(plan, one)["mean"] == 5.0
 
-    empty = Sample(values=(), per_day=(), days_covered=0, days_requested=7)
+    empty = Sample(values=(), points=(), days_covered=0, days_requested=7)
     unmet = unmet_of(plan, empty)
     # The full sentence, because "at least 1 value" is also a substring of the
     # plural and would pass against "at least 1 values".
@@ -694,3 +744,219 @@ def test_an_unknown_contribution_makes_a_whole_total_absent() -> None:
 
     gap = [*complete, ProjectedRow(id="c", values={"n": None}, units={}, flags=(), sort_key=None)]
     assert summarise(plan, gap, DEFAULTS, 0.0).values["all"] is None
+
+
+# -------------------------------------------------------- sub-day grouping --
+
+GRAINED = compile_source(
+    BASE
+    + """
+# d
+figure team_person.quarter_volume:
+    display "x"
+    depends:
+        mine = work_issue.by_quarter:{team_person}
+    calculate:
+        count(mine)
+
+# d
+figure team_person.quarter_lead:
+    display "x"
+    depends:
+        mine = work_issue.by_quarter:{team_person}
+    calculate:
+        list(work_issue.lead over mine)
+
+# d
+reading team_person.quarter_throughput(range):
+    display "x"
+    depends:
+        m = team_person.quarter_volume in range
+    calculate:
+        sum(m)
+        series(m) by hour
+
+# d
+reading team_person.quarter_pace(range):
+    display "x"
+    depends:
+        m = team_person.quarter_lead in range
+    requires:
+        at least 3 values in m
+    calculate:
+        mean(m)
+        series(m) by hour
+"""
+)
+
+
+def test_a_grouped_series_sums_counts_and_a_hole_stays_a_hole() -> None:
+    """An hour nobody merged in is not an hour somebody merged nothing in --
+    summing absences to nought would draw a floor that never happened, which is
+    the same lie per hour that the day series already refuses per day."""
+    buckets = [
+        ("2025-08-01T00:15", 2.0),
+        ("2025-08-01T00:30", 3.0),
+        ("2025-08-01T01:00", 1.0),
+    ]
+    sample = sample_from_buckets(buckets, "2025-08-01", "2025-08-01", by="hour")
+    series = series_of(sample)
+    assert len(series) == 24
+    assert series[0] == 5.0, "two quarters of one hour did not add up"
+    assert series[1] == 1.0
+    assert series[2:] == [None] * 22, "an empty hour was invented as a value"
+    assert sample.values == (2.0, 3.0, 1.0)
+    assert sample.days_covered == 1
+
+
+def test_grouping_changes_the_series_and_never_the_statistics() -> None:
+    """The scalar statistics run over the raw stored values whatever the series
+    grain is. A mean of the group means would weight each hour equally instead
+    of each record -- 37.5 here -- which is the mean-of-means trap wearing a new
+    grain."""
+    buckets = [
+        ("2025-08-01T09:00", [10.0, 20.0]),
+        ("2025-08-01T10:15", [60.0]),
+    ]
+    sample = sample_from_buckets(buckets, "2025-08-01", "2025-08-01", by="hour")
+    plan = READINGS.reading("team_person.speed")
+    assert plan is not None
+    assert statistics_of(plan, sample)["mean"] == 30.0
+
+    series = series_of(sample)
+    assert series[9] == 15.0, "an hour's point is the mean of its own records"
+    assert series[10] == 60.0
+
+
+def test_quarters_grouped_by_day_agree_with_what_a_day_figure_would_have_stored() -> None:
+    """One count, added up -- a day's point over quarter-hour buckets must equal
+    the count a `by day` index would have written, or the two grains are two
+    answers to one question."""
+    buckets = [
+        ("2025-08-01T09:15", 2.0),
+        ("2025-08-01T23:45", 1.0),
+        ("2025-08-03T00:00", 4.0),
+    ]
+    sample = sample_from_buckets(buckets, "2025-08-01", "2025-08-03", by="day")
+    assert series_of(sample) == [3.0, None, 4.0]
+    assert sample.days_covered == 2
+    assert sample.days_requested == 3
+
+
+def test_a_native_grain_series_lands_each_bucket_in_its_own_slot() -> None:
+    """Equal is the boundary of "no finer than the store": a quarter-hour
+    series over a quarter-hour figure is one point per bucket, at the position
+    its label says -- 09:15 is slot 37 of a day's 96."""
+    sample = sample_from_buckets(
+        [("2025-08-01T09:15", 2.0)], "2025-08-01", "2025-08-01", by="15 minutes"
+    )
+    series = series_of(sample)
+    assert len(series) == 96
+    assert series[9 * 4 + 1] == 2.0
+    assert sum(1 for point in series if point is not None) == 1
+
+
+def test_a_sub_day_sample_with_no_series_still_carries_its_values() -> None:
+    """A sub-day reading that declares no series has nothing to group, and the
+    scalar statistics must not notice the difference: the values and the day
+    coverage are the same either way."""
+    buckets = [("2025-08-01T09:15", 2.0), ("2025-08-02T10:00", 3.0)]
+    sample = sample_from_buckets(buckets, "2025-08-01", "2025-08-03", by=None)
+    assert sample.values == (2.0, 3.0)
+    assert sample.days_covered == 2
+    assert sample.days_requested == 3
+    assert series_of(sample) == []
+
+
+def test_every_local_day_carries_the_same_labels_whatever_the_clocks_did() -> None:
+    """The fall-back day's repeated labels merged at write time and the
+    spring-forward day's missing hour is a run of holes, so a grouped series
+    never gains or loses slots to DST -- a day is 24 hourly points, always."""
+    fall_back = sample_from_buckets(
+        [("2025-11-02T01:30", 5.0)], "2025-11-02", "2025-11-02", by="hour"
+    )
+    assert len(series_of(fall_back)) == 24
+    assert series_of(fall_back)[1] == 5.0
+
+    spring = sample_from_buckets([], "2026-03-08", "2026-03-08", by="hour")
+    assert len(series_of(spring)) == 24
+
+
+async def test_a_bucket_on_the_windows_final_day_is_served_not_lexicographically_lost() -> None:
+    """Every label on the window's last day -- "2025-08-24T04:45" -- sorts
+    *after* the bare day "2025-08-24", so day-string bounds would silently drop
+    the current day from every sub-day window: a board that reports the team
+    has shipped nothing all morning, every morning."""
+    store = MemoryEngineStore()
+    figure = GRAINED.figure("team_person.quarter_volume")
+    reading = GRAINED.reading("team_person.quarter_throughput")
+    assert figure is not None and reading is not None
+
+    tenant = "t1"
+    stamp = fingerprint(dict(DEFAULTS), list(figure.settings))
+    await store.set_pointer(
+        tenant, figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
+    )
+    await store.set_buckets(tenant, "work_issue.by_quarter", "w1", ["p1@2025-08-24T04:45"])
+    # The hand-written labels below are only honest if they are what the write
+    # path produces -- pin one against `label_in` so the two cannot drift.
+    assert label_in(1_756_035_900_000.0, "America/Los_Angeles", "15 minutes") == (
+        "2025-08-24T04:45"  # 2025-08-24T11:45Z
+    )
+    for subject, value in (
+        ("p1@2025-08-24T04:45", 2.0),  # the current LA day, mid-morning
+        ("p1@2025-08-24T23:45", 4.0),  # the final quarter of the final day
+        ("p1@2025-08-20T10:00", 3.0),  # mid-window
+        ("p1@2025-08-18T00:00", 1.0),  # the first quarter of the first day
+        ("p1@2025-08-17T23:45", 8.0),  # the quarter before the window opens
+        ("p1@2025-08-10T09:00", 7.0),  # well before the window; must not leak in
+    ):
+        await store.save(tenant, figure.name, figure.version, subject, value, (), "P One")
+
+    at = 1_756_036_800_000.0  # 2025-08-24T12:00Z, 05:00 in Los Angeles
+    result = await serve_reading(store, GRAINED, tenant, reading, DEFAULTS, [7], at_ms=at)
+
+    assert isinstance(result.state, Ok)
+    assert len(result.subjects) == 1
+    window = result.subjects[0].windows[0]
+    assert (window.frm, window.to) == ("2025-08-18", "2025-08-24")
+    assert window.total == 10.0, "a bucket at a window edge was dropped or leaked"
+    assert window.series_by == "hour"
+    assert window.series is not None and len(window.series) == 168
+    assert window.series[6 * 24 + 4] == 2.0  # 04:00 on the final day
+    assert window.series[6 * 24 + 23] == 4.0  # 23:00 on the final day
+    assert window.series[2 * 24 + 10] == 3.0  # 10:00 on 2025-08-20
+    assert window.series[0] == 1.0  # 00:00 on the first day
+    assert sum(1 for point in window.series if point is not None) == 4
+
+
+async def test_a_failed_floor_withholds_the_grouped_series_with_everything_else() -> None:
+    """Every statistic is withheld together, and the series is a statistic: a
+    sparkline drawn beside a suppressed mean would be the outlier's shape
+    published under a heading that says the sample was too small to say
+    anything -- and a grain shipped beside a null series would claim a shape
+    that was never sent."""
+    store = MemoryEngineStore()
+    figure = GRAINED.figure("team_person.quarter_lead")
+    reading = GRAINED.reading("team_person.quarter_pace")
+    assert figure is not None and reading is not None
+
+    tenant = "t1"
+    stamp = fingerprint(dict(DEFAULTS), list(figure.settings))
+    await store.set_pointer(
+        tenant, figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
+    )
+    await store.set_buckets(tenant, "work_issue.by_quarter", "w1", ["p1@2025-08-24T04:45"])
+    await store.save(
+        tenant, figure.name, figure.version, "p1@2025-08-24T04:45", [3600.0, 7200.0], (), "P One"
+    )
+
+    at = 1_756_036_800_000.0  # 2025-08-24T12:00Z
+    result = await serve_reading(store, GRAINED, tenant, reading, DEFAULTS, [7], at_ms=at)
+
+    assert isinstance(result.state, Ok)
+    window = result.subjects[0].windows[0]
+    assert window.unmet, "two values against a floor of three should have fallen short"
+    assert window.mean is None
+    assert window.series is None
+    assert window.series_by is None, "a grain travelled beside a series that did not"

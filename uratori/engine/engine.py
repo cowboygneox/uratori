@@ -419,10 +419,10 @@ class Engine:
             return sorted(out)
 
         roster = [row.key for row in await self._facts.of_kind(tenant, plan.scope)]
-        if plan.day_keyed and plan.scope_index is not None:
-            # A day-keyed figure's subjects are the days something happened on --
-            # there is no roster of days, and writing a nought for every calendar
-            # day would be a table of manufactured zeroes. Gated by the scope
+        if plan.grain is not None and plan.scope_index is not None:
+            # A time-keyed figure's subjects are the buckets something happened
+            # in -- there is no roster of days or quarter-hours, and writing a
+            # nought for every one would be a table of manufactured zeroes. Gated by the scope
             # roster for the reason the pair case is: the index goes on holding
             # a departed person's days, and the backfill would put them back
             # immediately after the removal pass took them out.

@@ -56,9 +56,11 @@ from .ast import (
     SetOp,
     SetRef,
     Setting,
+    Statistic,
     Sum,
     SummariseDecl,
     Text,
+    Truncation,
     ValueDecl,
 )
 from .hash import version_of
@@ -211,7 +213,7 @@ class _Checker:
                 )
             if part.zone is not None and part.zone not in self._schema.bucket_settings:
                 raise CheckError(
-                    f'index {d.name} buckets by day in "{part.zone}", which is not a setting '
+                    f'index {d.name} buckets by {part.truncate} in "{part.zone}", which is not a setting '
                     f"an index may name. Those are: {', '.join(self._schema.bucket_settings)}. "
                     "Moving one re-buckets a tenant's whole history, which is why the list is "
                     "short.",
@@ -286,7 +288,7 @@ class _Checker:
 
         set_names = self._named_sets(d)
         combines = self._combines(d)
-        scope_index, day_keyed, dimension_part = self._scope_index(d, set_names, scope)
+        scope_index, grain, dimension_part = self._scope_index(d, set_names, scope)
 
         kind = self._calc_kind(d.calculate, d, set_names, combines, scope)
         unit = self._figure_unit(d, kind, combines)
@@ -335,7 +337,7 @@ class _Checker:
             scope_index=scope_index,
             band=d.band if isinstance(d.band, Ladder) else None,
             band_settings=band_settings,
-            day_keyed=day_keyed,
+            grain=grain,
             dimension_part=dimension_part,
             depth=depth,
         )
@@ -586,11 +588,11 @@ class _Checker:
                         f"says nothing about a source. Write `over {source.across}`.",
                         c.line,
                     )
-                if source.day_keyed:
+                if source.grain is not None:
                     raise CheckError(
                         f"figure {d.name} reads {c.figure} as a single value, but {c.figure} "
-                        "is day-keyed, so it has one value per day rather than one per "
-                        "subject.",
+                        f"is time-keyed, so it has one value per {source.grain} rather than "
+                        "one per subject.",
                         c.line,
                     )
             if source.scope != d.name.split(".", 1)[0]:
@@ -605,7 +607,7 @@ class _Checker:
 
     def _scope_index(
         self, d: FigureDecl, sets: dict[str, SetExpr], scope: str
-    ) -> tuple[str | None, bool, str | None]:
+    ) -> tuple[str | None, Truncation | None, str | None]:
         """Exactly one index must fan the figure out, and this works out which.
 
         A rollup has none, and that is legitimate -- its subjects come from the
@@ -615,7 +617,7 @@ class _Checker:
         board-wide total attributed to nobody.
         """
         if d.combines:
-            return None, False, None
+            return None, None, None
 
         found: list[tuple[str, CompiledIndex]] = []
         for expr in sets.values():
@@ -657,7 +659,7 @@ class _Checker:
                 d.line,
             )
 
-        day_keyed = False
+        grain: Truncation | None = None
         dimension_part: str | None = None
         if len(parts) > 1:
             if len(parts) > 2:
@@ -667,14 +669,15 @@ class _Checker:
                     d.line,
                 )
             tail = parts[1]
-            if tail.truncate == "day":
-                day_keyed = True
+            if tail.truncate is not None:
+                grain = tail.truncate
                 if d.across is not None:
                     raise CheckError(
                         f"figure {d.name} is split across {d.across}, but {name} truncates "
-                        "its second part to a day. A day is not a dimension: it has no "
-                        "roster and no name, and whether a figure is day-keyed is what "
-                        "decides if a reading may roll it up over a range.",
+                        f"its second part to a {tail.truncate}. A bucket of time is not a "
+                        "dimension: it has no roster and no name, and whether a figure is "
+                        "time-keyed is what decides if a reading may roll it up over a "
+                        "range.",
                         d.line,
                     )
             else:
@@ -702,7 +705,7 @@ class _Checker:
                         "field, so every row would be headed by a raw id.",
                         d.line,
                     )
-        return name, day_keyed, dimension_part
+        return name, grain, dimension_part
 
     # ------------------------------------------------- calculate: kinds --
 
@@ -1026,10 +1029,10 @@ class _Checker:
                     d.line,
                 )
             raise CheckError(f'there is no figure called "{figure}".', d.line)
-        if not source.day_keyed:
+        if source.grain is None:
             raise CheckError(
-                f"{source.name} is not day-keyed -- its scope index must end in a `by day` "
-                "part for there to be a range to read over.",
+                f"{source.name} is not time-keyed -- its scope index must end in a `by day`, "
+                "`by minute` or `by 15 minutes` part for there to be a range to read over.",
                 d.line,
             )
         if source.scope != scope:
@@ -1050,7 +1053,7 @@ class _Checker:
                 f"{source.name} stores an instant rather than a quantity.", d.line
             )
 
-        self._statistics(d, bound, source.unit == "count", live=False)
+        self._statistics(d, bound, live=False, source=source)
         unit = self._reading_unit(source.unit, d)
         self._band(d, scope)
         requires = d.requires
@@ -1147,7 +1150,7 @@ class _Checker:
                 d.line,
             )
 
-        self._statistics(d, bound, counts=False, live=True)
+        self._statistics(d, bound, live=True, source=None)
         self._band(d, scope)
         self.readings.append(
             _versioned_reading(
@@ -1171,8 +1174,17 @@ class _Checker:
             )
         )
 
-    def _statistics(self, d: ReadingDecl, bound: set[str], counts: bool, live: bool) -> None:
+    def _statistics(
+        self,
+        d: ReadingDecl,
+        bound: set[str],
+        live: bool,
+        source: FigurePlan | None,
+    ) -> None:
+        counts = source is not None and source.unit == "count"
+        grain = source.grain if source is not None else None
         seen: set[str] = set()
+        series_declared = 0
         for stat in d.calculate:
             if stat.set not in bound:
                 raise CheckError(
@@ -1183,16 +1195,31 @@ class _Checker:
                 raise CheckError(
                     f"reading {d.name} summarises stored values, and count({stat.set}) over "
                     "those is already reported as the sample -- one quantity under two names. "
-                    "For a count figure they would not even agree, because the sample is days "
-                    "that contributed rather than records.",
+                    "For a count figure they would not even agree, because the sample is the "
+                    "buckets that contributed rather than records.",
                     stat.line,
                 )
             if counts and stat.fn in ("mean", "median", "worst"):
                 raise CheckError(
                     f"the figure under {d.name} stores a count, so {stat.fn}({stat.set}) is a "
-                    f"{stat.fn} per *day* wearing a label that says per record -- a plausible "
-                    "number of roughly the right magnitude, which is the worst kind of wrong. "
-                    "Only sum is allowed over a count.",
+                    f"{stat.fn} per *{grain}* wearing a label that says per record -- a "
+                    "plausible number of roughly the right magnitude, which is the worst "
+                    "kind of wrong. Only sum is allowed over a count.",
+                    stat.line,
+                )
+            if stat.fn == "series":
+                series_declared += 1
+                if series_declared > 1:
+                    raise CheckError(
+                        f"reading {d.name} declares two series. A response carries one, so "
+                        "the second would be whichever the serve path kept, silently. Two "
+                        "grains are two readings.",
+                        stat.line,
+                    )
+                self._series_grain(d, stat, live, source)
+            elif stat.by is not None:  # pragma: no cover - the parser refuses first
+                raise CheckError(
+                    f"only a series takes a grain, and {stat.fn}({stat.set}) is not one.",
                     stat.line,
                 )
             seen.add(stat.fn)
@@ -1207,6 +1234,57 @@ class _Checker:
                 raise CheckError(
                     f'requires names "{r.set}", which is not a set defined in depends.', r.line
                 )
+
+    def _series_grain(
+        self, d: ReadingDecl, stat: Statistic, live: bool, source: FigurePlan | None
+    ) -> None:
+        """What a series may group to, decided by what is stored underneath.
+
+        Over a day-keyed source a bare series already is the day series; over
+        a sub-day one the grain must be said out loud, because it is the
+        payload the definition commits to. Finer-than-stored is unwritable
+        rather than refused: the finest series grain the parser accepts equals
+        the coarsest sub-day stored grain.
+        """
+        grain = source.grain if source is not None else None
+        if stat.by is None:
+            if grain in ("minute", "15 minutes"):
+                raise CheckError(
+                    f"reading {d.name} takes a series over a figure keyed by {grain}, so it "
+                    "must say the grain its points group to -- `series(...) by hour`, for "
+                    "example. A bare series over a sub-day figure is a payload choice "
+                    "nobody can see from the definition: ninety days of quarter-hours is "
+                    "8,640 points under a line that reads like any other sparkline.",
+                    stat.line,
+                )
+            return
+        if live:
+            raise CheckError(
+                f"reading {d.name} groups a series by {stat.by}, but a live reading "
+                "measures records as they stand -- there are no stored buckets to group.",
+                stat.line,
+            )
+        if grain == "day":
+            raise CheckError(
+                f"reading {d.name} groups a series by {stat.by}, but its figure is already "
+                "day-keyed and a bare series is the day series. A second spelling of one "
+                "thing is a first place for the two to disagree.",
+                stat.line,
+            )
+        assert source is not None  # a windowed reading's source is always grained
+        # A grouped point must be a number some `by day` index could have
+        # stored: the sum of a count's buckets, the mean of a list's records.
+        # Any other scalar -- a share, a span of days -- would be *summed*
+        # across buckets, and four quarter-hours at 0.5 becoming an hour at 2.0
+        # is arithmetic no definition claims.
+        if source.unit != "count" and not isinstance(source.calculate, ListOf):
+            raise CheckError(
+                f"reading {d.name} groups a series over {source.name}, which stores a "
+                f"{source.unit} per bucket. A grouped point would have to add those "
+                "buckets up, and a sum of shares or spans is a number no definition "
+                "claims. Grouping is defined for counts and for list figures.",
+                stat.line,
+            )
 
     def _reading_unit(
         self, source: FigureUnit, d: ReadingDecl
@@ -1300,9 +1378,11 @@ class _Checker:
                     "another space and find nothing -- a column of dashes, for ever.",
                     r.line,
                 )
-            if source.day_keyed:
+            if source.grain is not None:
                 raise CheckError(
-                    f"projection {d.name} reads {r.figure}, which is day-keyed.", r.line
+                    f"projection {d.name} reads {r.figure}, which is time-keyed: one value "
+                    f"per {source.grain} rather than one per row.",
+                    r.line,
                 )
             if source.across is not None:
                 raise CheckError(
@@ -1995,7 +2075,11 @@ def _versioned_reading(
         "scope": plan.scope,
         "mode": plan.mode,
         "unit": plan.unit,
-        "calculate": [[s.fn, s.set] for s in plan.calculate],
+        # A grain is a third element only when declared, so every reading
+        # written before series grains existed keeps its historic version.
+        "calculate": [
+            [s.fn, s.set] if s.by is None else [s.fn, s.set, s.by] for s in plan.calculate
+        ],
         "requires": [[r.count, r.set] for r in plan.requires] or None,
         "band": (
             {

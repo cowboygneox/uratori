@@ -219,13 +219,14 @@ class Uratori:
         out: list[Result] = []
 
         for plan in lib.figures:
-            if plan.day_keyed or plan.across is not None:
-                # Both serve by name (`answer`) -- day or dimension rows for a
-                # host's evidence pane -- but this is the bulk surface a pass
-                # pushes and a first paint reads, and no screen subscribes to
-                # those rows: what a card wants is the reading or the rollup,
-                # and both are below. Shipping every stored person-day here
-                # would spend every pass on history nobody is watching.
+            if plan.grain is not None or plan.across is not None:
+                # Both serve by name (`answer`) -- time-bucket or dimension
+                # rows for a host's evidence pane -- but this is the bulk
+                # surface a pass pushes and a first paint reads, and no screen
+                # subscribes to those rows: what a card wants is the reading
+                # or the rollup, and both are below. Shipping every stored
+                # person-day here would spend every pass on history nobody is
+                # watching.
                 continue
             if touched is not None and plan.name not in touched:
                 continue

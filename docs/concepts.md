@@ -142,7 +142,7 @@ plumbing, not numbers a reader meets.
   facts move. `carrying` counts each courier's open orders; `load_band` is a
   figure built *on* a figure (the `combine` block), banding the count against
   a settings dial.
-- **Readings** summarise a day-keyed figure over trailing windows -- "orders
+- **Readings** summarise a time-keyed figure over trailing windows -- "orders
   delivered over the last 30 days" is a reading over a per-day deliveries
   figure.
 - **Projections** assemble live rows at the instant they are asked -- a

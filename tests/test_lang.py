@@ -272,7 +272,7 @@ figure team_person.days across data_connection:
     calculate:
         count(m)
 """,
-        "A day is not a dimension",
+        "A bucket of time is not a dimension",
     )
 
 
@@ -667,7 +667,7 @@ reading team_person.second(range):
     )
 
 
-def test_a_windowed_reading_needs_a_day_keyed_source() -> None:
+def test_a_windowed_reading_needs_a_time_keyed_source() -> None:
     refuses(
         """
 # d
@@ -678,7 +678,7 @@ reading team_person.nope(range):
     calculate:
         mean(m)
 """,
-        "not day-keyed",
+        "not time-keyed",
     )
 
 
@@ -1906,3 +1906,384 @@ def test_a_full_width_comment_inside_a_block_does_not_truncate_the_served_formul
     formula = declaration_source(lib, "team_person.wip") or ""
     assert "count(mine)" in formula
     assert "About sizing." not in formula
+
+
+# ---------------------------------------------------------- sub-day grain --
+
+# A composite whose tail is a quarter-hour rather than a day, and a count
+# figure over it. Every test below builds on these two.
+QUARTER = """
+index code_change.merged_by_quarter from (authorAccountId through team_person.accounts.accountId, mergedAt by 15 minutes in tenant.timezone)
+
+# d
+figure team_person.merge_rate:
+    display "x"
+    depends:
+        mine = code_change.merged_by_quarter:{team_person}
+    calculate:
+        count(mine)
+"""
+
+
+def test_a_sub_day_truncation_is_the_figures_grain() -> None:
+    """The control for everything in this section: `by 15 minutes` and
+    `by minute` compile, carry the zone a day does, and mark the figure as
+    keyed by that grain -- which is what decides everything a reading may do
+    over it."""
+    lib = compile_ok(
+        QUARTER
+        + """
+index code_change.merged_by_minute from (authorAccountId through team_person.accounts.accountId, mergedAt by minute in tenant.timezone)
+
+# d
+figure team_person.merge_minutes:
+    display "x"
+    depends:
+        mine = code_change.merged_by_minute:{team_person}
+    calculate:
+        count(mine)
+"""
+    )
+    quarters = lib.figure("team_person.merge_rate")
+    minutes = lib.figure("team_person.merge_minutes")
+    assert quarters is not None and quarters.grain == "15 minutes"
+    assert minutes is not None and minutes.grain == "minute"
+    day = lib.figure("team_person.time_to_merge")
+    assert day is not None and day.grain == "day"
+    plain = lib.figure("team_person.wip")
+    assert plain is not None and plain.grain is None
+
+
+def test_a_grain_nobody_asked_for_is_refused_by_name() -> None:
+    """A truncation decides how many values a figure has, so each one is a
+    product decision rather than a convenience -- the same restraint that keeps
+    `week` and `month` out."""
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(
+            BASE
+            + "index code_change.by_five from (authorAccountId, mergedAt by 5 minutes)\n"
+        )
+    assert "not a truncation" in caught.value.message
+
+    with pytest.raises(SyntaxError_):
+        compile_source(BASE + "index code_change.by_week from (authorAccountId, mergedAt by week)\n")
+
+
+def test_hour_is_a_grouping_at_read_and_not_a_stored_grain() -> None:
+    """Storing hours beside the quarter-hours they are made of would be two
+    answers to one question -- the argument that keeps `week` and `month` out,
+    pointed downward."""
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(
+            BASE + "index code_change.by_hour from (authorAccountId, mergedAt by hour)\n"
+        )
+    assert "not a truncation" in caught.value.message
+
+    # The control: the same word is welcome as a series grouping.
+    lib = compile_ok(
+        QUARTER
+        + """
+# d
+reading team_person.throughput(range):
+    display "x"
+    depends:
+        m = team_person.merge_rate in range
+    calculate:
+        sum(m)
+        series(m) by hour
+"""
+    )
+    plan = lib.reading("team_person.throughput")
+    assert plan is not None
+    assert [(s.fn, s.by) for s in plan.calculate] == [("sum", None), ("series", "hour")]
+
+
+def test_a_series_over_a_sub_day_figure_must_say_its_grain() -> None:
+    """A bare series over a sub-day figure is a payload choice nobody can see
+    from the definition: ninety days of quarter-hours is 8,640 points under a
+    line that reads like any other sparkline."""
+    refuses(
+        QUARTER
+        + """
+# d
+reading team_person.throughput(range):
+    display "x"
+    depends:
+        m = team_person.merge_rate in range
+    calculate:
+        series(m)
+""",
+        "say the grain",
+    )
+
+
+def test_a_minute_series_is_the_raw_records_and_the_word_is_refused() -> None:
+    """Over a sparse figure a minute group holds one record, so the point *is*
+    the record -- the raw collection the payload exists to withhold. Refusing
+    the word in the parser is also what makes a finer-than-stored series
+    unwritable rather than refused: the finest series grain equals the
+    coarsest sub-day stored grain."""
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(
+            BASE
+            + QUARTER
+            + """
+# d
+reading team_person.throughput(range):
+    display "x"
+    depends:
+        m = team_person.merge_rate in range
+    calculate:
+        series(m) by minute
+"""
+        )
+    assert "minute resolution" in caught.value.message
+
+    # The other spellings nobody asked for refuse too, by name.
+    for grain in ("5 minutes", "week"):
+        with pytest.raises(SyntaxError_):
+            compile_source(
+                BASE
+                + QUARTER
+                + f"""
+# d
+reading team_person.throughput(range):
+    display "x"
+    depends:
+        m = team_person.merge_rate in range
+    calculate:
+        series(m) by {grain}
+"""
+            )
+
+
+def test_the_control_a_series_at_the_stored_grain_compiles() -> None:
+    """Equal is the boundary of "no finer than the store", and refusing it
+    would leave a quarter-hour figure with no native-resolution series at
+    all."""
+    lib = compile_ok(
+        QUARTER
+        + """
+# d
+reading team_person.throughput(range):
+    display "x"
+    depends:
+        m = team_person.merge_rate in range
+    calculate:
+        series(m) by 15 minutes
+"""
+    )
+    plan = lib.reading("team_person.throughput")
+    assert plan is not None
+    assert [(s.fn, s.by) for s in plan.calculate] == [("series", "15 minutes")]
+
+
+def test_a_day_keyed_figure_refuses_a_series_grain() -> None:
+    """Over a day-keyed source a bare series already is the day series, and a
+    second spelling of one thing is a first place for the two to disagree."""
+    refuses(
+        """
+# d
+reading team_person.to_merge_daily(range):
+    display "x"
+    depends:
+        m = team_person.time_to_merge in range
+    calculate:
+        mean(m)
+        series(m) by day
+""",
+        "already",
+    )
+
+
+def test_only_a_series_takes_a_grain() -> None:
+    """A scalar statistic runs over the window's raw values whatever the
+    series grain is -- grouping cannot change it, so a grain written on one
+    would be a declaration that does nothing."""
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(
+            BASE
+            + QUARTER
+            + """
+# d
+reading team_person.throughput(range):
+    display "x"
+    depends:
+        m = team_person.merge_rate in range
+    calculate:
+        sum(m) by hour
+"""
+        )
+    assert "series" in caught.value.message
+
+
+def test_two_series_under_one_reading_are_refused() -> None:
+    """A response carries one series; two declared would mean whichever the
+    serve path kept, silently. Two grains are two readings."""
+    refuses(
+        QUARTER
+        + """
+# d
+reading team_person.throughput(range):
+    display "x"
+    depends:
+        m = team_person.merge_rate in range
+    calculate:
+        series(m) by hour
+        series(m) by day
+""",
+        "two series",
+    )
+
+
+def test_a_live_reading_has_no_buckets_to_group() -> None:
+    refuses(
+        """
+# d
+reading team_person.queue():
+    display "x"
+    depends:
+        w = code_review_request.waiting_seconds over (code_review_request.asked_of:{team_person} & code_review_request.pending)
+    calculate:
+        count(w)
+        series(w) by hour
+""",
+        "live",
+    )
+
+    # The control: the same reading with a bare series compiles -- the refusal
+    # is about the grain, not about series over live sources.
+    lib = compile_ok(
+        """
+# d
+reading team_person.queue():
+    display "x"
+    depends:
+        w = code_review_request.waiting_seconds over (code_review_request.asked_of:{team_person} & code_review_request.pending)
+    calculate:
+        count(w)
+        series(w)
+"""
+    )
+    assert lib.reading("team_person.queue") is not None
+
+
+def test_a_grouped_point_over_a_share_would_sum_shares() -> None:
+    """Four quarter-hours at 0.5 becoming an hour at 2.0 is arithmetic no
+    definition claims: a grouped point must be a number some `by day` index
+    could have stored -- the sum of a count's buckets, the mean of a list's
+    records -- and a share per bucket is neither."""
+    share_figure = (
+        QUARTER
+        + """
+# d
+figure team_person.quarter_share:
+    display "x"
+    unit share
+    depends:
+        mine = code_change.merged_by_quarter:{team_person}
+    calculate:
+        count(mine) / 4
+"""
+    )
+    refuses(
+        share_figure
+        + """
+# d
+reading team_person.load(range):
+    display "x"
+    depends:
+        m = team_person.quarter_share in range
+    calculate:
+        series(m) by hour
+""",
+        "no definition claims",
+    )
+
+    # The control: the same grouping over the count figure beneath it is the
+    # legitimate case.
+    lib = compile_ok(
+        share_figure
+        + """
+# d
+reading team_person.load(range):
+    display "x"
+    depends:
+        m = team_person.merge_rate in range
+    calculate:
+        series(m) by hour
+"""
+    )
+    assert lib.reading("team_person.load") is not None
+
+
+def test_a_time_keyed_figure_cannot_be_read_as_a_single_value() -> None:
+    """A bare read would take whichever bucket sorted first -- one quarter-hour
+    out of a history, presented as the subject's number."""
+    refuses(
+        QUARTER
+        + """
+# d
+figure team_person.merge_total:
+    display "x"
+    combine:
+        rate = team_person.merge_rate
+    calculate:
+        rate
+""",
+        "time-keyed",
+    )
+
+
+def test_a_projection_may_not_read_a_time_keyed_figure() -> None:
+    """A row holds one value; a time-keyed figure has one per bucket, so every
+    row would be about whichever bucket the lookup happened to find."""
+    refuses(
+        QUARTER
+        + """
+# d
+projection team_person.card:
+    field:
+        name = display_name as text
+    read:
+        rate = team_person.merge_rate
+""",
+        "time-keyed",
+    )
+
+
+def test_the_stored_grain_is_in_the_version_hash() -> None:
+    """The same figure over minutes and over quarter-hours stores values that
+    mean different things; reusing them across the change would file a
+    quarter's count under a minute's key."""
+    minute = compile_source(
+        BASE + QUARTER.replace("by 15 minutes", "by minute")
+    ).figure("team_person.merge_rate")
+    quarter = compile_source(BASE + QUARTER).figure("team_person.merge_rate")
+    assert minute is not None and quarter is not None
+    assert minute.version != quarter.version
+
+
+def test_the_series_grain_is_in_the_readings_version() -> None:
+    """A series of hourly sums and a series of daily sums are different claims
+    under one name; a version that cannot tell them apart would let the
+    sparkline change shape while citing the same definition."""
+
+    def reading_with(by: str) -> str:
+        return (
+            QUARTER
+            + f"""
+# d
+reading team_person.throughput(range):
+    display "x"
+    depends:
+        m = team_person.merge_rate in range
+    calculate:
+        series(m) by {by}
+"""
+        )
+
+    hourly = compile_source(BASE + reading_with("hour")).reading("team_person.throughput")
+    daily = compile_source(BASE + reading_with("day")).reading("team_person.throughput")
+    assert hourly is not None and daily is not None
+    assert hourly.version != daily.version

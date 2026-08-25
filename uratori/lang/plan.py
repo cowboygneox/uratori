@@ -27,6 +27,7 @@ from .ast import (
     SetExpr,
     SortDecl,
     Statistic,
+    Truncation,
 )
 
 Value: TypeAlias = float | str | list[float | None] | None
@@ -114,7 +115,13 @@ class FigurePlan:
     """
 
     band_settings: tuple[str, ...] = ()
-    day_keyed: bool = False
+    grain: Truncation | None = None
+    """The time grain of the scope index's tail part, when it has one -- `day`,
+    `minute` or `15 minutes`. A grained figure has one value per subject per
+    bucket rather than one per subject, so it cannot be served by subject and a
+    reading over a range is what a screen asks for. Not in the version hash
+    directly: the index spec that carries it already is."""
+
     dimension_part: str | None = None
     depth: int = 0
     """How many figures deep this is. Stored, and every path sorts by it: the
