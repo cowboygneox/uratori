@@ -1,0 +1,23 @@
+<!doctype html>
+<!-- The built-in investigation UI. No build step, no framework: this file,
+     style.css and app.js are the whole client, served from the wheel by
+     uratori/server/ui.py. The browser lays things out; every number, display
+     string and verdict on this page arrived rendered from the server. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>uratori</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="chrome">
+    <span id="brand">uratori</span>
+    <nav id="tabs"></nav>
+    <span id="spacer"></span>
+    <label id="tenant-box">tenant <select id="tenant"></select></label>
+  </header>
+  <main id="view"></main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,191 @@
+/* Dark, dense, and quiet: an investigation surface, not a product page.
+   Names and values are monospace because they are identifiers and evidence;
+   prose is the system face. Colour is spent only on declaration kinds and on
+   the moved/removed distinction in the activity log. */
+
+:root {
+  --canvas: #101216;
+  --surface: #171a20;
+  --surface-2: #1e2229;
+  --line: #2a2f38;
+  --ink: #e6e9ee;
+  --ink-dim: #9aa3b2;
+  --ink-faint: #6b7484;
+  --accent: #7aa2f7;
+  --good: #9ece6a;
+  --bad: #f7768e;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+#chrome {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  padding: 0.6rem 1.25rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+}
+
+#brand { font-family: var(--mono); font-weight: 600; letter-spacing: 0.04em; }
+#spacer, .spacer { flex: 1; }
+
+#tabs a {
+  color: var(--ink-dim);
+  text-decoration: none;
+  padding: 0.25rem 0.6rem;
+  border-radius: 4px;
+}
+#tabs a.active { color: var(--ink); background: var(--surface-2); }
+#tabs a:hover { color: var(--ink); }
+
+#tenant-box { color: var(--ink-faint); font-size: 0.85rem; }
+#tenant {
+  background: var(--surface-2);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.15rem 0.35rem;
+  font-family: var(--mono);
+}
+
+#view { padding: 1.25rem; max-width: 72rem; margin: 0 auto; }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+h1 { font-size: 1.15rem; margin: 0 0 0.75rem; }
+h2 { font-size: 0.95rem; margin: 1.5rem 0 0.5rem; color: var(--ink-dim); }
+
+.mono, code { font-family: var(--mono); font-size: 0.92em; }
+.dim { color: var(--ink-dim); }
+.faint { color: var(--ink-faint); }
+
+.notice {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  color: var(--ink-dim);
+}
+.notice.problem { border-color: var(--bad); color: var(--ink); }
+
+.badge {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--ink-dim);
+  vertical-align: 0.1em;
+}
+.badge.figure     { color: #7aa2f7; border-color: #3d5288; }
+.badge.reading    { color: #bb9af7; border-color: #5a4a85; }
+.badge.projection { color: #7dcfff; border-color: #3c6a85; }
+.badge.summary    { color: #73daca; border-color: #396b62; }
+.badge.group      { color: #e0af68; border-color: #7a5f36; }
+.badge.filter     { color: #d4b56a; border-color: #6f5c2f; }
+.badge.measure    { color: #ff9e64; border-color: #8a5535; }
+.badge.fact       { color: #9ece6a; border-color: #4f6b33; }
+.badge.setting    { color: var(--ink-dim); }
+
+table { border-collapse: collapse; width: 100%; }
+th, td {
+  text-align: left;
+  padding: 0.35rem 0.75rem 0.35rem 0;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+th { color: var(--ink-faint); font-weight: 500; font-size: 0.8rem; }
+
+pre {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.split { display: grid; grid-template-columns: 19rem 1fr; gap: 1.5rem; align-items: start; }
+
+.roster { border-right: 1px solid var(--line); padding-right: 1rem; }
+.roster .kind-head {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--ink-dim);
+  margin: 0.9rem 0 0.2rem;
+}
+.roster a { display: block; padding: 0.1rem 0.4rem; border-radius: 4px; color: var(--ink); }
+.roster a .badge { float: right; margin-top: 0.2rem; }
+.roster a.here { background: var(--surface-2); }
+.roster input {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+  padding: 0.3rem 0.5rem;
+  font-family: var(--mono);
+}
+
+.tree { list-style: none; padding-left: 1.1rem; margin: 0.25rem 0; border-left: 1px dotted var(--line); }
+.tree > li { margin: 0.15rem 0; }
+.tree .leaf { color: var(--ink-dim); }
+
+.run {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.9rem;
+}
+.run .head { display: flex; gap: 0.9rem; align-items: baseline; flex-wrap: wrap; }
+.run .when { font-family: var(--mono); color: var(--ink-dim); font-size: 0.85rem; }
+.move { display: flex; gap: 0.6rem; padding: 0.2rem 0; align-items: baseline; flex-wrap: wrap; }
+.move .arrow { color: var(--ink-faint); }
+.move .after { font-family: var(--mono); }
+.move.removed .after { color: var(--bad); }
+
+.controls { display: flex; gap: 0.75rem; align-items: center; margin: 0.75rem 0; flex-wrap: wrap; }
+.controls input[type="search"] {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+  padding: 0.3rem 0.6rem;
+  font-family: var(--mono);
+  min-width: 16rem;
+}
+button {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  border-radius: 4px;
+  padding: 0.25rem 0.7rem;
+  cursor: pointer;
+  font: inherit;
+}
+button:disabled { color: var(--ink-faint); cursor: default; }
+button:hover:not(:disabled) { border-color: var(--ink-faint); }
+
+.record-row { cursor: pointer; }
+.record-row:hover td { background: var(--surface); }
+
+.kv { margin: 0.2rem 0; }
+.kv dt { display: inline; color: var(--ink-faint); font-size: 0.85rem; }
+.kv dd { display: inline; margin: 0 0.9rem 0 0.3rem; font-family: var(--mono); font-size: 0.85rem; }

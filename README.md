@@ -106,6 +106,12 @@ string lands in every access log on the way. `DATABASE_URL` names a Postgres
 database of uratori's own; it refuses one that belongs to something else, and
 it migrates itself at boot.
 
+An open server also serves a [built-in investigation UI](docs/ui.md) at
+`/ui/` -- the library as written with dependencies traced down to the facts,
+the stored records themselves, and an activity log of what each pushed fact
+cascaded to. It is unauthenticated by design (the firewall is the door), so
+setting `URATORI_TOKEN` turns it off unless `URATORI_UI=on` says otherwise.
+
 Images live on [Docker Hub](https://hub.docker.com/r/cowboygneox/uratori) as
 `cowboygneox/uratori` and on GHCR as `ghcr.io/cowboygneox/uratori`, built for
 amd64 and arm64. If your Postgres is a container on the same machine, the
@@ -120,6 +126,7 @@ container, `localhost` is the container.
 | [Setup](docs/setup.md) | Deploying the container: environment, database, token, health, upgrades. |
 | [HTTP & websocket API](docs/http-api.md) | Every route and frame, with request and response shapes. |
 | [The definition language](docs/language.md) | Writing `.fig`: groups, filters, measures, figures, readings, projections. |
+| [The built-in UI](docs/ui.md) | The investigation surface at `/ui/`: definitions as written, dependency traces, facts, and the activity log. |
 
 ## The rules it inherits
 
