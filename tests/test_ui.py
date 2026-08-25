@@ -5,10 +5,11 @@ this deployment know, and why does this number say what it says" without
 checking a repository out. These tests pin the three claims that make it an
 investigation tool rather than a status page:
 
-- **The world payload is complete.** Every declaration of every kind -- indexes
-  and measures included, though they have no version of their own -- with its
-  source text and its dependencies, typed all the way down to the fact kinds,
-  so a reader can walk from any definition to the records it stands on.
+- **The world payload is complete.** Every declaration of every kind --
+  groups, filters and measures included, though they have no version of their
+  own -- with its source text and its dependencies, typed all the way down to
+  the fact kinds, so a reader can walk from any definition to the records it
+  stands on.
 - **The activity log is a cascade record.** A pushed fact leaves a persisted
   run whose movements say which figures moved and to what, frozen at the
   moment it happened.
@@ -90,9 +91,9 @@ COURIER = {"c1": {"name": "Aki"}}
 async def test_the_world_payload_lists_every_declaration_with_its_dependencies(
     pg_dsn: str,
 ) -> None:
-    """Indexes and measures included: they are the declarations the API's own
-    LibraryOut reduces to counts, and the ones an investigator most needs --
-    they are where a definition touches the facts."""
+    """Groups, filters and measures included: they are the declarations the
+    API's own LibraryOut reduces to counts, and the ones an investigator most
+    needs -- they are where a definition touches the facts."""
     async with serve(pg_dsn) as http:
         await _teach(http)
         world = (await http.get("/ui/api/world")).json()
@@ -107,9 +108,9 @@ async def test_the_world_payload_lists_every_declaration_with_its_dependencies(
         assert sorted(world["kinds"]) == ["shop_courier", "shop_order"]
 
         carried_by = by_name["shop_order.carried_by"]
-        assert carried_by["kind"] == "index"
+        assert carried_by["kind"] == "group"
         assert carried_by["version"] is None, (
-            "an index has no version of its own -- its text is hashed into "
+            "a group has no version of its own -- its text is hashed into "
             "every figure that reads it, and the payload must say so rather "
             "than invent one"
         )
@@ -125,8 +126,8 @@ async def test_the_world_payload_lists_every_declaration_with_its_dependencies(
             "hash that drifted from the compiler's would break verification"
         )
         rests = {(d["type"], d["name"]) for d in carrying["rests_on"]}
-        assert ("index", "shop_order.carried_by") in rests
-        assert ("index", "shop_order.open") in rests
+        assert ("group", "shop_order.carried_by") in rests
+        assert ("filter", "shop_order.open") in rests
         assert ("fact", "shop_courier") in rests, (
             "the scope kind is a dependency too: the subjects, the roster the "
             "backfill writes noughts over, and the labels all come from its "
@@ -144,7 +145,7 @@ async def test_the_world_payload_lists_every_declaration_with_its_dependencies(
 async def test_dependencies_walk_all_the_way_to_the_original_fact(pg_dsn: str) -> None:
     """The trace the UI draws: from any definition, following rests_on edges
     through the payload alone must reach a fact kind. A payload needing a
-    second request per hop, or one whose edges dead-end at an index, would
+    second request per hop, or one whose edges dead-end at a group, would
     make the trace a feature of the server rather than of the data."""
     async with serve(pg_dsn) as http:
         await _teach(http)
@@ -532,18 +533,18 @@ async def test_the_ui_serves_its_page_with_the_frame_ancestors_it_was_given(
 
 # ------------------------------------------------------ the full library --
 
-# Every declaration kind and every index spec the language has, so the world
-# payload's dependency edges are pinned where they actually vary: a composite
-# index hopping `through` another kind and bucketing `by day` in a zone dial,
-# an age index reading a threshold, measures, a windowed and a live reading,
-# a projection and its summary. The courier corpus alone cannot do this -- it
-# holds two indexes and two figures, and a payload whose contract is "every
-# declaration of every kind" needs a corpus that has them.
+# Every declaration kind and every grouping spec the language has, so the
+# world payload's dependency edges are pinned where they actually vary: a
+# composite group hopping `through` another kind and bucketing `by day` in a
+# zone dial, an age filter reading a threshold, measures, a windowed and a
+# live reading, a projection and its summary. The courier corpus alone cannot
+# do this -- it holds two groupings and two figures, and a payload whose
+# contract is "every declaration of every kind" needs a corpus that has them.
 FULL_SOURCE = """
-index code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
-index code_review_request.asked_of from reviewer_account_id through team_person.accounts.account_id
-index code_review_request.pending where pending == true
-index code_change.stale where updated_at older than thresholds.staleChangeDays
+group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
+group code_review_request.asked_of from reviewer_account_id through team_person.accounts.account_id
+filter code_review_request.pending where pending == true
+filter code_change.stale where updated_at older than thresholds.staleChangeDays
 
 measure code_change.open_seconds = merged_at - created_at
 measure code_review_request.waiting_seconds = now - requested_at
@@ -596,10 +597,10 @@ async def test_every_declaration_kind_travels_with_its_own_edges(pg_dsn: str) ->
         by_name = {d["name"]: d for d in world["declarations"]}
         kinds = {d["name"]: d["kind"] for d in world["declarations"]}
         assert kinds == {
-            "code_change.merged_by_day": "index",
-            "code_review_request.asked_of": "index",
-            "code_review_request.pending": "index",
-            "code_change.stale": "index",
+            "code_change.merged_by_day": "group",
+            "code_review_request.asked_of": "group",
+            "code_review_request.pending": "filter",
+            "code_change.stale": "filter",
             "code_change.open_seconds": "measure",
             "code_review_request.waiting_seconds": "measure",
             "team_person.time_to_merge": "figure",
@@ -612,14 +613,14 @@ async def test_every_declaration_kind_travels_with_its_own_edges(pg_dsn: str) ->
         def rests(name: str) -> set[tuple[str, str]]:
             return {(d["type"], d["name"]) for d in by_name[name]["rests_on"]}
 
-        # A composite index: its own kind, the kind it hops through, and the
+        # A composite group: its own kind, the kind it hops through, and the
         # zone dial that decides which day a bucket is.
         assert rests("code_change.merged_by_day") == {
             ("fact", "code_change"),
             ("fact", "team_person"),
             ("setting", "tenant.timezone"),
         }
-        # An age index reads a threshold dial.
+        # An age filter reads a threshold dial.
         assert rests("code_change.stale") == {
             ("fact", "code_change"),
             ("setting", "thresholds.staleChangeDays"),
@@ -634,11 +635,12 @@ async def test_every_declaration_kind_travels_with_its_own_edges(pg_dsn: str) ->
         assert ("fact", "team_person") in rests("team_person.lead_time")
         assert by_name["team_person.lead_time"]["mode"] == "window"
 
-        # A live reading: the measure it reads and the indexes that scope it.
+        # A live reading: the measure it reads, and the group and filter
+        # that scope it -- each edge typed by its own declaration keyword.
         live = rests("team_person.queue")
         assert ("measure", "code_review_request.waiting_seconds") in live
-        assert ("index", "code_review_request.asked_of") in live
-        assert ("index", "code_review_request.pending") in live
+        assert ("group", "code_review_request.asked_of") in live
+        assert ("filter", "code_review_request.pending") in live
         assert by_name["team_person.queue"]["mode"] == "live"
 
         # A projection rests on the kind whose records are its rows; its

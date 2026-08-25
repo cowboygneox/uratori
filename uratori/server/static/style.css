@@ -95,7 +95,8 @@ h2 { font-size: 0.95rem; margin: 1.5rem 0 0.5rem; color: var(--ink-dim); }
 .badge.reading    { color: #bb9af7; border-color: #5a4a85; }
 .badge.projection { color: #7dcfff; border-color: #3c6a85; }
 .badge.summary    { color: #73daca; border-color: #396b62; }
-.badge.index      { color: #e0af68; border-color: #7a5f36; }
+.badge.group      { color: #e0af68; border-color: #7a5f36; }
+.badge.filter     { color: #d4b56a; border-color: #6f5c2f; }
 .badge.measure    { color: #ff9e64; border-color: #8a5535; }
 .badge.fact       { color: #9ece6a; border-color: #4f6b33; }
 .badge.setting    { color: var(--ink-dim); }

@@ -154,7 +154,7 @@ async function render() {
 
 // -------------------------------------------------------- definitions --
 
-const KIND_ORDER = ['figure', 'reading', 'projection', 'summary', 'index', 'measure'];
+const KIND_ORDER = ['figure', 'reading', 'projection', 'summary', 'group', 'filter', 'measure'];
 
 function namespaceOf(name) {
   const dot = name.indexOf('.');

@@ -42,7 +42,7 @@ from pydantic import BaseModel
 
 from ..facade import DEFAULT_TRAILING
 from ..lang.ast import ByAge, ByComposite, ByField, IndexBy, IndexField
-from ..lang.plan import Library
+from ..lang.plan import CompiledIndex, Library
 from ..lang.source import declaration_prose, declaration_source
 from ..results import Evidence, Result
 from ..schema import Schema
@@ -59,10 +59,20 @@ _ASSETS = {
 whatever lands beside these; two known names cannot."""
 
 
-DeclarationKind = Literal["index", "measure", "figure", "reading", "projection", "summary"]
+DeclarationKind = Literal[
+    "group", "filter", "measure", "figure", "reading", "projection", "summary"
+]
 
 DependencyType = Literal[
-    "fact", "setting", "index", "measure", "figure", "reading", "projection", "summary"
+    "fact",
+    "setting",
+    "group",
+    "filter",
+    "measure",
+    "figure",
+    "reading",
+    "projection",
+    "summary",
 ]
 
 
@@ -78,8 +88,8 @@ class DeclarationOut(BaseModel):
     name: str
     kind: DeclarationKind
     version: str | None
-    """None for an index or a measure: they have no version of their own --
-    their text is hashed into every definition that reads them."""
+    """None for a group, filter or measure: they have no version of their own
+    -- their text is hashed into every definition that reads them."""
 
     doc: str
     source: str | None
@@ -381,13 +391,13 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
         edges = [Dependency(type="fact", name=index.kind)]
         if index.id_space != index.kind:
             # `keyed as`: the members are another kind's ids, so that kind is
-            # part of what this index rests on.
+            # part of what this group rests on.
             edges.append(Dependency(type="fact", name=index.id_space))
         edges += _spec_edges(index.spec)
         out.append(
             DeclarationOut(
                 name=name,
-                kind="index",
+                kind=_grouping_kind(index),
                 version=None,
                 doc=declaration_prose(library, name),
                 source=declaration_source(library, name),
@@ -417,7 +427,7 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
         edges = [Dependency(type="fact", name=figure.scope)]
         if figure.across is not None:
             edges.append(Dependency(type="fact", name=figure.across))
-        edges += [Dependency(type="index", name=n) for n in figure.indexes]
+        edges += [_grouping_edge(library, n) for n in figure.indexes]
         edges += [Dependency(type="measure", name=n) for n in figure.measures]
         sources = set(figure.reads) | {src for src, _ in figure.combines.values()}
         edges += [Dependency(type="figure", name=n) for n in sorted(sources)]
@@ -443,7 +453,7 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
             edges.append(Dependency(type="figure", name=reading.source))
         if reading.live_measure is not None:
             edges.append(Dependency(type="measure", name=reading.live_measure))
-        edges += [Dependency(type="index", name=n) for n in reading.indexes]
+        edges += [_grouping_edge(library, n) for n in reading.indexes]
         edges += [Dependency(type="setting", name=n) for n in reading.settings]
         out.append(
             DeclarationOut(
@@ -462,7 +472,7 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
         figures = set(projection.figures) | {name for _, name, _, _ in projection.reads}
         edges = [Dependency(type="fact", name=projection.kind)]
         edges += [Dependency(type="figure", name=n) for n in sorted(figures)]
-        edges += [Dependency(type="index", name=n) for n in projection.indexes]
+        edges += [_grouping_edge(library, n) for n in projection.indexes]
         edges += [Dependency(type="fact", name=j.kind) for j in projection.joins]
         edges += [Dependency(type="setting", name=n) for n in projection.settings]
         out.append(
@@ -492,6 +502,19 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
         )
 
     return out
+
+
+def _grouping_kind(index: CompiledIndex) -> Literal["group", "filter"]:
+    """The declaration keyword, recovered from the compiled shape: a group
+    fans records out (bucketed), a filter is a single narrowing bucket."""
+    return "group" if index.bucketed else "filter"
+
+
+def _grouping_edge(library: Library, name: str) -> Dependency:
+    held = library.indexes.get(name)
+    return Dependency(
+        type=_grouping_kind(held) if held is not None else "group", name=name
+    )
 
 
 def _spec_edges(spec: IndexBy) -> list[Dependency]:

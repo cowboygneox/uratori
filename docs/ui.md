@@ -10,12 +10,12 @@ product's end users; a host builds its own screens against the
 ## What it shows
 
 - **Definitions.** Every declaration of every kind -- figures, readings,
-  projections, summaries, *and* the indexes and measures that have no version
-  of their own. Each page shows the prose above the declaration, the version
-  hash (the citation every value carries), the source exactly as written, and
-  two walks: **rests on**, a tree following the declaration's dependencies
-  down through figures, indexes and measures to the fact kinds and tenant
-  dials at the leaves; and **used by**, the reverse. For servable kinds the
+  projections, summaries, *and* the groups, filters and measures that have no
+  version of their own. Each page shows the prose above the declaration, the
+  version hash (the citation every value carries), the source exactly as
+  written, and two walks: **rests on**, a tree following the declaration's
+  dependencies down through figures, groups, filters and measures to the fact
+  kinds and tenant dials at the leaves; and **used by**, the reverse. For servable kinds the
   page also asks for the current answer, and a figure's rows carry an
   *evidence* button -- the stored citation, joined back to the records.
 - **Facts.** Per kind, what the server holds -- a kind the schema declares
