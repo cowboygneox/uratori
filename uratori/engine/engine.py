@@ -354,8 +354,18 @@ class Engine:
             for subject, figures in pending.items():
                 if plan.name in figures:
                     subjects.add(subject)
+            if not subjects:
+                continue
+            # One reader context per figure per pass, not per subject. Nothing
+            # a reader serves moves while this figure's subjects recompute:
+            # buckets were rebuilt before any recompute began, facts do not
+            # move mid-pass, and depth order means every part a rollup reads
+            # was written before the rollup's turn. Per-subject rebuilding is
+            # the quadratic shape that turned a season-sized bulk load into
+            # tens of minutes -- tests/test_pass_cost.py holds the line.
+            readers = await self._readers(tenant, plan, settings)
             for subject in sorted(subjects):
-                change = await self._recompute_one(tenant, plan, subject, settings)
+                change = await self._recompute_one(tenant, plan, subject, readers)
                 if change is None:
                     continue
                 changes.append(change)
@@ -368,9 +378,8 @@ class Engine:
         return changes
 
     async def _recompute_one(
-        self, tenant: str, plan: FigurePlan, subject: str, settings: Mapping[str, Any]
+        self, tenant: str, plan: FigurePlan, subject: str, readers: Readers
     ) -> Change | None:
-        readers = await self._readers(tenant, plan, settings)
         result = evaluate(plan, subject, readers)
         held = await self._store.value(tenant, plan.name, plan.version, subject)
 
@@ -572,10 +581,19 @@ class Engine:
             if only is not None and plan.name not in only:
                 continue
             have = set(await self._store.subjects(tenant, plan.name, plan.version))
-            for subject in await self._scopes_of(tenant, plan, settings):
-                if gaps_only and subject in have:
-                    continue
-                change = await self._recompute_one(tenant, plan, subject, settings)
+            subjects = [
+                subject
+                for subject in await self._scopes_of(tenant, plan, settings)
+                if not (gaps_only and subject in have)
+            ]
+            if not subjects:
+                continue
+            # Hoisted for the reason `_recompute` gives: the context is fixed
+            # for the whole of a figure's turn, and a cold pass over a
+            # season-sized tenant recomputes every subject there is.
+            readers = await self._readers(tenant, plan, settings)
+            for subject in subjects:
+                change = await self._recompute_one(tenant, plan, subject, readers)
                 if change is not None:
                     changes.append(change)
         return changes

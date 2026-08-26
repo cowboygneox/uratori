@@ -1,0 +1,54 @@
+{
+  "bucket_settings": [
+    "tenant.timezone",
+    "form.recentDays"
+  ],
+  "figure_settings": [
+    "thresholds.contending.rate",
+    "thresholds.fading.rate",
+    "thresholds.passing.star",
+    "thresholds.conversion.sharp",
+    "thresholds.conversion.stalling"
+  ],
+  "reading_settings": [
+    "pace.restDays"
+  ],
+  "project_settings": [
+    "thresholds.blowout",
+    "thresholds.thisWeek",
+    "thresholds.giveaways"
+  ],
+  "defaults": {
+    "tenant": {
+      "hoursPerDay": 8,
+      "timezone": "America/New_York"
+    },
+    "form": {
+      "recentDays": 45
+    },
+    "thresholds": {
+      "contending": {
+        "rate": 0.65
+      },
+      "fading": {
+        "rate": 0.35
+      },
+      "passing": {
+        "star": 3800
+      },
+      "blowout": 17,
+      "thisWeek": 7,
+      "conversion": {
+        "sharp": 0.45,
+        "stalling": 0.35
+      },
+      "giveaways": 30
+    },
+    "pace": {
+      "restDays": {
+        "good": 6.5,
+        "poor": 5.75
+      }
+    }
+  }
+}

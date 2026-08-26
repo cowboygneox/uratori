@@ -148,7 +148,7 @@ curl -s -X PUT "$BASE/schema" -H "$AUTH" -H 'Content-Type: application/json' -d 
 
 | Field | Type | Meaning |
 |---|---|---|
-| `kinds` | `[string]` | The closed set of fact kinds definitions may name. Each must lex as one identifier (`[A-Za-z_][A-Za-z0-9_]*`): `-` is the language's set-difference operator and `.` would collide with figure names, so a kind containing either is refused with an explanation. |
+| `kinds` | `[string]` | The closed set of fact kinds definitions may name -- **omit it entirely in a fact-taught world** (see below). Each must lex as one identifier (`[A-Za-z_][A-Za-z0-9_]*`): `-` is the language's set-difference operator and `.` would collide with figure names, so a kind containing either is refused with an explanation. |
 | `name_fields` | `{kind: field}` | Which field of a record carries its human name, per kind. The engine freezes this name when a value is written. A name field for a kind not in `kinds` is refused as a typo rather than ignored -- ignoring it would leave the intended kind rendering raw ids for ever while everything looked configured. |
 | `url_fields` | `{kind: field}` | The same decision for a record's link: which field holds the address of the record in the source system, per kind. Evidence members carry it so a reader can walk from a cited record to the source. A kind with no url field serves bare titles -- declared rather than guessed, because a field that happens to be called `url` is a host convention the engine was never taught. Stray kinds are refused, like `name_fields`. |
 | `bucket_settings` | `[string]` | Dial paths a definition may read, split by what turning the dial costs: a bucket setting re-buckets a tenant's whole history... |
@@ -157,7 +157,12 @@ curl -s -X PUT "$BASE/schema" -H "$AUTH" -H 'Content-Type: application/json' -d 
 | `project_settings` | `[string]` | projection setting is free, because nothing is stored. |
 | `defaults` | object | The shipped settings document, as a nested object. A tenant's stored settings are sparse; the engine completes them over these at every use. A dial a definition names that resolves to nothing under the completed document **raises** rather than guessing. |
 
-All fields except `kinds` default to empty. One dial path is reserved:
+Every field defaults to empty, `kinds` included: a host that declares its
+facts **in the definition language** (`fact shop_order:` -- see
+[the language guide](language.md)) PUTs a schema of settings and defaults
+alone, and the kinds, name fields and url fields derive from the source at
+`PUT /definitions`. Declaring both is refused at compile time -- one world,
+one door. One dial path is reserved:
 `tenant.hoursPerDay`, which the renderer divides by to print an `effort`
 (seconds of working time) as days -- a world that renders efforts must carry
 it in `defaults`.
@@ -184,8 +189,10 @@ with the refusal until corrected definitions are `PUT`.)
 
 ### `GET /schema`
 
-The stored document, in exactly the `PUT` shape. `404` when no schema has
-ever been declared -- the one route where "not taught yet" is a missing
+The stored document, in exactly the `PUT` shape -- so in a fact-taught
+world it answers `kinds: []`, honestly: the world lives in the source, and
+`GET /definitions` is where its kinds, fields and versions are served.
+`404` when no schema has ever been declared -- the one route where "not taught yet" is a missing
 resource rather than a `409`, because here the resource being asked for *is*
 the missing configuration.
 
@@ -206,21 +213,47 @@ concatenated, the same text you commit. The server compiles it; source is the
 truth and the compiled plans are its consequence, never something a client
 uploads directly.
 
+**Adopting facts on a live deployment happens through this door.** A source
+that brings its own `fact` declarations refuses a schema that also declares
+kinds -- but rather than deadlocking a running schema-taught world, this
+route retires the stored schema's kinds, name fields and url fields in the
+same save: the new world is compiled whole before anything is persisted, and
+the settings and defaults survive. (Any other refusal is served verbatim; the
+retirement happens only for the one conflict.) Fact versions are downstream
+of nothing, so the adoption rebuilds no stored value.
+
 Responses:
 
 - `409` when no schema is declared yet (definitions compile against it).
 - `422` with the compiler's message, verbatim, whichever layer refused --
-  the parser's (`line 1: expected "group", "filter", …` for text that does
-  not parse) or the checker's (`"not a fact kind"` when a definition names a
-  kind the schema does not declare). A refused load changes nothing: the
-  previously loaded definitions (or the untaught state) stand whole, and
-  `/health` still says so.
-- `200` with the library, **described**: every declaration of all six kinds,
-  each carrying its prose, its formula, and the names it rests on. One entry
-  of each shape, abridged:
+  the parser's (`line 1: expected "fact", "group", "filter", …` for text
+  that does not parse) or the checker's (`"not a fact kind"` when a
+  definition names a kind the world does not declare). A refused load
+  changes nothing: the previously loaded definitions (or the untaught state)
+  stand whole, and `/health` still says so.
+- `200` with the library, **described**: every declaration, each carrying
+  its prose, its formula, and the names it rests on. A fact-taught world
+  additionally carries `facts` -- per kind, the version, the prose, the
+  name/url pointers, and every leaf field as a dotted path with its type,
+  whether it `repeats` (a `many` on the way), and its own prose. That array
+  is the schema a UI walks a number back to. One entry of each shape,
+  abridged:
 
 ```json
 {
+  "facts": [
+    {
+      "name": "shop_order",
+      "version": "af4ffe488502",
+      "prose": "An order in the shop, as the provider last showed it.",
+      "name_field": "ref",
+      "url_field": "url",
+      "fields": [
+        {"path": "ref", "type": "text", "repeats": false, "prose": ""},
+        {"path": "courier_id", "type": "text", "repeats": false, "prose": "Which courier holds it; absent until assigned."}
+      ]
+    }
+  ],
   "figures": [
     {
       "name": "shop_courier.carrying",
@@ -335,7 +368,7 @@ Request fields, all optional:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `writes` | `{kind: {key: record}}` | Records as the provider shows them now. Each record is arbitrary JSON. |
+| `writes` | `{kind: {key: record}}` | Records as the provider shows them now. Arbitrary JSON in a schema-taught world; verified against the declaration in a fact-taught one. |
 | `stamps` | `{kind: {key: instant}}` | The provider's own updated-at instant per record, ISO 8601, where one exists. Sparse. |
 | `deletes` | `{kind: [key]}` | Keys gone from the world. |
 | `full` | bool | Force a full pass: reindex and recompute everything rather than only what moved. The right call after a destructive change whose scope the warm path cannot see. Default `false`. |
@@ -365,6 +398,23 @@ the response); correctness over cheapness, and rare enough to be a fair price.
 
 Passes are serialised per tenant: two concurrent posts for one tenant queue,
 posts for different tenants overlap.
+
+**A batch is verified before anything lands.** A *write* against a kind the
+world does not declare is a `422` in either mode -- new behaviour from the
+release that added fact declarations; such writes previously stored rows
+nothing could ever read. A *delete* of an unknown kind is deliberately
+allowed: it is the cleanup path for a retired kind's stored rows. In a
+fact-taught world every written body is additionally checked against its
+declaration -- an undeclared field, a wrong type or a wrong shape (`one`
+receiving a list, a scalar receiving an object) refuses the **whole batch**,
+with the kind, key and field (down to the list element: `events[1]`) in the
+detail. Not per-record quarantine: silently landing a record's batch-mates
+would narrow a population by a cheap path, and the fix is in the pushing
+host's mapping. The batch's deletes and writes are also applied in one
+transaction, so anything verification could not foresee still fails whole
+rather than half-landing. An *absent* field -- omitted, an explicit null, or
+the empty string -- is never an error: the declaration's claim is
+known/unknown, not required/optional.
 
 `409` while the server is untaught; otherwise `200` with a **run report**:
 

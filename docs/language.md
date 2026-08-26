@@ -146,7 +146,7 @@ The pieces:
   either shape, so a typo is reported with the list of what was actually
   bound.
 
-**One namespace covers all seven declaration kinds.** Two definitions sharing a
+**One namespace covers all eight declaration kinds.** Two definitions sharing a
 name would make a citation ambiguous, so the checker refuses the second
 whatever kind it is.
 
@@ -160,10 +160,11 @@ a real constraint on naming, better stated than discovered.
 
 ---
 
-## Seven declarations
+## Eight declarations
 
 | | Answers | Stores |
 |---|---|---|
+| `fact` | what a record of this kind carries | nothing -- it gates what may land |
 | `group` | which records belong to which subject | one bucket per value |
 | `filter` | which records pass a test | one bucket |
 | `measure` | a quantity read off one record | nothing |
@@ -178,6 +179,129 @@ instant it is written and nothing would ever recompute it, because the clock
 is not an event. Every number would be real exactly once. So `now` is fenced
 by where the result may go -- a figure may never name it, and the constructs
 that may name it store nothing.
+
+---
+
+## `fact` -- what a record is
+
+```
+# An order in the shop, as the provider last showed it.
+fact shop_order:
+    name ref
+    url link
+    ref as text
+    link as text
+    # Which courier holds it; absent until assigned.
+    courier_id as text
+    status as text
+    placed_at as moment
+    delivered_at as moment
+    weight_grams as number
+    rush as flag
+    one dropoff:
+        street as text
+    many events:
+        kind as text
+        at as moment
+```
+
+The world, declared where the definitions that read it are declared. A host
+may still teach kinds through the schema document instead ([Concepts --
+The schema](concepts.md)); what it may not do is both -- a source that
+declares facts refuses a schema that also declares kinds, because two
+declarations of one world is where they drift. With facts declared, three
+things happen that a kind list cannot do:
+
+- **Every path a definition reads is checked.** A group bucketing by a field
+  that does not exist, a measure subtracting a text, a projection binding
+  `as date` over something that is not a moment, a filter testing a flag
+  against a word it can never hold -- each was a silently empty bucket or a
+  column of dashes in production, and each is now a build failure that names
+  the field and lists what the record actually carries. (For predicates the
+  quoting carries the claim: a bare `true` names a flag's value, a quoted
+  `"true"` names a word a text field holds, and numbers are written bare so
+  they compare in the bucket key's own spelling.)
+- **A record must match the declaration to land.** The facts route verifies
+  every written body; an undeclared field or a wrong type refuses the batch
+  whole, by kind, key and field (see [the HTTP API](http-api.md)).
+- **A reader can walk a number back to the schema.** Each fact is versioned
+  and served with its fields and their prose, so the trace that starts at a
+  figure bottoms out on a declaration instead of on arbitrary JSON.
+
+### The shape
+
+Named **bare** -- `fact shop_order:` -- where every other declaration is
+`<fact kind>.<name>`, so a kind can never collide with a definition name.
+There is **no `field` keyword**: a fact's body is its fields, so the word
+would be noise on every line. A line whose second token is `as` is a field;
+`name <field>` and `url <field>` are the two directives; `one x:` and
+`many x:` open nested blocks. A field literally called `name` is still
+writable (`name as text`) -- nothing here is a reserved word, in keeping with
+the lexer's own rule.
+
+### Structural only, on purpose
+
+Four types -- `text`, `number`, `flag`, `moment` -- and nothing else, because
+a fact describes the record as the provider shows it and every
+*interpretation* already has a home. A correlation (`courier_id` names a
+courier) is a group's `through` claim; what a number *means* (`effort`,
+`count`) is the measure's `in` clause. Writing either on the fact was
+considered and refused: nothing in the records marks those fields as special,
+and a `key of shop_courier` here would be the correlation declared twice.
+`moment` survives that test because "this string is an instant" is a claim
+about the value's form -- it is what makes `delivered_at - placed_at`
+checkable and what an age filter needs.
+
+`name` and `url` are directives pointing at fields rather than markers on the
+field line, because they are rendering, not data: fields are hashed, these
+are not, and a rendering choice written inline would look like part of the
+field's semantics. Both are optional -- a kind with no `name` renders raw ids
+(honest, and the checker still refuses to split a figure `across` it), and a
+kind with no `url` serves linkless evidence.
+
+### `one` and `many` -- nesting is cardinality
+
+Blocks nest by plain recursion, and what they declare is not the provider's
+payload shape but a **cardinality the checker can reason about**: a path
+crossing only `one` blocks yields one value; a path crossing a `many` yields
+every element. That single property is what each downstream rule branches on
+-- a group may cross a `many` (bucketing flattens deliberately: any
+account_id of any account), a measure may not (it reads one value, and across
+a list it would silently skip or first-win), a projection field may not (a
+row's field holds one value), and an age filter may not (it reads one
+instant). A predicate or an `is set` over a `many` is allowed and means *any
+element*: `==` asks whether any element matches, which makes `!=` "no element
+does" -- and, absent-satisfies-`!=` being the standing rule, a record with an
+empty list passes a `!=` exactly as a record with no field does. A deeply
+nested fact is usually the host
+transcribing the provider instead of mapping it; allowed, and the flatter
+mapping is house style.
+
+**A list of scalars is not declarable.** No construct can read one -- a
+predicate compares one field against one literal and cannot test membership
+-- and a declared-but-unreadable field would be a construct nobody has
+checked. The same goes for an open JSON bag: the body a host pushes is the
+body it authored, and what the provider sends but nothing reads is left out
+of the mapping. That is the write-boundary spelling of "a field that is not
+on a record here is a field not on disk".
+
+### An absence is never an error
+
+The declaration's claim is **known/unknown, not required/optional**. A record
+may omit any field, or carry it as an explicit null -- absence means "nobody
+said", exactly as it does everywhere else in this engine. What must not
+happen is a *present* value the declaration cannot account for.
+
+### Versioned, but downstream of nothing
+
+A fact's version hashes its fields and their shapes -- not its prose, not
+`name` or `url`. **No definition's version reads it**, for the reason
+`keyed as` is not hashed: a fact schema decides what the checker permits and
+what the write boundary accepts, never what the arithmetic produces. That is
+the property that makes adoption safe -- a host that moves its kinds into
+`fact` declarations moves no figure's hash and rebuilds no tenant's history,
+and the test that pins this compiles the same definitions both ways and
+compares every version.
 
 ---
 
@@ -1292,7 +1416,11 @@ filter labels,
 `keyed as` (it decides what the checker permits, not what the arithmetic
 produces), declaration positions, and the schema itself -- a version is the
 hash of a definition's semantics, and the same definition under two hosts is
-the same definition.
+the same definition. A `fact` declaration is the same case as `keyed as`,
+one construct up: it has a version of its own (fields and shapes; prose and
+the name/url pointers are out), but **no downstream version reads it** --
+declaring facts over a previously schema-taught world moves nothing and
+rebuilds nothing.
 
 One asymmetry worth knowing: a **windowed reading hashes its source figure's
 name, not its version**. A reading is not stored, so which figure version it
@@ -1322,7 +1450,7 @@ The ones most worth recognising, in the checker's own words:
 - *"...needs a prefix: a figure is named `<fact kind>.<what>`..."* -- every
   declaration carries its kind, because a citation is `name@version`.
 - *"...is already a figure. A reading needs its own name..."* -- one
-  namespace across all seven kinds.
+  namespace across all eight kinds.
 - *"there is no group or filter called ... Declared: ..."* / *"...is not a
   set defined in depends. Defined: ..."* -- a typo, answered with what was
   actually bound.
@@ -1413,5 +1541,8 @@ construct nobody has checked.
 | a general `max(<measure> over <set>)` | `latest` / `earliest` are the narrow case a definition wanted |
 | arbitrary text | a figure that could return any string would be a template engine with a version hash |
 | an inline predicate in `depends` | it would let a declaration lie about what it reads; narrowing is a declared filter's job |
+| `key of <kind>` on a fact field | the correlation is the group's `through` claim; on the fact it would be declared twice, and nothing in a record marks a field as special |
+| a unit on a fact field | what a number means is the measure's claim; a fact is structural, and grams filed as a `count` would compile |
+| a list of scalars in a fact | no construct can read one -- a predicate cannot test membership -- and a declared-but-unreadable field is a construct nobody has checked |
 | `work_hours` as a threshold unit | as shipped it was a synonym for `hours`; doing it honestly is a working calendar |
 | negative literals | a negative threshold is a dial; a negative value is a subtraction |

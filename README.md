@@ -56,7 +56,9 @@ your app ──facts──▶ uratori ──Results──▶ your screens
 - **Facts** are the plain JSON records you push, in batches. The engine's own
   change detection decides what moved, and a cascade recomputes exactly the
   figures that depended on it -- including figures built on other figures.
-- **A `Schema`** declares your world once: which fact kinds exist, which field
+- **A `Schema`** declares your world once -- or the world lives in the
+  definitions themselves as `fact` declarations, with the schema carrying
+  settings and defaults alone: which fact kinds exist, which field
   carries a record's human name, which settings dials a definition may read,
   and their defaults.
 - **Definitions** (`.fig`) declare what to compute: *groups* bucket records
@@ -125,7 +127,8 @@ container, `localhost` is the container.
 | [Concepts](docs/concepts.md) | Facts, schemas, definitions, versions, tenants -- the model in full. |
 | [Setup](docs/setup.md) | Deploying the container: environment, database, token, health, upgrades. |
 | [HTTP & websocket API](docs/http-api.md) | Every route and frame, with request and response shapes. |
-| [The definition language](docs/language.md) | Writing `.fig`: groups, filters, measures, figures, readings, projections. |
+| [The definition language](docs/language.md) | Writing `.fig`: facts, groups, filters, measures, figures, readings, projections, summaries. |
+| [The NFL example](examples/nfl/) | A loadable showcase: real seasons of NFL data, one tenant per season, every construct the language has in one library. |
 | [The built-in UI](docs/ui.md) | The investigation surface at `/ui/`: definitions as written, dependency traces, facts, and the activity log. |
 
 ## The rules it inherits
@@ -145,7 +148,7 @@ container, `localhost` is the container.
 ```bash
 uv venv --python 3.12 && uv pip install -e ".[server,dev]"
 export TEST_DATABASE_URL="postgres://user:pass@localhost:5432/uratori_test"
-.venv/bin/python -m pytest && .venv/bin/python -m mypy uratori && .venv/bin/python -m ruff check uratori tests
+.venv/bin/python -m pytest && .venv/bin/python -m mypy uratori examples/nfl/load.py && .venv/bin/python -m ruff check uratori tests examples
 ```
 
 The Postgres-backed tests fail rather than skip without `TEST_DATABASE_URL`;

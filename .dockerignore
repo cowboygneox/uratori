@@ -12,3 +12,6 @@ dist/
 docs/
 tests/
 .github/
+
+# The NFL example caches ~650 MB of season CSVs; the image needs none of it.
+examples/

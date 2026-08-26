@@ -22,9 +22,15 @@ from ..schema import Schema
 
 
 class SchemaIn(BaseModel):
-    """A host's world, as JSON. Mirrors `uratori.Schema` field for field."""
+    """A host's world, as JSON. Mirrors `uratori.Schema` field for field.
 
-    kinds: list[str]
+    `kinds` is optional since facts became declarable in the language: a
+    fact-taught host PUTs a schema of settings and defaults alone, and the
+    compile refuses a document that declares kinds beside a source that
+    declares facts -- one world, one door.
+    """
+
+    kinds: list[str] = Field(default_factory=list)
     name_fields: dict[str, str] = Field(default_factory=dict)
     url_fields: dict[str, str] = Field(default_factory=dict)
     bucket_settings: list[str] = Field(default_factory=list)
@@ -131,6 +137,35 @@ class DeclarationOut(BaseModel):
     or a projection joins through."""
 
 
+class FactFieldOut(BaseModel):
+    """One leaf of a fact's body, flattened for a reader.
+
+    `path` is dotted through the nesting (`events.at`); `repeats` says a
+    `many` sits somewhere on the way, because that is the property every
+    downstream rule branches on. `prose` is the `#` run above the field --
+    the customer-facing description of what the provider writes there.
+    """
+
+    path: str
+    type: Literal["text", "number", "flag", "moment"]
+    repeats: bool = False
+    prose: str = ""
+
+
+class FactOut(BaseModel):
+    """One fact kind, described whole -- the schema a traced number bottoms
+    out on. The version is the hash of the fields and types alone; prose and
+    the name/url pointers are rendering and move nothing."""
+
+    name: str
+    version: str
+    prose: str = ""
+    source: str = ""
+    name_field: str | None = None
+    url_field: str | None = None
+    fields: list[FactFieldOut] = Field(default_factory=list)
+
+
 class LibraryOut(BaseModel):
     """What compiled: every declaration, described.
 
@@ -148,6 +183,9 @@ class LibraryOut(BaseModel):
     """Groups and filters together, under the engine's collective key."""
 
     measures: list[DeclarationOut]
+    facts: list[FactOut] = Field(default_factory=list)
+    """The declared world, when the source declares one. Empty for a
+    schema-taught deployment -- the kinds live on `GET /schema` there."""
 
 
 class SettingsIn(BaseModel):

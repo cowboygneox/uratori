@@ -25,22 +25,24 @@ Design decisions a reader should not have to rediscover:
 """
 
 
+import dataclasses
 import hmac
 import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 
 from ..engine.activity import shown_changes
 from ..facade import DEFAULT_TRAILING, RunReport
-from ..lang.check import compile_source
+from ..lang.check import WorldConflict, compile_source
 from ..lang.lex import DefinitionError
-from ..lang.plan import Library
+from ..lang.plan import CompiledFactField, Library
 from ..results import Evidence, Result
 from ..store.postgres import PostgresFactStore
+from ..verify import FactError
 from . import db
 from . import ui as builtin_ui
 from .contract import (
@@ -48,6 +50,8 @@ from .contract import (
     DeclarationOut,
     DefinitionsIn,
     Envelope,
+    FactFieldOut,
+    FactOut,
     FactsIn,
     Health,
     LibraryOut,
@@ -239,14 +243,34 @@ def create_app(
                 status_code=409,
                 detail="Declare a schema before loading definitions; they compile against it",
             )
+        schema = s.world.schema
+        document = s.world.schema_document
         try:
-            library = compile_source(body.source, s.world.schema)
+            library = compile_source(body.source, schema)
+        except WorldConflict:
+            # A source that brings its own facts refuses a schema that also
+            # declares kinds -- but a live schema-taught deployment must be
+            # able to adopt facts without blanking its definitions first, and
+            # the schema door refuses first for the same reason. So teaching
+            # facts through THIS door retires the schema's kinds, name fields
+            # and url fields in the same save: the source is the truth, and
+            # the recompile below proves the new world whole before anything
+            # is persisted. Any other refusal still surfaces verbatim.
+            stripped = dataclasses.replace(
+                schema, kinds=frozenset(), name_fields={}, url_fields={}
+            )
+            try:
+                library = compile_source(body.source, stripped)
+            except DefinitionError as refusal:
+                raise HTTPException(status_code=422, detail=str(refusal)) from refusal
+            schema = stripped
+            document = schema_out(stripped).model_dump()
         except DefinitionError as refusal:
             raise HTTPException(status_code=422, detail=str(refusal)) from refusal
-        await db.save_world(s.pool, s.world.schema_document, body.source)
+        await db.save_world(s.pool, document, body.source)
         s.world = World(
-            schema=s.world.schema,
-            schema_document=s.world.schema_document,
+            schema=schema,
+            schema_document=document,
             source=body.source,
             library=library,
         )
@@ -272,25 +296,43 @@ def create_app(
         buckets a deleted record held to work out whose numbers move, and the
         fact table is what the departed-subject sweep walks -- both need the
         table to already say what the batch said.
+
+        Verification comes before any of it, and refuses the batch whole: a
+        record that does not match the declared world must land nowhere, and
+        landing its batch-mates while dropping it would narrow a population
+        by a cheap path. The 422 names the kind, key and field, because the
+        fix is in the host's mapping.
         """
         world, library = ready(s)
-        facts = PostgresFactStore(s.pool)
+        facade = facade_for(s, world, library)
+        try:
+            facade.verify(body.writes, body.deletes)
+        except FactError as refusal:
+            raise HTTPException(status_code=422, detail=str(refusal)) from refusal
         async with s.lock_for(tenant):
-            for kind, keys in body.deletes.items():
-                await facts.delete(tenant, kind, keys)
-            moved: dict[str, list[str]] = {}
-            written = 0
-            for kind, records in body.writes.items():
-                if not records:
-                    continue
-                changed = await facts.upsert(
-                    tenant, kind, records, stamps=body.stamps.get(kind)
-                )
-                written += len(changed)
-                if changed:
-                    moved[kind] = changed
+            # One transaction for the whole mutation: verification is the
+            # first line of defence, but a value it missed (or a database
+            # refusal it could not foresee) must fail the batch whole, not
+            # leave the kinds written before the bad one persisted and the
+            # rest gone -- the half-applied batch is the same narrowed
+            # population as a quarantined record.
+            async with s.pool.acquire() as connection, connection.transaction():
+                facts = PostgresFactStore(connection)
+                for kind, keys in body.deletes.items():
+                    await facts.delete(tenant, kind, keys)
+                moved: dict[str, list[str]] = {}
+                written = 0
+                for kind, records in body.writes.items():
+                    if not records:
+                        continue
+                    changed = await facts.upsert(
+                        tenant, kind, records, stamps=body.stamps.get(kind)
+                    )
+                    written += len(changed)
+                    if changed:
+                        moved[kind] = changed
             settings = await db.load_settings(s.pool, tenant)
-            report = await facade_for(s, world, library).run(
+            report = await facade.run(
                 tenant,
                 settings,
                 written=moved,
@@ -638,7 +680,37 @@ def _library_out(library: Library) -> LibraryOut:
             return "moment"
         return unit
 
+    def fact_leaves(
+        fields: tuple[CompiledFactField, ...], prefix: str, repeats: bool
+    ) -> list[FactFieldOut]:
+        """The body flattened to its leaves, dotted the way a definition
+        reads them, so the manifest and the paths in `fields`/`through`
+        speak one spelling."""
+        out: list[FactFieldOut] = []
+        for f in fields:
+            path = f"{prefix}{f.name}"
+            if f.type is None:
+                out.extend(fact_leaves(f.children, f"{path}.", repeats or f.many))
+            else:
+                leaf_type = cast('Literal["text", "number", "flag", "moment"]', f.type)
+                out.append(
+                    FactFieldOut(path=path, type=leaf_type, repeats=repeats, prose=f.doc)
+                )
+        return out
+
     return LibraryOut(
+        facts=[
+            FactOut(
+                name=f.name,
+                version=f.version,
+                prose=declaration_prose(library, f.name),
+                source=declaration_source(library, f.name) or "",
+                name_field=f.name_field,
+                url_field=f.url_field,
+                fields=fact_leaves(f.fields, "", False),
+            )
+            for f in library.facts.values()
+        ],
         figures=[
             described(
                 p.name,

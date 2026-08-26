@@ -10,8 +10,9 @@ product's end users; a host builds its own screens against the
 ## What it shows
 
 - **Definitions.** Every declaration of every kind -- figures, readings,
-  projections, summaries, *and* the groups, filters and measures that have no
-  version of their own. Each page shows the prose above the declaration, the
+  projections, summaries, the groups, filters and measures that have no
+  version of their own, *and* the facts of a fact-taught world, so a trace
+  bottoms out on the schema rather than on raw records. Each page shows the prose above the declaration, the
   version hash (the citation every value carries), the source exactly as
   written, and two walks: **rests on**, a tree following the declaration's
   dependencies down through figures, groups, filters and measures to the fact

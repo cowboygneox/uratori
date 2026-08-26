@@ -117,7 +117,7 @@ def _is_prose(line: str) -> bool:
     return line.startswith("#") and not _BANNER.match(line)
 
 
-def prose_above(lines: Sequence[str], header: int) -> str:
+def prose_above(lines: Sequence[str], header: int, *, indented: bool = False) -> str:
     """The contiguous `#` run directly above line `header` (1-based).
 
     This is the one implementation of what counts as a declaration's
@@ -131,13 +131,27 @@ def prose_above(lines: Sequence[str], header: int) -> str:
     paragraph, and adopting it would attach prose the author never aimed
     here. A banner also ends the run: what sits above one belongs to the
     previous file.
+
+    `indented` is for the one place prose lives inside a block -- the run
+    above a fact's field -- where the `#` sits at the field's own indent. A
+    declaration header is at column 0 and keeps the strict rule, so a
+    stranded indented comment can never become a declaration's explanation.
     """
+
+    def prose(line: str) -> bool:
+        if not indented:
+            return _is_prose(line)
+        # The comment must itself be indented: a column-0 `#` inside a block
+        # is a stray note (or the next declaration's explanation), and
+        # adopting it would serve somebody's TODO as a field's description.
+        return line[:1] in (" ", "\t") and _is_prose(line.lstrip())
+
     i = header - 2
     if i >= 0 and lines[i].strip() == "":
         i -= 1
     run: list[str] = []
-    while i >= 0 and _is_prose(lines[i]):
-        run.append(lines[i].lstrip("#").strip())
+    while i >= 0 and prose(lines[i]):
+        run.append(lines[i].lstrip().lstrip("#").strip())
         i -= 1
     run.reverse()
     return "\n".join(run).strip()
