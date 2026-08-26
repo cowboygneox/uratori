@@ -97,18 +97,44 @@ class EngineStore(Protocol):
         """Returns whether it actually moved, which is the release event."""
         ...
 
-    async def index_set(self, tenant: str) -> str | None:
-        """The index-set version this tenant last bucketed under.
+    async def index_versions(self, tenant: str) -> dict[str, str]:
+        """Per grouping, the spec version its stored buckets were built under.
 
-        Its own pair of methods rather than a `figure_pointer` row: that
-        table's versions name declarations somebody wrote, and the index set
-        is not one -- it is the hash of every index spec together, and it
-        exists for the indexes no figure reads (a projection's `from`), whose
-        arrival or redefinition otherwise moves no pointer at all.
+        Its own rows rather than `figure_pointer` ones: that table's versions
+        name declarations somebody wrote, and these exist for every index --
+        including the ones no figure reads (a projection's `from`), whose
+        arrival or redefinition moves no pointer at all. Per index rather
+        than one hash over the whole set, because staleness is the unit of
+        *work*: one stamp meant one new filter re-bucketed every grouping
+        over every record, and a million-fact tenant paid for the world to
+        answer a one-line edit.
         """
         ...
 
-    async def set_index_set(self, tenant: str, version: str) -> None: ...
+    async def set_index_version(self, tenant: str, index: str, version: str) -> None:
+        """Recorded after that index's rebuild actually ran -- a pass that
+        dies mid-way must leave exactly the unbuilt groupings stale."""
+        ...
+
+    async def drop_index(self, tenant: str, index: str) -> None:
+        """A retired grouping's rows and its version stamp, gone together.
+        Wholesale rebuilds erased dead groupings as a side effect; narrow
+        rebuilds must retire them deliberately, or the rows serve for ever
+        as if the definition still existed."""
+        ...
+
+    async def legacy_index_set(self, tenant: str) -> str | None:
+        """The pre-0.7 whole-set stamp, if one still stands.
+
+        Read once, at the first pass after an upgrade: a stamp matching the
+        current library proves every grouping current (seeded into per-index
+        versions), a mismatched one proves nothing (everything rebuilds).
+        Either way `drop_legacy_index_set` retires it. A store with no
+        legacy state answers None for ever.
+        """
+        ...
+
+    async def drop_legacy_index_set(self, tenant: str) -> None: ...
 
     # ------------------------------------------------------------- indexes --
 
@@ -130,7 +156,6 @@ class EngineStore(Protocol):
 
     async def index_has_rows(self, tenant: str, index: str) -> bool: ...
 
-    async def drop_index(self, tenant: str, index: str) -> None: ...
 
     async def remove_member(self, tenant: str, index: str, member: str) -> None: ...
 

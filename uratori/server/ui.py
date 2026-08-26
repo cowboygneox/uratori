@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -746,7 +746,6 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 detail="no definitions are loaded, so there is no classification to report",
             )
         else:
-            filed_state = await _membership_state(s.pool, library, tenant)
             # Only groupings whose members are ids of THIS kind: `keyed as`
             # files one kind's records under another kind's ids, and asking
             # "which bucket holds this commit" of a person-keyed index would
@@ -756,6 +755,10 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 for name, index in library.indexes.items()
                 if index.id_space == kind
             )
+            # The verdict table quotes every grouping in `over`, so its
+            # honesty rests on all of them -- one stale grouping and the
+            # whole table would mix eras.
+            filed_state = await _membership_state(s.pool, library, tenant, over)
             if isinstance(filed_state, Ok) and over:
                 held = await db.memberships_of(s.pool, tenant, key, over)
                 filed = [
@@ -818,7 +821,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         index = library.indexes.get(name)
         if index is None:
             raise HTTPException(status_code=404, detail=_not_a_grouping(library, name))
-        state = await _membership_state(s.pool, library, tenant)
+        state = await _membership_state(s.pool, library, tenant, [name])
         if not isinstance(state, Ok):
             # Every count empty under a not-Ok state: a number beside the
             # sentence would be read instead of it.
@@ -875,7 +878,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         index = library.indexes.get(name)
         if index is None:
             raise HTTPException(status_code=404, detail=_not_a_grouping(library, name))
-        state = await _membership_state(s.pool, library, tenant)
+        state = await _membership_state(s.pool, library, tenant, [name])
         if not isinstance(state, Ok):
             # 409 like `ready`'s: a fixable state (run a pass), and the page
             # that links here has already shown the sentence.
@@ -1054,34 +1057,52 @@ def _field_at(value: Mapping[str, Any] | None, field: str | None) -> str | None:
     return _field_of(value, field)
 
 
-async def _membership_state(pool: Any, library: Library, tenant: str) -> Availability:
-    """Whether stored membership rows may honestly be served as current.
+async def _membership_state(
+    pool: Any, library: Library, tenant: str, names: Sequence[str]
+) -> Availability:
+    """Whether the named groupings' stored rows may honestly serve as current.
 
-    The same two absences a figure states, detected the same way: no
-    index-set row means no pass ever bucketed this tenant, and a row naming
-    a different index-set hash means the definitions moved since. What this
-    deliberately cannot see is a moved *bucketing dial* (an age threshold, a
-    zone) with no pass since -- the index-set hash excludes settings by
-    design, and figures catch that case through their own per-definition
-    fingerprints. Until a pass runs, membership describes the last pass.
+    The same two absences a figure states, detected per grouping: no built
+    version anywhere means no pass ever bucketed this tenant, and a named
+    grouping whose built version is missing or differs means ITS definition
+    arrived or moved since -- the neighbours it never met keep serving,
+    which is the whole point of per-index staleness. The one-time upgrade
+    window is honoured too: a pre-0.7 whole-set stamp matching this library
+    is the same proof of currency the pass's seed accepts. What this
+    deliberately cannot see is a moved *bucketing dial* (an age threshold,
+    a zone) with no pass since -- spec hashes exclude settings by design,
+    and figures catch that case through their own fingerprints. Until a
+    pass runs, membership describes the last pass.
     """
-    from ..engine.engine import _index_set_version
+    from ..engine.engine import _index_set_version, _index_version
 
-    stored = await db.index_set_version(pool, tenant)
-    if stored is None:
+    built = await db.index_versions(pool, tenant)
+    if not built:
+        legacy = await db.legacy_index_set_version(pool, tenant)
+        if legacy is not None and legacy == _index_set_version(library):
+            built = {
+                name: _index_version(index) for name, index in library.indexes.items()
+            }
+    stale = [
+        name
+        for name in names
+        if name in library.indexes
+        and built.get(name) != _index_version(library.indexes[name])
+    ]
+    if not stale:
+        return Ok()
+    if not built:
         return Unavailable(
             because="never-computed",
             detail="no pass has ever bucketed this tenant, so there is no membership to report",
         )
-    if stored != _index_set_version(library):
-        return Unavailable(
-            because="behind-deploy",
-            detail=(
-                "the definitions have moved since this tenant's last pass; the stored "
-                "membership describes the old text and is withheld until a pass runs"
-            ),
-        )
-    return Ok()
+    return Unavailable(
+        because="behind-deploy",
+        detail=(
+            "this grouping arrived or moved since the tenant's last pass; its stored "
+            "membership would describe the old text and is withheld until a pass runs"
+        ),
+    )
 
 
 def _kind_of_name(library: Library, name: str) -> str | None:
@@ -1489,13 +1510,15 @@ def _owes_a_pass(
     claiming they leave tenants behind-deploy would invite a rebuild that
     moves nothing.
     """
-    from ..engine.engine import _index_set_version
+    from ..engine.engine import _index_version
 
     if old is None:
         return True
     if any(c.kind == "figure" and c.change != "unchanged" for c in changes):
         return True
-    return _index_set_version(old) != _index_set_version(new)
+    return {name: _index_version(idx) for name, idx in old.indexes.items()} != {
+        name: _index_version(idx) for name, idx in new.indexes.items()
+    }
 
 
 def _calc_tokens(text: str | None) -> object:

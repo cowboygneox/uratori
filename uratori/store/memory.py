@@ -65,7 +65,8 @@ class MemoryEngineStore:
         self._definitions: dict[str, tuple[str, str, str]] = {}
         self._pointers: dict[tuple[str, str], Pointer] = {}
         self._index: dict[tuple[str, str], dict[str, set[str]]] = {}
-        self._index_sets: dict[str, str] = {}
+        self._index_versions: dict[tuple[str, str], str] = {}
+        self._index_sets: dict[str, str] = {}  # pre-0.7 whole-set stamps; legacy only
         self._values: dict[tuple[str, str, str, str], StoredValue] = {}
 
     # --------------------------------------------------------- definitions --
@@ -95,11 +96,23 @@ class MemoryEngineStore:
         self._pointers[(tenant, name)] = pointer
         return True
 
-    async def index_set(self, tenant: str) -> str | None:
+    async def index_versions(self, tenant: str) -> dict[str, str]:
+        return {
+            index: version
+            for (held, index), version in self._index_versions.items()
+            if held == tenant
+        }
+
+    async def set_index_version(self, tenant: str, index: str, version: str) -> None:
+        self._index_versions[(tenant, index)] = version
+
+    async def legacy_index_set(self, tenant: str) -> str | None:
+        # `_index_sets` survives as the legacy holder so the migration seed
+        # can be modelled in memory; nothing writes it any more.
         return self._index_sets.get(tenant)
 
-    async def set_index_set(self, tenant: str, version: str) -> None:
-        self._index_sets[tenant] = version
+    async def drop_legacy_index_set(self, tenant: str) -> None:
+        self._index_sets.pop(tenant, None)
 
     # ------------------------------------------------------------- indexes --
 
@@ -152,6 +165,9 @@ class MemoryEngineStore:
 
     async def drop_index(self, tenant: str, index: str) -> None:
         self._index.pop((tenant, index), None)
+        # The stamp goes with the rows: a version without buckets would read
+        # as built-and-empty, which is a lie about a grouping that is gone.
+        self._index_versions.pop((tenant, index), None)
 
     async def remove_member(self, tenant: str, index: str, member: str) -> None:
         for members in self._buckets(tenant, index).values():

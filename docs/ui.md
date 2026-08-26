@@ -60,12 +60,14 @@ Where the deployment grants it (see the posture below), the UI carries an
   fingerprint), so two editors cannot silently overwrite each other -- the
   later save is refused with the state of play.
 - **The loop closes with a pass.** A save that moves stored state -- a
-  figure's version, the index set's hash -- leaves every tenant honestly
-  `behind-deploy` until one runs, and the saved panel says so and offers
+  figure's version, a grouping's spec -- leaves exactly the changed
+  groupings and figures `behind-deploy` until one runs (their untouched
+  neighbours keep serving; staleness is tracked per declaration, so the
+  pass rebuilds only what moved), and the saved panel says so and offers
   "run a pass" per tenant (the same pass `POST /tenants/{t}/runs` performs,
   recorded in the activity log like any other). A save that moves nothing
   stored (a label, a reading) says that instead, because offering a pass
-  for it would rebuild everything and move nothing.
+  for it would recompute nothing.
 - **It is the repair path.** A stored source this build's compiler refuses
   (an upgrade across a language change) boots the server unready; the editor
   serves the refused text with the reason and saves the correction.

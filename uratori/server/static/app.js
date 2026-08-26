@@ -1484,7 +1484,8 @@ async function editorView(params) {
       el('p', {},
         saved.stale
           ? `Saved. ${moves.length} declaration${moves.length === 1 ? '' : 's'} moved — `
-            + 'every tenant answers behind-deploy until its next pass. '
+            + 'the changed groupings and figures answer behind-deploy for every '
+            + 'tenant until its next pass (the rest keep serving). '
             + 'Run one now, or let the next facts push do it:'
           : moves.length
             ? `Saved. ${moves.length} declaration${moves.length === 1 ? '' : 's'} moved and `

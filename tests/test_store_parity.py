@@ -53,24 +53,65 @@ async def test_pointers_report_movement_and_only_movement(
     assert (await s.pointers(tenant)) == {"f": Pointer("v1", "fp2")}
 
 
-async def test_the_index_set_pointer_round_trips_per_tenant(
+async def test_index_versions_round_trip_per_grouping_per_tenant(
     store: tuple[EngineStore, str],
 ) -> None:
-    """The one pointer that is not a figure's: which index set this tenant
-    last bucketed under. A store that answered another tenant's version --
-    or invented one before the first rebuild -- would let a projection's
-    population serve over buckets a different library built."""
+    """The membership pointers that are not a figure's: which spec version
+    each grouping's stored buckets were built under. Per grouping, because
+    staleness is the unit of work -- and per tenant, because one tenant's
+    rebuild proves nothing about another's."""
     s, tenant = store
-    assert await s.index_set(tenant) is None, (
-        "before any rebuild there is no version, and None is what forces the first one"
+    assert await s.index_versions(tenant) == {}, (
+        "a tenant no pass has bucketed holds no versions -- an invented row "
+        "here would read as built"
     )
-    await s.set_index_set(tenant, "isv1")
-    assert await s.index_set(tenant) == "isv1"
-    await s.set_index_set(tenant, "isv1")
-    assert await s.index_set(tenant) == "isv1"
-    await s.set_index_set(tenant, "isv2")
-    assert await s.index_set(tenant) == "isv2"
-    assert await s.index_set("some-other-tenant") is None
+    await s.set_index_version(tenant, "k.open", "v1")
+    await s.set_index_version(tenant, "k.by_team", "v1")
+    assert await s.index_versions(tenant) == {"k.open": "v1", "k.by_team": "v1"}
+    await s.set_index_version(tenant, "k.open", "v2")
+    assert await s.index_versions(tenant) == {"k.open": "v2", "k.by_team": "v1"}
+    assert await s.index_versions("some-other-tenant") == {}
+
+
+async def test_drop_index_retires_the_rows_and_the_stamp_together(
+    store: tuple[EngineStore, str],
+) -> None:
+    """Rows without a stamp read as never-built, which is honest; a stamp
+    without rows would read as built-and-empty, which is a lie about a
+    grouping that is gone. So the two leave together."""
+    s, tenant = store
+    await s.set_buckets(tenant, "k.open", "m1", [""])
+    await s.set_index_version(tenant, "k.open", "v1")
+    await s.set_buckets(tenant, "k.other", "m1", [""])
+    await s.set_index_version(tenant, "k.other", "v1")
+
+    await s.drop_index(tenant, "k.open")
+    assert await s.members(tenant, "k.open", "") == frozenset()
+    assert await s.index_versions(tenant) == {"k.other": "v1"}
+    assert await s.members(tenant, "k.other", "") == frozenset({"m1"}), (
+        "retiring one grouping must not touch its neighbour"
+    )
+
+
+async def test_the_legacy_stamp_reads_once_and_retires(
+    store: tuple[EngineStore, str],
+) -> None:
+    """The pre-0.7 whole-set stamp: the memory store models it for the
+    engine's seed tests, the Postgres store reads whatever an older release
+    left in `index_state`. Neither may resurrect it once dropped."""
+    s, tenant = store
+    assert await s.legacy_index_set(tenant) is None
+    if isinstance(s, MemoryEngineStore):
+        s._index_sets[tenant] = "setv1"
+    else:
+        await s._pool.execute(  # type: ignore[attr-defined]
+            "insert into index_state (tenant_id, version) values ($1, $2)",
+            tenant,
+            "setv1",
+        )
+    assert await s.legacy_index_set(tenant) == "setv1"
+    await s.drop_legacy_index_set(tenant)
+    assert await s.legacy_index_set(tenant) is None
 
 
 async def test_bucket_diffs_are_the_invalidation_signal(

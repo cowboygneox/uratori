@@ -509,8 +509,19 @@ async def page_facts(
 # grows is a way a calculation could start depending on where records live.
 
 
-async def index_set_version(pool: asyncpg.Pool[Any], tenant: str) -> str | None:
-    """Which index set this tenant last bucketed under, or None if never."""
+async def index_versions(pool: asyncpg.Pool[Any], tenant: str) -> dict[str, str]:
+    """Per grouping, the spec version its stored buckets were built under --
+    empty if no pass has ever bucketed this tenant."""
+    rows = await pool.fetch(
+        "select index_name, version from index_built where tenant_id = $1", tenant
+    )
+    return {row["index_name"]: row["version"] for row in rows}
+
+
+async def legacy_index_set_version(pool: asyncpg.Pool[Any], tenant: str) -> str | None:
+    """The pre-0.7 whole-set stamp, still standing only in the window between
+    an upgrade and the tenant's first pass. Read so the UI can honour the
+    same proof of currency the pass's seed will accept."""
     held = await pool.fetchval(
         "select version from index_state where tenant_id = $1", tenant
     )
@@ -694,6 +705,7 @@ async def remove_tenant(pool: asyncpg.Pool[Any], tenant: str) -> tuple[int, int]
         ("fact", "tenant_id"),
         ("figure_pointer", "tenant_id"),
         ("figure_index", "tenant_id"),
+        ("index_built", "tenant_id"),
         ("index_state", "tenant_id"),
         ("figure_value", "tenant_id"),
         ("tenant_settings", "tenant_id"),

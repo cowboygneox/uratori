@@ -2507,3 +2507,50 @@ async def test_the_save_says_whether_a_pass_is_owed(pg_dsn: str) -> None:
             "the predicate moved the index set; serving the old membership "
             "as current would show records matching a predicate they do not"
         )
+
+
+async def test_an_arrived_filter_does_not_unseat_its_neighbours(pg_dsn: str) -> None:
+    """The complaint that forced per-index staleness, pinned end to end: a
+    saved source with one NEW filter must leave every existing grouping's
+    page serving (its buckets are exactly what the pass built), withhold
+    only the newcomer, and a pass then seats the newcomer -- without the
+    whole index set being rebuilt on the way."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        await _feed_couriers(http)
+        assert (
+            await http.get("/ui/api/tenants/t1/membership/shop_order.open")
+        ).json()["state"]["ok"] is True
+
+        grown = COURIER_SOURCE + 'filter shop_order.done where status == "delivered" label "done"\n'
+        held = (await http.get("/ui/api/source")).json()
+        saved = await http.put(
+            "/ui/api/source", json={"source": grown, "expected": held["fingerprint"]}
+        )
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["stale"] is True
+
+        neighbour = (
+            await http.get("/ui/api/tenants/t1/membership/shop_order.open")
+        ).json()
+        assert neighbour["state"]["ok"] is True, (
+            "shop_order.open's buckets are exactly what the last pass built; "
+            "unseating it for a filter it never met is the rebuild-the-world "
+            "behaviour this change ends"
+        )
+        newcomer = (
+            await http.get("/ui/api/tenants/t1/membership/shop_order.done")
+        ).json()
+        assert newcomer["state"]["ok"] is False
+        assert newcomer["state"]["because"] == "behind-deploy"
+
+        ran = await http.post("/ui/api/tenants/t1/runs", json={})
+        assert ran.status_code == 200, ran.text
+        seated = (
+            await http.get("/ui/api/tenants/t1/membership/shop_order.done")
+        ).json()
+        assert seated["state"]["ok"] is True
+        assert seated["members"] == 1, (
+            "exactly one seeded order is delivered (o2); any other count "
+            "means the newcomer was seated over the wrong records"
+        )

@@ -109,23 +109,35 @@ class PostgresEngineStore:
         )
         return row is not None
 
-    async def index_set(self, tenant: str) -> str | None:
+    async def index_versions(self, tenant: str) -> dict[str, str]:
+        rows = await self._pool.fetch(
+            "select index_name, version from index_built where tenant_id = $1", tenant
+        )
+        return {row["index_name"]: row["version"] for row in rows}
+
+    async def set_index_version(self, tenant: str, index: str, version: str) -> None:
+        await self._pool.execute(
+            """
+            insert into index_built (tenant_id, index_name, version, moved_at)
+            values ($1, $2, $3, now())
+            on conflict (tenant_id, index_name) do update
+              set version = excluded.version, moved_at = now()
+              where index_built.version is distinct from excluded.version
+            """,
+            tenant,
+            index,
+            version,
+        )
+
+    async def legacy_index_set(self, tenant: str) -> str | None:
         held = await self._pool.fetchval(
             "select version from index_state where tenant_id = $1", tenant
         )
         return held if isinstance(held, str) else None
 
-    async def set_index_set(self, tenant: str, version: str) -> None:
+    async def drop_legacy_index_set(self, tenant: str) -> None:
         await self._pool.execute(
-            """
-            insert into index_state (tenant_id, version, moved_at)
-            values ($1, $2, now())
-            on conflict (tenant_id) do update
-              set version = excluded.version, moved_at = now()
-              where index_state.version is distinct from excluded.version
-            """,
-            tenant,
-            version,
+            "delete from index_state where tenant_id = $1", tenant
         )
 
     # -------------------------------------------------------------- indexes --
@@ -261,9 +273,20 @@ class PostgresEngineStore:
         return row is not None
 
     async def drop_index(self, tenant: str, index: str) -> None:
-        await self._pool.execute(
-            "delete from figure_index where tenant_id = $1 and index_name = $2", tenant, index
-        )
+        # One transaction: rows without a stamp read as never-built (honest),
+        # but a stamp without rows would read as built-and-empty -- a lie
+        # about a grouping that is gone.
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "delete from figure_index where tenant_id = $1 and index_name = $2",
+                tenant,
+                index,
+            )
+            await conn.execute(
+                "delete from index_built where tenant_id = $1 and index_name = $2",
+                tenant,
+                index,
+            )
 
     async def remove_member(self, tenant: str, index: str, member: str) -> None:
         await self._pool.execute(
@@ -608,10 +631,24 @@ create table if not exists figure_pointer (
   primary key (tenant_id, name)
 );
 
--- Which index set a tenant last bucketed under: the hash of every index spec
--- together, recorded only after a rebuild actually ran. It exists for the
--- indexes no figure reads (a projection's population), whose redefinition
--- moves no figure_pointer row -- see the engine's index-set tracking.
+-- Which spec version each grouping's stored buckets were built under,
+-- recorded only after that index's rebuild actually ran. Per index rather
+-- than one stamp over the set: staleness is the unit of work, and a single
+-- stamp made one new filter re-bucket every grouping over every record.
+-- It exists for every index, including the ones no figure reads (a
+-- projection's population), whose redefinition moves no figure_pointer row.
+create table if not exists index_built (
+  tenant_id  text not null,
+  index_name text not null,
+  version    text not null,
+  moved_at   timestamptz not null default now(),
+  primary key (tenant_id, index_name)
+);
+
+-- The pre-0.7 whole-set stamp, kept only so an upgraded deployment's first
+-- pass can tell "fully built yesterday" from "never built": a row matching
+-- the current library seeds index_built and retires; any row retires. New
+-- installs never write it.
 create table if not exists index_state (
   tenant_id  text primary key,
   version    text not null,

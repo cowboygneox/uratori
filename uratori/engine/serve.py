@@ -36,7 +36,10 @@ from ..results import (
 from ..schema import Schema
 from ..store import EngineStore, FactSource, StoredValue
 from .buckets import SEPARATOR, day_range, subject_of
-from .engine import _index_set_version  # one hash of the index set, shared deliberately
+from .engine import (  # the same hashes the pass records, shared deliberately
+    _index_set_version,
+    _index_version,
+)
 from .evaluate import band_of
 from .project import ProjectedRow, RenderedFlag, Summary, format_value
 from .read import (
@@ -869,23 +872,41 @@ async def project_rows(
 
     if plan.frm is not None:
         # The discipline a figure's pointer enforces, applied to the
-        # population. The buckets `from` filters through are stored state,
-        # and the engine records the index-set version only after a rebuild
-        # has actually run -- so a mismatch here means the population's
-        # buckets were built by a different library (or never built), and
-        # filtering through them would serve an Ok page with records
-        # silently missing: a confident zero on exactly the screen the
-        # population gate was written for.
-        built = await store.index_set(tenant)
-        if built != _index_set_version(library):
+        # population -- per grouping. The buckets `from` filters through are
+        # stored state, each built under a recorded spec version, and the
+        # engine records that version only after the rebuild actually ran.
+        # Only the groupings THIS population reads are compared: an
+        # unrelated filter arriving elsewhere in the library must not
+        # unseat a page whose own buckets are exactly what the pass built.
+        # A mismatch on one of its own means the buckets describe a
+        # different definition (or none), and filtering through them would
+        # serve an Ok page with records silently missing: a confident zero
+        # on exactly the screen this gate was written for.
+        built = await store.index_versions(tenant)
+        if not built:
+            # The upgrade window: per-index versions arrive at the first
+            # pass, but a pre-0.7 whole-set stamp matching this library is
+            # the same proof of currency the pass's seed accepts.
+            legacy = await store.legacy_index_set(tenant)
+            if legacy is not None and legacy == _index_set_version(library):
+                built = {
+                    name: _index_version(idx) for name, idx in library.indexes.items()
+                }
+        stale = [
+            name
+            for name in plan.indexes
+            if name in library.indexes
+            and built.get(name) != _index_version(library.indexes[name])
+        ]
+        if stale:
             return [], Unavailable(
-                because="never-computed" if built is None else "behind-deploy",
+                because="never-computed" if not built else "behind-deploy",
                 detail=(
                     "this board has not bucketed the population's groups and "
                     "filters yet; the next sync will"
-                    if built is None
+                    if not built
                     else "the population's buckets were built under a previous "
-                    "index set; the next sync rebuilds them"
+                    "definition; the next sync rebuilds them"
                 ),
             ), []
 

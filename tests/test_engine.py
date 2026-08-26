@@ -732,9 +732,9 @@ async def test_a_population_before_any_pass_is_never_computed_rather_than_empty(
 
 
 async def test_a_failed_reindex_is_retried_rather_than_recorded_as_built() -> None:
-    """The index-set version is recorded only after the rebuild actually ran.
+    """A grouping's built version is recorded only after ITS rebuild ran.
     Recorded up front -- in a `finally`, say -- a pass that dies mid-rebuild
-    marks the tenant built, the next pass sees nothing stale, and the
+    marks the grouping built, the next pass sees nothing stale, and the
     population serves over buckets that were never rebuilt until the hourly
     full sync repairs it in silence."""
     from uratori.engine.serve import project_rows
@@ -755,7 +755,7 @@ async def test_a_failed_reindex_is_retried_rather_than_recorded_as_built() -> No
     upgraded = Engine(store, facts, grown, WORLD)
     real_reindex = upgraded._reindex
 
-    async def dies(tenant: str, settings: Any) -> None:
+    async def dies(tenant: str, settings: Any, only: Any = None) -> None:
         raise RuntimeError("the database went away mid-rebuild")
 
     upgraded._reindex = dies  # type: ignore[method-assign]

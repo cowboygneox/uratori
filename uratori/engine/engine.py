@@ -83,8 +83,37 @@ class Engine:
         # until the next *full* sync, over a population nobody chose. The
         # exact failure class this file's header names, through the rebuild
         # path instead of the calculation.
-        indexes_version = _index_set_version(lib)
-        stale_indexes = await self._store.index_set(tenant) != indexes_version
+        #
+        # Noticed PER GROUPING, deliberately. One stamp over the whole set
+        # made any index change re-bucket every grouping over every record --
+        # a million-fact tenant paid a rebuild of the world to answer a
+        # one-line filter. Staleness is the unit of work, so each grouping
+        # carries the spec version its stored buckets were built under, and
+        # a pass rebuilds exactly the stale ones and retires exactly the
+        # removed ones.
+        built = await self._store.index_versions(tenant)
+        wanted = {name: _index_version(idx) for name, idx in lib.indexes.items()}
+        if not built:
+            # The one-time upgrade window: no per-index versions yet, but a
+            # pre-0.7 whole-set stamp may still stand. A stamp matching this
+            # library proves every grouping current -- seeded rather than
+            # rebuilt, so no tenant pays for the upgrade itself. A mismatch
+            # proves nothing and everything below reads as stale. Either way
+            # the stamp retires here; kept, it would shadow every later save.
+            legacy = await self._store.legacy_index_set(tenant)
+            if legacy is not None:
+                if legacy == _index_set_version(lib):
+                    for name, version in wanted.items():
+                        await self._store.set_index_version(tenant, name, version)
+                    built = dict(wanted)
+                await self._store.drop_legacy_index_set(tenant)
+        stale = {name for name, version in wanted.items() if built.get(name) != version}
+        for name in built:
+            if name not in wanted:
+                # Retired deliberately: wholesale rebuilds erased dead
+                # groupings as a side effect, narrow ones must not leave
+                # their rows serving as if the definition still existed.
+                await self._store.drop_index(tenant, name)
 
         changes: list[Change] = []
         rebuilt: tuple[str, ...] = ()
@@ -100,13 +129,25 @@ class Engine:
                     declaration_source(lib, plan.name) or "",
                     {"unit": plan.unit, "scope": plan.scope, "depth": plan.depth},
                 )
-            # Reindex only when a pending figure actually reads an index, or
-            # the index set itself moved. Saving a threshold rebuilds one
-            # figure's values and touches no index row; saving the timezone
-            # re-buckets the lot, which is right. The observable difference is
-            # *work*, so it is reported.
-            if full or stale_indexes or any(p.indexes for p in pending):
+            # Reindex what moved, and what a moved dial can reach. A stale
+            # grouping's own rebuild is obvious; the subtle half is a pending
+            # figure whose fingerprint moved because a BUCKET dial did (a
+            # timezone, an age threshold) -- the index hash excludes settings,
+            # so the groupings that read that dial must be re-bucketed here or
+            # their membership describes the old dial for ever. Only the
+            # dialled ones: a grouping whose spec reads no setting cannot
+            # change buckets when a setting does, and taxing it anyway is the
+            # rebuild-the-world habit this bookkeeping exists to end.
+            dialled = {
+                name
+                for plan in pending
+                for name in plan.indexes
+                if name in lib.indexes and _reads_a_dial(lib.indexes[name])
+            }
+            if full:
                 await self._reindex(tenant, settings)
+            elif stale or dialled:
+                await self._reindex(tenant, settings, only=stale | dialled)
             changes.extend(await self._remove_departed(tenant, settings))
             only = None if full else {p.name for p in pending}
             # A cold pass **recomputes** rather than fills gaps: the reason it is
@@ -124,17 +165,17 @@ class Engine:
             changes.extend(
                 await self._apply(tenant, settings, written or {}, deleted or {})
             )
-            if stale_indexes:
-                # The index set moved with no figure pointer moving -- an index
-                # only a `from` reads arrived or changed. Rebuild the lot now
+            if stale:
+                # A grouping moved with no figure pointer moving -- an index
+                # only a `from` reads arrived or changed. Rebuild it now
                 # rather than waiting for the next full pass: until it is
                 # built, every projection filtering through it serves whichever
                 # records the deltas since the deploy happened to touch. After
                 # `_apply`, deliberately -- `_apply` diffs a record's old
                 # buckets against its new ones to decide whose figures moved,
-                # and a wholesale rebuild beforehand would erase the "old" half
-                # of that comparison and silence the change stream.
-                await self._reindex(tenant, settings)
+                # and a rebuild beforehand would erase the "old" half of that
+                # comparison and silence the change stream.
+                await self._reindex(tenant, settings, only=stale)
             if deleted:
                 # A departed *subject* is not a moved bucket, and the warm path
                 # is driven by bucket movement -- so without this a person
@@ -143,13 +184,6 @@ class Engine:
                 # nothing was deleted, which is every ordinary sync.
                 changes.extend(await self._remove_departed(tenant, settings))
             changes.extend(await self._backfill(tenant, settings))
-
-        if stale_indexes:
-            # After the reindex has actually happened, on whichever path ran.
-            # Recorded up front, a pass that dies mid-rebuild marks the tenant
-            # built, and the population serves over buckets that were never
-            # rebuilt until the next full sync repairs it in silence.
-            await self._store.set_index_set(tenant, indexes_version)
 
         # `covered` is what the host re-dates evidence on, so it must name
         # the kinds this pass *read*, not the kinds the batch happened to
@@ -211,16 +245,24 @@ class Engine:
 
         return resolve
 
-    async def _reindex(self, tenant: str, settings: Mapping[str, Any]) -> None:
+    async def _reindex(
+        self, tenant: str, settings: Mapping[str, Any], only: set[str] | None = None
+    ) -> None:
         resolve = await self._resolver(tenant)
         now_ms = _now_ms()
         for index in self._library.indexes.values():
+            if only is not None and index.name not in only:
+                continue
             wanted: dict[str, list[str]] = {}
             for row in await self._facts.of_kind(tenant, index.kind):
                 buckets = buckets_of(index, row.value, settings, resolve, now_ms)
                 if buckets:
                     wanted[row.key] = buckets
             await self._store.replace_index(tenant, index.name, wanted)
+            # Recorded per grouping, after ITS rebuild ran: a pass that dies
+            # mid-way leaves exactly the unbuilt ones stale, and the next
+            # pass pays exactly the remaining debt.
+            await self._store.set_index_version(tenant, index.name, _index_version(index))
 
     # -------------------------------------------------------- incremental --
 
@@ -716,16 +758,45 @@ def _parts_of(index: CompiledIndex) -> list[Any]:
     return _index_fields(index.spec)
 
 
-def _index_set_version(library: Library) -> str:
-    """Every index's name and spec, as one version.
+def _index_version(index: CompiledIndex) -> str:
+    """One grouping's spec, as a version -- the unit of membership staleness.
 
-    The same `_index_hash` a figure's version is built from, so the two ways of
-    noticing an index changed cannot disagree about what "changed" means. Prose
-    (a label) is not in it. Settings are not either, and that is safe only
-    because the indexes this pointer exists for -- the ones no figure reads --
-    are predicates and presences: the checker refuses age and fan-out indexes
-    to a projection's `from`, and every other reader of an index carries the
-    relevant dials in its own figure's fingerprint.
+    The same `_index_hash` a figure's version is built from, so the two ways
+    of noticing an index changed cannot disagree about what "changed" means.
+    Prose (a label) is not in it. Settings are not either, and that is safe
+    because a settings move reaches the dialled groupings through the pending
+    figures that read them (the cold pass's `dialled` set), and the checker
+    refuses age and fan-out indexes to a projection's `from` -- the one
+    reader with no figure to notice for it.
+    """
+    from ..lang.check import _index_hash  # local import: avoids a cycle at import time
+    from ..lang.hash import version_of
+
+    return version_of(_index_hash(index))
+
+
+def _reads_a_dial(index: CompiledIndex) -> bool:
+    """Whether this grouping's buckets can move when a setting does: an age
+    threshold, or a calendar zone on a truncated part."""
+    from ..lang.ast import ByAge, ByComposite, ByField
+
+    spec = index.spec
+    if isinstance(spec, ByAge):
+        return True
+    if isinstance(spec, ByField):
+        return spec.part.zone is not None
+    if isinstance(spec, ByComposite):
+        return any(part.zone is not None for part in spec.parts)
+    return False
+
+
+def _index_set_version(library: Library) -> str:
+    """Every index's name and spec, as one version -- the pre-0.7 stamp.
+
+    Alive only for the upgrade seed: a stored whole-set stamp equal to this
+    proves the tenant was fully built under exactly these specs, so its
+    per-index versions can be written without a rebuild. Nothing else may
+    grow a dependency on it; the per-index versions are the truth now.
     """
     from ..lang.check import _index_hash  # local import: avoids a cycle at import time
     from ..lang.hash import version_of
