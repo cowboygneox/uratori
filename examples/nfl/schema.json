@@ -1,0 +1,75 @@
+{
+  "kinds": [
+    "nfl_team",
+    "nfl_game",
+    "nfl_team_game",
+    "nfl_player",
+    "nfl_stat_line",
+    "nfl_play"
+  ],
+  "name_fields": {
+    "nfl_team": "name",
+    "nfl_game": "name",
+    "nfl_team_game": "name",
+    "nfl_player": "name",
+    "nfl_stat_line": "name",
+    "nfl_play": "name"
+  },
+  "url_fields": {
+    "nfl_team": "url",
+    "nfl_game": "url",
+    "nfl_player": "url"
+  },
+  "bucket_settings": [
+    "tenant.timezone",
+    "form.recentDays"
+  ],
+  "figure_settings": [
+    "thresholds.contending.rate",
+    "thresholds.fading.rate",
+    "thresholds.passing.star",
+    "thresholds.conversion.sharp",
+    "thresholds.conversion.stalling"
+  ],
+  "reading_settings": [
+    "pace.restDays"
+  ],
+  "project_settings": [
+    "thresholds.blowout",
+    "thresholds.thisWeek",
+    "thresholds.giveaways"
+  ],
+  "defaults": {
+    "tenant": {
+      "hoursPerDay": 8,
+      "timezone": "America/New_York"
+    },
+    "form": {
+      "recentDays": 45
+    },
+    "thresholds": {
+      "contending": {
+        "rate": 0.65
+      },
+      "fading": {
+        "rate": 0.35
+      },
+      "passing": {
+        "star": 3800
+      },
+      "blowout": 17,
+      "thisWeek": 7,
+      "conversion": {
+        "sharp": 0.45,
+        "stalling": 0.35
+      },
+      "giveaways": 30
+    },
+    "pace": {
+      "restDays": {
+        "good": 6.5,
+        "poor": 5.75
+      }
+    }
+  }
+}

@@ -6,3 +6,6 @@ __pycache__/
 .ruff_cache/
 dist/
 *.egg-info/
+
+# The NFL example downloads season CSVs beside its loader.
+examples/nfl/data/

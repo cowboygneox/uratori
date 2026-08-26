@@ -1,0 +1,598 @@
+# ---- nfl.fig ----
+# A season of American football, defined. Every construct the language has
+# appears here at least once, over data everybody already understands: teams
+# play games, players rack up yards, and somebody is always asking whether
+# their team is any good. Load a season with examples/nfl/load.py and every
+# number this file defines is served with its version and its evidence.
+
+# -------------------------------------------------- teams and their games --
+
+# The hop through nfl_team.abbrs.abbr is the identity join: a franchise is
+# one subject however it appears in the record -- the Raiders are the same
+# team whether a game sheet says OAK or LV, exactly as a person is the same
+# person across two logins.
+group nfl_team_game.by_team from team through nfl_team.abbrs.abbr
+
+group nfl_team_game.team_by_day from (team through nfl_team.abbrs.abbr, kickoff by day in tenant.timezone)
+
+filter nfl_team_game.wins where won == true label "won"
+filter nfl_team_game.ties where tied == true label "tied"
+filter nfl_team_game.regular where game_type == "REG" label "regular season"
+
+# An age filter reads the wall clock, in whole days, against a bucket dial.
+# Over a finished season it is honestly empty; during a live season it is
+# what "recent form" means.
+filter nfl_team_game.recent where kickoff younger than form.recentDays label "recently played"
+
+measure nfl_team_game.points_for = points_for in count
+measure nfl_team_game.points_against = points_against in count
+
+# A duration is the wall-clock gap between two moments on the record: how
+# long since this team last took the field. Thursday games make it short.
+measure nfl_team_game.rest = kickoff - previous_kickoff
+
+measure nfl_team_game.played_on = moment kickoff
+
+# How many regular-season games this team has finished. The postseason
+# lives on the scoreboard and the bracket, not in the record columns --
+# nobody calls the 2016 Patriots an eighteen-game team.
+figure nfl_team.games_played:
+    display "{nfl_team} played {value} games"
+
+    depends:
+        mine = nfl_team_game.by_team:{nfl_team} & nfl_team_game.regular
+
+    calculate:
+        count(mine)
+
+# Regular-season wins. A count of an empty bucket is a real nought: a
+# winless team reads 0, not a dash.
+figure nfl_team.wins:
+    display "{nfl_team} has {value} wins"
+
+    depends:
+        mine = nfl_team_game.by_team:{nfl_team} & nfl_team_game.wins & nfl_team_game.regular
+
+    calculate:
+        count(mine)
+
+# Regular-season ties, which the NFL keeps around precisely so that wins
+# and losses do not have to add up to games played.
+figure nfl_team.ties:
+    display "{nfl_team} has {value} ties"
+
+    depends:
+        mine = nfl_team_game.by_team:{nfl_team} & nfl_team_game.ties & nfl_team_game.regular
+
+    calculate:
+        count(mine)
+
+# Points this team scored across the regular season.
+figure nfl_team.points_scored:
+    display "{nfl_team} scored {value} points"
+
+    depends:
+        mine = nfl_team_game.by_team:{nfl_team} & nfl_team_game.regular
+
+    calculate:
+        sum(nfl_team_game.points_for over mine)
+
+# Points scored against this team across the regular season.
+figure nfl_team.points_allowed:
+    display "{nfl_team} allowed {value} points"
+
+    depends:
+        mine = nfl_team_game.by_team:{nfl_team} & nfl_team_game.regular
+
+    calculate:
+        sum(nfl_team_game.points_against over mine)
+
+# Point differential: scored minus allowed. Built on the two figures above
+# rather than re-summing the games, so the difference and its parts cannot
+# disagree. Arithmetic must say what its number is -- hence the unit.
+figure nfl_team.point_diff:
+    display "{nfl_team} point differential"
+    unit count
+
+    combine:
+        scored = nfl_team.points_scored
+        allowed = nfl_team.points_allowed
+
+    calculate:
+        scored - allowed
+
+# Share of regular-season games won. The band puts a word beside the
+# number, judged against dials a tenant can move; a team that has played
+# nothing has no share -- division by nought answers nothing, never a
+# confident 0%.
+figure nfl_team.win_rate:
+    display "{nfl_team} win rate"
+    unit share
+
+    depends:
+        mine = nfl_team_game.by_team:{nfl_team} & nfl_team_game.regular
+        won = nfl_team_game.by_team:{nfl_team} & nfl_team_game.wins & nfl_team_game.regular
+
+    calculate:
+        count(won) / count(mine)
+
+    band:
+        when value >= thresholds.contending.rate then "contending"
+        when value < thresholds.fading.rate then "fading"
+        otherwise "steady"
+
+# The season in one word, read off the win rate a screen already shows --
+# a figure built on a figure, so the word and the number cannot drift apart.
+figure nfl_team.form:
+    display "{nfl_team} form"
+
+    combine:
+        rate = nfl_team.win_rate
+
+    calculate:
+        when rate >= thresholds.contending.rate then "contending"
+        when rate < thresholds.fading.rate then "fading"
+        otherwise "steady"
+
+# Wins inside the recent-form window. Alive during a season, honestly nought
+# once it is over -- the games all age out of the filter, and 0 recent wins
+# is a measured answer, not an absence.
+figure nfl_team.recent_wins:
+    display "{nfl_team} wins in the form window"
+
+    depends:
+        mine = nfl_team_game.by_team:{nfl_team} & nfl_team_game.wins & nfl_team_game.recent
+
+    calculate:
+        count(mine)
+
+# When this team last took the field. The latest of nothing is nothing --
+# never 1 January 1970.
+figure nfl_team.last_played:
+    display "{nfl_team} last played"
+
+    depends:
+        mine = nfl_team_game.by_team:{nfl_team}
+
+    calculate:
+        latest(nfl_team_game.played_on over mine)
+
+# Points per calendar day, stored one value per team per day -- the shape a
+# windowed reading can range over.
+figure nfl_team.points_by_day:
+    display "{nfl_team} points that day"
+
+    depends:
+        played = nfl_team_game.team_by_day:{nfl_team}
+
+    calculate:
+        sum(nfl_team_game.points_for over played)
+
+# How rested this team was at each kickoff: the list of gaps since the
+# previous game, stored per day so a reading can take a mean or a worst.
+# Openers are filtered out by declaration -- a game that cannot carry a gap
+# is not evidence about rest.
+figure nfl_team.rest_by_day:
+    display "{nfl_team} rest before kickoff"
+
+    depends:
+        played = nfl_team_game.team_by_day:{nfl_team} & nfl_team_game.rested
+
+    calculate:
+        list(nfl_team_game.rest over played)
+
+# ------------------------------------------------------------ the players --
+
+group nfl_stat_line.by_player from player_id
+group nfl_stat_line.player_by_day from (player_id, kickoff by day in tenant.timezone)
+
+# A pair group: each stat line filed under (player, opponent franchise) --
+# the second part is a dimension, and the figure over it says so.
+group nfl_stat_line.versus from (player_id, opponent through nfl_team.abbrs.abbr)
+
+measure nfl_stat_line.passing = passing_yards in count
+measure nfl_stat_line.scrimmage = scrimmage_yards in count
+measure nfl_stat_line.tds = total_tds in count
+
+# Passing yards across the season, banded against the star threshold.
+figure nfl_player.pass_yards:
+    display "{nfl_player} passing yards"
+
+    depends:
+        mine = nfl_stat_line.by_player:{nfl_player}
+
+    calculate:
+        sum(nfl_stat_line.passing over mine)
+
+    band:
+        when value >= thresholds.passing.star then "star"
+        otherwise "working"
+
+# Yards from scrimmage -- rushing plus receiving, as the league counts it.
+figure nfl_player.scrimmage_yards:
+    display "{nfl_player} scrimmage yards"
+
+    depends:
+        mine = nfl_stat_line.by_player:{nfl_player}
+
+    calculate:
+        sum(nfl_stat_line.scrimmage over mine)
+
+# Touchdowns this player accounted for -- thrown or scored -- split by
+# opponent: one value per (player, franchise) pair. A pair exists once it
+# has ever appeared; nobody gets a nought against a team they never faced.
+# A touchdown pass is credited to its thrower and its catcher alike, which
+# is how the league talks about production.
+figure nfl_player.tds_versus across nfl_team:
+    display "{nfl_player} touchdowns against {nfl_team}"
+
+    depends:
+        mine = nfl_stat_line.versus:{nfl_player}
+
+    calculate:
+        sum(nfl_stat_line.tds over mine)
+
+# Touchdowns accounted for -- thrown or scored -- added up from the
+# per-opponent split above. A rollup reads its parts' stored values, so the
+# total and the split cannot disagree, and its evidence is the parts, not
+# the records re-counted a second way.
+figure nfl_player.touchdowns:
+    display "{nfl_player} touchdowns"
+
+    combine:
+        parts = nfl_player.tds_versus over nfl_team
+
+    calculate:
+        sum(parts)
+
+# Scrimmage yards per calendar day, the player's season as a line a reading
+# can draw.
+figure nfl_player.yards_by_day:
+    display "{nfl_player} yards that day"
+
+    depends:
+        played = nfl_stat_line.player_by_day:{nfl_player}
+
+    calculate:
+        sum(nfl_stat_line.scrimmage over played)
+
+# --------------------------------------------------- every single play --
+
+# Every snap is a fact, filed under the offence that ran it. The loader
+# imports a game's plays only when they rebuild its final score, so what
+# these figures count is play-by-play the data itself has vouched for.
+group nfl_play.by_offense from offense through nfl_team.abbrs.abbr
+
+# Sub-day time buckets: every play that moved a scoreboard, filed into the
+# quarter-hour it happened in the tenant's own calendar, under whoever the
+# points went to -- pick-sixes and safeties credit the defence. A play that
+# scored nothing carries neither field and files nowhere.
+group nfl_play.scoring_slots from (scored_by through nfl_team.abbrs.abbr, clock_time by 15 minutes in tenant.timezone)
+
+filter nfl_play.third_downs where down == 3 label "on third down"
+filter nfl_play.conversions where third_down_converted == true label "converted"
+filter nfl_play.giveaways where turnover == true label "turned over"
+
+measure nfl_play.yards = yards_gained in count
+measure nfl_play.points = points in count
+
+# How many snaps this team's offence ran. The count that shows the scale:
+# every one of these cites a real play.
+figure nfl_team.plays_run:
+    display "{nfl_team} offensive plays"
+
+    depends:
+        mine = nfl_play.by_offense:{nfl_team}
+
+    calculate:
+        count(mine)
+
+# Yards gained, summed across every offensive snap.
+figure nfl_team.yards_gained:
+    display "{nfl_team} yards gained"
+
+    depends:
+        mine = nfl_play.by_offense:{nfl_team}
+
+    calculate:
+        sum(nfl_play.yards over mine)
+
+# Times the offence handed the ball over: interceptions thrown and fumbles
+# lost.
+figure nfl_team.turnovers:
+    display "{nfl_team} giveaways"
+
+    depends:
+        mine = nfl_play.by_offense:{nfl_team} & nfl_play.giveaways
+
+    calculate:
+        count(mine)
+
+# Third downs converted, as a share of third downs faced -- the drive-
+# sustaining stat, banded against dials a tenant can move.
+figure nfl_team.third_down_rate:
+    display "{nfl_team} third-down conversion"
+    unit share
+
+    depends:
+        faced = nfl_play.by_offense:{nfl_team} & nfl_play.third_downs
+        moved = nfl_play.by_offense:{nfl_team} & nfl_play.third_downs & nfl_play.conversions
+
+    calculate:
+        count(moved) / count(faced)
+
+    band:
+        when value >= thresholds.conversion.sharp then "sharp"
+        when value < thresholds.conversion.stalling then "stalling"
+        otherwise "steady"
+
+# Points put on the board per quarter-hour of the day -- the grain that lets
+# a reading show when, on the clock, a team actually scores.
+figure nfl_team.scoring_clock:
+    display "{nfl_team} points in that quarter-hour"
+
+    depends:
+        slots = nfl_play.scoring_slots:{nfl_team}
+
+    calculate:
+        sum(nfl_play.points over slots)
+
+# ------------------------------------------------------------- readings --
+
+# Points scored over the window, with the day-by-day series behind the
+# total -- the sparkline is the definition's answer, not a client slicing.
+reading nfl_team.scoring(range):
+    display "{nfl_team} points over the window"
+
+    depends:
+        days = nfl_team.points_by_day in range
+
+    calculate:
+        sum(days)
+        series(days)
+
+# The gaps between this team's games: the typical week of recovery the
+# schedule allowed, and the longest stretch without football -- the bye-week
+# layoff. Withheld together below two games; a worst case printed alone is
+# by construction the outlier.
+reading nfl_team.rest(range):
+    display "{nfl_team} rest between games"
+    band high against pace.restDays
+
+    depends:
+        spans = nfl_team.rest_by_day in range
+
+    requires:
+        at least 2 values in spans
+
+    calculate:
+        mean(spans)
+        median(spans)
+        worst(spans)
+
+# When the scoring happened, on the clock: the window's quarter-hour points
+# grouped into hours, a timeline at hour grain. The grain is declared and
+# hashed -- an hourly series and a daily one differ in what every point
+# means.
+reading nfl_team.scoring_rhythm(range):
+    display "{nfl_team} scoring, hour by hour"
+
+    depends:
+        slots = nfl_team.scoring_clock in range
+
+    calculate:
+        sum(slots)
+        series(slots) by hour
+
+# A player's production over the window, with the series that shows the
+# shape of the season -- the monster week and the bye week both.
+reading nfl_player.production(range):
+    display "{nfl_player} scrimmage yards over the window"
+
+    depends:
+        days = nfl_player.yards_by_day in range
+
+    calculate:
+        sum(days)
+        series(days)
+
+# ---------------------------------------------------------- projections --
+
+# An explicit flag rather than `home_score is set`: the language reads a
+# numeric nought as absent by design, and a filter on the score would drop
+# every game the home team lost by shutout from every page at once.
+filter nfl_game.finished where finished == true label "finished"
+filter nfl_game.playoff where game_type != "REG" label "postseason"
+
+# Presence, on a field that is genuinely sometimes absent: a season opener
+# has no previous kickoff, so it can carry no rest gap.
+filter nfl_team_game.rested where previous_kickoff is set label "not a season opener"
+
+# Every finished game, most recent first: the scoreboard. The scores are
+# fields off the record; the margin, the verdict and the sentences are
+# values computed at the instant the page is asked for.
+projection nfl_game.scoreboard:
+    from nfl_game.finished
+    sort by age_days ascending
+    limit 40
+
+    field:
+        name = name as text
+        week = week as number
+        stage = game_type as text
+        played_on = kickoff as date
+        away = away_team as text
+        home = home_team as text
+        away_points = away_score as number
+        home_points = home_score as number
+        total_points = total as number
+        went_overtime = went_overtime as flag
+        home_name = name from home_team through nfl_team.abbrs.abbr as text
+        away_name = name from away_team through nfl_team.abbrs.abbr as text
+
+    value:
+        margin in count = home_points - away_points
+        swing in count = max(margin, 0 - margin)
+        age_days in days = days from played_on to now
+        outcome =
+            when margin > 0 then "home-win"
+            when margin < 0 then "road-win"
+            otherwise "tie"
+
+    flag blowout when swing >= thresholds.blowout:
+        label "Blowout"
+        detail "{away_name} at {home_name} was decided by {swing} points."
+        severity info
+
+    flag overtime-finish when went_overtime == 1:
+        label "Overtime"
+        detail "{away_name} at {home_name} needed more than sixty minutes."
+        severity info
+
+# What is coming: every game not yet played, soonest first. The gate reads
+# the row's own values at the instant of asking, so a game drops off this
+# page the moment its score lands -- no reindex, no stale bucket.
+projection nfl_game.upcoming:
+    sort by days_until ascending
+    limit 25
+
+    field:
+        name = name as text
+        week = week as number
+        stage = game_type as text
+        scheduled_for = kickoff as date
+        away = away_team as text
+        home = home_team as text
+        settled = finished as flag
+        home_name = name from home_team through nfl_team.abbrs.abbr as text
+        away_name = name from away_team through nfl_team.abbrs.abbr as text
+
+    value:
+        days_until in days = days from now to scheduled_for
+
+    omit when settled == 1
+
+    flag this-week when days_until <= thresholds.thisWeek:
+        label "This week"
+        detail "{away_name} at {home_name} in {days_until} days."
+        severity info
+
+# The bracket: every finished postseason game, in one page -- a population
+# written as a set expression, so which records get a row is itself part of
+# the definition's version.
+projection nfl_game.postseason:
+    from nfl_game.finished & nfl_game.playoff
+    sort by age_days ascending
+
+    field:
+        name = name as text
+        stage = game_type as text
+        played_on = kickoff as date
+        away_points = away_score as number
+        home_points = home_score as number
+        home_name = name from home_team through nfl_team.abbrs.abbr as text
+        away_name = name from away_team through nfl_team.abbrs.abbr as text
+
+    value:
+        margin in count = home_points - away_points
+        age_days in days = days from played_on to now
+
+# The standings: one row per franchise, the stored regular-season figures
+# side by side, ordered by the win rate the server computed. Losses are
+# derived from the other three columns, so the row cannot contradict itself.
+projection nfl_team.standings:
+    sort by rate descending
+
+    field:
+        name = name as text
+        conference = conference as text
+        division = division as text
+
+    read:
+        played = nfl_team.games_played
+        wins = nfl_team.wins
+        ties = nfl_team.ties
+        scored = nfl_team.points_scored
+        allowed = nfl_team.points_allowed
+        differential = nfl_team.point_diff
+        rate = nfl_team.win_rate
+        health = band of nfl_team.win_rate
+        form = nfl_team.form
+
+    value:
+        losses in count = played - wins - ties
+
+    flag contender when health == "contending":
+        label "In the hunt"
+        detail "{wins} wins from {played} games."
+        severity info
+
+# The offence, one row per franchise: figures computed over every single
+# snap of the season, side by side. The evidence route under any of these
+# numbers lists the actual plays.
+projection nfl_team.offense:
+    sort by yards descending
+
+    field:
+        name = name as text
+        conference = conference as text
+        division = division as text
+
+    read:
+        plays = nfl_team.plays_run
+        yards = nfl_team.yards_gained
+        giveaways = nfl_team.turnovers
+        conversion = nfl_team.third_down_rate
+        sustain = band of nfl_team.third_down_rate
+
+    flag sharp-offense when sustain == "sharp":
+        label "Keeps drives alive"
+        detail "Converting {conversion} of third downs."
+        severity info
+
+    flag generous when giveaways >= thresholds.giveaways:
+        label "Generous"
+        detail "{giveaways} giveaways on the season."
+        severity attention
+
+# The season's touchdown producers: stored per-player figures side by
+# side, ordered by touchdowns accounted for, cut to the top twenty-five.
+# A thrown touchdown credits the passer and the catcher alike -- that is
+# why the quarterbacks and the running backs share this page.
+projection nfl_player.leaders:
+    sort by tds descending
+    limit 25
+
+    field:
+        name = name as text
+        position = position as text
+
+    read:
+        yards = nfl_player.scrimmage_yards
+        passing = nfl_player.pass_yards
+        arm = band of nfl_player.pass_yards
+        tds = nfl_player.touchdowns
+
+    flag star-arm when arm == "star":
+        label "Star passer"
+        detail "{passing} passing yards on the season."
+        severity info
+
+# ------------------------------------------------------------- summary --
+
+# The scoreboard's population in one row: how much football, how much of it
+# was close. Counts are floors -- a game the engine could not judge is not
+# evidence of a blowout -- and the totals are over every row, never the page.
+summarise nfl_game.season over nfl_game.scoreboard:
+    count games
+    count blowouts where swing >= thresholds.blowout
+    count overtime_games where went_overtime == 1
+    total points in count = total_points
+
+    value:
+        blowout_share in share = blowouts / games
+
+    flag one-sided when blowouts > 0:
+        label "One-sided afternoons"
+        detail "{blowouts} of {games} {blowouts|game was:games were} decided by wide margins."
+        severity info

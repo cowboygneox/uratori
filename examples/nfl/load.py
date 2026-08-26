@@ -1,0 +1,572 @@
+"""Load NFL seasons into a running uratori as facts, one tenant per season.
+
+The data is nflverse (https://github.com/nflverse/nflverse-data): the
+community-maintained public record of NFL games, weekly player stat lines and
+play-by-play. This script is a *host*: it downloads the seasons, shapes them
+into plain records -- **every single play is a fact** -- teaches the engine
+the world (examples/nfl/schema.json + examples/nfl/definitions.fig) and
+pushes it all over the HTTP API. It computes no figure of its own: every
+number the demo serves comes from a definition, with its version and its
+evidence.
+
+Only accurate play-by-play is imported, and the loader proves it per game:
+a played game loads only if its plays rebuild its final score exactly --
+both teams, to the point. A game that fails that reconciliation is excluded
+whole (game, sides, stat lines and plays), and the loader says how many it
+dropped, because a silent cap reads as "covered everything". Fixtures with
+no result yet have nothing to be inaccurate about and load as fixtures --
+that is what the upcoming page shows.
+
+Stdlib only, so it runs anywhere Python 3.12 does:
+
+    python examples/nfl/load.py --base http://localhost:8080 \
+        --seasons 1999-2026
+
+The default is the whole play-by-play era, 1999 onwards: roughly 1.3
+million plays across two dozen tenants. A season whose games have no scores
+yet (next season's schedule) loads as fixtures only -- the upcoming page
+fills, and the stored figures honestly answer nothing-collected rather
+than a fabricated zero.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import gzip
+import io
+import json
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
+
+Record = dict[str, Any]
+
+HERE = Path(__file__).parent
+NFLVERSE = "https://github.com/nflverse/nflverse-data/releases/download"
+
+# Kickoff times in games.csv are US Eastern wall clock; the loader renders
+# them as instants so `by day in tenant.timezone` has a real moment to file.
+EASTERN = ZoneInfo("America/New_York")
+
+# One franchise, several abbreviations: the relocations inside the nflverse
+# era. The hop in the definitions (`through nfl_team.abbrs.abbr`) is what
+# makes OAK and LV one subject; this map is what tells the loader they are.
+FRANCHISE = {"OAK": "LV", "SD": "LAC", "STL": "LA"}
+
+BATCH = 20000
+
+
+# --------------------------------------------------------------- download --
+
+
+def fetch(url: str, cache: Path) -> bytes:
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    if cache.exists():
+        return cache.read_bytes()
+    print(f"  downloading {url.rsplit('/', 1)[-1]} ...", flush=True)
+    with urllib.request.urlopen(url) as response:
+        body: bytes = response.read()
+    cache.write_bytes(body)
+    return body
+
+
+def rows_of(blob: bytes) -> list[dict[str, str]]:
+    if blob[:2] == b"\x1f\x8b":
+        blob = gzip.decompress(blob)
+    return list(csv.DictReader(io.TextIOWrapper(io.BytesIO(blob), encoding="utf-8")))
+
+
+PBP_COLUMNS = (
+    "game_id",
+    "play_id",
+    "desc",
+    "posteam",
+    "defteam",
+    "play_type",
+    "down",
+    "yards_gained",
+    "qtr",
+    "sp",
+    "time_of_day",
+    "posteam_score",
+    "defteam_score",
+    "posteam_score_post",
+    "defteam_score_post",
+    "third_down_converted",
+    "interception",
+    "fumble_lost",
+)
+
+
+def pbp_rows(blob: bytes) -> list[dict[str, str]]:
+    """Play-by-play trimmed to the columns the loader reads while parsing.
+
+    A season is ~50,000 rows by ~370 columns; a full DictReader list is
+    gigabytes across the era, and the loader reads eighteen of them.
+    """
+    if blob[:2] == b"\x1f\x8b":
+        blob = gzip.decompress(blob)
+    reader = csv.reader(io.TextIOWrapper(io.BytesIO(blob), encoding="utf-8"))
+    header = next(reader)
+    wanted = [(column, header.index(column)) for column in PBP_COLUMNS if column in header]
+    return [{column: row[index] for column, index in wanted} for row in reader]
+
+
+# ------------------------------------------------------------------ shape --
+
+
+def number(text: str) -> float | int | None:
+    """CSV numerics arrive as text; an empty cell is an absence, not a zero."""
+    if text in ("", "NA"):
+        return None
+    value = float(text)
+    return int(value) if value == int(value) else value
+
+
+def put(record: Record, field: str, text: str) -> None:
+    value = number(text)
+    if value is not None:
+        record[field] = value
+
+
+def kickoff_of(game: dict[str, str]) -> str:
+    day = game["gameday"]
+    clock = game["gametime"] or "13:00"
+    moment = datetime.fromisoformat(f"{day}T{clock}:00").replace(tzinfo=EASTERN)
+    return moment.isoformat()
+
+
+def franchise(abbr: str) -> str:
+    return FRANCHISE.get(abbr, abbr)
+
+
+def team_facts(teams_csv: list[dict[str, str]], season_abbrs: set[str]) -> dict[str, Record]:
+    """One record per franchise, named as the season knew it, carrying every
+    abbreviation the franchise has answered to -- the identity the `through`
+    hop resolves."""
+    by_abbr = {row["team_abbr"]: row for row in teams_csv}
+    facts: dict[str, Record] = {}
+    for abbr in sorted(season_abbrs):
+        key = franchise(abbr)
+        row = by_abbr.get(abbr) or by_abbr[key]
+        facts[key] = {
+            "name": row["team_name"],
+            "abbrs": sorted(
+                [{"abbr": a} for a in {key, *[o for o, n in FRANCHISE.items() if n == key]}],
+                key=lambda entry: entry["abbr"],
+            ),
+            "conference": row["team_conf"],
+            "division": row["team_division"],
+            "url": f"https://www.nfl.com/teams/{row['team_name'].lower().replace(' ', '-')}/",
+            "logo": row.get("team_logo_espn", ""),
+        }
+    return facts
+
+
+def game_facts(games: list[dict[str, str]]) -> tuple[dict[str, Record], dict[str, Record]]:
+    """Games as fixtures-plus-results, and the two per-side outcome records a
+    finished game earns. An unplayed game carries no score fields at all --
+    an absence must stay an absence -- and `finished` says which it is,
+    explicitly, because a 0 score is a measured nought the definitions must
+    not have to distinguish from a missing one."""
+    game_records: dict[str, Record] = {}
+    side_records: dict[str, Record] = {}
+    latest: dict[str, str] = {}
+    for game in sorted(games, key=kickoff_of):
+        kickoff = kickoff_of(game)
+        away, home = game["away_team"], game["home_team"]
+        label = f"Week {game['week']}: {away} @ {home}"
+        record: Record = {
+            "name": label,
+            "season": int(game["season"]),
+            "week": int(game["week"]),
+            "game_type": game["game_type"],
+            "kickoff": kickoff,
+            "away_team": away,
+            "home_team": home,
+            "stadium": game["stadium"],
+            "went_overtime": game["overtime"] == "1",
+            "division_game": game["div_game"] == "1",
+        }
+        if game["espn"]:
+            record["url"] = f"https://www.espn.com/nfl/game/_/gameId/{game['espn']}"
+        put(record, "away_score", game["away_score"])
+        put(record, "home_score", game["home_score"])
+        put(record, "total", game["total"])
+        # An explicit finished flag, because the definitions cannot gate on
+        # `home_score is set`: the language deliberately reads a numeric
+        # nought as absent, and a shutout of the home team is finished
+        # football, not an unplayed fixture. A boolean is present either way.
+        record["finished"] = "home_score" in record and "away_score" in record
+        game_records[game["game_id"]] = record
+
+        if not record["finished"]:
+            continue
+        scores = {home: record["home_score"], away: record["away_score"]}
+        for abbr, opponent in ((home, away), (away, home)):
+            side: Record = {
+                "name": f"{abbr} vs {opponent}, week {game['week']}",
+                "team": abbr,
+                "opponent": opponent,
+                "week": int(game["week"]),
+                "game_type": game["game_type"],
+                "kickoff": kickoff,
+                "points_for": scores[abbr],
+                "points_against": scores[opponent],
+                "won": scores[abbr] > scores[opponent],
+                "tied": scores[abbr] == scores[opponent],
+                "home": abbr == home,
+            }
+            if abbr in latest:
+                side["previous_kickoff"] = latest[abbr]
+            side_records[f"{game['game_id']}@{abbr}"] = side
+        latest[home] = kickoff
+        latest[away] = kickoff
+    return game_records, side_records
+
+
+def player_facts(
+    stats: list[dict[str, str]], kickoffs: dict[str, str]
+) -> tuple[dict[str, Record], dict[str, Record]]:
+    players: dict[str, Record] = {}
+    lines: dict[str, Record] = {}
+    for row in stats:
+        game_id = row["game_id"]
+        kickoff = kickoffs.get(game_id)
+        if kickoff is None:
+            continue
+        pid = row["player_id"]
+        players[pid] = {
+            "name": row["player_display_name"],
+            "position": row["position"],
+            "team": row["team"],
+            "url": row.get("headshot_url", ""),
+        }
+        line: Record = {
+            "name": f"{row['player_display_name']}, week {row['week']} vs {row['opponent_team']}",
+            "player_id": pid,
+            "team": row["team"],
+            "opponent": row["opponent_team"],
+            "week": int(row["week"]),
+            "game_type": row["season_type"],
+            "kickoff": kickoff,
+        }
+        for field in (
+            "completions",
+            "attempts",
+            "passing_yards",
+            "passing_tds",
+            "passing_interceptions",
+            "carries",
+            "rushing_yards",
+            "rushing_tds",
+            "receptions",
+            "targets",
+            "receiving_yards",
+            "receiving_tds",
+        ):
+            put(line, field, row.get(field, ""))
+        # Scrimmage yards and touchdowns-accounted-for are the league's own
+        # composite stats, and they must be record fields: a measure is
+        # deliberately not arithmetic (one field per record), and the figures
+        # that need these -- a per-day sum, the per-opponent split -- cannot
+        # be composed from parts (a time-keyed figure cannot be combined, a
+        # rollup totals at most one split figure). Where composition *is*
+        # expressible, the definitions do it: see nfl_team.point_diff and
+        # nfl_player.touchdowns. Note total_tds credits a thrown touchdown
+        # to passer and catcher alike, as the league does; the definitions'
+        # prose says so wherever the number is served.
+        line["scrimmage_yards"] = (line.get("rushing_yards") or 0) + (
+            line.get("receiving_yards") or 0
+        )
+        line["total_tds"] = (
+            (line.get("passing_tds") or 0)
+            + (line.get("rushing_tds") or 0)
+            + (line.get("receiving_tds") or 0)
+        )
+        lines[f"{game_id}@{pid}"] = line
+    return players, lines
+
+
+def play_facts(
+    pbp: list[dict[str, str]],
+) -> tuple[dict[str, dict[str, Record]], dict[str, dict[str, int]]]:
+    """Every single play, one fact each, grouped by game -- plus, per game,
+    the final score those plays rebuild, which is what the reconciliation
+    gate compares against the schedule.
+
+    A play that moved the scoreboard carries `points` and `scored_by`
+    (whoever the points went to, pick-sixes and safeties included), judged
+    by the score delta rather than by parsing the text. The wall-clock
+    instant travels when the league recorded one; the sub-day figures file
+    only what genuinely has a clock."""
+    by_game: dict[str, dict[str, Record]] = {}
+    rebuilt: dict[str, dict[str, int]] = {}
+    for row in pbp:
+        game_id = row.get("game_id", "")
+        play_id = row.get("play_id", "")
+        if not game_id or not play_id:
+            continue
+        description = (row.get("desc") or "").strip()
+        play: Record = {"name": description[:140] or f"play {play_id}"}
+        if row.get("posteam"):
+            play["offense"] = row["posteam"]
+        if row.get("play_type"):
+            play["play_type"] = row["play_type"]
+        if row.get("time_of_day"):
+            play["clock_time"] = row["time_of_day"]
+        if row.get("third_down_converted") == "1":
+            play["third_down_converted"] = True
+        if row.get("interception") == "1" or row.get("fumble_lost") == "1":
+            play["turnover"] = True
+        put(play, "down", row.get("down", ""))
+        put(play, "yards_gained", row.get("yards_gained", ""))
+        put(play, "quarter", row.get("qtr", ""))
+
+        if row.get("sp") == "1":
+            before_pos = number(row.get("posteam_score", ""))
+            before_def = number(row.get("defteam_score", ""))
+            after_pos = number(row.get("posteam_score_post", ""))
+            after_def = number(row.get("defteam_score_post", ""))
+            # All four ends or nothing: a delta against a baseline coerced
+            # to nought would fabricate points from an absence. A scoring
+            # play whose ends are unreadable carries no points, and the
+            # shortfall is exactly what the reconciliation gate then sees.
+            if (
+                before_pos is not None
+                and before_def is not None
+                and after_pos is not None
+                and after_def is not None
+            ):
+                points = int((after_pos + after_def) - (before_pos + before_def))
+                team = row["posteam"] if after_pos > before_pos else row["defteam"]
+                if points > 0 and team:
+                    play["points"] = points
+                    play["scored_by"] = team
+                    game_score = rebuilt.setdefault(game_id, {})
+                    game_score[team] = game_score.get(team, 0) + points
+
+        by_game.setdefault(game_id, {})[f"{game_id}@{play_id}"] = play
+    return by_game, rebuilt
+
+
+def reconciled(
+    game_records: dict[str, Record], rebuilt: dict[str, dict[str, int]]
+) -> tuple[set[str], list[str]]:
+    """Which finished games the play-by-play accounts for exactly.
+
+    The gate: a played game is imported only if the points its plays claim
+    add up to the final score on the schedule -- per team, matched through
+    the franchise map, because old schedules say OAK where the play-by-play
+    says LV. Anything else -- a missing game, a missing play, a score that
+    does not balance -- excludes the game whole."""
+    kept: set[str] = set()
+    dropped: list[str] = []
+    for game_id, record in game_records.items():
+        if not record["finished"]:
+            continue
+        claimed = {
+            franchise(team): points for team, points in rebuilt.get(game_id, {}).items()
+        }
+        final = {
+            franchise(record["home_team"]): record["home_score"],
+            franchise(record["away_team"]): record["away_score"],
+        }
+        # A real shutout leaves the shut-out team absent from `claimed`;
+        # a nought on the schedule is the same claim.
+        if {t: p for t, p in final.items() if p != 0} == claimed:
+            kept.add(game_id)
+        else:
+            dropped.append(game_id)
+    return kept, sorted(dropped)
+
+
+# ------------------------------------------------------------------- push --
+
+
+class Client:
+    def __init__(self, base: str, token: str | None):
+        self.base = base.rstrip("/")
+        self.token = token
+
+    def call(self, method: str, path: str, body: Record | None = None) -> Record:
+        request = urllib.request.Request(self.base + path, method=method)
+        request.add_header("Content-Type", "application/json")
+        if self.token:
+            request.add_header("Authorization", f"Bearer {self.token}")
+        payload = json.dumps(body).encode() if body is not None else None
+        try:
+            with urllib.request.urlopen(request, data=payload) as response:
+                answer: Record = json.loads(response.read())
+                return answer
+        except urllib.error.HTTPError as refusal:
+            detail = refusal.read().decode(errors="replace")
+            sys.exit(f"{method} {path} -> {refusal.code}: {detail}")
+
+
+def push(client: Client, tenant: str, facts: dict[str, dict[str, Record]]) -> None:
+    """Batches sized for comfort, in dependency-friendly order; the engine's
+    own change detection decides what each pass recomputes."""
+    pending: list[tuple[str, str, Record]] = [
+        (kind, key, record)
+        for kind in ("nfl_team", "nfl_game", "nfl_team_game", "nfl_player", "nfl_stat_line", "nfl_play")
+        for key, record in facts.get(kind, {}).items()
+    ]
+    total_written = total_changed = 0
+    for start in range(0, len(pending), BATCH):
+        writes: dict[str, dict[str, Record]] = {}
+        for kind, key, record in pending[start : start + BATCH]:
+            writes.setdefault(kind, {})[key] = record
+        report = client.call("POST", f"/tenants/{tenant}/facts", {"writes": writes})
+        total_written += report["written"]
+        total_changed += report["changed"]
+        print(
+            f"  [{tenant}] batch {start // BATCH + 1}: "
+            f"written {report['written']}, figure movements {report['changed']}",
+            flush=True,
+        )
+    print(f"  [{tenant}] done: {total_written} records, {total_changed} movements")
+
+
+# ------------------------------------------------------------------- main --
+
+
+def load_season(
+    client: Client,
+    season: int,
+    cache: Path,
+    teams_csv: list[dict[str, str]],
+    games_csv: list[dict[str, str]],
+) -> None:
+    print(f"season {season} -> tenant \"{season}\"")
+    games = [row for row in games_csv if row["season"] == str(season)]
+    if not games:
+        sys.exit(f"season {season}: nflverse has no schedule for it")
+    game_records, side_records = game_facts(games)
+    finished = [gid for gid, record in game_records.items() if record["finished"]]
+
+    by_game: dict[str, dict[str, Record]] = {}
+    rebuilt: dict[str, dict[str, int]] = {}
+    if finished:
+        try:
+            pbp = pbp_rows(
+                fetch(
+                    f"{NFLVERSE}/pbp/play_by_play_{season}.csv.gz",
+                    cache / f"play_by_play_{season}.csv.gz",
+                )
+            )
+        except urllib.error.HTTPError:
+            print(f"  no play-by-play published for {season}")
+        else:
+            by_game, rebuilt = play_facts(pbp)
+
+    # The accuracy gate: a played game is imported only when its plays
+    # rebuild its final score. Fixtures pass by having nothing to check.
+    kept, dropped = reconciled(game_records, rebuilt)
+    if dropped:
+        shown = ", ".join(dropped[:5]) + (" ..." if len(dropped) > 5 else "")
+        print(
+            f"  excluded {len(dropped)} of {len(finished)} played games -- "
+            f"play-by-play does not rebuild the final score: {shown}"
+        )
+    admitted = kept | {gid for gid, record in game_records.items() if not record["finished"]}
+    game_records = {gid: r for gid, r in game_records.items() if gid in admitted}
+    side_records = {key: r for key, r in side_records.items() if key.split("@")[0] in kept}
+    plays = {key: r for gid in kept for key, r in by_game.get(gid, {}).items()}
+
+    kickoffs = {gid: str(game_records[gid]["kickoff"]) for gid in kept}
+    abbrs = {g["home_team"] for g in games} | {g["away_team"] for g in games}
+    facts: dict[str, dict[str, Record]] = {
+        "nfl_team": team_facts(teams_csv, abbrs),
+        "nfl_game": game_records,
+        "nfl_team_game": side_records,
+        "nfl_play": plays,
+    }
+
+    if kept:
+        try:
+            stats = rows_of(
+                fetch(
+                    f"{NFLVERSE}/stats_player/stats_player_week_{season}.csv",
+                    cache / f"stats_player_week_{season}.csv",
+                )
+            )
+        except urllib.error.HTTPError:
+            print(f"  no weekly player stats published for {season}; skipping stat lines")
+        else:
+            # The kickoffs map carries reconciled games only, so stat lines
+            # from an excluded game are excluded with it.
+            players, lines = player_facts(stats, kickoffs)
+            facts["nfl_player"] = players
+            facts["nfl_stat_line"] = lines
+
+    for kind, records in facts.items():
+        print(f"  {kind}: {len(records)}")
+    push(client, str(season), facts)
+
+
+def seasons_of(text: str) -> list[int]:
+    """"1999-2003,2016" -> [1999, 2000, 2001, 2002, 2003, 2016]."""
+    out: list[int] = []
+    for part in text.split(","):
+        if "-" in part:
+            first, last = part.split("-", 1)
+            out.extend(range(int(first), int(last) + 1))
+        else:
+            out.append(int(part))
+    return out
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--base", default="http://localhost:8080")
+    parser.add_argument("--token", default=None)
+    parser.add_argument(
+        "--seasons",
+        default="1999-2026",
+        help="comma-separated years and ranges; the default is the whole play-by-play era",
+    )
+    parser.add_argument("--cache", default=str(HERE / "data"))
+    arguments = parser.parse_args()
+
+    client = Client(arguments.base, arguments.token)
+    cache = Path(arguments.cache)
+
+    health = client.call("GET", "/health")
+    print(f"engine {health['version']} at {arguments.base}")
+
+    client.call("PUT", "/schema", json.loads((HERE / "schema.json").read_text()))
+    library = client.call(
+        "PUT", "/definitions", {"source": (HERE / "definitions.fig").read_text()}
+    )
+    print(
+        f"library loaded: {len(library['figures'])} figures, "
+        f"{len(library['readings'])} readings, {len(library['projections'])} projections, "
+        f"{len(library['summaries'])} summaries"
+    )
+
+    teams_csv = rows_of(
+        fetch(f"{NFLVERSE}/teams/teams_colors_logos.csv", cache / "teams_colors_logos.csv")
+    )
+    games_csv = rows_of(fetch(f"{NFLVERSE}/schedules/games.csv", cache / "games.csv"))
+
+    for season in seasons_of(arguments.seasons):
+        load_season(client, season, cache, teams_csv, games_csv)
+
+    print("\nloaded. Try:")
+    picks = seasons_of(arguments.seasons)
+    # The last season in a default run is next season's fixtures; the one
+    # before it is the freshest tenant with numbers on the board.
+    first = str(picks[-2] if len(picks) > 1 else picks[0])
+    print(f"  {arguments.base}/ui/  (pick tenant \"{first}\")")
+    print(f"  {arguments.base}/tenants/{first}/results/nfl_team.standings")
+    print(f"  {arguments.base}/tenants/{first}/results/nfl_team.scoring?trailing=365")
+
+
+if __name__ == "__main__":
+    main()
