@@ -115,6 +115,7 @@ fact shop_order:
     url as text
     courier_id as text
     status as text
+    handling_seconds as number
 
 # A courier on the road.
 fact shop_courier:

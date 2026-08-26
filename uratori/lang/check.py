@@ -89,6 +89,16 @@ class CheckError(DefinitionError):
         self.line = line
 
 
+class WorldConflict(CheckError):
+    """The source declares facts and the schema also declares kinds.
+
+    Its own type because one caller has to recognise it: `PUT /definitions`
+    retries a conflicted compile against a kind-stripped schema so a live
+    schema-taught deployment can adopt facts without blanking its
+    definitions first -- and matching on message text would make that repair
+    hang off a comma."""
+
+
 def compile_source(source: str, schema: Schema) -> Library:
     """Check and lower one concatenated source against the host's world.
 
@@ -236,7 +246,7 @@ class _Checker:
         """
         if self.facts and self._schema.kinds:
             first = next(d for d in self._decls if isinstance(d, FactDecl))
-            raise CheckError(
+            raise WorldConflict(
                 "the source declares facts, and the schema also declares kinds. The "
                 "world is declared in one place: drop the schema's kinds (and its name "
                 "and url fields) -- they derive from the facts.",
@@ -397,8 +407,14 @@ class _Checker:
             found = self._record_field(d.kind, spec.field, what, d.line)
             assert found is not None
             node, _ = found
-            boolean = spec.value in ("true", "false")
-            if node.type == "flag" and not boolean:
+            # A bare `true`/`false` and a quoted `"true"` are different claims
+            # -- the flag's value versus a word a text field holds -- and only
+            # the parser knows which was written, which is why `quoted` rides
+            # on the spec. Each refusal below is a predicate that would match
+            # nothing (or, with `!=`, everything) for ever, with nothing
+            # thrown.
+            boolean = not spec.quoted and spec.value in ("true", "false")
+            if node.type == "flag" and spec.value not in ("true", "false"):
                 raise CheckError(
                     f'{what} compares {spec.field}, a flag, against "{spec.value}". A '
                     "flag holds true or false, so nothing would ever match -- and with "
@@ -410,6 +426,14 @@ class _Checker:
                     f"{what} compares {spec.field}, a {node.type}, against {spec.value}, "
                     "which is how a flag is tested. Quote it if the field really holds "
                     "that word.",
+                    d.line,
+                )
+            if node.type == "number" and spec.quoted:
+                raise CheckError(
+                    f'{what} compares {spec.field}, a number, against the quoted '
+                    f'"{spec.value}". A number\'s bucket key is the number\'s own '
+                    "spelling, so write it bare -- quoted, a stray decimal point is a "
+                    "predicate that never matches.",
                     d.line,
                 )
 
@@ -1788,6 +1812,10 @@ class _Checker:
                     "nothing for every row that carries two.",
                     f.line,
                 )
+            # The matching path on the other kind must exist too: unmatched,
+            # the join table is empty and every row's column is None -- a
+            # permanently blank column wearing a declared join.
+            self._record_field(f.join.kind, f.join.path, what, f.line)
             source_kind = f.join.kind
         found = self._record_field(source_kind, f.path, what, f.line)
         assert found is not None
@@ -2092,7 +2120,14 @@ def _compiled_fields(fields: tuple[FactField, ...]) -> tuple[CompiledFactField, 
 def _fact_field_hash(fields: tuple[CompiledFactField, ...]) -> list[object]:
     """The fields and their shapes, and nothing else: prose, the name field
     and the url field are rendering, out of the hash for the reason a display
-    template is."""
+    template is.
+
+    Sorted by name, because declaration order is rendering too -- every
+    consumer keys the fields by name, so reordering a fact's body is the
+    "plan built in a different order" case the hashing rules promise not to
+    fork a version over. Contrast a projection's row fields, where the list
+    order *is* the answer.
+    """
     return [
         {
             "name": f.name,
@@ -2100,7 +2135,7 @@ def _fact_field_hash(fields: tuple[CompiledFactField, ...]) -> list[object]:
             "many": f.many or None,
             "children": _fact_field_hash(f.children) or None,
         }
-        for f in fields
+        for f in sorted(fields, key=lambda f: f.name)
     ]
 
 
@@ -2561,4 +2596,4 @@ def _project_hash(plan: ProjectPlan, indexes: dict[str, CompiledIndex]) -> objec
     }
 
 
-__all__ = ["CheckError", "compile_source"]
+__all__ = ["CheckError", "WorldConflict", "compile_source"]

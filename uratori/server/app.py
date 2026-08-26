@@ -25,6 +25,7 @@ Design decisions a reader should not have to rediscover:
 """
 
 
+import dataclasses
 import hmac
 import logging
 import os
@@ -36,7 +37,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, 
 
 from ..engine.activity import shown_changes
 from ..facade import DEFAULT_TRAILING, RunReport
-from ..lang.check import compile_source
+from ..lang.check import WorldConflict, compile_source
 from ..lang.lex import DefinitionError
 from ..lang.plan import CompiledFactField, Library
 from ..results import Evidence, Result
@@ -242,14 +243,34 @@ def create_app(
                 status_code=409,
                 detail="Declare a schema before loading definitions; they compile against it",
             )
+        schema = s.world.schema
+        document = s.world.schema_document
         try:
-            library = compile_source(body.source, s.world.schema)
+            library = compile_source(body.source, schema)
+        except WorldConflict:
+            # A source that brings its own facts refuses a schema that also
+            # declares kinds -- but a live schema-taught deployment must be
+            # able to adopt facts without blanking its definitions first, and
+            # the schema door refuses first for the same reason. So teaching
+            # facts through THIS door retires the schema's kinds, name fields
+            # and url fields in the same save: the source is the truth, and
+            # the recompile below proves the new world whole before anything
+            # is persisted. Any other refusal still surfaces verbatim.
+            stripped = dataclasses.replace(
+                schema, kinds=frozenset(), name_fields={}, url_fields={}
+            )
+            try:
+                library = compile_source(body.source, stripped)
+            except DefinitionError as refusal:
+                raise HTTPException(status_code=422, detail=str(refusal)) from refusal
+            schema = stripped
+            document = schema_out(stripped).model_dump()
         except DefinitionError as refusal:
             raise HTTPException(status_code=422, detail=str(refusal)) from refusal
-        await db.save_world(s.pool, s.world.schema_document, body.source)
+        await db.save_world(s.pool, document, body.source)
         s.world = World(
-            schema=s.world.schema,
-            schema_document=s.world.schema_document,
+            schema=schema,
+            schema_document=document,
             source=body.source,
             library=library,
         )
@@ -288,21 +309,28 @@ def create_app(
             facade.verify(body.writes, body.deletes)
         except FactError as refusal:
             raise HTTPException(status_code=422, detail=str(refusal)) from refusal
-        facts = PostgresFactStore(s.pool)
         async with s.lock_for(tenant):
-            for kind, keys in body.deletes.items():
-                await facts.delete(tenant, kind, keys)
-            moved: dict[str, list[str]] = {}
-            written = 0
-            for kind, records in body.writes.items():
-                if not records:
-                    continue
-                changed = await facts.upsert(
-                    tenant, kind, records, stamps=body.stamps.get(kind)
-                )
-                written += len(changed)
-                if changed:
-                    moved[kind] = changed
+            # One transaction for the whole mutation: verification is the
+            # first line of defence, but a value it missed (or a database
+            # refusal it could not foresee) must fail the batch whole, not
+            # leave the kinds written before the bad one persisted and the
+            # rest gone -- the half-applied batch is the same narrowed
+            # population as a quarantined record.
+            async with s.pool.acquire() as connection, connection.transaction():
+                facts = PostgresFactStore(connection)
+                for kind, keys in body.deletes.items():
+                    await facts.delete(tenant, kind, keys)
+                moved: dict[str, list[str]] = {}
+                written = 0
+                for kind, records in body.writes.items():
+                    if not records:
+                        continue
+                    changed = await facts.upsert(
+                        tenant, kind, records, stamps=body.stamps.get(kind)
+                    )
+                    written += len(changed)
+                    if changed:
+                        moved[kind] = changed
             settings = await db.load_settings(s.pool, tenant)
             report = await facade.run(
                 tenant,

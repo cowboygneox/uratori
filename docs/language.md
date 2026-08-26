@@ -214,9 +214,13 @@ things happen that a kind list cannot do:
 
 - **Every path a definition reads is checked.** A group bucketing by a field
   that does not exist, a measure subtracting a text, a projection binding
-  `as date` over something that is not a moment -- each was a silently empty
-  bucket or a column of dashes in production, and each is now a build
-  failure that names the field and lists what the record actually carries.
+  `as date` over something that is not a moment, a filter testing a flag
+  against a word it can never hold -- each was a silently empty bucket or a
+  column of dashes in production, and each is now a build failure that names
+  the field and lists what the record actually carries. (For predicates the
+  quoting carries the claim: a bare `true` names a flag's value, a quoted
+  `"true"` names a word a text field holds, and numbers are written bare so
+  they compare in the bucket key's own spelling.)
 - **A record must match the declaration to land.** The facts route verifies
   every written body; an undeclared field or a wrong type refuses the batch
   whole, by kind, key and field (see [the HTTP API](http-api.md)).
@@ -264,7 +268,12 @@ every element. That single property is what each downstream rule branches on
 -- a group may cross a `many` (bucketing flattens deliberately: any
 account_id of any account), a measure may not (it reads one value, and across
 a list it would silently skip or first-win), a projection field may not (a
-row's field holds one value). A deeply nested fact is usually the host
+row's field holds one value), and an age filter may not (it reads one
+instant). A predicate or an `is set` over a `many` is allowed and means *any
+element*: `==` asks whether any element matches, which makes `!=` "no element
+does" -- and, absent-satisfies-`!=` being the standing rule, a record with an
+empty list passes a `!=` exactly as a record with no field does. A deeply
+nested fact is usually the host
 transcribing the provider instead of mapping it; allowed, and the flatter
 mapping is house style.
 

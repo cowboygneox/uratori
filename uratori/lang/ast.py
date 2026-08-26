@@ -197,6 +197,13 @@ class ByPredicate:
     field: str
     op: Literal["==", "!="]
     value: str
+    quoted: bool = False
+    """Whether the value was written in quotes. Evaluation cannot tell --
+    bucket keys are strings either way -- but the checker must: against a
+    declared world, a bare `true` names a flag's value and a quoted `"true"`
+    names a word a text field holds, and a rule that could not tell them
+    apart refused the quoted spelling while advising the author to quote it.
+    Deliberately not hashed: it never changes what the arithmetic produces."""
 
 
 @dataclass(frozen=True)

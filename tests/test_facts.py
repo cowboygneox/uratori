@@ -202,7 +202,7 @@ def test_name_and_url_live_at_the_top_level_only() -> None:
     refuses(
         "# An order.\nfact shop_order:\n    ref as text\n    one dropoff:\n"
         "        name street\n        street as text\n",
-        "name",
+        "lives at the top",
     )
 
 
@@ -231,6 +231,64 @@ def test_field_prose_is_carried() -> None:
     assert "absent until assigned" in courier_id.doc
 
 
+def test_a_column_zero_comment_is_not_a_fields_prose() -> None:
+    # A stray note at column 0 inside the block is somebody's TODO, and
+    # adopting it would serve that TODO as the field's customer-facing
+    # description on the manifest.
+    library = compile_taught(
+        "# An order.\nfact shop_order:\n    ref as text\n"
+        "# TODO: this mapping is wrong, ask Priya\n"
+        "    status as text\n"
+    )
+    status = next(f for f in library.facts["shop_order"].fields if f.name == "status")
+    assert status.doc == ""
+
+
+def test_a_field_named_field_is_still_writable() -> None:
+    # Jira changelog items genuinely carry a `field` key; only the
+    # `field <name> as <type>` spelling is the refused keyword shape.
+    library = compile_taught("# A log line.\nfact shop_order:\n    field as text\n")
+    assert {f.name for f in library.facts["shop_order"].fields} == {"field"}
+
+
+def test_a_dotted_field_name_is_refused() -> None:
+    # It would lex, verify and store -- and then be unreadable for ever,
+    # because a definition reads fields by dotted path.
+    refuses(
+        "# An order.\nfact shop_order:\n    custom.field_10021 as number\n",
+        "custom.field_10021",
+        "separator",
+    )
+    refuses(
+        "# An order.\nfact shop_order:\n    ref as text\n    many custom.items:\n"
+        "        k as text\n",
+        "separator",
+    )
+
+
+def test_a_dotted_fact_name_is_refused() -> None:
+    refuses("# An order.\nfact shop.order:\n    ref as text\n", "dot")
+
+
+def test_a_duplicate_name_directive_is_refused() -> None:
+    refuses(
+        "# An order.\nfact shop_order:\n    name ref\n    name status\n"
+        "    ref as text\n    status as text\n",
+        "name",
+    )
+
+
+def test_one_with_a_scalar_is_refused_with_directions() -> None:
+    refuses(
+        "# An order.\nfact shop_order:\n    one ref as text\n",
+        "single value",
+    )
+
+
+def test_a_field_missing_as_names_the_shape() -> None:
+    refuses("# An order.\nfact shop_order:\n    ref text\n", "as <type>")
+
+
 # --------------------------------------------------------------- checking --
 
 
@@ -243,10 +301,15 @@ def test_the_world_is_declared_in_one_place() -> None:
     assert "one place" in str(caught.value)
 
 
-def test_schema_name_fields_conflict_the_same_way() -> None:
-    sneaky = Schema(kinds=frozenset(), name_fields={})
-    # name_fields over no kinds is empty and fine; the conflict is kinds.
-    compile_source(BASE, sneaky)
+def test_the_taught_schema_carries_the_declared_world() -> None:
+    # What every runtime consumer reads: kinds, name fields and url fields
+    # completed from the facts. If this drifted, labels freeze as raw ids
+    # and evidence loses its links, silently.
+    library = compile_taught(SOURCE)
+    taught = TAUGHT.taught_by(library)
+    assert taught.kinds == frozenset({"shop_order", "shop_courier"})
+    assert taught.name_fields == {"shop_order": "ref", "shop_courier": "display_name"}
+    assert taught.url_fields == {"shop_order": "link"}
 
 
 def test_a_duplicate_fact_is_refused() -> None:
@@ -263,11 +326,13 @@ def test_a_duplicate_field_is_refused() -> None:
 def test_name_must_point_at_a_declared_text_field() -> None:
     refuses(
         "# An order.\nfact shop_order:\n    name weight\n    weight as number\n",
-        "text",
+        "a number",
+        "rendered",
     )
     refuses(
         "# An order.\nfact shop_order:\n    name ref\n    status as text\n",
         "ref",
+        "does not declare",
     )
 
 
@@ -319,6 +384,33 @@ def test_true_against_a_text_field_is_refused() -> None:
     refuses(BASE + "\nfilter shop_order.odd where status == true\n", "flag")
 
 
+def test_a_quoted_true_is_a_word_a_text_field_may_hold() -> None:
+    # The refusal above advises quoting; the checker must be able to tell the
+    # two spellings apart, or the advice is unfollowable and a provider that
+    # spells booleans as strings becomes unfilterable.
+    compile_taught(BASE + '\nfilter shop_order.opted where status == "true"\n')
+
+
+def test_a_quoted_true_still_tests_a_flag() -> None:
+    # A flag's bucket keys ARE the strings true/false, so the quoted spelling
+    # matches at run time and refusing it would break a working definition.
+    compile_taught(BASE + '\nfilter shop_order.rushed where rush == "true"\n')
+
+
+def test_a_quoted_value_against_a_number_is_refused() -> None:
+    refuses(
+        BASE + '\nfilter shop_order.heavy where weight_grams == "3.0"\n',
+        "bare",
+    )
+
+
+def test_a_number_literal_is_normalised_to_its_bucket_key() -> None:
+    # Bucket keys spell 3.0 as "3"; a predicate that kept the raw text
+    # matched nothing, for ever, with nothing thrown.
+    library = compile_taught(BASE + "\nfilter shop_order.three where weight_grams == 3.0\n")
+    assert library.indexes["shop_order.three"].spec.value == "3"
+
+
 def test_a_duration_measure_needs_two_moments() -> None:
     refuses(
         BASE + "\nmeasure shop_order.span = delivered_at - ref\n",
@@ -367,6 +459,100 @@ def test_a_projection_field_may_not_cross_a_many() -> None:
     )
 
 
+COURIER_FACT = (
+    "\n# A courier.\nfact shop_courier:\n    display_name as text\n"
+    "    courier_ref as text\n    many accounts:\n        account_id as text\n"
+)
+
+
+def test_a_join_is_checked_at_both_ends() -> None:
+    head = BASE + COURIER_FACT + "\n# Orders.\nprojection shop_order.item:\n"
+    # The remote matching path: unmatched, the join table is empty and the
+    # column is None on every row -- a permanently blank column wearing a
+    # declared join.
+    refuses(
+        head + "    field:\n        who = display_name from ref through shop_courier.TYPO as text\n",
+        "TYPO",
+        "shop_courier",
+    )
+    # The remote field being bound, checked against the REMOTE kind: checked
+    # against the local one, a join to a field only the other record carries
+    # would be refused for every host.
+    refuses(
+        head + "    field:\n        who = not_there from ref through shop_courier.courier_ref as text\n",
+        "not_there",
+        "shop_courier",
+    )
+    # And its type.
+    refuses(
+        head + "    field:\n        who = display_name from ref through shop_courier.courier_ref as number\n",
+        "number",
+    )
+    # The local pointer crossing a list: several candidate ids per record,
+    # so the join answers nothing for every row that carries two.
+    refuses(
+        head + "    field:\n        who = display_name from events.kind through shop_courier.courier_ref as text\n",
+        "several",
+    )
+
+
+def test_a_fully_exercised_world_compiles() -> None:
+    """The positive half of every checker rule above.
+
+    Each refusal test proves the rule can fire; this proves it does not fire
+    on correct definitions -- an over-strict rule is a build failure for
+    every host, and without this test the suite could not tell an over-
+    strict checker from a working one, because a refusal test only reads the
+    message.
+    """
+    library = compile_taught(
+        BASE
+        + COURIER_FACT
+        + """
+group shop_order.by_ref from ref through shop_courier.accounts.account_id
+group shop_order.by_day from (ref, placed_at by day)
+filter shop_order.fresh where placed_at younger than limits.carrying.over
+measure shop_order.transit_seconds = delivered_at - placed_at
+measure shop_order.weight = weight_grams in count
+measure shop_order.placed = moment placed_at
+
+# Orders, one row each.
+projection shop_order.item:
+    field:
+        key = ref as text
+        placed = placed_at as date
+        w = weight_grams as number
+        rushed = rush as flag
+        who = display_name from ref through shop_courier.courier_ref as text
+    sort by key ascending
+"""
+    )
+    assert {"shop_order.by_ref", "shop_order.by_day", "shop_order.fresh"} <= set(
+        library.indexes
+    )
+    assert len(library.measures) == 3 and len(library.projections) == 1
+
+
+def test_a_nested_duplicate_field_is_refused() -> None:
+    refuses(
+        "# An order.\nfact shop_order:\n    ref as text\n    many events:\n"
+        "        k as text\n        k as number\n",
+        "twice",
+    )
+
+
+def test_url_must_point_at_a_declared_text_field_too() -> None:
+    refuses(
+        "# An order.\nfact shop_order:\n    url weight\n    weight as number\n",
+        "text",
+    )
+    refuses(
+        "# An order.\nfact shop_order:\n    name dropoff\n    ref as text\n"
+        "    one dropoff:\n        street as text\n",
+        "nested record",
+    )
+
+
 def test_across_takes_its_name_field_from_the_facts() -> None:
     # Splitting across a kind with no name field renders raw ids; the rule
     # already existed against the schema and must hold against facts too.
@@ -405,17 +591,36 @@ def test_declaring_facts_moves_no_downstream_version() -> None:
     }
 
 
-def test_prose_and_name_do_not_move_a_fact_version() -> None:
+def test_prose_name_url_and_order_do_not_move_a_fact_version() -> None:
     one = compile_taught(BASE).facts["shop_order"].version
     reworded = BASE.replace("# An order.", "# An order, reworded.")
-    named = reworded.replace("fact shop_order:\n", "fact shop_order:\n    name ref\n")
+    named = reworded.replace(
+        "fact shop_order:\n", "fact shop_order:\n    name ref\n    url ref\n"
+    )
     assert compile_taught(named).facts["shop_order"].version == one
+    # Field order is rendering too: every consumer keys the fields by name,
+    # so reordering the body is the "plan built in a different order" case
+    # the hashing rules promise not to fork a version over.
+    reordered = BASE.replace(
+        "    ref as text\n    status as text\n",
+        "    status as text\n    ref as text\n",
+    )
+    assert compile_taught(reordered).facts["shop_order"].version == one
 
 
 def test_a_type_change_moves_the_fact_version() -> None:
     one = compile_taught(BASE).facts["shop_order"].version
     widened = BASE.replace("weight_grams as number", "weight_grams as text")
     assert compile_taught(widened).facts["shop_order"].version != one
+
+
+def test_a_cardinality_change_moves_the_fact_version() -> None:
+    # one-vs-many decides what a measure may read and what a batch may
+    # carry; a version that did not move would cite the old shape for the
+    # new rules.
+    one = compile_taught(BASE).facts["shop_order"].version
+    flattened = BASE.replace("    many events:", "    one events:")
+    assert compile_taught(flattened).facts["shop_order"].version != one
 
 
 # ------------------------------------------------------------ verification --
@@ -458,20 +663,25 @@ def test_a_conforming_batch_verifies() -> None:
 
 def test_an_absent_field_is_not_an_error() -> None:
     # An absence is never a zero, and never a refusal either: a record may
-    # omit any field, including as an explicit null.
+    # omit any field, carry it as an explicit null, or as the empty string --
+    # the engine's own readers skip all three as "nobody said", and a null
+    # element inside a list is the same case one level down.
     record = _order()
     del record["courier_id"]
     record["delivered_at"] = None
+    record["placed_at"] = ""
+    record["events"] = [None, {"kind": "picked"}]
     _facade().verify(writes={"shop_order": {"o1": record}})
 
 
-def test_an_unknown_kind_is_refused() -> None:
+def test_an_unknown_kind_write_is_refused_and_a_delete_is_not() -> None:
     engine = _facade()
     with pytest.raises(FactError) as caught:
         engine.verify(writes={"shop_orb": {"x": {}}})
     assert "shop_orb" in str(caught.value)
-    with pytest.raises(FactError):
-        engine.verify(deletes={"shop_orb": ["x"]})
+    # A delete of a kind the world no longer declares is the cleanup path for
+    # a retired kind's stored rows; gating it would strand them for ever.
+    engine.verify(deletes={"retired_kind": ["x"]})
 
 
 def test_an_undeclared_field_is_refused_by_name() -> None:
@@ -484,15 +694,31 @@ def test_wrong_types_are_refused() -> None:
     # A bool IS an int in Python; a guard that forgot that files `true` as 1.
     _refused(engine, _order(weight_grams=True), "weight_grams")
     _refused(engine, _order(rush="yes"), "rush", "flag")
+    _refused(engine, _order(rush=1), "rush", "flag")
     _refused(engine, _order(placed_at="yesterday"), "placed_at", "instant")
+    _refused(engine, _order(placed_at=1756100000000), "placed_at", "instant")
     _refused(engine, _order(ref=7), "ref", "text")
+
+
+def test_values_no_store_can_hold_are_refused_here_not_mid_batch() -> None:
+    # Valid JSON both, and each previously 500'd the write half-applied: NaN
+    # poisons every sum it touches while sitting in no bucket, and a NUL is
+    # unrepresentable in Postgres jsonb.
+    engine = _facade()
+    _refused(engine, _order(weight_grams=float("nan")), "weight_grams", "finite")
+    _refused(engine, _order(weight_grams=float("inf")), "weight_grams", "finite")
+    _refused(engine, _order(status="op\x00en"), "status", "NUL")
 
 
 def test_shape_mismatches_are_refused() -> None:
     engine = _facade()
     _refused(engine, _order(dropoff=[{"street": "1 Way"}]), "dropoff", "one")
     _refused(engine, _order(events={"kind": "picked"}), "events", "list")
-    _refused(engine, _order(status={"raw": "riding"}), "status")
+    _refused(engine, _order(status={"raw": "riding"}), "status", "structure")
+    _refused(engine, _order(ref=["A-1"]), "ref", "structure")
+    with pytest.raises(FactError) as caught:
+        _facade().verify(writes={"shop_order": {"o1": "not a record"}})
+    assert "not an object" in str(caught.value)
 
 
 def test_nested_fields_are_verified() -> None:
@@ -503,6 +729,23 @@ def test_nested_fields_are_verified() -> None:
         "events",
         "when",
     )
+    # The batch is refused whole, so the message must locate WHICH element
+    # of which list to fix.
+    _refused(
+        engine,
+        _order(events=[{"kind": "picked"}, 3]),
+        "events[1]",
+        "not an object",
+    )
+
+
+def test_the_module_door_skips_kinds_its_library_never_declared() -> None:
+    # `verify_writes` is public; a caller whose kind list outruns its
+    # library must get a skip, not a KeyError wearing a stack trace.
+    from uratori import verify_writes
+
+    library = compile_taught(SOURCE)
+    verify_writes(library, frozenset({"shop_order", "other"}), {"other": {"x": {"a": 1}}})
 
 
 def test_an_untaught_world_verifies_kinds_only() -> None:
@@ -569,10 +812,13 @@ async def test_the_service_serves_and_enforces_a_fact_taught_world(
 
     manifest = {f["name"]: f for f in put.json()["facts"]}
     order = manifest["shop_order"]
-    assert order["name_field"] == "ref" and order["version"]
+    assert order["name_field"] == "ref" and order["url_field"] == "link"
+    assert order["version"] == compile_taught(SOURCE).facts["shop_order"].version
     assert "provider last showed it" in order["prose"]
+    assert "placed_at as moment" in order["source"]
     leaves = {f["path"]: f for f in order["fields"]}
     assert leaves["placed_at"]["type"] == "moment"
+    assert leaves["placed_at"]["repeats"] is False
     assert leaves["events.at"]["repeats"] is True
     assert "absent until assigned" in leaves["courier_id"]["prose"]
 
@@ -604,6 +850,103 @@ async def test_the_service_serves_and_enforces_a_fact_taught_world(
     # written == 2 is the proof o1 did NOT land with the refused batch: an
     # identical re-push of an already-stored record writes nothing.
     assert good.json()["written"] == 2, good.json()
+
+
+async def test_a_refused_batch_deletes_nothing_either(
+    service: Server,  # noqa: F811 - the imported fixture, rebound
+) -> None:
+    """The delete half of "refuses the batch whole".
+
+    Deletes are applied before writes, so verification running even one
+    step later would let a refused batch destroy records on its way to the
+    422 -- the same narrowed population, from the other side.
+    """
+    put = await service.http.put("/schema", json=TAUGHT.to_document())
+    assert put.status_code == 200
+    put = await service.http.put("/definitions", json={"source": SOURCE})
+    assert put.status_code == 200
+
+    seeded = await service.http.post(
+        "/tenants/t1/facts", json={"writes": {"shop_order": {"o1": _order()}}}
+    )
+    assert seeded.status_code == 200 and seeded.json()["written"] == 1
+
+    bad = await service.http.post(
+        "/tenants/t1/facts",
+        json={
+            "deletes": {"shop_order": ["o1"]},
+            "writes": {"shop_order": {"o2": _order(weight_grams="heavy")}},
+        },
+    )
+    assert bad.status_code == 422, bad.text
+
+    # o1 is still stored: an identical re-push of a stored record writes
+    # nothing, so written == 0 is the proof the delete never landed.
+    again = await service.http.post(
+        "/tenants/t1/facts", json={"writes": {"shop_order": {"o1": _order()}}}
+    )
+    assert again.status_code == 200 and again.json()["written"] == 0, again.json()
+
+
+async def test_a_live_deployment_can_adopt_facts_through_the_definitions_door(
+    service: Server,  # noqa: F811 - the imported fixture, rebound
+) -> None:
+    """The migration the neutrality property promises has to be walkable.
+
+    Both doors refuse a half-adopted world, so without this path a running
+    schema-taught deployment could only adopt facts by blanking its
+    definitions first. Teaching facts through PUT /definitions retires the
+    schema's kinds in the same save -- and an unrelated refusal must NOT
+    take that shortcut.
+    """
+    from .test_schema import COURIER_SOURCE, COURIER_WORLD
+
+    put = await service.http.put("/schema", json=COURIER_WORLD.to_document())
+    assert put.status_code == 200
+    put = await service.http.put("/definitions", json={"source": COURIER_SOURCE})
+    assert put.status_code == 200
+
+    adopted = await service.http.put("/definitions", json={"source": SOURCE})
+    assert adopted.status_code == 200, adopted.text
+    assert {f["name"] for f in adopted.json()["facts"]} == {"shop_order", "shop_courier"}
+
+    # The stored schema retired its kinds in the same save.
+    stored = await service.http.get("/schema")
+    assert stored.json()["kinds"] == [] and stored.json()["name_fields"] == {}
+    # And the world still answers: defaults survived the strip.
+    run = await service.http.post("/tenants/t1/runs", json={})
+    assert run.status_code == 200
+
+    # A source that is broken for any other reason is refused verbatim, not
+    # silently retried into a kindless world.
+    broken = await service.http.put(
+        "/definitions", json={"source": SOURCE + "\ngroup shop_orb.x from y\n"}
+    )
+    assert broken.status_code == 422
+    assert "shop_orb" in broken.json()["detail"]
+
+
+async def test_the_ui_describes_a_fact_taught_world(
+    service: Server,  # noqa: F811 - the imported fixture, rebound
+) -> None:
+    """The Data screen's world route: kinds, record names and the fact
+    declarations themselves must come from the taught world, or a
+    fact-taught deployment shows an empty kind list and raw-id records --
+    the exact failure name fields exist to prevent, on the one surface a
+    human reads."""
+    put = await service.http.put("/schema", json=TAUGHT.to_document())
+    assert put.status_code == 200
+    put = await service.http.put("/definitions", json={"source": SOURCE})
+    assert put.status_code == 200
+
+    world = await service.http.get("/ui/api/world")
+    assert world.status_code == 200, world.text
+    body = world.json()
+    assert body["kinds"] == ["shop_courier", "shop_order"]
+    assert body["name_fields"]["shop_courier"] == "display_name"
+    facts = [d for d in body["declarations"] if d["kind"] == "fact"]
+    assert {d["name"] for d in facts} == {"shop_order", "shop_courier"}
+    assert any("provider last showed it" in d["doc"] for d in facts)
 
 
 async def test_a_schema_with_kinds_cannot_replace_a_fact_taught_world(

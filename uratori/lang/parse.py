@@ -386,11 +386,12 @@ class _Parser:
                 line,
             )
 
-        if word == "field" and following.kind == "name":
+        if word == "field" and following.kind == "name" and following.value != "as":
             # The plausible spelling from every other schema language. A
             # fact's body is its fields, so the keyword would be noise on
             # every line -- and left to the generic path this fails as
-            # 'expected "as"', pointing at nothing.
+            # 'expected "as"', pointing at nothing. The `as` guard keeps a
+            # field genuinely called `field` writable, like `name` and `one`.
             raise self._error(
                 'there is no "field" keyword here: a fact\'s body is its fields. '
                 "Write the field bare -- `ref as text`.",
@@ -398,6 +399,14 @@ class _Parser:
             )
 
         fname = self._name("a field, e.g. placed_at as moment")
+        if "." in fname:
+            raise self._error(
+                f'"{fname}" cannot be a field name: a definition reads fields by dotted '
+                "path, so the dot is the separator and a field carrying one could be "
+                "declared and written but never read. Map the provider's name to an "
+                "undotted one.",
+                line,
+            )
         if not self._at_word("as"):
             raise self._error(
                 f'expected "as" after "{fname}" -- a field is `<name> as <type>`, '
@@ -426,6 +435,14 @@ class _Parser:
         line = self._peek().line
         word = self._next().value
         name = self._name("the nested field")
+        if "." in name:
+            raise self._error(
+                f'"{name}" cannot be a field name: a definition reads fields by dotted '
+                "path, so the dot is the separator and a field carrying one could be "
+                "declared and written but never read. Map the provider's name to an "
+                "undotted one.",
+                line,
+            )
         if self._at_word("as"):
             if many:
                 raise self._error(
@@ -608,22 +625,29 @@ class _Parser:
 
         if self._at_op("==") or self._at_op("!="):
             symbol = self._next().value
-            value = self._predicate_value()
-            return ByPredicate(field=field, op="==" if symbol == "==" else "!=", value=value)
+            value, quoted = self._predicate_value()
+            return ByPredicate(
+                field=field, op="==" if symbol == "==" else "!=", value=value, quoted=quoted
+            )
 
         raise self._error(
             f'expected "==", "!=", "is set", "older than" or "younger than", got '
             f"{self._describe()}"
         )
 
-    def _predicate_value(self) -> str:
+    def _predicate_value(self) -> tuple[str, bool]:
         tok = self._peek()
         if tok.kind == "string":
-            return self._next().value
+            return self._next().value, True
         if tok.kind == "name" and tok.value in ("true", "false"):
-            return self._next().value
+            return self._next().value, False
         if tok.kind == "number":
-            return self._next().value
+            # Normalised to the exact string a bucket key uses (`3.0` -> `3`),
+            # because the comparison at evaluation is between strings: written
+            # raw, a trailing `.0` produced a predicate that matched nothing,
+            # for ever, with nothing thrown.
+            raw = float(self._next().value)
+            return (str(int(raw)) if raw.is_integer() else str(raw)), False
         raise self._error(
             f"expected a quoted value, a number, true or false, got {self._describe()}"
         )

@@ -440,7 +440,14 @@ class PostgresFactStore:
     moved, because it is the only thing holding both versions.
     """
 
-    def __init__(self, pool: asyncpg.Pool) -> None:
+    def __init__(
+        self,
+        pool: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    ) -> None:
+        # A connection (or a pool's proxy for one) is accepted alongside a
+        # pool so the facts route can run one batch's deletes and writes
+        # inside a single transaction -- asyncpg gives all three the same
+        # query surface, and this store only queries.
         self._pool = pool
 
     async def of_kind(self, tenant: str, kind: str) -> list[FactRow]:

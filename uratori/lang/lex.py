@@ -139,7 +139,12 @@ def prose_above(lines: Sequence[str], header: int, *, indented: bool = False) ->
     """
 
     def prose(line: str) -> bool:
-        return _is_prose(line.lstrip() if indented else line)
+        if not indented:
+            return _is_prose(line)
+        # The comment must itself be indented: a column-0 `#` inside a block
+        # is a stray note (or the next declaration's explanation), and
+        # adopting it would serve somebody's TODO as a field's description.
+        return line[:1] in (" ", "\t") and _is_prose(line.lstrip())
 
     i = header - 2
     if i >= 0 and lines[i].strip() == "":

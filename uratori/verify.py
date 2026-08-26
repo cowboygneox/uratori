@@ -13,7 +13,8 @@ is verified -- a write against a kind nobody declared has never been readable
 by any definition, so it is a typo worth stopping at the door rather than a
 row stored for nothing.
 
-An **absent** field is never an error, including as an explicit null: absence
+An **absent** field is never an error -- omitted, an explicit null, or the
+empty string, which the engine's own readers already skip as unsaid: absence
 means "nobody said", and the schema's claim is known/unknown, not
 required/optional. What must not happen is a *present* value the declaration
 cannot account for.
@@ -21,6 +22,7 @@ cannot account for.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -38,18 +40,24 @@ def verify_writes(
     writes: Mapping[str, Mapping[str, Mapping[str, Any]]] | None = None,
     deletes: Mapping[str, Sequence[str]] | None = None,
 ) -> None:
-    for kind in sorted({*(writes or {}), *(deletes or {})}):
+    # Writes only: a delete of a kind the world no longer declares is the
+    # cleanup path for a retired kind's stored rows, and refusing it would
+    # make them undeletable through the API for ever.
+    del deletes
+    for kind in sorted(writes or {}):
         if kind not in kinds:
             raise FactError(
                 f'"{kind}" is not a fact kind. Those are: '
                 f'{", ".join(sorted(kinds)) or "none"}.'
             )
-    if not library.facts:
-        return
     for kind, records in (writes or {}).items():
-        fields = library.facts[kind].fields
+        fact = library.facts.get(kind)
+        if fact is None:
+            # A schema-taught world (or a caller whose kind list outruns its
+            # library): no fields were declared, so nothing can be checked.
+            continue
         for key, record in records.items():
-            _record(kind, key, fields, record, at="")
+            _record(kind, key, fact.fields, record, at="")
 
 
 def _record(
@@ -60,12 +68,14 @@ def _record(
     at: str,
 ) -> None:
     if not isinstance(value, Mapping):
-        raise FactError(
-            f'fact {kind}, record "{key}": {at or "the record"} is not an object.'
-        )
+        where = f'"{at.rstrip(".")}"' if at else "the record"
+        raise FactError(f'fact {kind}, record "{key}": {where} is not an object.')
     declared = {f.name: f for f in fields}
     for name, held in value.items():
-        if held is None:
+        # None and the empty string are both "nobody said" -- the engine's
+        # own readers skip both, so refusing either here would 422 a batch
+        # the calculations would have read correctly.
+        if held is None or held == "":
             continue
         path = f"{at}{name}"
         f = declared.get(name)
@@ -82,8 +92,13 @@ def _record(
                         f'fact {kind}, record "{key}": "{path}" is declared `many`, '
                         "so it holds a list of records, and this is not a list."
                     )
-                for element in held:
-                    _record(kind, key, f.children, element, at=f"{path}.")
+                for i, element in enumerate(held):
+                    if element is None:
+                        continue
+                    # The index is in the path because the batch is refused
+                    # whole: without it a host cannot locate which element of
+                    # which list to fix.
+                    _record(kind, key, f.children, element, at=f"{path}[{i}].")
             else:
                 if isinstance(held, (list, tuple)):
                     raise FactError(
@@ -102,11 +117,20 @@ def _scalar(kind: str, key: str, path: str, wanted: str, held: Any) -> None:
     if wanted == "text":
         if not isinstance(held, str):
             raise FactError(f"{prefix} is declared as text and {held!r} is not text.")
+        if "\x00" in held:
+            # Valid JSON, but no Postgres jsonb column can hold it -- unchecked
+            # it is a 500 mid-batch instead of a 422 naming the field.
+            raise FactError(f"{prefix} carries a NUL character, which no store can hold.")
     elif wanted == "number":
         # A bool IS an int in Python; without the explicit exclusion `true`
-        # files as 1 and a mistyped flag becomes a plausible quantity.
+        # files as 1 and a mistyped flag becomes a plausible quantity. NaN and
+        # the infinities are excluded because they are not values anybody
+        # wrote down: one of them in a bucket poisons every sum it touches
+        # while `read_path` files the record in no bucket at all.
         if isinstance(held, bool) or not isinstance(held, (int, float)):
             raise FactError(f"{prefix} is declared as number and {held!r} is not a number.")
+        if not math.isfinite(held):
+            raise FactError(f"{prefix} is declared as number and {held!r} is not finite.")
     elif wanted == "flag":
         if not isinstance(held, bool):
             raise FactError(f"{prefix} is declared as flag and {held!r} is not true or false.")

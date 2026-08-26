@@ -60,7 +60,7 @@ whatever lands beside these; two known names cannot."""
 
 
 DeclarationKind = Literal[
-    "group", "filter", "measure", "figure", "reading", "projection", "summary"
+    "fact", "group", "filter", "measure", "figure", "reading", "projection", "summary"
 ]
 
 DependencyType = Literal[
@@ -387,6 +387,23 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
     page groups them itself, but a stable order keeps the payload diffable.
     """
     out: list[DeclarationOut] = []
+
+    # Facts first: they are the leaves every trace bottoms out on, and a
+    # fact-taught world whose schema was invisible here would dead-end the
+    # exact reader the catalogue exists for. Schema-taught worlds have no
+    # entries -- their kinds have no declaration to show.
+    for name, fact in library.facts.items():
+        out.append(
+            DeclarationOut(
+                name=name,
+                kind="fact",
+                version=fact.version,
+                doc=declaration_prose(library, name),
+                source=declaration_source(library, name),
+                fact_kind=name,
+                rests_on=[],
+            )
+        )
 
     for name, index in library.indexes.items():
         edges = [Dependency(type="fact", name=index.kind)]
