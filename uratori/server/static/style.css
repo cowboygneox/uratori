@@ -658,7 +658,16 @@ tr.expansion li .trace { margin-left: auto; }
   border-radius: 0;
   max-height: none;
   background: transparent;
-  padding: 12px; /* mirrored by the completion's caret arithmetic in app.js */
+  /* Top/left 12px are mirrored by the completion's caret arithmetic in
+     app.js. Right/bottom carry an extra scrollbar's worth: the textarea owns
+     the scrollbars, so its viewport is one scrollbar shorter and narrower
+     than this layer's -- it can scroll that much FURTHER, and at the end of
+     the file this layer would clamp at its own maximum while the textarea
+     kept going. The caret and selection then float half a line off the text
+     they belong to, which in a transparent-text overlay reads as a corrupted
+     document. The padding keeps this layer's scroll range at least the
+     textarea's, always. */
+  padding: 12px calc(12px + 24px) calc(12px + 24px) 12px;
   overflow: hidden;
   white-space: pre;
 }
