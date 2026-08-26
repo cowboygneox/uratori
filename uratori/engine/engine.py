@@ -69,7 +69,7 @@ class Engine:
         # alone still has indexing work to do -- returning early would serve
         # every such projection an empty page for ever.
         if not lib.figures and not lib.indexes:
-            return Outcome(changes=(), covered=frozenset(), rebuilt=())
+            return Outcome(changes=(), covered=frozenset(), reindexed=(), rebuilt=())
 
         pending = await self._pending(tenant, settings)
         cold = bool(pending) or full
@@ -129,6 +129,7 @@ class Engine:
 
         changes: list[Change] = []
         rebuilt: tuple[str, ...] = ()
+        reindexed: tuple[str, ...] = ()
 
         if cold:
             for plan in lib.figures:
@@ -143,8 +144,10 @@ class Engine:
                 )
             if full:
                 await self._reindex(tenant, settings)
+                reindexed = tuple(sorted(lib.indexes))
             elif stale:
                 await self._reindex(tenant, settings, only=stale)
+                reindexed = tuple(sorted(stale))
             changes.extend(await self._remove_departed(tenant, settings))
             only = None if full else {p.name for p in pending}
             # A cold pass **recomputes** rather than fills gaps: the reason it is
@@ -159,9 +162,14 @@ class Engine:
                     _pointer_for(plan, settings),
                 )
         else:
-            changes.extend(
-                await self._apply(tenant, settings, written or {}, deleted or {})
-            )
+            if written or deleted:
+                # Not just an optimisation of a no-op: `_apply` builds the
+                # full through-hop resolver up front, scanning every hop kind
+                # in the library, and a definition-only pass would pay those
+                # scans to apply an empty batch.
+                changes.extend(
+                    await self._apply(tenant, settings, written or {}, deleted or {})
+                )
             if stale:
                 # A grouping moved with no figure pointer moving -- an index
                 # only a `from` reads arrived or changed, a stamp is missing
@@ -174,6 +182,7 @@ class Engine:
                 # whose figures moved, and a rebuild beforehand would erase
                 # the "old" half of that comparison and silence the stream.
                 await self._reindex(tenant, settings, only=stale)
+                reindexed = tuple(sorted(stale))
                 # A wholesale rebuild is diffless -- `replace_index` cannot
                 # say whose buckets moved -- so every figure reading a
                 # rebuilt grouping recomputes outright. Without this, the
@@ -198,7 +207,14 @@ class Engine:
                 # change stream says nothing. The scan is skipped entirely when
                 # nothing was deleted, which is every ordinary sync.
                 changes.extend(await self._remove_departed(tenant, settings))
-            changes.extend(await self._backfill(tenant, settings))
+            if written or deleted:
+                # The gap sweep exists for the sync: writes can introduce
+                # subjects whose values were never computed. A definition-only
+                # pass can introduce no gap -- everything it invalidated was
+                # recomputed above, outright -- and sweeping anyway is fixed
+                # work the change cannot reach. (Repair of gaps left by a
+                # crashed pass stays where it always was: the full sync.)
+                changes.extend(await self._backfill(tenant, settings))
 
         # `covered` is what the host re-dates evidence on, so it must name
         # the kinds this pass *read*, not the kinds the batch happened to
@@ -210,7 +226,9 @@ class Engine:
         covered = frozenset(written or {}) | frozenset(deleted or {})
         if full:
             covered |= _kinds_read(lib)
-        return Outcome(changes=tuple(changes), covered=covered, rebuilt=rebuilt)
+        return Outcome(
+            changes=tuple(changes), covered=covered, reindexed=reindexed, rebuilt=rebuilt
+        )
 
     # -------------------------------------------------------------- pending --
 

@@ -203,15 +203,39 @@ class Uratori:
         outcome = await self.execute(
             tenant, settings, written=written, deleted=deleted, full=full
         )
+        touched = {change.figure for change in outcome.changes}
+        # A pass carrying facts (or `full`) is the host's sync moment: every
+        # projection re-serves on it, clock refresh included. A definition-only
+        # pass is a deploy step whose reach is known with certainty -- the
+        # dependency graph is compile-time -- so it serves exactly the
+        # projections a rebuilt grouping or a moved figure can touch, and a
+        # change that reaches nothing serves nothing and wakes nobody.
+        sync = full or bool(written) or bool(deleted)
+        projections = None if sync else self._reached(outcome.reindexed, touched)
         results = await self.results(
             tenant,
             settings,
-            touched={change.figure for change in outcome.changes},
+            touched=touched,
+            projections=projections,
             trailing=trailing,
         )
         if outcome.changes or results:
             await self._notify(tenant, outcome, results)
         return RunReport(outcome=outcome, results=results)
+
+    def _reached(self, reindexed: Sequence[str], moved: set[str]) -> set[str]:
+        """The projections a definition-only pass can have moved: those
+        filtering through a re-bucketed grouping, or reading a figure whose
+        value changed. Everything else is certain to serve the same rows it
+        served before -- the clock excepted, and a deploy is not the moment
+        the clock contract pays out (the sync is)."""
+        rebuilt = set(reindexed)
+        out: set[str] = set()
+        for plan in self._library.projections:
+            reads = set(plan.figures) | {name for _, name, _, _ in plan.reads}
+            if set(plan.indexes) & rebuilt or reads & moved:
+                out.add(plan.name)
+        return out
 
     # ------------------------------------------------------------- serving --
 
@@ -221,19 +245,22 @@ class Uratori:
         settings: Mapping[str, Any] | None = None,
         *,
         touched: set[str] | None = None,
+        projections: set[str] | None = None,
         trailing: Sequence[int] = DEFAULT_TRAILING,
     ) -> tuple[Result, ...]:
         """The current answers: touched figures and their readings, or all of
         them when `touched` is None (a client's first paint).
 
-        **Every projection, every time, with no `touched` gate**, and that is
-        not laziness -- it is the only correct rule. A projection stores nothing
-        and is evaluated at the instant it is asked, so its rows move for three
-        reasons: a record of its kind changed, a figure it reads changed, or
-        *the clock advanced*. The third is always true, so there is no gate that
-        could be right -- and the failure of a wrong gate is silent: figures
-        moving over a socket while the list they are attached to, its ranking
-        and every sentence on it stay as they were at the last page load.
+        **Every projection on every sync, with no `touched` gate** -- a
+        projection stores nothing and is evaluated at the instant it is asked,
+        so its rows move when a record of its kind changes, when a figure it
+        reads changes, or when *the clock advances*, and the sync is the
+        moment all three are honoured: gating projections by `touched` there
+        fails silently, figures moving over a socket while the list they sit
+        on keeps yesterday's ranking. `projections` narrows that ONLY for the
+        definition-only pass, whose reach is compile-time certain -- `run`
+        computes the set from what the pass actually rebuilt, and a caller
+        passing one anywhere else would be reintroducing the silent freeze.
         """
         document = self._schema.settings_for(settings)
         lib = self._library
@@ -265,6 +292,8 @@ class Uratori:
             )
 
         for projection in lib.projections:
+            if projections is not None and projection.name not in projections:
+                continue
             out.append(
                 await answer_projection(
                     self._store, self._facts, lib, tenant, projection, document
