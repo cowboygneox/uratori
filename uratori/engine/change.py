@@ -57,16 +57,17 @@ class Outcome:
 
     changes: tuple[Change, ...]
     covered: frozenset[str]
-    reindexed: tuple[str, ...] = ()
-    """Which groupings this run re-bucketed wholesale. The serving layer's
-    reach computation starts here: a projection re-serves on a definition-only
-    pass exactly when a grouping it filters through is in this tuple (or a
-    figure it reads moved), because those are the only ways such a pass can
-    move its rows."""
-
     rebuilt: tuple[str, ...] = ()
     """Which figures were rebuilt from scratch, and why it is worth reporting:
     the observable difference between a narrow settings save and a full rebuild
     is *work*, and a figure recomputed to the value it already held writes
     nothing and reports nothing. Without this the two are indistinguishable from
     outside, and a test cannot tell them apart either."""
+
+    reindexed: tuple[str, ...] = ()
+    """Which groupings this run re-bucketed wholesale -- appended after
+    `rebuilt` so an embedder constructing `Outcome` positionally keeps its
+    meaning. The serving layer's reach computation starts here: a projection
+    re-serves on a definition-only pass when a grouping it filters through is
+    in this tuple (beside the moved-figure, moved-text and moved-dial
+    checks)."""

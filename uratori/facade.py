@@ -38,9 +38,11 @@ from .engine.change import Outcome
 from .engine.engine import Engine
 from .engine.serve import answer_projection, serve_evidence, serve_figure, serve_reading
 from .lang.plan import Library
+from .lang.settings import fingerprint as settings_fingerprint
+from .lang.source import declaration_source
 from .results import Evidence, Result
 from .schema import Schema
-from .store import EngineStore, FactSource
+from .store import EngineStore, FactSource, Pointer
 from .verify import verify_writes
 
 log = logging.getLogger("uratori")
@@ -204,19 +206,24 @@ class Uratori:
             tenant, settings, written=written, deleted=deleted, full=full
         )
         touched = {change.figure for change in outcome.changes}
-        # A pass through the facts door (or `full`) is the host's sync
-        # moment: every projection re-serves on it, clock refresh included --
-        # and `is not None`, not truthiness, because a scheduled sync whose
-        # batch deduplicated to nothing is still the sync, and gating on the
-        # batch's contents would freeze every clock-worded sentence exactly
-        # when the data goes quiet. A definition-only pass is a deploy step
-        # whose reach is known with certainty -- the dependency graph is
-        # compile-time -- so it serves exactly the projections a rebuilt
-        # grouping or a moved figure can touch, and a change that reaches
-        # nothing serves nothing and wakes nobody.
+        # A pass through the facts door (or `full`, or deleting) is the
+        # host's sync moment: every projection re-serves on it, clock
+        # refresh included -- and `is not None`, not truthiness, because a
+        # scheduled sync whose batch deduplicated to nothing is still the
+        # sync, and gating on the batch's contents would freeze every
+        # clock-worded sentence exactly when the data goes quiet. A
+        # definition-only pass is a deploy step whose reach is known with
+        # certainty, so it serves exactly what the change can touch, and a
+        # change that reaches nothing serves nothing and wakes nobody.
         sync = full or written is not None or deleted is not None
-        projections = None if sync else self._reached(outcome.reindexed, touched)
-        results = await self.results(
+        document = self._schema.settings_for(settings)
+        stamps = self._serve_stamps(document)
+        if sync:
+            projections = None
+        else:
+            held = await self._store.pointers(tenant)
+            projections = self._reached(outcome.reindexed, touched, stamps, held)
+        results = await self._serve(
             tenant,
             settings,
             touched=touched,
@@ -225,21 +232,107 @@ class Uratori:
         )
         if outcome.changes or results:
             await self._notify(tenant, outcome, results)
+        # The stamps settle only after the answers actually went out: a crash
+        # between serving and stamping re-serves next pass, which is the safe
+        # direction. Settled on sync passes too, or the first definition-only
+        # pass after a sync would re-serve everything the sync already sent.
+        await self._settle_serve_stamps(tenant, stamps)
         return RunReport(outcome=outcome, results=results)
 
-    def _reached(self, reindexed: Sequence[str], moved: set[str]) -> set[str]:
-        """The projections a definition-only pass can have moved: those
-        filtering through a re-bucketed grouping, or reading a figure whose
-        value changed. Everything else is certain to serve the same rows it
-        served before -- the clock excepted, and a deploy is not the moment
-        the clock contract pays out (the sync is)."""
+    def _serve_stamps(self, document: Mapping[str, Any]) -> dict[str, Pointer]:
+        """What each projection and summary currently serves under.
+
+        The same two-part discipline as every other pointer in the engine:
+        the declaration's version, and a fingerprint of the dials that can
+        move its *rendered* answer without moving any stored value -- its own
+        `value:`/`omit:`/flag dials, and the band dials of every figure it
+        binds `band of` (a band is worded at serve time, deliberately outside
+        the figure's compute fingerprint). This is what lets a definition-only
+        pass know, rather than guess, that an edit or a settings save reached
+        a projection: nothing about a projection is stored, so without a
+        stamp there is nothing to compare and the only honest alternatives
+        are serve-everything (the fixed tail this replaces) or a silent
+        freeze (the bug three reviewers found in the first attempt).
+        """
+        lib = self._library
+        stamps: dict[str, Pointer] = {}
+        for plan in lib.projections:
+            dials = set(plan.settings)
+            for _, figure, _, band in plan.reads:
+                if band:
+                    read = lib.figure(figure)
+                    if read is not None:
+                        dials.update(read.band_settings)
+            stamps[plan.name] = Pointer(
+                version=plan.version,
+                settings_fingerprint=settings_fingerprint(dict(document), sorted(dials)),
+            )
+        for summary in lib.summaries:
+            stamps[summary.name] = Pointer(
+                version=summary.version,
+                settings_fingerprint=settings_fingerprint(
+                    dict(document), list(summary.settings)
+                ),
+            )
+        return stamps
+
+    def _reached(
+        self,
+        reindexed: Sequence[str],
+        moved: set[str],
+        stamps: Mapping[str, Pointer],
+        held: Mapping[str, Pointer],
+    ) -> set[str]:
+        """The projections a definition-only pass can have moved.
+
+        Four ways exist, and all four are consulted: a grouping it filters
+        through was re-bucketed; a figure it reads changed value; its own
+        text (or a summary's over it) moved; a dial it renders under moved.
+        The last two compare serve stamps -- see `_serve_stamps`. Everything
+        outside the four is certain to serve the same rows it served before:
+        the clock excepted, and a deploy is not the moment the clock contract
+        pays out (the sync is)."""
         rebuilt = set(reindexed)
         out: set[str] = set()
         for plan in self._library.projections:
             reads = set(plan.figures) | {name for _, name, _, _ in plan.reads}
-            if set(plan.indexes) & rebuilt or reads & moved:
+            if (
+                set(plan.indexes) & rebuilt
+                or reads & moved
+                or held.get(plan.name) != stamps[plan.name]
+            ):
                 out.add(plan.name)
+        for summary in self._library.summaries:
+            if held.get(summary.name) != stamps[summary.name]:
+                out.add(summary.over)
         return out
+
+    async def _settle_serve_stamps(
+        self, tenant: str, stamps: Mapping[str, Pointer]
+    ) -> None:
+        lib = self._library
+        for plan in lib.projections:
+            await self._store.ensure_definition(
+                plan.version,
+                plan.name,
+                "projection",
+                plan.doc,
+                "",
+                declaration_source(lib, plan.name) or "",
+                {"kind": plan.kind},
+            )
+            await self._store.set_pointer(tenant, plan.name, stamps[plan.name])
+        for summary in lib.summaries:
+            await self._store.ensure_definition(
+                summary.version,
+                summary.name,
+                "summary",
+                summary.doc,
+                "",
+                declaration_source(lib, summary.name) or "",
+                {"over": summary.over},
+            )
+            await self._store.set_pointer(tenant, summary.name, stamps[summary.name])
 
     # ------------------------------------------------------------- serving --
 
@@ -249,23 +342,34 @@ class Uratori:
         settings: Mapping[str, Any] | None = None,
         *,
         touched: set[str] | None = None,
-        projections: set[str] | None = None,
         trailing: Sequence[int] = DEFAULT_TRAILING,
     ) -> tuple[Result, ...]:
         """The current answers: touched figures and their readings, or all of
         them when `touched` is None (a client's first paint).
 
-        **Every projection on every sync, with no `touched` gate** -- a
-        projection stores nothing and is evaluated at the instant it is asked,
-        so its rows move when a record of its kind changes, when a figure it
-        reads changes, or when *the clock advances*, and the sync is the
-        moment all three are honoured: gating projections by `touched` there
-        fails silently, figures moving over a socket while the list they sit
-        on keeps yesterday's ranking. `projections` narrows that ONLY for the
-        definition-only pass, whose reach is compile-time certain -- `run`
-        computes the set from what the pass actually rebuilt, and a caller
-        passing one anywhere else would be reintroducing the silent freeze.
+        Every projection serves, every time, from here: a projection stores
+        nothing and is evaluated at the instant it is asked, so its rows move
+        when a record of its kind changes, when a figure it reads changes, or
+        when *the clock advances*. The one caller allowed to narrow that is
+        `run`, for the definition-only pass whose reach is provable -- and it
+        goes through the private `_serve` precisely so that no public caller
+        can reach the narrowing and reintroduce the silent freeze (figures
+        moving over a socket while the list they sit on keeps yesterday's
+        ranking).
         """
+        return await self._serve(
+            tenant, settings, touched=touched, projections=None, trailing=trailing
+        )
+
+    async def _serve(
+        self,
+        tenant: str,
+        settings: Mapping[str, Any] | None = None,
+        *,
+        touched: set[str] | None = None,
+        projections: set[str] | None = None,
+        trailing: Sequence[int] = DEFAULT_TRAILING,
+    ) -> tuple[Result, ...]:
         document = self._schema.settings_for(settings)
         lib = self._library
         out: list[Result] = []

@@ -193,6 +193,16 @@ class Engine:
                 healed = {
                     plan.name for plan in lib.figures if set(plan.indexes) & stale
                 }
+                # Closed over the rollups: a figure combining a healed one
+                # totals the very values the heal is about to rewrite.
+                # Figures are compiled in depth order, so one forward walk
+                # closes the set.
+                for plan in lib.figures:
+                    sources = set(plan.reads) | {
+                        src for src, _ in plan.combines.values()
+                    }
+                    if sources & healed:
+                        healed.add(plan.name)
                 if healed:
                     changes.extend(
                         await self._backfill(
@@ -207,13 +217,17 @@ class Engine:
                 # change stream says nothing. The scan is skipped entirely when
                 # nothing was deleted, which is every ordinary sync.
                 changes.extend(await self._remove_departed(tenant, settings))
-            if written or deleted:
-                # The gap sweep exists for the sync: writes can introduce
-                # subjects whose values were never computed. A definition-only
-                # pass can introduce no gap -- everything it invalidated was
-                # recomputed above, outright -- and sweeping anyway is fixed
-                # work the change cannot reach. (Repair of gaps left by a
-                # crashed pass stays where it always was: the full sync.)
+            if written is not None or deleted is not None:
+                # The gap sweep runs on every pass through the facts door --
+                # `is not None`, the same rule the facade's sync gate uses,
+                # so an empty scheduled batch still repairs what a crashed
+                # earlier pass may have left half-written. A definition-only
+                # pass skips it: it wrote no facts, so it can have opened no
+                # gap, and everything it invalidated was recomputed above.
+                # This moves crash repair from every pass to every facts
+                # pass; an embedding host that mutates its FactSource out of
+                # band and polls a bare run() must reconcile with `written=`
+                # or `full` -- see `Uratori.run`.
                 changes.extend(await self._backfill(tenant, settings))
 
         # `covered` is what the host re-dates evidence on, so it must name

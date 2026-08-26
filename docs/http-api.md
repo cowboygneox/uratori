@@ -448,7 +448,7 @@ known/unknown, not required/optional.
 | `rebuilt` | Figure names rebuilt from scratch this pass (a moved dial, a redeploy, a deletion, `full`). A figure recomputed to the value it already held writes nothing and appears nowhere; `rebuilt` is how a rebuild and a no-op stay distinguishable from outside. |
 | `covered` | The fact kinds this pass actually read, sorted. A webhook covers almost nothing and a reconcile covers everything, and the difference says which values were *confirmed* unchanged rather than merely not checked. |
 | `shown` | A **ranked sample** of the movements, capped at 40, for an activity log. See below. |
-| `results` | The re-served `Result` for everything the pass moved -- plus, when the pass carried facts or ran `full` (the host's sync moment), every projection, because the clock is one of a projection's inputs and the sync is when that contract pays out. A pass with no facts (`POST /tenants/{t}/runs` after a definition deploy) re-serves exactly what the change reached: the moved figures, their readings, and the projections filtering through a rebuilt grouping or reading a moved figure -- a change that reaches nothing serves nothing. The same objects `GET /tenants/{t}/results` returns and the websocket pushes; there is no run-only shape to drift. (One spelling difference: HTTP responses write absent fields as `null`, the socket omits them -- treat both as absent.) |
+| `results` | The re-served `Result` for everything the pass moved -- plus, on any pass through the facts door or one that ran `full` (an empty batch counts: the door is the sync moment, not the batch's contents, and a standing import debt upgrades a run to `full`), every projection, because the clock is one of a projection's inputs and the sync is when that contract pays out. A definition-only pass (`POST /tenants/{t}/runs` after a deploy or a settings save) re-serves exactly what the change reached: the moved figures, and the projections whose answer can differ -- a rebuilt grouping they filter through, a moved figure they read, their own text (or a summary's over them) having changed, or a dial they render under having turned. A change that reaches none of that serves nothing. The same objects `GET /tenants/{t}/results` returns and the websocket pushes; there is no run-only shape to drift. (One spelling difference: HTTP responses write absent fields as `null`, the socket omits them -- treat both as absent.) |
 
 A **deferred** post answers the same shape with only `written` and `deleted`
 populated -- `changed` 0, everything else empty -- because nothing recomputed,
@@ -828,10 +828,14 @@ All are one envelope, with absent fields omitted:
 3. **Movement.** Whenever a pass for the subscribed tenant changes something
    (a facts post, a manual run), the server pushes one `result` frame per
    figure or reading that **moved** -- and only those; an unchanged recompute
-   pushes nothing. Projections are the exception and are pushed on every
-   pass, because a projection is evaluated at the instant it is asked and the
-   clock is one of its inputs -- there is no gate on "did it move" that could
-   be right.
+   pushes nothing. Projections are pushed on every *sync*
+   pass (the facts door, or `full`), because a projection is evaluated at
+   the instant it is asked and the clock is one of its inputs, and the sync
+   is when that contract pays out. A definition-only pass pushes exactly the
+   projections its change can reach -- a rebuilt grouping, a moved figure it
+   reads, its own text, a dial it renders under; each projection's served
+   answer carries a stamp of what it was served under, so "did it move" is
+   compared rather than guessed.
 4. **Ping** whenever you like; the `pong` doubles as an ordering fence, since
    frames are delivered in order.
 

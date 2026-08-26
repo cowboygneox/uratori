@@ -61,6 +61,40 @@ projection code_change.card:
 projection work_issue.list:
     field:
         key = title as text
+
+# Banded load.
+figure team_person.banded:
+    display "{value}"
+    depends:
+        mine = work_issue.assigned_to:{team_person} & work_issue.active
+    calculate:
+        count(mine)
+    band:
+        when value >= thresholds.wip.over then "over"
+        otherwise "ok"
+
+# Cards.
+projection team_person.cards:
+    read:
+        b = band of team_person.banded
+
+# The watch list.
+projection team_person.watch:
+    read:
+        w = team_person.wip_level
+
+# Weighted issues.
+projection work_issue.weighted:
+    field:
+        key = title as text
+    value:
+        weight in count =
+            when thresholds.openChanges.over > 3 then 2
+            otherwise 0
+
+# The tally.
+summarise work_issue.tally over work_issue.weighted:
+    count heavy where weight >= 2
 """
 
 PARKED = 'filter work_issue.parked where active == false label "parked"\n'
@@ -150,11 +184,22 @@ async def test_a_moved_figure_dial_serves_the_figure_not_the_board() -> None:
 
     turned = {"thresholds": {"wip": {"over": 1}}}
     report = await facade.run(TENANT, turned)
-    assert "team_person.wip_level" in _served(report.results), (
+    served = _served(report.results)
+    assert report.outcome.reindexed == ()
+    assert "team_person.wip_level" in served, (
         "the band flipped under the new dial; the moved figure must re-serve"
     )
-    assert not _served(report.results) & {"code_change.card", "work_issue.list"}, (
-        "no projection reads the dialled figure, and a dial is not a sync"
+    assert "team_person.watch" in served, (
+        "watch reads the moved figure -- the value it renders changed, and "
+        "a reach rule that only followed groupings would freeze it"
+    )
+    assert "team_person.cards" in served, (
+        "the dial is also team_person.banded's BAND dial: no stored value "
+        "moved, but the word cards renders beside the number did -- the "
+        "serve stamp's dial fingerprint is what notices"
+    )
+    assert not served & {"code_change.card", "work_issue.list", "work_issue.weighted"}, (
+        "nothing these render under moved, and a dial is not a sync"
     )
 
 
@@ -180,3 +225,64 @@ async def test_a_facts_pass_is_still_the_serving_moment() -> None:
     # are exactly when the clock is the only thing moving the sentences.
     report = await facade.run(TENANT, written={})
     assert {"code_change.card", "work_issue.list"} <= _served(report.results)
+
+    # The other two doors into the sync: a delete-only batch, and `full` --
+    # each alone must serve the board, or a projection nothing reads (the
+    # bare list) vanishes from every rebuild and every removal sync.
+    report = await facade.run(TENANT, deleted={"code_change": ["c3"]})
+    assert {"code_change.card", "work_issue.list"} <= _served(report.results)
+    report = await facade.run(TENANT, full=True)
+    assert {"code_change.card", "work_issue.list", "team_person.cards"} <= _served(
+        report.results
+    )
+
+
+async def test_a_projections_own_edit_reaches_it() -> None:
+    """Nothing about a projection is stored, so its text moving leaves no
+    stored value to notice -- the serve stamp is what notices. The edited
+    projection re-serves once (its columns changed on every subscribed
+    screen), then the stamp settles and the next pass owes nothing."""
+    store, facts = MemoryEngineStore(), MemoryFactStore()
+    _seed(facts)
+    await _facade(LIB, store, facts).run(TENANT, full=True)
+
+    edited = LIB.replace(
+        "projection code_change.card:\n    from code_change.open\n\n    field:\n        key = title as text",
+        "projection code_change.card:\n    from code_change.open\n\n    field:\n        key = title as text\n        state = state as text",
+    )
+    assert edited != LIB
+    grown = _facade(edited, store, facts)
+    report = await grown.run(TENANT)
+    assert _served(report.results) == {"code_change.card"}
+    report = await grown.run(TENANT)
+    assert report.results == (), "the stamp settled; nothing is owed twice"
+
+
+async def test_a_dial_a_projection_renders_under_reaches_it() -> None:
+    """`value:` ladders read dials at serve time; no stored value moves when
+    one turns, and before serve stamps the pass served nothing while every
+    subscribed row silently went stale. The dialled projection (and the
+    summary riding it) re-serves; its neighbours do not."""
+    store, facts = MemoryEngineStore(), MemoryFactStore()
+    _seed(facts)
+    facade = _facade(LIB, store, facts)
+    await facade.run(TENANT, full=True)
+
+    report = await facade.run(TENANT, {"thresholds": {"openChanges": {"over": 1}}})
+    assert _served(report.results) == {"work_issue.weighted"}, (
+        "the weight ladder reads the dial; every row's rendered weight moved"
+    )
+
+
+async def test_a_summarys_own_edit_reaches_its_projection() -> None:
+    """A summary rides inside its projection's served answer, so a summary
+    edit must re-serve the projection -- there is nowhere else its new
+    counts could travel."""
+    store, facts = MemoryEngineStore(), MemoryFactStore()
+    _seed(facts)
+    await _facade(LIB, store, facts).run(TENANT, full=True)
+
+    edited = LIB.replace("count heavy where weight >= 2", "count heavy where weight >= 1")
+    assert edited != LIB
+    report = await _facade(edited, store, facts).run(TENANT)
+    assert _served(report.results) == {"work_issue.weighted"}

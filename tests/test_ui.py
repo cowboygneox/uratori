@@ -2637,3 +2637,104 @@ async def test_membership_honours_the_upgrade_window(pg_dsn: str) -> None:
             await connection.execute(f"drop schema {name} cascade")
         finally:
             await connection.close()
+
+
+BOARD_SOURCE = COURIER_SOURCE + """
+# The open orders, listed.
+projection shop_order.board:
+    from shop_order.open
+
+    field:
+        key = ref as text
+"""
+
+
+async def test_an_unchanged_batch_still_serves_the_board(pg_dsn: str) -> None:
+    """The scheduled sync whose writes deduplicate to nothing: the facts door
+    was used, so the pass is the sync moment and the board re-serves --
+    projections' clock-worded sentences are refreshed at syncs, and the
+    quiet weeks are exactly when the clock is the only thing moving them.
+    Pinned at the DOOR, not just the facade: the door builds its `written`
+    from what actually changed, and a door-level normalisation of the empty
+    dict to None would reintroduce the freeze invisibly."""
+    async with serve(pg_dsn) as http:
+        put = await http.put("/schema", json=COURIER_WORLD.to_document())
+        assert put.status_code == 200, put.text
+        put = await http.put("/definitions", json={"source": BOARD_SOURCE})
+        assert put.status_code == 200, put.text
+
+        first = await http.post(
+            "/tenants/t1/facts",
+            json={"writes": {"shop_order": {"o1": {"ref": "A-1", "status": "riding"}}}},
+        )
+        assert first.status_code == 200, first.text
+        assert any(r["name"] == "shop_order.board" for r in first.json()["results"])
+
+        again = await http.post(
+            "/tenants/t1/facts",
+            json={"writes": {"shop_order": {"o1": {"ref": "A-1", "status": "riding"}}}},
+        )
+        assert again.status_code == 200, again.text
+        body = again.json()
+        assert body["written"] == 0, "the batch deduplicated to nothing"
+        assert any(r["name"] == "shop_order.board" for r in body["results"]), (
+            "the door was the facts door; an unchanged batch is still the sync"
+        )
+
+
+async def test_the_run_guard_knows_a_settings_only_tenant(pg_dsn: str) -> None:
+    """`tenant_exists` unions facts, settings and run history, like the
+    tenant list it replaced -- a tenant taught settings but never fed is
+    exactly the misconfiguration an investigator pokes at, and 404ing its
+    run door would tell them it does not exist."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        put = await http.put("/tenants/t7/settings", json={"document": {}})
+        assert put.status_code == 200, put.text
+        ran = await http.post("/ui/api/tenants/t7/runs", json={})
+        assert ran.status_code == 200, ran.text
+
+
+async def test_the_editor_pass_pays_deferred_debt_in_full(pg_dsn: str) -> None:
+    """A bulk import that deferred its pass leaves the tenant owing a FULL
+    one; the editor's run door must upgrade like the API's, and the log must
+    say a full pass is what ran -- a silently downgraded debt payment leaves
+    stored answers describing the pre-import world."""
+    name = f"uratori_ui_{os.urandom(4).hex()}"
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await connection.execute(f"create schema {name}")
+    finally:
+        await connection.close()
+    try:
+        app = create_app(dsn=pg_dsn, pg_schema=name, token=None, version="test")
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://uratori"
+            ) as http:
+                await _teach(http)
+                await _feed_couriers(http)
+                pool = app.state.uratori.pool
+                await pool.execute(
+                    "insert into import_debt (tenant_id) values ('t1') "
+                    "on conflict do nothing"
+                )
+                ran = await http.post("/ui/api/tenants/t1/runs", json={})
+                assert ran.status_code == 200, ran.text
+                newest = (
+                    await http.get("/ui/api/tenants/t1/activity?quiet=1")
+                ).json()["runs"][0]
+                assert newest["full"] is True, (
+                    "the debt upgrades the pass, and the log tells it as full"
+                )
+                owed = await pool.fetchval(
+                    "select count(*) from import_debt where tenant_id = 't1'"
+                )
+                assert owed == 0, "the paid debt is settled, not carried"
+    finally:
+        connection = await asyncpg.connect(pg_dsn)
+        try:
+            await connection.execute(f"drop schema {name} cascade")
+        finally:
+            await connection.close()
