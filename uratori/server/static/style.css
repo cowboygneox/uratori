@@ -485,6 +485,17 @@ dl.kv {
 .kv dt { display: inline; color: var(--ink-faint); font-size: 0.85rem; }
 .kv dd { display: inline; margin: 0 0 0 0.35rem; font-family: var(--mono); font-size: 0.85rem; }
 
+/* -------------------------------------------------------------- drill --- */
+
+/* The trace link at the end of an evidence line: quiet until wanted, so a
+   long citation list stays a list rather than a wall of buttons. */
+.trace { color: var(--ink-faint); font-size: 0.85em; white-space: nowrap; }
+.trace:hover { color: var(--accent); }
+
+/* The bucket the reader is standing in, marked the way the roster marks the
+   open declaration: one accent rule at the row's edge. */
+tr.here td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+
 /* ------------------------------------------------------------- motion --- */
 
 @media (prefers-reduced-motion: no-preference) {

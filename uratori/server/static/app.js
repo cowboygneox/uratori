@@ -137,7 +137,11 @@ async function render() {
   const cut = raw.indexOf('?');
   const path = cut === -1 ? raw : raw.slice(0, cut);
   const params = new URLSearchParams(cut === -1 ? '' : raw.slice(cut + 1));
-  const argument = path ? safeDecode(path) : null;
+  // Segments are decoded one by one AFTER splitting: a record key carrying
+  // an encoded '/' must stay one segment, and decoding the joined path first
+  // would split it in two -- a record page for half a key.
+  const segments = path ? path.split('/').map(safeDecode) : [];
+  const argument = segments.length ? segments[0] : null;
   view.replaceChildren(el('p', { class: 'faint' }, 'loading…'));
 
   if (world === null) {
@@ -150,9 +154,12 @@ async function render() {
 
   // flat(Infinity): a view may return nested arrays of nodes, and a nested
   // array handed to replaceChildren renders as "[object HTMLDivElement]".
-  if (route === 'facts') view.replaceChildren(...(await factsView(argument, params)).flat(Infinity));
-  else if (route === 'activity') view.replaceChildren(...(await activityView()).flat(Infinity));
-  else view.replaceChildren(...(await definitionsView(argument)).flat(Infinity));
+  // The null filter is for the same reason el() skips nulls: a view may say
+  // "nothing here" with a null, and replaceChildren would print the word.
+  const draw = (nodes) => view.replaceChildren(...nodes.flat(Infinity).filter((n) => n != null));
+  if (route === 'facts') draw(await factsView(segments, params));
+  else if (route === 'activity') draw(await activityView());
+  else draw(await definitionsView(argument, params));
 }
 
 // -------------------------------------------------------- definitions --
@@ -210,8 +217,8 @@ function roster(selected) {
   return holder;
 }
 
-async function definitionsView(name) {
-  const pane = name ? await declarationPane(name) : [libraryPlate()];
+async function definitionsView(name, params) {
+  const pane = name ? await declarationPane(name, params) : [libraryPlate()];
   // Pane before roster: a keyboard should reach the content in a few tabs,
   // not after all 75 roster links. The stylesheet places the roster left.
   return [el('div', { class: 'split' }, el('div', { class: 'pane' }, pane), roster(name))];
@@ -238,8 +245,8 @@ function libraryPlate() {
         el('p', { class: 'prose' },
           'Every declaration this deployment computes from, including the ',
           'groups, filters and measures that have no version of their own. ',
-          'Pick one to read it as written and walk its dependencies down ',
-          'to the facts.'))),
+          'Pick one to read it as written, see what can move it, and drill ',
+          'through the records it filed down to the facts themselves.'))),
     world.refusal
       ? el('div', { class: 'notice problem' },
           'Definitions are stored but refused by this build’s compiler: ',
@@ -247,40 +254,79 @@ function libraryPlate() {
       : null);
 }
 
-function dependencyNode(edge, seen) {
+function defHash(name, extra) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(extra || {})) {
+    if (value) params.set(key, value);
+  }
+  const tail = params.toString();
+  return `#/definitions/${encodeURIComponent(name)}${tail ? '?' + tail : ''}`;
+}
+
+function recordHash(kind, key) {
+  return `#/facts/${encodeURIComponent(kind)}/${encodeURIComponent(key)}`;
+}
+
+// One leaf of the impact answer: where the records live, or which dial.
+function leafLine(edge) {
   if (edge.type === 'fact') {
     return el('li', {},
       el('span', { class: 'badge fact' }, 'fact'), ' ',
       el('a', { class: 'mono', href: `#/facts/${encodeURIComponent(edge.name)}` }, edge.name),
       el('span', { class: 'leaf' }, ' — the records themselves'));
   }
-  if (edge.type === 'setting') {
-    return el('li', {},
-      el('span', { class: 'badge setting' }, 'setting'), ' ',
-      el('span', { class: 'mono' }, edge.name),
-      el('span', { class: 'leaf' }, ' — a tenant dial'));
-  }
-  const declaration = byName.get(edge.name);
-  const line = el('li', {},
-    el('span', { class: `badge ${edge.type}` }, edge.type), ' ',
-    el('a', { class: 'mono', href: `#/definitions/${encodeURIComponent(edge.name)}` }, edge.name));
-  if (!declaration) {
-    line.append(el('span', { class: 'leaf' }, ' — not in the library?'));
-    return line;
-  }
-  if (seen.has(edge.name)) {
-    line.append(el('span', { class: 'leaf' }, ' — shown above'));
-    return line;
-  }
-  seen.add(edge.name);
-  if (declaration.rests_on.length) {
-    line.append(el('ul', { class: 'tree' },
-      declaration.rests_on.map((below) => dependencyNode(below, seen))));
-  }
-  return line;
+  return el('li', {},
+    el('span', { class: 'badge setting' }, 'setting'), ' ',
+    el('span', { class: 'mono' }, edge.name),
+    el('span', { class: 'leaf' }, ' — a tenant dial'));
 }
 
-async function declarationPane(name) {
+// One direct dependency, one hop, never a subtree. The old recursive tree
+// answered "what can move this?" only after the reader walked all of it, and
+// two levels down it held more entries than the library has declarations.
+// That walk is the server's job now (moved_by); structure reads one hop at a
+// time, by navigation.
+function edgeLine(edge) {
+  if (edge.type === 'fact' || edge.type === 'setting') return leafLine(edge);
+  return el('li', {},
+    el('span', { class: `badge ${edge.type}` }, edge.type), ' ',
+    el('a', { class: 'mono', href: `#/definitions/${encodeURIComponent(edge.name)}` }, edge.name),
+    byName.has(edge.name) ? null : el('span', { class: 'leaf' }, ' — not in the library?'));
+}
+
+// The keyset pager every paged section shares: `trail` carries the stack of
+// prior cursors, so ← back re-asks the exact previous page rather than
+// guessing at one.
+function pager(params, page, lastKey, go) {
+  const after = params.get('after');
+  const crumbs = (params.get('trail') || '').split('|').filter((s) => s !== '');
+  if (!crumbs.length && !after && !page.more) return null;
+  return el('div', { class: 'controls' },
+    el('button', {
+      disabled: crumbs.length === 0 && !after ? 'disabled' : undefined,
+      onclick: () => {
+        const previous = crumbs.pop();
+        go(previous ? decodeURIComponent(previous) : null, crumbs.join('|'));
+      },
+    }, '← back'),
+    el('button', {
+      disabled: page.more ? undefined : 'disabled',
+      onclick: () => {
+        // Each crumb is encoded before joining, so a '|' inside a key can
+        // never split the trail.
+        crumbs.push(encodeURIComponent(after || ''));
+        go(lastKey, crumbs.join('|'));
+      },
+    }, 'next →'));
+}
+
+function unavailable(state) {
+  return el('div', { class: 'notice' },
+    'Not available: ', el('span', { class: 'mono' }, state.because), ' — ',
+    state.detail || 'the server gave no further sentence.');
+}
+
+async function declarationPane(name, params) {
   const declaration = byName.get(name);
   if (!declaration) {
     return [el('div', { class: 'notice problem' },
@@ -311,13 +357,29 @@ async function declarationPane(name) {
       : el('p', { class: 'faint' }, 'The source of this declaration could not be located.'),
   ];
 
-  if (declaration.rests_on.length) {
-    parts.push(el('h2', {}, 'Rests on'),
-      el('ul', { class: 'tree' },
-        declaration.rests_on.map((edge) => dependencyNode(edge, new Set([name])))));
+  // The impact answer, precomputed by the server: leaves only, so a reader
+  // learns in one glance whether a change to some data can reach this number.
+  const movedBy = declaration.moved_by || [];
+  parts.push(el('h2', {}, 'Moved by'));
+  if (movedBy.length) {
+    parts.push(
+      el('p', { class: 'prose' },
+        'A change to any of these records or dials can move this ',
+        declaration.kind, ' — nothing else can.'),
+      el('ul', { class: 'tree' }, movedBy.map(leafLine)));
   } else {
-    parts.push(el('h2', {}, 'Rests on'),
-      el('p', { class: 'faint' }, 'Nothing — this declaration reads only its own records.'));
+    parts.push(el('p', { class: 'faint' }, 'Nothing — it reads no records and no dials.'));
+  }
+
+  // Structure, only when there is structure: for a group or a measure the
+  // direct edges ARE the leaves above, and repeating them under a second
+  // heading would be noise. Each entry is a link, one hop — the deep walk
+  // belongs to Moved by now.
+  const structural = declaration.rests_on.some(
+    (edge) => edge.type !== 'fact' && edge.type !== 'setting');
+  if (structural) {
+    parts.push(el('h2', {}, 'Built from'),
+      el('ul', { class: 'tree' }, declaration.rests_on.map((edge) => edgeLine(edge))));
   }
 
   const dependants = usedBy.get(name) || [];
@@ -329,7 +391,16 @@ async function declarationPane(name) {
         ]))
       : el('p', { class: 'faint' }, 'Nothing in the library reads this.'));
 
-  if (['figure', 'reading', 'projection', 'summary'].includes(declaration.kind)) {
+  if (declaration.kind === 'group' || declaration.kind === 'filter') {
+    parts.push(el('h2', {},
+      declaration.kind === 'filter' ? 'Matching records — tenant ' : 'Buckets — tenant ',
+      el('span', { class: 'verbatim' }, tenant() || '?')));
+    parts.push(await membershipSection(declaration, params));
+  } else if (declaration.kind === 'measure') {
+    parts.push(el('h2', {}, 'Measurements — tenant ',
+      el('span', { class: 'verbatim' }, tenant() || '?')));
+    parts.push(await measuredSection(declaration, params));
+  } else {
     // The tenant id rides in a verbatim span: the label style uppercases,
     // and a case-mangled identifier on this page would be a small lie.
     parts.push(el('h2', {}, 'Current answer — tenant ',
@@ -337,6 +408,116 @@ async function declarationPane(name) {
     parts.push(await answerSection(declaration));
   }
   return parts;
+}
+
+// ------------------------------------------------- membership & measures --
+
+async function membershipSection(declaration, params) {
+  if (!tenant()) return el('p', { class: 'faint' }, 'No tenant to ask.');
+  const answer = await get(
+    `tenants/${encodeURIComponent(tenant())}/membership/${encodeURIComponent(declaration.name)}`);
+  if (!answer.ok) return problem(answer, 'The engine declined to answer:');
+  const m = answer.body;
+  if (!m.state.ok) return unavailable(m.state);
+
+  const blocks = [];
+  // Chrome, not a computation: every number in the sentence arrived from the
+  // server; this only places them side by side.
+  blocks.push(el('p', { class: 'dim' },
+    `${m.members} of ${m.population} `,
+    el('span', { class: 'mono' }, m.id_space),
+    m.kind === 'filter'
+      ? ' records match.'
+      : ` records are filed, across ${m.buckets_total} buckets.`));
+
+  const chosen = m.kind === 'filter' ? '' : params.get('bucket');
+  if (m.kind === 'group') {
+    blocks.push(el('table', {},
+      el('tr', {}, el('th', {}, 'bucket'), el('th', {}, 'records')),
+      m.buckets.map((b) => el('tr', { class: b.bucket === chosen ? 'here' : '' },
+        el('td', {}, el('a', {
+          class: 'mono',
+          href: defHash(declaration.name, { bucket: b.bucket }),
+        }, b.bucket)),
+        el('td', { class: 'mono' }, String(b.members))))));
+    if (m.buckets.length < m.buckets_total) {
+      blocks.push(el('p', { class: 'faint' },
+        `showing the first ${m.buckets.length} of ${m.buckets_total} buckets.`));
+    }
+  }
+  if (chosen !== null) {
+    blocks.push(await memberList(declaration, m, chosen, params));
+  } else if (m.kind === 'group') {
+    blocks.push(el('p', { class: 'faint' }, 'Pick a bucket to see the records it holds.'));
+  }
+  return el('div', {}, blocks);
+}
+
+async function memberList(declaration, m, bucket, params) {
+  const query = new URLSearchParams();
+  query.set('bucket', bucket);
+  const after = params.get('after');
+  if (after) query.set('after', after);
+  const answer = await get(
+    `tenants/${encodeURIComponent(tenant())}/membership/`
+    + `${encodeURIComponent(declaration.name)}/members?${query}`);
+  if (!answer.ok) return problem(answer, 'Could not read the members:');
+  const page = answer.body;
+  const lastKey = page.records.length ? page.records[page.records.length - 1].key : null;
+  return el('div', {},
+    m.kind === 'group'
+      ? el('p', { class: 'dim' }, 'bucket ', el('span', { class: 'mono' }, bucket),
+          ` — ${page.total} records`)
+      : null,
+    page.records.length
+      ? el('table', {},
+          el('tr', {}, el('th', {}, 'key'), el('th', {}, 'name')),
+          page.records.map((record) => el('tr', {},
+            el('td', {}, record.held
+              // The drill's next rung: every member links to the record
+              // itself, so "which records?" ends at the fact, not at a key.
+              ? el('a', { class: 'mono', href: recordHash(m.id_space, record.key) }, record.key)
+              : [el('span', { class: 'mono' }, record.key),
+                 el('span', { class: 'faint' }, ' (no record stored)')]),
+            el('td', {}, record.name ?? el('span', { class: 'faint' }, '—')))))
+      : el('p', { class: 'faint' }, 'Nothing here.'),
+    pager(params, page, lastKey, (nextAfter, trail) => {
+      location.hash = defHash(declaration.name,
+        { bucket: m.kind === 'group' ? bucket : null, after: nextAfter, trail });
+    }));
+}
+
+async function measuredSection(declaration, params) {
+  if (!tenant()) return el('p', { class: 'faint' }, 'No tenant to ask.');
+  const after = params.get('after');
+  const answer = await get(
+    `tenants/${encodeURIComponent(tenant())}/measured/${encodeURIComponent(declaration.name)}`
+    + (after ? `?after=${encodeURIComponent(after)}` : ''));
+  if (!answer.ok) return problem(answer, 'The engine declined to answer:');
+  const page = answer.body;
+  if (!page.records.length) {
+    return el('p', { class: 'faint' },
+      'Nothing collected for ', el('span', { class: 'mono' }, page.fact_kind),
+      ', so there is nothing to measure.');
+  }
+  const lastKey = page.records[page.records.length - 1].key;
+  return el('div', {},
+    el('p', { class: 'dim' },
+      `${page.total} `, el('span', { class: 'mono' }, page.fact_kind), ' records.'),
+    el('table', {},
+      el('tr', {}, el('th', {}, 'key'), el('th', {}, 'name'), el('th', {}, 'measures as')),
+      page.records.map((record) => el('tr', {},
+        el('td', {}, el('a', {
+          class: 'mono', href: recordHash(page.fact_kind, record.key),
+        }, record.key)),
+        el('td', {}, record.name ?? el('span', { class: 'faint' }, '—')),
+        // null is the server saying "no measurement for this record" — an
+        // absence to show as one, never a rendered nought.
+        el('td', { class: 'mono' },
+          record.display ?? el('span', { class: 'faint' }, '— no measurement'))))),
+    pager(params, page, lastKey, (nextAfter, trail) => {
+      location.hash = defHash(declaration.name, { after: nextAfter, trail });
+    }));
 }
 
 async function answerSection(declaration) {
@@ -458,7 +639,14 @@ async function evidenceRow(row, figure, subject) {
                 member.title || member.key)
             : (member.title || member.key),
           member.display ? el('span', { class: 'dim' }, ` — ${member.display}`) : null,
-          member.held ? null : el('span', { class: 'faint' }, ' (no longer held)'));
+          member.held ? null : el('span', { class: 'faint' }, ' (no longer held)'),
+          // The citation's last rung: when the members are records of one
+          // kind, each held one links to the record itself, so a value can
+          // be walked to the stored fact without leaving the trace.
+          evidence.kind && member.held
+            ? [' ', el('a', { class: 'trace', href: recordHash(evidence.kind, member.key) },
+                'record →')]
+            : null);
       }))));
   }
   row.after(expansion);
@@ -466,13 +654,115 @@ async function evidenceRow(row, figure, subject) {
 
 // --------------------------------------------------------------- facts --
 
-async function factsView(kind, params) {
+async function factsView(segments, params) {
   if (!tenant()) {
     return [el('h1', {}, 'Facts'),
       el('p', { class: 'faint' }, 'No tenant holds any facts yet.')];
   }
+  const kind = segments.length ? segments[0] : null;
   if (!kind) return kindListView();
+  if (segments.length > 1) {
+    // A hand-typed literal '/' in a key splits into extra segments; joining
+    // them back is the only honest recovery.
+    return recordView(kind, segments.slice(1).join('/'));
+  }
   return kindView(kind, params.get('q') || '', params.get('after'), params.get('trail') || '');
+}
+
+// Which declarations a change to records of this kind can reach — the
+// inverse of the server's moved_by, inverted here because it is structure
+// (the same composition usedBy already does), never a value.
+function moversOf(kind) {
+  return world.declarations.filter((declaration) =>
+    (declaration.moved_by || []).some((edge) => edge.type === 'fact' && edge.name === kind));
+}
+
+function moverLinks(kind) {
+  const movers = moversOf(kind);
+  if (!movers.length) return null;
+  return el('p', { class: 'prose' },
+    'A change to these records can move ',
+    movers.map((declaration, i) => [
+      i ? ', ' : null,
+      el('a', { class: 'mono', href: `#/definitions/${encodeURIComponent(declaration.name)}` },
+        declaration.name),
+    ]), '.');
+}
+
+async function recordView(kind, key) {
+  const answer = await get(
+    `tenants/${encodeURIComponent(tenant())}/facts/${encodeURIComponent(kind)}`
+    + `/${encodeURIComponent(key)}`);
+  if (!answer.ok) return [problem(answer, 'Could not read this record:')];
+  const record = answer.body;
+  const link = record.url ? safeUrl(record.url) : null;
+
+  const parts = [
+    el('h1', {},
+      el('a', { href: '#/facts' }, 'Facts'), ' / ',
+      el('a', { class: 'mono', href: `#/facts/${encodeURIComponent(kind)}` }, kind), ' / ',
+      el('span', { class: 'mono' }, key)),
+    el('div', { class: 'title-block' },
+      el('div', { class: 'tb-head' },
+        el('h1', {}, record.name ?? key), ' ',
+        el('span', { class: 'badge fact' }, 'fact'),
+        el('span', { class: 'badge' }, kind)),
+      el('div', { class: 'tb-cite' },
+        record.source_stamp
+          ? ['source stamp ', el('span', { class: 'mono' }, record.source_stamp),
+             ' — the provider’s own version of this record']
+          : 'no source stamp — the provider did not date this record',
+        link ? [' · ', el('a', { href: link, target: '_blank', rel: 'noreferrer' },
+            'open at the source')] : null)),
+  ];
+
+  parts.push(el('h2', {}, 'Filed under'));
+  if (!record.filed_state.ok) {
+    parts.push(unavailable(record.filed_state));
+  } else if (!record.filed.length) {
+    parts.push(el('p', { class: 'faint' },
+      'No group or filter is keyed by ', el('span', { class: 'mono' }, kind), ' ids.'));
+  } else {
+    // Every grouping over this kind reports, the rejections included: "this
+    // filter did not take it" is exactly the verdict a verifier came to check.
+    parts.push(el('table', {},
+      record.filed.map((filed) => el('tr', {},
+        el('td', {}, el('a', {
+          class: 'mono', href: `#/definitions/${encodeURIComponent(filed.index)}`,
+        }, filed.index)),
+        el('td', {}, el('span', { class: `badge ${filed.kind}` }, filed.kind)),
+        el('td', { class: 'mono' },
+          filed.kind === 'filter'
+            ? (filed.member ? 'matches'
+               : el('span', { class: 'dim' }, 'does not match'))
+            : (filed.member
+               ? ['in ', filed.buckets.map((bucket, i) => [
+                   i ? ', ' : null,
+                   el('a', { class: 'mono', href: defHash(filed.index, { bucket }) }, bucket),
+                 ])]
+               : el('span', { class: 'dim' }, 'in no bucket')))))));
+  }
+
+  parts.push(el('h2', {}, 'Measured as'));
+  if (!record.measured.length) {
+    parts.push(el('p', { class: 'faint' },
+      'No measure reads ', el('span', { class: 'mono' }, kind), ' records.'));
+  } else {
+    parts.push(el('table', {},
+      record.measured.map((entry) => el('tr', {},
+        el('td', {}, el('a', {
+          class: 'mono', href: `#/definitions/${encodeURIComponent(entry.measure)}`,
+        }, entry.measure)),
+        el('td', { class: 'mono' },
+          entry.display ?? el('span', { class: 'faint' }, '— no measurement'))))));
+  }
+
+  const movers = moverLinks(kind);
+  if (movers) parts.push(el('h2', {}, 'Can move'), movers);
+
+  parts.push(el('h2', {}, 'As stored'),
+    el('pre', {}, JSON.stringify(record.value, null, 2)));
+  return parts;
 }
 
 async function kindListView() {
@@ -529,7 +819,13 @@ async function kindView(kind, q, after, trail) {
     // tabindex + keydown: the expansion is the only way to read a record,
     // so it cannot be mouse-only.
     const row = el('tr', { class: 'record-row', tabindex: '0' },
-      el('td', { class: 'mono' }, record.key),
+      // The key is the door to the record's own page (classification,
+      // measurements, the full JSON); the row click stays the quick peek.
+      // stopPropagation so following the link does not also toggle the row.
+      el('td', {}, el('a', {
+        class: 'mono', href: recordHash(kind, record.key),
+        onclick: (event) => event.stopPropagation(),
+      }, record.key)),
       el('td', {}, record.name ?? el('span', { class: 'faint' }, '—')),
       el('td', { class: 'mono faint' }, record.source_stamp ?? '—'));
     const toggle = () => {
@@ -551,6 +847,7 @@ async function kindView(kind, q, after, trail) {
   const lastKey = page.records.length ? page.records[page.records.length - 1].key : null;
   return [
     el('h1', {}, el('a', { href: '#/facts' }, 'Facts'), ' / ', el('span', { class: 'mono' }, kind)),
+    moverLinks(kind),
     el('div', { class: 'controls' },
       search,
       el('span', { class: 'faint' },

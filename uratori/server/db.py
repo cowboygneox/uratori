@@ -469,6 +469,175 @@ async def page_facts(
     return page, more, total
 
 
+# ------------------------------------------------------------ membership --
+#
+# Read-only views over the engine's own figure_index and index_state tables,
+# for the UI's drill-down. They live here rather than on EngineStore because
+# they are presentation reads (paged, counted, joined to names) and the store
+# protocol is deliberately too narrow to grow them -- every method a store
+# grows is a way a calculation could start depending on where records live.
+
+
+async def index_set_version(pool: asyncpg.Pool[Any], tenant: str) -> str | None:
+    """Which index set this tenant last bucketed under, or None if never."""
+    held = await pool.fetchval(
+        "select version from index_state where tenant_id = $1", tenant
+    )
+    return held if isinstance(held, str) else None
+
+
+async def bucket_counts(
+    pool: asyncpg.Pool[Any], tenant: str, index: str, *, limit: int
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Buckets with member counts, bucket order, plus the two honest totals:
+    distinct members across every bucket (a record can be in several), and how
+    many buckets exist -- a capped list under no total reads as complete."""
+    rows = await pool.fetch(
+        """
+        select bucket, count(*)::int as members
+        from figure_index
+        where tenant_id = $1 and index_name = $2
+        group by bucket
+        order by bucket
+        limit $3
+        """,
+        tenant,
+        index,
+        limit,
+    )
+    members = await pool.fetchval(
+        "select count(distinct member) from figure_index "
+        "where tenant_id = $1 and index_name = $2",
+        tenant,
+        index,
+    )
+    buckets_total = await pool.fetchval(
+        "select count(distinct bucket) from figure_index "
+        "where tenant_id = $1 and index_name = $2",
+        tenant,
+        index,
+    )
+    return (
+        [{"bucket": row["bucket"], "members": row["members"]} for row in rows],
+        int(members or 0),
+        int(buckets_total or 0),
+    )
+
+
+async def page_members(
+    pool: asyncpg.Pool[Any],
+    tenant: str,
+    index: str,
+    bucket: str,
+    kind: str,
+    *,
+    after: str | None,
+    limit: int,
+) -> tuple[list[dict[str, Any]], bool, int]:
+    """One keyset page of a bucket's members, each joined to its record.
+
+    `kind` is the index's **id_space**, not its fact kind: `keyed as` files one
+    kind's records under another kind's ids, and joining the wrong table marks
+    every member missing. A member with no record still lists (`value` None) --
+    the membership row is the engine's claim and hiding it would un-say it.
+    """
+    conditions = ["i.tenant_id = $1", "i.index_name = $2", "i.bucket = $3"]
+    args: list[Any] = [tenant, index, bucket, kind]
+    if after is not None:
+        args.append(after)
+        conditions.append(f"i.member > ${len(args)}")
+    args.append(limit + 1)  # one past the page is how `more` is a fact, not a guess
+    rows = await pool.fetch(
+        f"""
+        select i.member, f.value
+        from figure_index i
+        left join fact f
+          on f.tenant_id = i.tenant_id and f.kind = $4 and f.key = i.member
+        where {" and ".join(conditions)}
+        order by i.member
+        limit ${len(args)}
+        """,
+        *args,
+    )
+    more = len(rows) > limit
+    page = [
+        {
+            "member": row["member"],
+            "value": (
+                row["value"]
+                if row["value"] is None or isinstance(row["value"], dict)
+                else json.loads(row["value"])
+            ),
+        }
+        for row in rows[:limit]
+    ]
+    total = int(
+        await pool.fetchval(
+            "select count(*) from figure_index "
+            "where tenant_id = $1 and index_name = $2 and bucket = $3",
+            tenant,
+            index,
+            bucket,
+        )
+        or 0
+    )
+    return page, more, total
+
+
+async def memberships_of(
+    pool: asyncpg.Pool[Any], tenant: str, member: str, indexes: list[str]
+) -> dict[str, list[str]]:
+    """Every bucket holding this member, per index, restricted to the given
+    index names -- the caller restricts to the current library, so a dropped
+    index's leftover rows cannot resurface as classification."""
+    rows = await pool.fetch(
+        """
+        select index_name, bucket
+        from figure_index
+        where tenant_id = $1 and member = $2 and index_name = any($3::text[])
+        order by index_name, bucket
+        """,
+        tenant,
+        member,
+        indexes,
+    )
+    held: dict[str, list[str]] = {}
+    for row in rows:
+        held.setdefault(row["index_name"], []).append(row["bucket"])
+    return held
+
+
+async def count_kind(pool: asyncpg.Pool[Any], tenant: str, kind: str) -> int:
+    return int(
+        await pool.fetchval(
+            "select count(*) from fact where tenant_id = $1 and kind = $2",
+            tenant,
+            kind,
+        )
+        or 0
+    )
+
+
+async def fact_record(
+    pool: asyncpg.Pool[Any], tenant: str, kind: str, key: str
+) -> dict[str, Any] | None:
+    row = await pool.fetchrow(
+        "select value, source_stamp from fact "
+        "where tenant_id = $1 and kind = $2 and key = $3",
+        tenant,
+        kind,
+        key,
+    )
+    if row is None:
+        return None
+    return {
+        "value": row["value"] if isinstance(row["value"], dict) else json.loads(row["value"]),
+        "source_stamp": (
+            row["source_stamp"].isoformat() if row["source_stamp"] is not None else None
+        ),
+    }
+
+
 # ---------------------------------------------------------------- tenants --
 
 
