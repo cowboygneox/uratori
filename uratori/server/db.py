@@ -402,6 +402,22 @@ def _contains(q: str) -> str:
     return f"%{disarmed}%"
 
 
+async def tenant_exists(pool: asyncpg.Pool[Any], tenant: str) -> bool:
+    """Whether anything anywhere belongs to this tenant. The existence
+    question only: the run door asks it as a guard, and answering it by
+    counting every fact taxed each editor pass with a scan of the whole
+    table for a yes/no."""
+    held = await pool.fetchval(
+        """
+        select exists (select 1 from fact where tenant_id = $1)
+            or exists (select 1 from tenant_settings where tenant_id = $1)
+            or exists (select 1 from run_log where tenant_id = $1)
+        """,
+        tenant,
+    )
+    return bool(held)
+
+
 async def list_tenants(pool: asyncpg.Pool[Any]) -> list[dict[str, Any]]:
     """Every tenant the database knows, however it got there: facts pushed,
     settings stored, or runs logged. The union matters -- a tenant taught

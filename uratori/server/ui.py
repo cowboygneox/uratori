@@ -635,12 +635,13 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         s = _state(request)
         _granted()
         world, library = ready(s)
-        listed = {row["tenant"] for row in await db.list_tenants(s.pool)}
-        if tenant not in listed:
+        if not await db.tenant_exists(s.pool, tenant):
             # Refused rather than run: a pass for a tenant nobody has pushed
             # facts for computes nothing, writes a run-log row that makes the
             # name look real, and leaks a per-name lock for the process's
             # lifetime. Tenants are created by pushing facts through the API.
+            # An existence check, not the counted tenant list -- the guard
+            # was costing a full fact scan per editor pass.
             raise HTTPException(
                 status_code=404, detail=f"No tenant called {tenant} holds any facts here"
             )
