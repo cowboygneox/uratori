@@ -59,13 +59,22 @@ Where the deployment grants it (see the posture below), the UI carries an
   world adoption included. Every save names the text it edited (a
   fingerprint), so two editors cannot silently overwrite each other -- the
   later save is refused with the state of play.
-- **The loop closes with a pass.** A save leaves every tenant honestly
-  `behind-deploy` until one runs; the saved panel offers "run a pass" per
-  tenant (the same pass `POST /tenants/{t}/runs` performs, recorded in the
-  activity log like any other).
+- **The loop closes with a pass.** A save that moves stored state -- a
+  figure's version, the index set's hash -- leaves every tenant honestly
+  `behind-deploy` until one runs, and the saved panel says so and offers
+  "run a pass" per tenant (the same pass `POST /tenants/{t}/runs` performs,
+  recorded in the activity log like any other). A save that moves nothing
+  stored (a label, a reading) says that instead, because offering a pass
+  for it would rebuild everything and move nothing.
 - **It is the repair path.** A stored source this build's compiler refuses
   (an upgrade across a language change) boots the server unready; the editor
   serves the refused text with the reason and saves the correction.
+
+Without the grant, the Editor tab is absent, `GET /ui/api/source` still
+answers (read-only -- with a compiling world it serves nothing the
+declaration pages don't, and with a boot-refused one it is the only place
+the stored text is visible, which is exactly when the repair needs it), and
+the check, save and run routes answer 403 naming `URATORI_UI_EDIT`.
 
 Definitions edited here live in the engine's own Postgres, exactly as if the
 API had taught them. A host that treats a git repository as the source of
@@ -98,7 +107,9 @@ default is off: the API's writes are gated there, and a UI that could still
 save would hand "redefine every figure" to anyone who can reach the port.
 Granting it (`URATORI_UI_EDIT=on`) beside a token is for deployments whose
 UI sits behind an authenticating proxy. The grant with the UI itself off is
-refused at boot as the contradiction it is. Be clear-eyed about what the split grants, though: the UI serves
+refused at boot as the contradiction it is.
+
+Be clear-eyed about what the read split already grants: the UI serves
 *more* data than the token'd API does -- full definition source, the tenant
 list, and the stored records themselves have no API equivalent at all. Anyone
 who can reach the port can read everything, so "behind the firewall" has to

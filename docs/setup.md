@@ -83,6 +83,7 @@ config files.
 | `PORT` | `8080` | The port the server binds. The image sets it to `8080` and exposes the same. |
 | `APP_VERSION` | `dev` | The build identifier reported at `/health`. Published images bake it in at build time (the release tag, or `sha-<commit>`); you set it yourself only when building your own image, via the `APP_VERSION` build argument. |
 | `URATORI_UI` | follows the token | Mounts the [built-in investigation UI](ui.md) at `/ui/`. Unset, the UI is on exactly when `URATORI_TOKEN` is unset -- the UI is unauthenticated by design, so a token'd API does not silently carry an open window. `on`/`off` (also `true`/`false`, `1`/`0`, `yes`/`no`) overrides in either direction; anything else refuses to boot. |
+| `URATORI_UI_EDIT` | on only for an open server | Grants [editing definitions from the UI](ui.md#editing-definitions). Unset, editing is on exactly when the UI is on AND `URATORI_TOKEN` is unset -- an open server already accepts an unauthenticated `PUT /definitions`, so its UI editing grants nothing new, while beside a token it would hand "redefine every figure" to anyone who can reach the port. Same spellings as `URATORI_UI`; junk refuses to boot, and so does granting it while the UI itself is off. |
 | `URATORI_UI_FRAME_ANCESTORS` | `'self'` | Who may iframe the UI, pasted verbatim into its `Content-Security-Policy: frame-ancestors` header. Set it to the embedding application's origin to allow embedding; see [the UI's own page](ui.md) for the proxy alternative. |
 
 ## The database

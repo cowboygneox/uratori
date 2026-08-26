@@ -609,7 +609,9 @@ tr.expansion li .trace { margin-left: auto; }
   border: 1px solid var(--line);
   border-radius: 4px;
   background: var(--surface);
-  height: min(62vh, 42rem);
+  /* 56vh, not more: the check's report renders below the shell, and an
+     editor that fills the fold hides its own verdict. */
+  height: min(56vh, 40rem);
   min-height: 18rem;
   overflow: hidden;
 }
@@ -630,6 +632,9 @@ tr.expansion li .trace { margin-left: auto; }
   font-family: var(--mono);
   font-size: 0.85rem;
   line-height: 1.6;
+  /* Declared identically on both layers: a pasted hard tab must measure the
+     same in the highlight and the textarea, by rule rather than by luck. */
+  tab-size: 8;
 }
 
 .ed-lines {
@@ -716,7 +721,12 @@ tr.expansion li .trace { margin-left: auto; }
   cursor: pointer;
 }
 
-.ed-popup li.active { background: var(--surface); outline: 1px solid var(--line); }
+.ed-popup li.active {
+  /* The accent tint, not a darker surface: keyboard navigation is blind if
+     the active row reads as a hairline. */
+  background: rgba(138, 184, 221, 0.16);
+  outline: 1px solid var(--accent);
+}
 
 .badge.kw    { color: var(--accent); border-color: #2c4a66; }
 .badge.field { color: var(--fact); border-style: dashed; }
@@ -755,4 +765,7 @@ tr.expansion li .trace { margin-left: auto; }
 @media (max-width: 60rem) {
   .ed-shell { height: 55vh; }
   .ed-gutter { width: 2.6rem; }
+  /* On a phone the intro prose costs half the viewport before the first
+     line of source appears; the editor explains itself by being one. */
+  .ed-title .tb-doc { display: none; }
 }

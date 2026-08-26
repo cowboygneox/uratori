@@ -58,6 +58,13 @@ class State:
         self.world: World | None = None
         self.hub = Hub()
         self.locks: dict[str, asyncio.Lock] = {}
+        self.teach = asyncio.Lock()
+        """Serialises every write to the world (schema, definitions, the
+        editor's save). The check-then-write in each of those awaits the
+        database between reading `self.world` and swapping it, and two
+        writers interleaving across that await would both pass their
+        preconditions -- the editor's edited-since-loaded refusal exists
+        precisely to prevent the silent overwrite that allows."""
 
     def lock_for(self, tenant: str) -> asyncio.Lock:
         held = self.locks.get(tenant)
@@ -110,7 +117,9 @@ def taught_schema(world: World) -> Schema:
     return world.schema.taught_by(world.library)
 
 
-def compile_for_teach(source: str, world: World) -> tuple[Library, Schema, dict[str, Any]]:
+def compile_for_teach(
+    source: str, world: World
+) -> tuple[Library, Schema, dict[str, Any], bool]:
     """Compile a candidate source exactly the way `PUT /definitions` teaches.
 
     Shared between the API door and the built-in editor so the two cannot
@@ -123,16 +132,20 @@ def compile_for_teach(source: str, world: World) -> tuple[Library, Schema, dict[
     proves the new world whole before anything is persisted. Any other refusal
     propagates verbatim as the `DefinitionError` it is; each door shapes its
     own response from it.
+
+    The final element says whether that retirement happened. It is part of
+    what a save changes -- record names and links stop coming from the schema
+    -- and a diff that walked only the declarations would state none of it.
     """
     schema = world.schema
     try:
-        return compile_source(source, schema), schema, world.schema_document
+        return compile_source(source, schema), schema, world.schema_document, False
     except WorldConflict:
         stripped = dataclasses.replace(
             schema, kinds=frozenset(), name_fields={}, url_fields={}
         )
         library = compile_source(source, stripped)
-        return library, stripped, schema_out(stripped).model_dump()
+        return library, stripped, schema_out(stripped).model_dump(), True
 
 
 async def record_pass(s: State, tenant: str, cause: str, *, full: bool, out: RunOut) -> None:

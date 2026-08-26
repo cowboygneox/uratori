@@ -132,7 +132,12 @@ def create_app(
             schema = SchemaIn(**document).build()
             boot_refusal: str | None = None
             try:
-                library = compile_source(source, schema) if source else None
+                # `is not None`, not truthiness: an explicitly saved empty
+                # source is a taught (empty) library that answered ready
+                # before the restart, and a boot that quietly demoted it to
+                # "no definitions loaded" would make the same stored state
+                # ready on one side of a restart and unready on the other.
+                library = compile_source(source, schema) if source is not None else None
             except DefinitionError as refusal:
                 # A stored source an older engine wrote, refused by this
                 # build's compiler -- an upgrade across a language change.
@@ -218,37 +223,41 @@ def create_app(
         except ValueError as refusal:
             raise HTTPException(status_code=422, detail=str(refusal)) from refusal
 
-        source = s.world.source if s.world is not None else None
-        library = s.world.library if s.world is not None else None
-        held_refusal: str | None = None
-        if source:
-            try:
-                library = compile_source(source, schema)
-            except DefinitionError as refusal:
-                if library is not None:
-                    raise HTTPException(
-                        status_code=422,
-                        detail=(
-                            "the loaded definitions do not compile under this schema: "
-                            f"{refusal}"
-                        ),
-                    ) from refusal
-                # The stored source already failed this build's compiler --
-                # there is no working library the schema could break. Refusing
-                # here would lock the host's own teach order (schema first,
-                # then definitions) out of the repair the boot path promised.
-                library = None
-                held_refusal = str(refusal)
+        # Under the teach lock like every other world writer: this reads the
+        # held source and swaps the world across an await, and interleaving
+        # with a definitions save would revert whichever landed first.
+        async with s.teach:
+            source = s.world.source if s.world is not None else None
+            library = s.world.library if s.world is not None else None
+            held_refusal: str | None = None
+            if source:
+                try:
+                    library = compile_source(source, schema)
+                except DefinitionError as refusal:
+                    if library is not None:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                "the loaded definitions do not compile under this schema: "
+                                f"{refusal}"
+                            ),
+                        ) from refusal
+                    # The stored source already failed this build's compiler --
+                    # there is no working library the schema could break. Refusing
+                    # here would lock the host's own teach order (schema first,
+                    # then definitions) out of the repair the boot path promised.
+                    library = None
+                    held_refusal = str(refusal)
 
-        document = body.model_dump()
-        await db.save_world(s.pool, document, source)
-        s.world = World(
-            schema=schema,
-            schema_document=document,
-            source=source,
-            library=library,
-            refusal=held_refusal,
-        )
+            document = body.model_dump()
+            await db.save_world(s.pool, document, source)
+            s.world = World(
+                schema=schema,
+                schema_document=document,
+                source=source,
+                library=library,
+                refusal=held_refusal,
+            )
         return Ack(ok=True)
 
     @app.get("/definitions", response_model=LibraryOut, dependencies=[auth])
@@ -265,18 +274,22 @@ def create_app(
             )
         # The compile, adoption rules included, is `compile_for_teach` --
         # shared with the built-in editor so a source its dry-run check
-        # accepts is a source this door accepts, and vice versa.
-        try:
-            library, schema, document = compile_for_teach(body.source, s.world)
-        except DefinitionError as refusal:
-            raise HTTPException(status_code=422, detail=str(refusal)) from refusal
-        await db.save_world(s.pool, document, body.source)
-        s.world = World(
-            schema=schema,
-            schema_document=document,
-            source=body.source,
-            library=library,
-        )
+        # accepts is a source this door accepts, and vice versa. The teach
+        # lock serialises the read-compile-write against every other world
+        # writer; without it two teaches interleaving across the save's
+        # await would each persist over the other's swap.
+        async with s.teach:
+            try:
+                library, schema, document, _adopted = compile_for_teach(body.source, s.world)
+            except DefinitionError as refusal:
+                raise HTTPException(status_code=422, detail=str(refusal)) from refusal
+            await db.save_world(s.pool, document, body.source)
+            s.world = World(
+                schema=schema,
+                schema_document=document,
+                source=body.source,
+                library=library,
+            )
         return _library_out(library)
 
     # ----------------------------------------------------------- settings --

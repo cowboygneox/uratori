@@ -47,7 +47,7 @@ from ..engine.buckets import measure_of
 from ..engine.project import format_value
 from ..facade import DEFAULT_TRAILING
 from ..lang.ast import ByAge, ByComposite, ByField, FigureUnit, IndexBy, IndexField
-from ..lang.lex import DefinitionError
+from ..lang.lex import DefinitionError, lex
 from ..lang.plan import CompiledFactField, CompiledIndex, CompiledMeasure, Library
 from ..lang.source import declaration_prose, declaration_source
 from ..results import Availability, Evidence, Ok, Result, Unavailable
@@ -176,6 +176,8 @@ class SourceOut(BaseModel):
 
 
 class CheckIn(BaseModel):
+    """A candidate source for the dry-run compile -- checked, never stored."""
+
     source: str
 
 
@@ -193,11 +195,13 @@ class RefusalOut(BaseModel):
 class DeclChange(BaseModel):
     """One declaration's fate under a candidate source.
 
-    `changed` means the engine would treat it as moved: its version hash
+    `changed` means the saved text would serve differently: its version hash
     moved (which happens when a group, filter or measure it reads moved,
     even if its own lines are untouched -- the diff must tell the cascade's
-    truth) or its calculation text moved. Display and prose edits move no
-    plan and are reported `unchanged`; the save still stores them.
+    truth) or its own tokens moved. Display and prose edits move neither and
+    are reported `unchanged`; the save still stores them. A label IS part of
+    what serves (`changed`), yet owes no pass -- that split is `SaveOut.stale`'s
+    to state, not this one's.
     """
 
     name: str
@@ -208,6 +212,12 @@ class DeclChange(BaseModel):
 class CheckOut(BaseModel):
     ok: bool
     refusal: RefusalOut | None
+    adoption: str | None = None
+    """Stated when the candidate source declares facts over a schema that
+    declared kinds: the save retires the schema's kinds, name fields and url
+    fields, which no per-declaration diff row can carry. A change the page
+    does not state is a change the reader cannot review."""
+
     declarations: list[DeclChange]
 
 
@@ -220,16 +230,34 @@ class SaveIn(BaseModel):
 
 
 class SaveOut(BaseModel):
+    """What the save did: the new text's fingerprint (the `expected` of the
+    next save), the adoption sentence when the schema's kinds retired, and
+    the same per-declaration diff the check serves."""
+
     ok: bool
     fingerprint: str
+    adoption: str | None = None
+    stale: bool
+    """Whether this save leaves tenants owing a pass. True exactly when
+    stored state is now behind the text: a figure moved (its values and
+    pointers are stored) or the index set's hash moved (memberships are
+    stored). A changed label or reading changes nothing stored -- it serves
+    its new text immediately -- and a page that offered "run a pass" for it
+    would send every tenant through a rebuild that moves nothing."""
+
     declarations: list[DeclChange]
 
 
 class EditRunIn(BaseModel):
+    """A pass with no new facts; `full` rebuilds everything from storage."""
+
     full: bool = False
 
 
 class EditRunOut(BaseModel):
+    """The pass, reduced to what the saved panel's one line needs; the full
+    record lands in the activity log like every other pass."""
+
     ok: bool
     changed: int
     rebuilt: list[str]
@@ -430,9 +458,12 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
 
     def _granted() -> None:
         """The editor's whole gate. Request-time rather than mount-time, so a
-        read-only deployment still serves the source (it already serves every
-        declaration's text) and answers a write attempt with the fix instead
-        of a 404 that reads as a broken page."""
+        read-only deployment still serves the source and answers a write
+        attempt with the fix instead of a 404 that reads as a broken page.
+        The open GET is a real decision, not an oversight: with a compiling
+        world it serves nothing the declaration pages don't already, and
+        with a boot-refused world -- where those pages go bare -- it is the
+        repair path's only window onto the stored text."""
         if not edit:
             raise HTTPException(
                 status_code=403,
@@ -524,14 +555,18 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         """
         s = _state(request)
         _granted()
+        _within_reason(body.source)
         if s.world is None:
             raise HTTPException(status_code=409, detail="No schema has been declared yet")
         try:
-            library, _schema, _document = compile_for_teach(body.source, s.world)
+            library, _schema, _document, adopted = compile_for_teach(body.source, s.world)
         except DefinitionError as refusal:
             return CheckOut(ok=False, refusal=_refusal_out(refusal), declarations=[])
         return CheckOut(
-            ok=True, refusal=None, declarations=_changes(s.world.library, library)
+            ok=True,
+            refusal=None,
+            adoption=_ADOPTION if adopted else None,
+            declarations=_changes(s.world.library, library),
         )
 
     @ui.put("/ui/api/source", response_model=SaveOut, include_in_schema=False)
@@ -542,35 +577,49 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         overwrite each other."""
         s = _state(request)
         _granted()
-        if s.world is None:
-            raise HTTPException(status_code=409, detail="No schema has been declared yet")
-        held = s.world
-        if body.expected != _fingerprint(held.source or ""):
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "The stored source has changed since this editor loaded it. "
-                    "Reload, reapply the edit, and save again -- saving now would "
-                    "silently overwrite what the other author taught."
-                ),
+        _within_reason(body.source)
+        # The whole read-check-compile-write rides the teach lock: the save
+        # awaits the database between reading the fingerprint and swapping
+        # the world, and two saves interleaving across that await would BOTH
+        # pass the edited-since-loaded check -- the silent overwrite the
+        # fingerprint exists to refuse.
+        async with s.teach:
+            if s.world is None:
+                raise HTTPException(status_code=409, detail="No schema has been declared yet")
+            held = s.world
+            if body.expected != _fingerprint(held.source or ""):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "The stored source has changed since this editor loaded it. "
+                        "Reload, reapply the edit, and save again -- saving now would "
+                        "silently overwrite what the other author taught."
+                    ),
+                )
+            try:
+                library, schema, document, adopted = compile_for_teach(body.source, held)
+            except DefinitionError as refusal:
+                raise HTTPException(
+                    status_code=422, detail=_refusal_out(refusal).model_dump()
+                ) from refusal
+            # The diff against what was taught before, not after: the response
+            # is the review record of what this save did.
+            changes = _changes(held.library, library)
+            stale = _owes_a_pass(held.library, library, changes)
+            await db.save_world(s.pool, document, body.source)
+            s.world = World(
+                schema=schema,
+                schema_document=document,
+                source=body.source,
+                library=library,
             )
-        try:
-            library, schema, document = compile_for_teach(body.source, held)
-        except DefinitionError as refusal:
-            raise HTTPException(
-                status_code=422, detail=_refusal_out(refusal).model_dump()
-            ) from refusal
-        # The diff against what was taught before, not after: the response is
-        # the review record of what this save did.
-        changes = _changes(held.library, library)
-        await db.save_world(s.pool, document, body.source)
-        s.world = World(
-            schema=schema,
-            schema_document=document,
-            source=body.source,
-            library=library,
+        return SaveOut(
+            ok=True,
+            fingerprint=_fingerprint(body.source),
+            adoption=_ADOPTION if adopted else None,
+            stale=stale,
+            declarations=changes,
         )
-        return SaveOut(ok=True, fingerprint=_fingerprint(body.source), declarations=changes)
 
     @ui.post(
         "/ui/api/tenants/{tenant}/runs",
@@ -585,6 +634,15 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         s = _state(request)
         _granted()
         world, library = ready(s)
+        listed = {row["tenant"] for row in await db.list_tenants(s.pool)}
+        if tenant not in listed:
+            # Refused rather than run: a pass for a tenant nobody has pushed
+            # facts for computes nothing, writes a run-log row that makes the
+            # name look real, and leaks a per-name lock for the process's
+            # lifetime. Tenants are created by pushing facts through the API.
+            raise HTTPException(
+                status_code=404, detail=f"No tenant called {tenant} holds any facts here"
+            )
         async with s.lock_for(tenant):
             settings = await db.load_settings(s.pool, tenant)
             report = await facade_for(s, world, library).run(tenant, settings, full=body.full)
@@ -1297,6 +1355,31 @@ def _fill_moved_by(declarations: list[DeclarationOut]) -> None:
         )
 
 
+_ADOPTION = (
+    "The source declares its own facts, so this save retires the schema's "
+    "declared kinds, name fields and url fields: record names and links come "
+    "from the fact declarations alone from here on."
+)
+
+_SOURCE_CAP = 2_000_000
+"""Two megabytes of definitions -- fifty times the largest real corpus --
+before the editor refuses to compile. The check runs on every pause in
+typing on the single-worker event loop; without a ceiling, one pasted blob
+stalls every pass and socket on the deployment."""
+
+
+def _within_reason(source: str) -> None:
+    if len(source) > _SOURCE_CAP:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"This source is {len(source):,} characters; the editor compiles "
+                f"at most {_SOURCE_CAP:,}. Definitions that size belong in files "
+                "taught through PUT /definitions."
+            ),
+        )
+
+
 def _fingerprint(source: str) -> str:
     """Names a source text, for the editor's edited-since-loaded check. The
     same twelve-hex convention as declaration versions, over the raw text."""
@@ -1373,7 +1456,8 @@ def _changes(old: Library | None, new: Library) -> list[DeclChange]:
             out.append(DeclChange(name=name, kind=kind, change="new"))
             continue
         moved = version != before[name][1] or (
-            declaration_source(old, name) != declaration_source(new, name)
+            _calc_tokens(declaration_source(old, name))
+            != _calc_tokens(declaration_source(new, name))
         )
         out.append(
             DeclChange(name=name, kind=kind, change="changed" if moved else "unchanged")
@@ -1382,6 +1466,47 @@ def _changes(old: Library | None, new: Library) -> list[DeclChange]:
         if name not in after:
             out.append(DeclChange(name=name, kind=kind, change="removed"))
     return sorted(out, key=lambda change: change.name)
+
+
+def _owes_a_pass(
+    old: Library | None, new: Library, changes: list[DeclChange]
+) -> bool:
+    """Whether tenants' stored state is now behind the saved text.
+
+    Two stores exist: figure values/pointers, and the bucketed memberships.
+    So a pass is owed exactly when a figure's version moved (new, changed or
+    removed) or the index set's hash moved -- the same hash the engine
+    compares at its next pass. Readings, projections and summaries store
+    nothing (computed at serve time), and an index label is deliberately
+    outside the index hash: those serve their new text immediately, and
+    claiming they leave tenants behind-deploy would invite a rebuild that
+    moves nothing.
+    """
+    from ..engine.engine import _index_set_version
+
+    if old is None:
+        return True
+    if any(c.kind == "figure" and c.change != "unchanged" for c in changes):
+        return True
+    return _index_set_version(old) != _index_set_version(new)
+
+
+def _calc_tokens(text: str | None) -> object:
+    """A declaration's calculation, as the lexer reads it.
+
+    Compared instead of the raw text because the raw text over-reports: a
+    re-spaced expression or a comment slipped into the body changes no token
+    and moves no version, and a diff calling that `changed` makes the saved
+    panel claim a behind-deploy that will never happen -- and offer a pass
+    that recomputes nothing. Text the lexer refuses falls back to the text
+    itself; a fragment that cannot lex has no fairer identity than its bytes.
+    """
+    if text is None:
+        return None
+    try:
+        return [(token.kind, token.value) for token in lex(text)]
+    except DefinitionError:
+        return text
 
 
 def _grouping_kind(index: CompiledIndex) -> Literal["group", "filter"]:

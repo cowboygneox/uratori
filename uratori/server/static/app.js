@@ -1218,12 +1218,18 @@ async function editorView(params) {
 
   let base = page.fingerprint;
   let restored = false;
+  let orphan = null;
   let text = page.source;
   if (draft && draft.base === base && draft.text !== page.source) {
     text = draft.text;
     restored = true;
   } else if (draft && draft.base !== base) {
-    draft = null; // drafted against text that is gone; keeping it would lie
+    // Drafted against text that has since been replaced. Dropping it
+    // silently would eat work the beforeunload guard promised to protect;
+    // restoring it silently would hide that the ground moved. So it is
+    // held aside and the choice is stated.
+    orphan = draft;
+    draft = null;
   }
 
   // ---- the surface -------------------------------------------------------
@@ -1361,23 +1367,31 @@ async function editorView(params) {
       else vocab.names.set(declaration.name, declaration.kind);
     }
     if (!moves.length) {
-      report.replaceChildren(el('p', { class: 'faint' },
-        source === page.source && base === page.fingerprint
-          ? 'Unchanged from what is taught.'
-          : 'No calculation moves — the edit is prose or display only.'));
+      // Through el(), never bare replaceChildren with a possible null:
+      // replaceChildren stringifies a null into the visible word.
+      report.replaceChildren(el('div', {},
+        checked.adoption ? el('p', { class: 'finding' }, checked.adoption) : null,
+        el('p', { class: 'faint' },
+          !checked.declarations.length && source.trim() === ''
+            ? 'Nothing is taught yet — write the first definitions and save.'
+            : source === page.source && base === page.fingerprint
+              ? 'Unchanged from what is taught.'
+              : 'No calculation moves — the edit is prose or display only.')));
       return;
     }
     report.replaceChildren(el('div', { class: 'ed-diff' },
+      checked.adoption ? el('p', { class: 'finding' }, checked.adoption) : null,
       el('p', { class: 'dim' }, 'What a save would change:'),
       el('ul', {}, moves.map((d) => el('li', {},
         el('span', { class: `badge change-${d.change}` }, d.change), ' ',
-        el('span', { class: `badge ${d.kind === 'summary' ? 'summary' : d.kind}` }, d.kind), ' ',
+        el('span', { class: `badge ${d.kind}` }, d.kind), ' ',
         el('span', { class: 'mono' }, d.name)))),
       untouched ? el('p', { class: 'faint' }, `${untouched} declarations untouched.`) : null));
   }
 
   // ---- saving ------------------------------------------------------------
   async function save() {
+    if (saveButton.disabled) return; // Cmd+S while a save is in flight
     completionClose();
     saveButton.disabled = true;
     saveButton.textContent = 'saving…';
@@ -1431,10 +1445,18 @@ async function editorView(params) {
       return;
     }
     base = out.body.fingerprint;
-    draft = null;
-    discard.hidden = true;
     page.source = source;
     page.fingerprint = base;
+    // Keystrokes that landed while the save was in flight are NOT in what
+    // was saved; forgetting them here would disarm the unsaved-draft guard
+    // while the screen still shows text the server never received.
+    if (input.value === source) {
+      draft = null;
+      discard.hidden = true;
+    } else {
+      draft = { base, text: input.value };
+      discard.hidden = false;
+    }
     // The library moved; the other tabs must not keep describing the old
     // one, and the stale "what a save would change" panel must re-check.
     await loadWorld();
@@ -1446,15 +1468,30 @@ async function editorView(params) {
   async function savedPanel(saved) {
     const moves = saved.declarations.filter((d) => d.change !== 'unchanged');
     const tenants = await get('tenants');
-    const names = tenants.ok ? tenants.body.tenants.map((t) => t.tenant) : [];
+    if (!tenants.ok) {
+      // A failed read is not an empty world: saying "no tenants" here would
+      // be a fabricated absence over a fetch that never answered.
+      return el('div', { class: 'notice ed-saved' },
+        el('p', {}, 'Saved.'),
+        problem(tenants, 'Could not list the tenants to offer a pass:'));
+    }
+    const names = tenants.body.tenants.map((t) => t.tenant);
+    // `stale` is the server's verdict, not a client inference from the diff:
+    // a changed label serves immediately and owes no pass, and offering one
+    // would send every tenant through a rebuild that moves nothing.
     return el('div', { class: 'notice ed-saved' },
+      saved.adoption ? el('p', { class: 'finding' }, saved.adoption) : null,
       el('p', {},
-        moves.length
+        saved.stale
           ? `Saved. ${moves.length} declaration${moves.length === 1 ? '' : 's'} moved — `
             + 'every tenant answers behind-deploy until its next pass. '
             + 'Run one now, or let the next facts push do it:'
-          : 'Saved. No calculation moved, so nothing needs recomputing.'),
-      moves.length && names.length
+          : moves.length
+            ? `Saved. ${moves.length} declaration${moves.length === 1 ? '' : 's'} moved and `
+              + `${moves.length === 1 ? 'serves its' : 'serve their'} new text immediately `
+              + '— nothing stored needs recomputing.'
+            : 'Saved. No calculation moved, so nothing needs recomputing.'),
+      saved.stale && names.length
         ? el('div', { class: 'ed-runs' }, names.map((name) => {
             const line = el('span', {});
             const button = el('button', {
@@ -1480,7 +1517,7 @@ async function editorView(params) {
             return el('span', { class: 'ed-run' }, button, line);
           }))
         : null,
-      moves.length && !names.length
+      saved.stale && !names.length
         ? el('p', { class: 'faint' }, 'No tenants yet, so there is nothing to recompute.')
         : null);
   }
@@ -1568,6 +1605,8 @@ async function editorView(params) {
       // Band ladders compare `value`; projection ladders and omits compare
       // fields and bound names. The compiler is the judge of which.
       list = [...(kindOf ? fieldsOf(kindOf) : []), ['value', 'kw']];
+    } else if (prev === 'is') {
+      list = [['set', 'kw'], ['not set', 'kw'], ['nothing', 'kw'], ['something', 'kw']];
     } else if (prev === 'unit') {
       list = FIG_UNITS.map((word) => [word, 'kw']);
     } else if (prev === 'as') {
@@ -1640,13 +1679,25 @@ async function editorView(params) {
       el('span', { class: 'mono' }, item.label), ' ',
       el('span', { class: `badge ${item.type}` }, item.type))));
     // Monospace makes the caret's place arithmetic: column times one glyph.
+    // Clamped to the visible pane, flipped above the caret when the room
+    // below has run out -- an off-screen popup would still be swallowing
+    // Enter and the arrows for completions nobody can see.
     const before = input.value.slice(0, input.selectionStart);
     const lineNo = (before.match(/\n/g) || []).length;
     const column = wordStart - (before.lastIndexOf('\n') + 1);
     const pad = 12; // .ed-hl padding, kept in step with the stylesheet
-    popup.style.left = `${Math.max(0, pad + column * charWidth - input.scrollLeft)}px`;
-    popup.style.top = `${pad + (lineNo + 1) * lineHeight - input.scrollTop}px`;
     popup.hidden = false;
+    const caretTop = pad + lineNo * lineHeight - input.scrollTop;
+    let top = caretTop + lineHeight;
+    if (top + popup.offsetHeight > input.clientHeight && caretTop - popup.offsetHeight >= 0) {
+      top = caretTop - popup.offsetHeight;
+    }
+    if (top < 0 || top > input.clientHeight) { completionClose(); return; }
+    const left = Math.min(
+      Math.max(0, pad + column * charWidth - input.scrollLeft),
+      Math.max(0, input.clientWidth - popup.offsetWidth - 4));
+    popup.style.left = `${left}px`;
+    popup.style.top = `${top}px`;
   }
 
   function completionMove(delta) {
@@ -1686,10 +1737,13 @@ async function editorView(params) {
     scheduleCheck();
   }
 
-  input.addEventListener('input', () => { onEdit(); completionOpen(false); });
+  let tabLeaves = false; // armed by Escape, spent by the next key or click
+  input.addEventListener('input', () => { tabLeaves = false; onEdit(); completionOpen(false); });
+  input.addEventListener('mousedown', () => { tabLeaves = false; });
   input.addEventListener('scroll', () => { sync(); completionClose(); });
   input.addEventListener('blur', () => completionClose());
   input.addEventListener('keydown', (event) => {
+    if (event.key !== 'Tab' && event.key !== 'Escape') tabLeaves = false;
     if (!popup.hidden) {
       if (event.key === 'ArrowDown') { event.preventDefault(); completionMove(1); return; }
       if (event.key === 'ArrowUp') { event.preventDefault(); completionMove(-1); return; }
@@ -1704,20 +1758,32 @@ async function editorView(params) {
     if (event.key === 's' && (event.metaKey || event.ctrlKey)) {
       event.preventDefault(); save(); return;
     }
-    if (event.key === 'Tab' && !event.shiftKey) {
-      event.preventDefault();
-      insertText(input.selectionStart, input.selectionEnd, '    ');
+    if (event.key === 'Escape') {
+      // The way out of the trap: Escape arms one focus-moving Tab, so a
+      // keyboard user is never stuck inside the textarea (Tab otherwise
+      // indents, as every code editor's does).
+      tabLeaves = true;
       return;
     }
-    if (event.key === 'Tab' && event.shiftKey) {
+    if (event.key === 'Tab' && tabLeaves) return;
+    if (event.key === 'Tab') {
       event.preventDefault();
-      const caret = input.selectionStart;
-      const lineStart = input.value.lastIndexOf('\n', caret - 1) + 1;
-      const eaten = /^ {1,4}/.exec(input.value.slice(lineStart, lineStart + 4));
-      if (eaten) {
-        insertText(lineStart, lineStart + eaten[0].length, '');
-        input.setSelectionRange(Math.max(lineStart, caret - eaten[0].length),
-          Math.max(lineStart, caret - eaten[0].length));
+      const from = input.selectionStart;
+      const to = input.selectionEnd;
+      if (from !== to || event.shiftKey) {
+        // Block indent/dedent: a Tab that replaced the selection with four
+        // spaces would be the one editing gesture that deletes work.
+        const blockStart = input.value.lastIndexOf('\n', from - 1) + 1;
+        const block = input.value.slice(blockStart, to);
+        const shifted = block.split('\n')
+          .map((line) => event.shiftKey ? line.replace(/^ {1,4}/, '') : `    ${line}`)
+          .join('\n');
+        if (shifted !== block) {
+          insertText(blockStart, to, shifted);
+          input.setSelectionRange(blockStart, blockStart + shifted.length);
+        }
+      } else {
+        insertText(from, to, '    ');
       }
       return;
     }
@@ -1761,7 +1827,7 @@ async function editorView(params) {
   scheduleCheck();
 
   return [
-    el('div', { class: 'title-block' },
+    el('div', { class: 'title-block ed-title' },
       el('div', { class: 'tb-head' }, el('h1', {}, 'Editor')),
       el('div', { class: 'tb-doc' }, el('p', { class: 'prose' },
         'The definitions as stored, editable. Every keystroke is checked by ',
@@ -1776,6 +1842,26 @@ async function editorView(params) {
       ? el('p', { class: 'faint' },
           'An unsaved draft from this tab was restored; “discard draft” returns ',
           'to the text as stored.')
+      : null,
+    orphan
+      ? (() => {
+          const banner = el('div', { class: 'notice' },
+            el('p', {},
+              'An unsaved draft from this tab edited text that has since been ',
+              'replaced by another save.'),
+            el('div', { class: 'ed-runs' },
+              el('button', {
+                onclick: () => {
+                  input.value = orphan.text;
+                  banner.remove();
+                  onEdit(); // retargets the draft at the current base
+                },
+              }, 'Restore the draft over the current text'),
+              el('button', {
+                onclick: () => { orphan = null; banner.remove(); },
+              }, 'Discard it')));
+          return banner;
+        })()
       : null,
     bar, shell, report, outcome,
   ];

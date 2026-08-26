@@ -21,6 +21,7 @@ investigation tool rather than a status page:
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -1789,8 +1790,18 @@ async def test_check_reports_a_syntax_refusal_with_line_and_column(
         assert out["ok"] is False
         assert out["declarations"] == []
         assert out["refusal"]["line"] == 2
-        assert isinstance(out["refusal"]["column"], int)
+        assert out["refusal"]["column"] == bad.split("\n")[1].index('"'), (
+            "the caret goes where the refusing token starts; any other integer "
+            "points a reader at the wrong character"
+        )
         assert out["refusal"]["message"]
+
+        # A refused check is still a dry run: the draft it refused must not
+        # have touched the stored world -- a check that persisted what it
+        # just refused would take the deployment unready.
+        assert (await http.get("/ui/api/source")).json()["source"] == COURIER_SOURCE
+        world = (await http.get("/ui/api/world")).json()
+        assert len(world["declarations"]) == 4 and world["refusal"] is None
 
 
 async def test_check_reports_a_checker_refusal_by_line_alone(pg_dsn: str) -> None:
@@ -1826,14 +1837,17 @@ async def test_check_classifies_what_a_save_would_change(pg_dsn: str) -> None:
 
         out = (await http.post("/ui/api/check", json={"source": EDITED_SOURCE})).json()
         assert out["ok"] is True and out["refusal"] is None
-        changes = {d["name"]: d["change"] for d in out["declarations"]}
+        changes = {d["name"]: (d["kind"], d["change"]) for d in out["declarations"]}
         assert changes == {
-            "shop_order.carried_by": "unchanged",
-            "shop_order.open": "changed",
-            "shop_courier.carrying": "changed",
-            "shop_courier.idle": "new",
-            "shop_courier.load_band": "removed",
-        }
+            "shop_order.carried_by": ("group", "unchanged"),
+            "shop_order.open": ("filter", "changed"),
+            "shop_courier.carrying": ("figure", "changed"),
+            "shop_courier.idle": ("figure", "new"),
+            "shop_courier.load_band": ("figure", "removed"),
+        }, (
+            "a removed entry carries the kind it HAD -- the candidate source "
+            "has no answer, and the reviewer is being told what is being lost"
+        )
 
         # A check is a dry run: nothing was taught, nothing was stored.
         held = (await http.get("/ui/api/source")).json()
@@ -1912,6 +1926,26 @@ async def test_a_save_that_does_not_compile_changes_nothing(pg_dsn: str) -> None
         assert again["source"] == COURIER_SOURCE
         assert again["fingerprint"] == held["fingerprint"]
 
+        # A checker refusal through the SAVE path carries its line and a null
+        # column, same as through check -- the editor renders both doors'
+        # refusals with one code path.
+        unresolved = (
+            "# Sums a set nobody declared.\n"
+            "figure shop_courier.x:\n"
+            '    display "x"\n'
+            "    depends:\n"
+            "        mine = shop_order.nowhere:{shop_courier}\n"
+            "    calculate:\n"
+            "        count(mine)\n"
+        )
+        refused = await http.put(
+            "/ui/api/source",
+            json={"source": unresolved, "expected": held["fingerprint"]},
+        )
+        assert refused.status_code == 422
+        detail = refused.json()["detail"]
+        assert detail["line"] == 5 and detail["column"] is None
+
 
 async def test_two_editors_cannot_silently_overwrite_each_other(
     pg_dsn: str,
@@ -1944,28 +1978,81 @@ async def test_the_editor_can_declare_facts_and_adopt_the_world(
     """A fact-bearing save through the editor is the same adoption
     `PUT /definitions` performs: the schema's kinds retire, the source's fact
     declarations become the world -- and the completion payload now knows the
-    fields, nested ones flattened to the dotted paths definitions write."""
-    async with serve(pg_dsn) as http:
-        await _teach(http)
+    fields, nested ones flattened to the dotted paths definitions write.
 
-        checked = (await http.post("/ui/api/check", json={"source": FACT_SOURCE})).json()
-        assert checked["ok"] is True, checked
+    Two claims a lighter test missed. The retirement must be STATED -- it is
+    a change no per-declaration diff row carries, and record names and links
+    hang on it. And the retired schema must be what is PERSISTED: a save
+    that swapped memory but stored the old kind-declaring document would
+    answer 200 and brick the deployment at its next boot, when the stored
+    source and the stored schema refuse each other."""
+    name = f"uratori_ui_{os.urandom(4).hex()}"
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await connection.execute(f"create schema {name}")
+    finally:
+        await connection.close()
+    try:
+        first = create_app(dsn=pg_dsn, pg_schema=name, token=None, version="test")
+        async with first.router.lifespan_context(first):
+            transport = httpx.ASGITransport(app=first)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://uratori"
+            ) as http:
+                await _teach(http)
 
-        held = (await http.get("/ui/api/source")).json()
-        saved = await http.put(
-            "/ui/api/source",
-            json={"source": FACT_SOURCE, "expected": held["fingerprint"]},
-        )
-        assert saved.status_code == 200, saved.text
+                checked = (
+                    await http.post("/ui/api/check", json={"source": FACT_SOURCE})
+                ).json()
+                assert checked["ok"] is True, checked
+                assert checked["adoption"] and "retires" in checked["adoption"]
+                fated = {d["name"]: (d["kind"], d["change"]) for d in checked["declarations"]}
+                assert fated["shop_courier"] == ("fact", "new")
+                assert fated["shop_order"] == ("fact", "new")
 
-        page = (await http.get("/ui/api/source")).json()
-        assert page["kinds"] == {
-            "shop_courier": ["name"],
-            "shop_order": ["courier_id", "ref", "status", "tags.tag", "url"],
-        }
-        world = (await http.get("/ui/api/world")).json()
-        assert sorted(world["kinds"]) == ["shop_courier", "shop_order"]
-        assert world["name_fields"]["shop_order"] == "ref"
+                held = (await http.get("/ui/api/source")).json()
+                saved = await http.put(
+                    "/ui/api/source",
+                    json={"source": FACT_SOURCE, "expected": held["fingerprint"]},
+                )
+                assert saved.status_code == 200, saved.text
+                assert saved.json()["adoption"], (
+                    "the save is the moment of retirement; saying it only at "
+                    "check time lets a direct save pass silently"
+                )
+
+                schema_doc = (await http.get("/schema")).json()
+                assert schema_doc["kinds"] == [], (
+                    "the schema's kinds retired with the save"
+                )
+                page = (await http.get("/ui/api/source")).json()
+                assert page["kinds"] == {
+                    "shop_courier": ["name"],
+                    "shop_order": ["courier_id", "ref", "status", "tags.tag", "url"],
+                }
+                world = (await http.get("/ui/api/world")).json()
+                assert sorted(world["kinds"]) == ["shop_courier", "shop_order"]
+                assert world["name_fields"]["shop_order"] == "ref"
+
+        second = create_app(dsn=pg_dsn, pg_schema=name, token=None, version="test")
+        async with second.router.lifespan_context(second):
+            transport = httpx.ASGITransport(app=second)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://uratori"
+            ) as http:
+                health = (await http.get("/health")).json()
+                assert health["ready"] is True, (
+                    "the retired schema was persisted with the fact-taught "
+                    "source; anything else refuses itself at the next boot"
+                )
+                world = (await http.get("/ui/api/world")).json()
+                assert sorted(world["kinds"]) == ["shop_courier", "shop_order"]
+    finally:
+        connection = await asyncpg.connect(pg_dsn)
+        try:
+            await connection.execute(f"drop schema {name} cascade")
+        finally:
+            await connection.close()
 
 
 async def test_the_editor_repairs_a_world_this_build_refused(pg_dsn: str) -> None:
@@ -2088,6 +2175,21 @@ async def test_a_pass_can_be_run_from_the_editor(pg_dsn: str) -> None:
 
         page = (await http.get("/ui/api/tenants/t1/activity?quiet=1")).json()
         assert page["runs"][0]["trigger"] == "run"
+        assert page["runs"][0]["full"] is False
+
+        full = await http.post("/ui/api/tenants/t1/runs", json={"full": True})
+        assert full.status_code == 200, full.text
+        newest = (await http.get("/ui/api/tenants/t1/activity?quiet=1")).json()["runs"][0]
+        assert newest["full"] is True, (
+            "a silently downgraded full rebuild, logged as partial, is the "
+            "kind of lie the run log exists to prevent"
+        )
+
+        nobody = await http.post("/ui/api/tenants/nobody/runs", json={})
+        assert nobody.status_code == 404, (
+            "a pass for a tenant nobody has fed computes nothing and forges "
+            "an activity row that makes the name look real"
+        )
 
 
 async def test_editing_is_a_grant_not_a_default_beside_a_token(
@@ -2099,8 +2201,10 @@ async def test_editing_is_a_grant_not_a_default_beside_a_token(
     async with serve(pg_dsn, token="secret", ui=True) as http:
         await _teach(http, headers={"Authorization": "Bearer secret"})
 
-        page = (await http.get("/ui/api/source")).json()
-        assert page["editable"] is False, "reading the source stays fine"
+        read = await http.get("/ui/api/source")
+        assert read.status_code == 200, "reading the source stays fine"
+        page = read.json()
+        assert page["editable"] is False
         assert (await http.get("/ui/api/world")).json()["editable"] is False
 
         checked = await http.post("/ui/api/check", json={"source": COURIER_SOURCE})
@@ -2162,3 +2266,244 @@ def test_uratori_ui_edit_env_spellings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("URATORI_UI_EDIT", raising=False)
     with pytest.raises(RuntimeError, match="URATORI_UI_EDIT"):
         create_app(dsn="postgres://unused", token="secret", ui=False, ui_edit=True)
+
+
+async def test_a_cosmetic_edit_is_reported_as_touching_nothing(pg_dsn: str) -> None:
+    """Re-spaced expressions, comments slipped into a body, a reworded
+    display: none of it moves a version or a token, so the diff must say
+    `unchanged` -- a diff that cried `changed` here would send the saved
+    panel claiming a behind-deploy that will never happen, and offering a
+    pass that recomputes nothing. The save still stores the new text."""
+    cosmetic = COURIER_SOURCE.replace(
+        'display "{value} orders in hand"', 'display "orders held: {value}"'
+    ).replace(
+        "        mine = shop_order.carried_by:{shop_courier} & shop_order.open",
+        "        # counted, not summed\n"
+        "        mine = shop_order.carried_by:{shop_courier}  &  shop_order.open",
+    )
+    assert cosmetic != COURIER_SOURCE
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+
+        out = (await http.post("/ui/api/check", json={"source": cosmetic})).json()
+        assert out["ok"] is True
+        assert {d["change"] for d in out["declarations"]} == {"unchanged"}
+
+        held = (await http.get("/ui/api/source")).json()
+        saved = await http.put(
+            "/ui/api/source", json={"source": cosmetic, "expected": held["fingerprint"]}
+        )
+        assert saved.status_code == 200, saved.text
+        assert {d["change"] for d in saved.json()["declarations"]} == {"unchanged"}
+        assert (await http.get("/ui/api/source")).json()["source"] == cosmetic
+
+
+async def test_simultaneous_saves_cannot_both_win(pg_dsn: str) -> None:
+    """Two editors, one loaded text, two saves in the same instant: exactly
+    one wins and the stored source is the winner's. The fingerprint check
+    reads process memory and the save awaits the database before swapping
+    it -- without serialisation, both requests pass the check inside that
+    window, both answer 200, and one author's work vanishes with no signal
+    anywhere. That silent overwrite is the one thing the fingerprint
+    contract exists to make impossible."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        fingerprint = (await http.get("/ui/api/source")).json()["fingerprint"]
+
+        first, second = await asyncio.gather(
+            http.put(
+                "/ui/api/source",
+                json={"source": EDITED_SOURCE, "expected": fingerprint},
+            ),
+            http.put(
+                "/ui/api/source",
+                json={"source": FACT_SOURCE, "expected": fingerprint},
+            ),
+        )
+        assert sorted([first.status_code, second.status_code]) == [200, 409], (
+            first.text + " / " + second.text
+        )
+        winner = EDITED_SOURCE if first.status_code == 200 else FACT_SOURCE
+        assert (await http.get("/ui/api/source")).json()["source"] == winner
+
+
+async def test_a_saves_fingerprint_names_the_text_it_stored(pg_dsn: str) -> None:
+    """Consecutive saves are the editor's normal life: each response's
+    fingerprint must open the door to the next save, and a no-op save must
+    say so -- everything unchanged, the fingerprint standing still."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        held = (await http.get("/ui/api/source")).json()
+
+        first = await http.put(
+            "/ui/api/source",
+            json={"source": EDITED_SOURCE, "expected": held["fingerprint"]},
+        )
+        assert first.status_code == 200, first.text
+        stamp = first.json()["fingerprint"]
+
+        again = await http.put(
+            "/ui/api/source", json={"source": EDITED_SOURCE, "expected": stamp}
+        )
+        assert again.status_code == 200, (
+            "the fingerprint a save answers must name the text it stored; "
+            "anything else 409s every save after the first: " + again.text
+        )
+        body = again.json()
+        assert body["fingerprint"] == stamp
+        assert {d["change"] for d in body["declarations"]} == {"unchanged"}
+
+
+async def test_check_and_save_without_a_schema_name_the_gap(pg_dsn: str) -> None:
+    async with serve(pg_dsn) as http:
+        checked = await http.post("/ui/api/check", json={"source": COURIER_SOURCE})
+        assert checked.status_code == 409
+        assert "schema" in checked.json()["detail"].lower()
+        saved = await http.put(
+            "/ui/api/source", json={"source": COURIER_SOURCE, "expected": "000000000000"}
+        )
+        assert saved.status_code == 409
+        assert "schema" in saved.json()["detail"].lower()
+        ran = await http.post("/ui/api/tenants/t1/runs", json={})
+        assert ran.status_code == 409, (
+            "a pass needs a taught world; the 409 says which step is missing"
+        )
+
+
+async def test_the_env_grant_is_honoured_not_just_parsed(
+    pg_dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The spelling test proves the env values parse; this proves they
+    GOVERN. An operator writing URATORI_UI_EDIT=off on an open server is
+    turning the editor off, and a build that parsed the flag and then
+    ignored it would ship that operator a writable UI."""
+    monkeypatch.setenv("URATORI_UI_EDIT", "off")
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        page = (await http.get("/ui/api/source")).json()
+        assert page["editable"] is False
+        refused = await http.post("/ui/api/check", json={"source": COURIER_SOURCE})
+        assert refused.status_code == 403
+
+    monkeypatch.setenv("URATORI_UI_EDIT", "on")
+    async with serve(pg_dsn, token="secret", ui=True) as http:
+        await _teach(http, headers={"Authorization": "Bearer secret"})
+        page = (await http.get("/ui/api/source")).json()
+        assert page["editable"] is True
+    monkeypatch.delenv("URATORI_UI_EDIT", raising=False)
+
+
+async def test_an_emptied_library_stays_taught_across_a_restart(pg_dsn: str) -> None:
+    """Saving an empty source is removing every declaration, and the server
+    answers ready with zero figures. The same stored state must answer the
+    same way after a restart -- a boot that quietly demoted the empty source
+    to "no definitions loaded" would make readiness depend on which side of
+    a restart you ask from."""
+    name = f"uratori_ui_{os.urandom(4).hex()}"
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await connection.execute(f"create schema {name}")
+    finally:
+        await connection.close()
+    try:
+        first = create_app(dsn=pg_dsn, pg_schema=name, token=None, version="test")
+        async with first.router.lifespan_context(first):
+            transport = httpx.ASGITransport(app=first)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://uratori"
+            ) as http:
+                await _teach(http)
+                held = (await http.get("/ui/api/source")).json()
+                saved = await http.put(
+                    "/ui/api/source", json={"source": "", "expected": held["fingerprint"]}
+                )
+                assert saved.status_code == 200, saved.text
+                assert {d["change"] for d in saved.json()["declarations"]} == {"removed"}
+                assert (await http.get("/health")).json()["ready"] is True
+
+        second = create_app(dsn=pg_dsn, pg_schema=name, token=None, version="test")
+        async with second.router.lifespan_context(second):
+            transport = httpx.ASGITransport(app=second)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://uratori"
+            ) as http:
+                assert (await http.get("/health")).json()["ready"] is True
+                page = (await http.get("/ui/api/source")).json()
+                assert page["source"] == "" and page["declarations"] == []
+    finally:
+        connection = await asyncpg.connect(pg_dsn)
+        try:
+            await connection.execute(f"drop schema {name} cascade")
+        finally:
+            await connection.close()
+
+
+async def test_a_source_beyond_reason_is_refused_not_compiled(pg_dsn: str) -> None:
+    """The check fires on every pause in typing, on the single-worker event
+    loop; one pasted blob without a ceiling stalls every pass and socket on
+    the deployment. 413 with the ceiling named, and nothing stored."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        blob = "# padding\n" * 300_000
+        checked = await http.post("/ui/api/check", json={"source": blob})
+        assert checked.status_code == 413
+        saved = await http.put(
+            "/ui/api/source", json={"source": blob, "expected": "000000000000"}
+        )
+        assert saved.status_code == 413
+        assert (await http.get("/ui/api/source")).json()["source"] == COURIER_SOURCE
+
+
+async def test_the_save_says_whether_a_pass_is_owed(pg_dsn: str) -> None:
+    """`stale` must agree with the engine's own behind-deploy verdict --
+    they are two views of one fact. A cosmetic edit owes nothing and the
+    membership stays served; a label edit changes what serves but stores
+    nothing, so it owes nothing either; a predicate edit moves the index
+    set and the membership honestly refuses until a pass runs. A `stale`
+    that disagreed with the membership state in either direction would
+    have the saved panel inviting rebuilds that move nothing, or promising
+    freshness over pages that answer behind-deploy."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        await _feed_couriers(http)
+
+        async def save(source: str) -> dict[str, Any]:
+            held = (await http.get("/ui/api/source")).json()
+            answer = await http.put(
+                "/ui/api/source", json={"source": source, "expected": held["fingerprint"]}
+            )
+            assert answer.status_code == 200, answer.text
+            return dict(answer.json())
+
+        async def membership_ok() -> bool:
+            page = (
+                await http.get("/ui/api/tenants/t1/membership/shop_order.open")
+            ).json()
+            return bool(page["state"]["ok"])
+
+        cosmetic = COURIER_SOURCE.replace(
+            'display "{value} orders in hand"', 'display "orders carried: {value}"'
+        )
+        saved = await save(cosmetic)
+        assert saved["stale"] is False
+        assert await membership_ok(), (
+            "nothing stored moved, so the stored membership still serves"
+        )
+
+        labelled = cosmetic.replace(
+            'filter shop_order.open where status != "delivered"',
+            'filter shop_order.open where status != "delivered" label "open"',
+        )
+        saved = await save(labelled)
+        assert saved["stale"] is (not await membership_ok()), (
+            "stale and the membership's behind-deploy verdict are two views "
+            "of one fact and may not disagree"
+        )
+
+        flipped = labelled.replace('status != "delivered"', 'status == "delivered"')
+        saved = await save(flipped)
+        assert saved["stale"] is True
+        assert not await membership_ok(), (
+            "the predicate moved the index set; serving the old membership "
+            "as current would show records matching a predicate they do not"
+        )
