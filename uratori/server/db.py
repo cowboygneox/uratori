@@ -1,6 +1,9 @@
 """The server's own database: the engine's tables, plus what makes it a service.
 
-Three server-only tables sit beside the engine's four:
+The server-only tables sit beside the engine's own (counted in neither
+place on purpose -- a number here rots the day either side grows a table;
+`_SERVER_SQL` below and the store's `SCHEMA_SQL` are the lists). The three
+that carry decisions:
 
 - `uratori_meta` -- the ownership marker. The engine's table names are generic
   enough to exist in other products (the project this grew out of has a
@@ -502,7 +505,7 @@ async def page_facts(
 
 # ------------------------------------------------------------ membership --
 #
-# Read-only views over the engine's own figure_index and index_state tables,
+# Read-only views over the engine's own figure_index and index_built tables,
 # for the UI's drill-down. They live here rather than on EngineStore because
 # they are presentation reads (paged, counted, joined to names) and the store
 # protocol is deliberately too narrow to grow them -- every method a store
@@ -511,7 +514,10 @@ async def page_facts(
 
 async def index_versions(pool: asyncpg.Pool[Any], tenant: str) -> dict[str, str]:
     """Per grouping, the spec version its stored buckets were built under --
-    empty if no pass has ever bucketed this tenant."""
+    empty if no pass has ever bucketed this tenant. The version half only:
+    the UI compares specs; the dial fingerprint beside it is the engine's
+    own staleness signal, and the membership pages state the dial caveat in
+    prose instead."""
     rows = await pool.fetch(
         "select index_name, version from index_built where tenant_id = $1", tenant
     )

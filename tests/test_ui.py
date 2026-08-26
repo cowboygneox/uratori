@@ -2504,8 +2504,30 @@ async def test_the_save_says_whether_a_pass_is_owed(pg_dsn: str) -> None:
         saved = await save(flipped)
         assert saved["stale"] is True
         assert not await membership_ok(), (
-            "the predicate moved the index set; serving the old membership "
-            "as current would show records matching a predicate they do not"
+            "the predicate moved this grouping's spec; serving the old "
+            "membership as current would show records matching a predicate "
+            "they do not"
+        )
+
+        # A grouping nobody's figure reads: its spec is the ONLY thing that
+        # can notice the edit, so a stale verdict degraded to name-set
+        # comparison would tell the operator no pass is owed while every
+        # page filtering through it goes behind-deploy.
+        parked = flipped + '\nfilter shop_order.parked where status == "parked" label "parked"\n'
+        saved = await save(parked)
+        assert saved["stale"] is True
+        edited = parked.replace('status == "parked"', 'status == "queued"')
+        saved = await save(edited)
+        assert saved["stale"] is True, (
+            "same names, moved spec: the one case only a per-grouping "
+            "version comparison can see"
+        )
+        relabelled = edited.replace('label "parked"', 'label "waiting"')
+        saved = await save(relabelled)
+        assert saved["stale"] is False, (
+            "a label is prose; a pass for it would rebuild nothing -- and "
+            "this pins the absolute, not just agreement with the membership "
+            "page"
         )
 
 
@@ -2554,3 +2576,64 @@ async def test_an_arrived_filter_does_not_unseat_its_neighbours(pg_dsn: str) -> 
             "exactly one seeded order is delivered (o2); any other count "
             "means the newcomer was seated over the wrong records"
         )
+
+
+async def test_membership_honours_the_upgrade_window(pg_dsn: str) -> None:
+    """Between a 0.7 upgrade and a tenant's first pass, the per-grouping
+    stamps do not exist yet -- only the old whole-set stamp. The membership
+    pages must accept the same proof of currency the pass's seed will: a
+    matching stamp serves, a mismatched one answers behind-deploy (the
+    tenant WAS bucketed, under an older library; never-computed would tell
+    an upgraded deployment its history vanished)."""
+    from uratori import compile_source as compile_lib
+    from uratori.engine.engine import _index_set_version
+
+    name = f"uratori_ui_{os.urandom(4).hex()}"
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await connection.execute(f"create schema {name}")
+    finally:
+        await connection.close()
+    try:
+        app = create_app(dsn=pg_dsn, pg_schema=name, token=None, version="test")
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://uratori"
+            ) as http:
+                await _teach(http)
+                await _feed_couriers(http)
+
+                # What the upgrade leaves behind, planted directly: rows
+                # built, per-grouping stamps absent, the whole-set stamp
+                # standing with the hash the old engine recorded.
+                stamp = _index_set_version(compile_lib(COURIER_SOURCE, COURIER_WORLD))
+                pool = app.state.uratori.pool
+                await pool.execute("delete from index_built where tenant_id = 't1'")
+                await pool.execute(
+                    "insert into index_state (tenant_id, version) values ('t1', $1)",
+                    stamp,
+                )
+                page = (
+                    await http.get("/ui/api/tenants/t1/membership/shop_order.open")
+                ).json()
+                assert page["state"]["ok"] is True, (
+                    "the stamp proves the buckets current; a 409 here means "
+                    "every upgraded deployment's pages go dark until a pass"
+                )
+
+                await pool.execute(
+                    "update index_state set version = 'another-library' "
+                    "where tenant_id = 't1'"
+                )
+                page = (
+                    await http.get("/ui/api/tenants/t1/membership/shop_order.open")
+                ).json()
+                assert page["state"]["ok"] is False
+                assert page["state"]["because"] == "behind-deploy"
+    finally:
+        connection = await asyncpg.connect(pg_dsn)
+        try:
+            await connection.execute(f"drop schema {name} cascade")
+        finally:
+            await connection.close()

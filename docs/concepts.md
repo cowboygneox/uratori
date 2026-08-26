@@ -353,7 +353,7 @@ what a dial is set to -- one boundary means one truth.)
 
 | List | Read from | Moving it invalidates |
 |---|---|---|
-| `bucket_settings` | a group's `by day in ...` and a filter's `older/younger than ...` | the tenant's whole bucketed history -- day boundaries moved, so every membership is suspect |
+| `bucket_settings` | a group's `by day in ...` and a filter's `older/younger than ...` | the buckets of every grouping that reads the dial -- day boundaries moved, so those memberships are suspect (each grouping's stamp carries a fingerprint of its dials, so the untouched rest stay built) |
 | `figure_settings` | figure calculations | one stored value per subject, for each figure naming the dial |
 | `reading_settings` | reading statistics and bands | nothing stored -- the next read evaluates under the new dial |
 | `project_settings` | projection values and flags | nothing stored -- rows are assembled when asked |

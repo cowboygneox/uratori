@@ -97,11 +97,15 @@ class EngineStore(Protocol):
         """Returns whether it actually moved, which is the release event."""
         ...
 
-    async def index_versions(self, tenant: str) -> dict[str, str]:
-        """Per grouping, the spec version its stored buckets were built under.
+    async def index_stamps(self, tenant: str) -> dict[str, Pointer]:
+        """Per grouping, what its stored buckets were built under: the spec
+        version, and a fingerprint of the dials the spec reads.
 
-        Its own rows rather than `figure_pointer` ones: that table's versions
-        name declarations somebody wrote, and these exist for every index --
+        The same two-part discipline a figure's pointer carries, for the same
+        reason: a spec hash deliberately excludes settings, so an age filter
+        or a zoned calendar grouping re-bucketed only when its hash moved
+        would describe the old dial for ever. Its own rows rather than
+        `figure_pointer` ones because these exist for every index --
         including the ones no figure reads (a projection's `from`), whose
         arrival or redefinition moves no pointer at all. Per index rather
         than one hash over the whole set, because staleness is the unit of
@@ -111,16 +115,16 @@ class EngineStore(Protocol):
         """
         ...
 
-    async def set_index_version(self, tenant: str, index: str, version: str) -> None:
+    async def set_index_stamp(self, tenant: str, index: str, stamp: Pointer) -> None:
         """Recorded after that index's rebuild actually ran -- a pass that
         dies mid-way must leave exactly the unbuilt groupings stale."""
         ...
 
     async def drop_index(self, tenant: str, index: str) -> None:
-        """A retired grouping's rows and its version stamp, gone together.
-        Wholesale rebuilds erased dead groupings as a side effect; narrow
-        rebuilds must retire them deliberately, or the rows serve for ever
-        as if the definition still existed."""
+        """A retired grouping's rows and its stamp, gone together. Nothing
+        erased a dead grouping's rows before staleness went per-index (they
+        simply accumulated); narrow rebuilds retire them deliberately, so a
+        dropped definition's rows cannot outlive it."""
         ...
 
     async def legacy_index_set(self, tenant: str) -> str | None:
@@ -155,7 +159,6 @@ class EngineStore(Protocol):
     async def bucket_keys(self, tenant: str, index: str) -> list[str]: ...
 
     async def index_has_rows(self, tenant: str, index: str) -> bool: ...
-
 
     async def remove_member(self, tenant: str, index: str, member: str) -> None: ...
 

@@ -1084,19 +1084,20 @@ looks like a complete one:
   with nothing thrown.
 
 The buckets a `from` narrows through are stored state, so serving is gated
-the way a figure's pointer gates it: the engine records which index set (the
-library's groups and filters together) a
-tenant last bucketed under, only after the rebuild actually ran, and a
-projection whose population was bucketed under a different index set (or
-never) answers `behind-deploy` (or `never-computed`) rather than an `ok` page
-with records silently missing. (A kind with no records at all still answers
+the way a figure's pointer gates it: the engine records, per group and
+filter, which spec version a tenant's buckets were built under -- recorded
+only after that grouping's rebuild actually ran -- and a projection whose
+population was bucketed under a different definition (or never) answers
+`behind-deploy` (or `never-computed`) rather than an `ok` page with records
+silently missing. (A kind with no records at all still answers
 `nothing-collected` first -- that is a claim about the sync, and it comes
-before any question about buckets.) The recorded version covers the library's
-whole index set, so a deploy that changes *any* group or filter holds every
-`from` page in that state until the tenant's next pass -- a short, honest absence,
-traded deliberately against a page that cannot silently be wrong. A population that matches nothing is served
-`ok` with no rows -- records were collected, and the empty page is the
-population's truthful answer.
+before any question about buckets.) Only the groupings the population
+actually reads are compared, so a deploy that changes an unrelated group or
+filter holds nothing: each `from` page waits exactly when its own groupings
+moved, until the tenant's next pass -- a short, honest absence, traded
+deliberately against a page that cannot silently be wrong. A population that
+matches nothing is served `ok` with no rows -- records were collected, and
+the empty page is the population's truthful answer.
 
 ### `field` -- values off the record
 

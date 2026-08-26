@@ -240,10 +240,10 @@ class SaveOut(BaseModel):
     stale: bool
     """Whether this save leaves tenants owing a pass. True exactly when
     stored state is now behind the text: a figure moved (its values and
-    pointers are stored) or the index set's hash moved (memberships are
-    stored). A changed label or reading changes nothing stored -- it serves
-    its new text immediately -- and a page that offered "run a pass" for it
-    would send every tenant through a rebuild that moves nothing."""
+    pointers are stored) or some grouping's spec moved (its memberships
+    are stored). A changed label or reading changes nothing stored -- it
+    serves its new text immediately -- and a page that offered "run a pass"
+    for it would send every tenant through a rebuild that moves nothing."""
 
     declarations: list[DeclChange]
 
@@ -374,11 +374,12 @@ class MembershipOut(BaseModel):
     note: str | None = None
     """A server-rendered caveat the counts cannot carry themselves. Today:
     this index's spec reads dials (an age threshold, a zone), and a dial that
-    moved since the last pass shows here only after the next one -- the
-    index-set hash deliberately excludes settings, so `state` cannot see it.
-    Figures over the same index refuse with `setting-moved` in that window;
-    membership states its weaker guarantee instead of silently wearing an Ok
-    it has not earned."""
+    moved since the last pass shows here only after the next one -- spec
+    hashes deliberately exclude settings, so `state` cannot see it (the
+    engine's own stamp carries a dial fingerprint and rebuilds at that next
+    pass; this page compares specs alone). Figures over the same index
+    refuse with `setting-moved` in that window; membership states its weaker
+    guarantee instead of silently wearing an Ok it has not earned."""
 
 
 class MemberRecordOut(BaseModel):
@@ -1074,15 +1075,13 @@ async def _membership_state(
     and figures catch that case through their own fingerprints. Until a
     pass runs, membership describes the last pass.
     """
-    from ..engine.engine import _index_set_version, _index_version
+    from ..engine.engine import _index_version, _versions_if_legacy_current
 
     built = await db.index_versions(pool, tenant)
+    legacy = None
     if not built:
         legacy = await db.legacy_index_set_version(pool, tenant)
-        if legacy is not None and legacy == _index_set_version(library):
-            built = {
-                name: _index_version(index) for name, index in library.indexes.items()
-            }
+        built = _versions_if_legacy_current(legacy, library) or {}
     stale = [
         name
         for name in names
@@ -1091,15 +1090,24 @@ async def _membership_state(
     ]
     if not stale:
         return Ok()
-    if not built:
+    if not built and legacy is None:
         return Unavailable(
             because="never-computed",
             detail="no pass has ever bucketed this tenant, so there is no membership to report",
         )
+    # Behind-deploy either way from here -- a mismatched legacy stamp means
+    # the tenant WAS bucketed, under an older library, and never-computed
+    # would tell an upgraded deployment its history vanished. The detail
+    # tells arrival from movement: an arrived grouping has no old rows to
+    # withhold, and claiming some would send the reader hunting them.
+    arrived = all(name not in built for name in stale)
     return Unavailable(
         because="behind-deploy",
         detail=(
-            "this grouping arrived or moved since the tenant's last pass; its stored "
+            "this grouping arrived since the tenant's last pass; it has no "
+            "buckets until one runs"
+            if arrived
+            else "this grouping moved since the tenant's last pass; its stored "
             "membership would describe the old text and is withheld until a pass runs"
         ),
     )
@@ -1503,12 +1511,12 @@ def _owes_a_pass(
 
     Two stores exist: figure values/pointers, and the bucketed memberships.
     So a pass is owed exactly when a figure's version moved (new, changed or
-    removed) or the index set's hash moved -- the same hash the engine
-    compares at its next pass. Readings, projections and summaries store
-    nothing (computed at serve time), and an index label is deliberately
-    outside the index hash: those serve their new text immediately, and
-    claiming they leave tenants behind-deploy would invite a rebuild that
-    moves nothing.
+    removed) or some grouping's spec moved -- compared per grouping, with
+    the same per-index hash the engine's stamps record. Readings,
+    projections and summaries store nothing (computed at serve time), and
+    an index label is deliberately outside the index hash: those serve
+    their new text immediately, and claiming they leave tenants
+    behind-deploy would invite a rebuild that moves nothing.
     """
     from ..engine.engine import _index_version
 

@@ -37,8 +37,8 @@ from ..schema import Schema
 from ..store import EngineStore, FactSource, StoredValue
 from .buckets import SEPARATOR, day_range, subject_of
 from .engine import (  # the same hashes the pass records, shared deliberately
-    _index_set_version,
     _index_version,
+    _versions_if_legacy_current,
 )
 from .evaluate import band_of
 from .project import ProjectedRow, RenderedFlag, Summary, format_value
@@ -882,16 +882,16 @@ async def project_rows(
         # different definition (or none), and filtering through them would
         # serve an Ok page with records silently missing: a confident zero
         # on exactly the screen this gate was written for.
-        built = await store.index_versions(tenant)
+        stamps = await store.index_stamps(tenant)
+        built = {name: stamp.version for name, stamp in stamps.items()}
+        legacy = None
         if not built:
-            # The upgrade window: per-index versions arrive at the first
-            # pass, but a pre-0.7 whole-set stamp matching this library is
-            # the same proof of currency the pass's seed accepts.
+            # The upgrade window: per-index stamps arrive at the first pass,
+            # but a pre-0.7 whole-set stamp matching this library is the same
+            # proof of currency the pass's seed accepts -- one shared rule,
+            # so the reader and the writer cannot disagree about it.
             legacy = await store.legacy_index_set(tenant)
-            if legacy is not None and legacy == _index_set_version(library):
-                built = {
-                    name: _index_version(idx) for name, idx in library.indexes.items()
-                }
+            built = _versions_if_legacy_current(legacy, library) or {}
         stale = [
             name
             for name in plan.indexes
@@ -899,12 +899,18 @@ async def project_rows(
             and built.get(name) != _index_version(library.indexes[name])
         ]
         if stale:
+            # Two different absences: a tenant nothing ever bucketed, and a
+            # tenant whose buckets exist but describe other definitions. A
+            # mismatched legacy stamp is the SECOND kind -- it was bucketed,
+            # under an older library -- and calling it never-computed would
+            # tell an upgraded deployment its history vanished.
+            never = not built and legacy is None
             return [], Unavailable(
-                because="never-computed" if not built else "behind-deploy",
+                because="never-computed" if never else "behind-deploy",
                 detail=(
                     "this board has not bucketed the population's groups and "
                     "filters yet; the next sync will"
-                    if not built
+                    if never
                     else "the population's buckets were built under a previous "
                     "definition; the next sync rebuilds them"
                 ),

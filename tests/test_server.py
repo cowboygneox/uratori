@@ -489,13 +489,16 @@ async def test_deleting_a_tenant_reports_what_went(server: Server) -> None:
     after = (await server.http.get("/tenants/t1/results/shop_courier.carrying")).json()
     assert after["state"]["because"] == "never-computed"
 
-    # The index-set marker is tenant state and must go with the tenant: left
-    # behind, it says "the population's buckets are built" about buckets that
-    # no longer exist -- the exact claim the projection gate trusts.
-    marker = await server.app.state.uratori.pool.fetchval(
-        "select version from index_state where tenant_id = $1", "t1"
+    # The per-grouping stamps are tenant state and must go with the tenant:
+    # left behind, they say "these buckets are built" about buckets that no
+    # longer exist -- so a re-created tenant under the same name would never
+    # be rebuilt, and the projection gate and every membership page would
+    # answer Ok over nothing. (The old whole-set marker had the same duty;
+    # its table survives only as the upgrade seed and nothing writes it.)
+    stamps = await server.app.state.uratori.pool.fetchval(
+        "select count(*) from index_built where tenant_id = $1", "t1"
     )
-    assert marker is None
+    assert stamps == 0
 
 
 async def test_the_token_gates_everything_but_health(pg_dsn: str) -> None:

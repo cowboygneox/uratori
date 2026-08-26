@@ -53,24 +53,34 @@ async def test_pointers_report_movement_and_only_movement(
     assert (await s.pointers(tenant)) == {"f": Pointer("v1", "fp2")}
 
 
-async def test_index_versions_round_trip_per_grouping_per_tenant(
+async def test_index_stamps_round_trip_per_grouping_per_tenant(
     store: tuple[EngineStore, str],
 ) -> None:
-    """The membership pointers that are not a figure's: which spec version
-    each grouping's stored buckets were built under. Per grouping, because
-    staleness is the unit of work -- and per tenant, because one tenant's
+    """The membership pointers that are not a figure's: what each grouping's
+    stored buckets were built under -- spec version AND dial fingerprint,
+    because a spec hash excludes settings and an age filter re-bucketed only
+    on hash moves would describe the old dial for ever. Per grouping,
+    because staleness is the unit of work; per tenant, because one tenant's
     rebuild proves nothing about another's."""
     s, tenant = store
-    assert await s.index_versions(tenant) == {}, (
-        "a tenant no pass has bucketed holds no versions -- an invented row "
+    assert await s.index_stamps(tenant) == {}, (
+        "a tenant no pass has bucketed holds no stamps -- an invented row "
         "here would read as built"
     )
-    await s.set_index_version(tenant, "k.open", "v1")
-    await s.set_index_version(tenant, "k.by_team", "v1")
-    assert await s.index_versions(tenant) == {"k.open": "v1", "k.by_team": "v1"}
-    await s.set_index_version(tenant, "k.open", "v2")
-    assert await s.index_versions(tenant) == {"k.open": "v2", "k.by_team": "v1"}
-    assert await s.index_versions("some-other-tenant") == {}
+    one = Pointer(version="v1", settings_fingerprint="")
+    dialled = Pointer(version="v1", settings_fingerprint="fp1")
+    await s.set_index_stamp(tenant, "k.open", one)
+    await s.set_index_stamp(tenant, "k.fresh", dialled)
+    assert await s.index_stamps(tenant) == {"k.open": one, "k.fresh": dialled}
+    # Re-setting the identical stamp is a no-op, a moved fingerprint is not:
+    # the dial half must survive the round trip or dial staleness is blind.
+    await s.set_index_stamp(tenant, "k.fresh", dialled)
+    turned = Pointer(version="v1", settings_fingerprint="fp2")
+    await s.set_index_stamp(tenant, "k.fresh", turned)
+    assert (await s.index_stamps(tenant))["k.fresh"] == turned
+    await s.set_index_stamp(tenant, "k.open", Pointer(version="v2", settings_fingerprint=""))
+    assert (await s.index_stamps(tenant))["k.open"].version == "v2"
+    assert await s.index_stamps("some-other-tenant") == {}
 
 
 async def test_drop_index_retires_the_rows_and_the_stamp_together(
@@ -80,14 +90,15 @@ async def test_drop_index_retires_the_rows_and_the_stamp_together(
     without rows would read as built-and-empty, which is a lie about a
     grouping that is gone. So the two leave together."""
     s, tenant = store
+    stamp = Pointer(version="v1", settings_fingerprint="")
     await s.set_buckets(tenant, "k.open", "m1", [""])
-    await s.set_index_version(tenant, "k.open", "v1")
+    await s.set_index_stamp(tenant, "k.open", stamp)
     await s.set_buckets(tenant, "k.other", "m1", [""])
-    await s.set_index_version(tenant, "k.other", "v1")
+    await s.set_index_stamp(tenant, "k.other", stamp)
 
     await s.drop_index(tenant, "k.open")
     assert await s.members(tenant, "k.open", "") == frozenset()
-    assert await s.index_versions(tenant) == {"k.other": "v1"}
+    assert await s.index_stamps(tenant) == {"k.other": stamp}
     assert await s.members(tenant, "k.other", "") == frozenset({"m1"}), (
         "retiring one grouping must not touch its neighbour"
     )

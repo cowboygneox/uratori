@@ -109,24 +109,35 @@ class PostgresEngineStore:
         )
         return row is not None
 
-    async def index_versions(self, tenant: str) -> dict[str, str]:
+    async def index_stamps(self, tenant: str) -> dict[str, Pointer]:
         rows = await self._pool.fetch(
-            "select index_name, version from index_built where tenant_id = $1", tenant
+            "select index_name, version, settings_fingerprint from index_built "
+            "where tenant_id = $1",
+            tenant,
         )
-        return {row["index_name"]: row["version"] for row in rows}
+        return {
+            row["index_name"]: Pointer(
+                version=row["version"], settings_fingerprint=row["settings_fingerprint"]
+            )
+            for row in rows
+        }
 
-    async def set_index_version(self, tenant: str, index: str, version: str) -> None:
+    async def set_index_stamp(self, tenant: str, index: str, stamp: Pointer) -> None:
         await self._pool.execute(
             """
-            insert into index_built (tenant_id, index_name, version, moved_at)
-            values ($1, $2, $3, now())
+            insert into index_built (tenant_id, index_name, version, settings_fingerprint, moved_at)
+            values ($1, $2, $3, $4, now())
             on conflict (tenant_id, index_name) do update
-              set version = excluded.version, moved_at = now()
-              where index_built.version is distinct from excluded.version
+              set version = excluded.version,
+                  settings_fingerprint = excluded.settings_fingerprint,
+                  moved_at = now()
+              where (index_built.version, index_built.settings_fingerprint)
+                is distinct from (excluded.version, excluded.settings_fingerprint)
             """,
             tenant,
             index,
-            version,
+            stamp.version,
+            stamp.settings_fingerprint,
         )
 
     async def legacy_index_set(self, tenant: str) -> str | None:
@@ -641,6 +652,10 @@ create table if not exists index_built (
   tenant_id  text not null,
   index_name text not null,
   version    text not null,
+  -- Over the dials the spec reads (an age threshold, a calendar zone),
+  -- '' for the dial-free majority -- the same second half a figure's
+  -- pointer carries, because a spec hash deliberately excludes settings.
+  settings_fingerprint text not null default '',
   moved_at   timestamptz not null default now(),
   primary key (tenant_id, index_name)
 );
