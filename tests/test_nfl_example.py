@@ -61,6 +61,7 @@ def test_the_example_exercises_every_declaration_kind() -> None:
     assert library.summaries, "no summaries left in the showcase"
     assert library.indexes, "no groups or filters left in the showcase"
     assert library.measures, "no measures left in the showcase"
+    assert library.facts, "no fact declarations left in the showcase"
 
 
 def test_an_unplayed_game_carries_no_score_fields() -> None:
@@ -134,6 +135,8 @@ def test_a_finished_game_produces_two_sides_and_rest_gaps() -> None:
             "overtime": "0",
             "div_game": "0",
             "stadium": "Somewhere Field",
+            "roof": "outdoors",
+            "surface": "grass",
             "espn": "",
         }
 
@@ -316,6 +319,8 @@ def _game(gid: str, day: str, away: str, home: str, away_score: str, home_score:
         "overtime": "0",
         "div_game": "0",
         "stadium": "Somewhere Field",
+        "roof": "outdoors",
+        "surface": "grass",
         "espn": "401001",
     }
     row.update(extra)
@@ -357,7 +362,7 @@ TEAMS_CSV = [
         "team_name": name,
         "team_conf": "AFC",
         "team_division": "AFC West",
-        "team_logo_espn": "",
+        "team_logo_espn": f"https://a.espncdn.com/i/teamlogos/nfl/500/{abbr.lower()}.png",
     }
     for abbr, name in (
         ("KC", "Kansas City Chiefs"),
@@ -371,12 +376,13 @@ TEAMS_CSV = [
 
 
 def test_every_field_the_definitions_read_exists_on_a_loader_record() -> None:
-    """The schema declares kinds, not fields, so the compile cannot catch the
-    loader and the definitions drifting apart -- rename `points_for` on
-    either side and every team figure reads a silent nought. This is the
-    suite's `SPECIMENS` pattern with the loader's own outputs as the
-    specimens: every group and filter field, every `through` path and every
-    measure path must resolve on a record the loader actually builds."""
+    """The compile checks the definitions against the declared facts; this
+    checks the *loader* against both -- rename `points_for` in load.py alone
+    and every team figure reads a silent nought the build cannot see. The
+    suite's `SPECIMENS` pattern, with the loader's own outputs as the
+    specimens: every path a definition reads must resolve on a record the
+    loader actually builds, and every record must pass the same write gate
+    the live facts route applies."""
     from uratori.engine.buckets import read_path
     from uratori.lang.check import _index_fields
 
@@ -433,6 +439,18 @@ def test_every_field_the_definitions_read_exists_on_a_loader_record() -> None:
                 assert read_path(specimen, path), (
                     f"{name} reads {path}, which no loaded {measure.kind} record carries"
                 )
+    # And the reverse direction, with the production gate itself: every
+    # specimen must pass the same verification the facts route applies, so
+    # a loader field the declarations do not carry -- or a mistyped one --
+    # fails here instead of refusing batch 1 of two hundred thousand live.
+    from uratori.verify import verify_writes
+
+    verify_writes(
+        library,
+        frozenset(library.facts),
+        {kind: {"specimen": record} for kind, record in specimens.items()},
+    )
+
     for plan in library.projections:
         specimen = specimens[plan.kind]
         for field_name, path, _ftype, join in plan.fields:
@@ -464,6 +482,7 @@ def test_the_loader_pushes_every_kind_the_world_declares() -> None:
     delivered, not that the source mentions the names."""
     module = _load_module()
     kinds = set(_library().facts)
+    assert len(kinds) == 6, "the world lost a declared kind"
 
     delivered: set[str] = set()
 
@@ -745,7 +764,8 @@ def test_the_showcase_keeps_the_constructs_the_readme_promises() -> None:
     source = (EXAMPLE / "definitions.fig").read_text()
     for construct in (
         "fact nfl_play:",  # the world, declared beside the definitions
-        "many abbrs:",  # nesting as cardinality
+        "many abbrs:",  # nesting as cardinality: every element
+        "one venue:",  # and its other half: exactly one
         "through nfl_team.abbrs.abbr",  # the identity hop
         "by day in tenant.timezone",  # calendar bucketing
         "by 15 minutes in tenant.timezone",  # the sub-day grain
@@ -873,8 +893,14 @@ def test_load_season_excludes_a_failed_game_everywhere() -> None:
 
     pushed: dict[str, dict] = {}
 
+    from uratori.verify import verify_writes
+
+    library = _library()
+
     class FakeClient:
         def call(self, method: str, path: str, body=None):
+            # Every batch faces the gate the live facts route applies.
+            verify_writes(library, frozenset(library.facts), body["writes"])
             for kind, records in body["writes"].items():
                 pushed.setdefault(kind, {}).update(records)
             return {"written": 0, "changed": 0}
@@ -900,3 +926,37 @@ def test_load_season_excludes_a_failed_game_everywhere() -> None:
         "a clock that disagrees with its own kickoff must be stripped, not served"
     )
     assert suspect["points"] == 3, "the play itself stays -- only its clock goes"
+
+
+def test_teach_migrates_a_pre_fact_world_definitions_first() -> None:
+    """A server taught before facts joined the language refuses a
+    settings-only schema beside its stored kind-declaring world. The loader
+    must take the engine's own no-wipe repair -- definitions first, then
+    the schema -- rather than dying on the first 422, and a fresh server
+    must keep the plain order."""
+    module = _load_module()
+
+    class Scripted:
+        def __init__(self, refuse_first_schema: bool):
+            self.refuse_first_schema = refuse_first_schema
+            self.paths: list[str] = []
+
+        def attempt(self, method, path, body=None, tolerate=None):
+            self.paths.append(path)
+            if path == "/schema" and self.refuse_first_schema and self.paths.count("/schema") == 1:
+                assert tolerate == 422, "only the first schema PUT is allowed to fail"
+                return None
+            return {"figures": [], "readings": [], "projections": [], "summaries": []}
+
+        def call(self, method, path, body=None):
+            answer = self.attempt(method, path, body)
+            assert answer is not None
+            return answer
+
+    taught_before_facts = Scripted(refuse_first_schema=True)
+    module.teach(taught_before_facts)
+    assert taught_before_facts.paths == ["/schema", "/definitions", "/schema"]
+
+    fresh = Scripted(refuse_first_schema=False)
+    module.teach(fresh)
+    assert fresh.paths == ["/schema", "/definitions"]

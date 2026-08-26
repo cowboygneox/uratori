@@ -4,8 +4,8 @@ The data is nflverse (https://github.com/nflverse/nflverse-data): the
 community-maintained public record of NFL games, weekly player stat lines and
 play-by-play. This script is a *host*: it downloads the seasons, shapes them
 into plain records -- **every single play is a fact** -- teaches the engine
-its settings (schema.json) and its world and numbers (definitions.fig, where
-the fact declarations live) and pushes it all over the HTTP API. It computes no figure of its own: every
+its settings (schema.json) and its world and numbers (definitions.fig,
+where the fact declarations live), and pushes it all over the HTTP API. It computes no figure of its own: every
 number the demo serves comes from a definition, with its version and its
 evidence.
 
@@ -197,7 +197,15 @@ def game_facts(games: list[dict[str, str]]) -> tuple[dict[str, Record], dict[str
             "kickoff": kickoff,
             "away_team": away,
             "home_team": home,
-            "stadium": game["stadium"],
+            "venue": {
+                key: value
+                for key, value in {
+                    "stadium": game["stadium"],
+                    "roof": game.get("roof", ""),
+                    "surface": game.get("surface", ""),
+                }.items()
+                if value
+            },
             "went_overtime": game["overtime"] == "1",
             "division_game": game["div_game"] == "1",
         }
@@ -444,6 +452,16 @@ class Client:
         self.token = token
 
     def call(self, method: str, path: str, body: Record | None = None) -> Record:
+        answer = self.attempt(method, path, body)
+        assert answer is not None, "attempt only returns None for a tolerated status"
+        return answer
+
+    def attempt(
+        self, method: str, path: str, body: Record | None = None, tolerate: int | None = None
+    ) -> Record | None:
+        """One JSON call; a refusal exits with the server's own words --
+        except a status the caller declared it can handle, which returns
+        None instead."""
         request = urllib.request.Request(self.base + path, method=method)
         request.add_header("Content-Type", "application/json")
         if self.token:
@@ -454,8 +472,30 @@ class Client:
                 answer: Record = json.loads(response.read())
                 return answer
         except urllib.error.HTTPError as refusal:
+            if refusal.code == tolerate:
+                return None
             detail = refusal.read().decode(errors="replace")
             sys.exit(f"{method} {path} -> {refusal.code}: {detail}")
+
+
+def teach(client: Client) -> Record:
+    """Schema then definitions -- with the one migration the fixed order
+    cannot make. A server taught before facts joined the language holds a
+    kind-declaring schema and a source with no fact blocks; a settings-only
+    schema is refused against that stored source (it names kinds nothing
+    would declare). The engine's own repair is definitions-first: loading
+    the fact-declaring source retires the stored kinds without blanking a
+    single tenant, and the settings schema then lands clean. Only a schema
+    refusal takes the detour, so a fresh server keeps the plain path."""
+    schema_document = json.loads((HERE / "schema.json").read_text())
+    source = {"source": (HERE / "definitions.fig").read_text()}
+    if client.attempt("PUT", "/schema", schema_document, tolerate=422) is None:
+        print("  stored world predates the fact declarations; teaching definitions first")
+        library = client.call("PUT", "/definitions", source)
+        client.call("PUT", "/schema", schema_document)
+    else:
+        library = client.call("PUT", "/definitions", source)
+    return library
 
 
 def push(client: Client, tenant: str, facts: dict[str, dict[str, Record]]) -> None:
@@ -617,10 +657,7 @@ def main() -> None:
     health = client.call("GET", "/health")
     print(f"engine {health['version']} at {arguments.base}")
 
-    client.call("PUT", "/schema", json.loads((HERE / "schema.json").read_text()))
-    library = client.call(
-        "PUT", "/definitions", {"source": (HERE / "definitions.fig").read_text()}
-    )
+    library = teach(client)
     print(
         f"library loaded: {len(library['figures'])} figures, "
         f"{len(library['readings'])} readings, {len(library['projections'])} projections, "

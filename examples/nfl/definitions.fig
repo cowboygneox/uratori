@@ -40,13 +40,16 @@ fact nfl_game:
     kickoff as moment
     away_team as text
     home_team as text
-    stadium as text
     went_overtime as flag
     division_game as flag
     finished as flag
     away_score as number
     home_score as number
     total as number
+    one venue:
+        stadium as text
+        roof as text
+        surface as text
 
 # One team's side of one finished game -- the shape the record figures
 # count. previous_kickoff is absent on a season opener, which is exactly
@@ -66,7 +69,8 @@ fact nfl_team_game:
     tied as flag
     home as flag
 
-# A player, as the most recent loaded season knew them.
+# A player, as this season's weekly stats last listed them -- a mid-season
+# trade shows the later team.
 fact nfl_player:
     name name
     url url
@@ -97,26 +101,35 @@ fact nfl_stat_line:
     targets as number
     receiving_yards as number
     receiving_tds as number
+    # Rushing plus receiving -- the league's own composite, carried as a
+    # field because a measure reads exactly one.
     scrimmage_yards as number
+    # Touchdowns accounted for: thrown, rushed and caught alike, as the
+    # league talks about production -- a thrown score credits two players.
     total_tds as number
 
-# A single play. Points and scored_by exist only when a scoreboard moved;
-# lost_by only when somebody gave the ball away; snap only when the offence
-# ran a play the books kept; clock_time only when the loader could verify
-# the stamp against the game's own kickoff.
+# A single play. Every field is present only when the play earns it -- a
+# kickoff carries no down, a clock survives only when the loader verified
+# it against the game's own kickoff, and an absence is never a nought.
 fact nfl_play:
     name name
     name as text
     season_type as text
     offense as text
     play_type as text
+    # Present only on a play the offence snapped and the books kept --
+    # kickoffs, punts and nullified plays are not snaps run.
     snap as flag
     clock_time as moment
     down as number
     yards_gained as number
     quarter as number
+    # The league's judgement, three-valued: converted, not converted, or
+    # never judged at all -- and only the first two are written.
     third_down_converted as flag
+    # Whoever actually lost the ball -- on a muffed punt, the returner.
     lost_by as text
+    # Only when a scoreboard moved, judged by the score delta.
     points as number
     scored_by as text
 
@@ -622,6 +635,7 @@ projection nfl_game.postseason:
         name = name as text
         stage = game_type as text
         played_on = kickoff as date
+        venue = venue.stadium as text
         away_points = away_score as number
         home_points = home_score as number
         home_name = name from home_team through nfl_team.abbrs.abbr as text

@@ -55,10 +55,11 @@ engine computes as it ingests -- expect a few minutes per season, with the
 run report printed batch by batch, and around 70,000 facts per tenant when
 it settles.
 
-Reloading across a change to `schema.json` that removes a fact kind needs
-a fresh database (`docker compose down -v && docker compose up -d`): the
-server refuses to shrink a world its loaded definitions still name, which
-is the right behaviour and inconvenient in exactly this one case.
+Reloading against a database taught before the fact declarations existed
+is handled in place: the settings-only schema is refused beside the stored
+kind-declaring world, so the loader teaches the new definitions first --
+which retires the stored kinds without touching a single tenant -- and
+then lands the schema. Nothing needs wiping.
 
 Then look around. The built-in UI is the guided tour -- every definition,
 its source, its dependency trace down to the records, and the run log of
