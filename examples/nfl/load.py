@@ -100,6 +100,7 @@ PBP_COLUMNS = (
     "third_down_converted",
     "interception",
     "fumble_lost",
+    "fumbled_1_team",
 )
 
 
@@ -114,7 +115,11 @@ def pbp_rows(blob: bytes) -> list[dict[str, str]]:
     reader = csv.reader(io.TextIOWrapper(io.BytesIO(blob), encoding="utf-8"))
     header = next(reader)
     wanted = [(column, header.index(column)) for column in PBP_COLUMNS if column in header]
-    return [{column: row[index] for column, index in wanted} for row in reader]
+    return [
+        {column: row[index] if index < len(row) else "" for column, index in wanted}
+        for row in reader
+        if row
+    ]
 
 
 # ------------------------------------------------------------------ shape --
@@ -136,6 +141,9 @@ def put(record: Record, field: str, text: str) -> None:
 
 def kickoff_of(game: dict[str, str]) -> str:
     day = game["gameday"]
+    # 1999 is the one season whose schedule mostly lacks a kickoff time; the
+    # 1pm window is the league's default slot, and a day bucket needs *some*
+    # instant. The day is real; the hour, for those games, is conventional.
     clock = game["gametime"] or "13:00"
     moment = datetime.fromisoformat(f"{day}T{clock}:00").replace(tzinfo=EASTERN)
     return moment.isoformat()
@@ -293,8 +301,15 @@ def player_facts(
     return players, lines
 
 
+SNAP_TYPES = frozenset({"pass", "run", "qb_kneel", "qb_spike"})
+"""The play types where the offence actually snapped the ball and the play
+counted. Kickoffs (where nflverse's `posteam` is the *receiving* team),
+punts, kicks and clock rows all carry a `posteam`; a nullified `no_play`
+was snapped and then wiped off the books. None of them is a snap run."""
+
+
 def play_facts(
-    pbp: list[dict[str, str]],
+    pbp: list[dict[str, str]], game_types: dict[str, str]
 ) -> tuple[dict[str, dict[str, Record]], dict[str, dict[str, int]]]:
     """Every single play, one fact each, grouped by game -- plus, per game,
     the final score those plays rebuild, which is what the reconciliation
@@ -302,9 +317,11 @@ def play_facts(
 
     A play that moved the scoreboard carries `points` and `scored_by`
     (whoever the points went to, pick-sixes and safeties included), judged
-    by the score delta rather than by parsing the text. The wall-clock
-    instant travels when the league recorded one; the sub-day figures file
-    only what genuinely has a clock."""
+    by the score delta rather than by parsing the text. A giveaway carries
+    `lost_by` -- whoever actually lost the ball, which on a muffed punt is
+    the returner, not the team whose punt it was. The wall-clock instant
+    travels when the league recorded one; whether it can be *trusted* is
+    checked per game against the scheduled kickoff, in `load_season`."""
     by_game: dict[str, dict[str, Record]] = {}
     rebuilt: dict[str, dict[str, int]] = {}
     for row in pbp:
@@ -314,16 +331,27 @@ def play_facts(
             continue
         description = (row.get("desc") or "").strip()
         play: Record = {"name": description[:140] or f"play {play_id}"}
+        if game_id in game_types:
+            play["season_type"] = game_types[game_id]
         if row.get("posteam"):
             play["offense"] = row["posteam"]
         if row.get("play_type"):
             play["play_type"] = row["play_type"]
+            if row["play_type"] in SNAP_TYPES:
+                play["snap"] = True
         if row.get("time_of_day"):
             play["clock_time"] = row["time_of_day"]
+        # True, false and unknown are three different answers: "1" and "0"
+        # are the league's judgement either way, a blank is no judgement at
+        # all, and a boolean false is *present* to the language's `is set`.
         if row.get("third_down_converted") == "1":
             play["third_down_converted"] = True
-        if row.get("interception") == "1" or row.get("fumble_lost") == "1":
-            play["turnover"] = True
+        elif row.get("third_down_converted") == "0":
+            play["third_down_converted"] = False
+        if row.get("interception") == "1":
+            play["lost_by"] = row.get("posteam", "")
+        elif row.get("fumble_lost") == "1":
+            play["lost_by"] = row.get("fumbled_1_team") or row.get("posteam", "")
         put(play, "down", row.get("down", ""))
         put(play, "yards_gained", row.get("yards_gained", ""))
         put(play, "quarter", row.get("qtr", ""))
@@ -355,6 +383,26 @@ def play_facts(
     return by_game, rebuilt
 
 
+def credible_clock(kickoff: str, stamps: list[str]) -> bool:
+    """Whether a game's play clocks can be trusted, judged against its own
+    scheduled kickoff.
+
+    nflverse's `time_of_day` is genuine UTC from 2005 onwards; 2003-2004
+    stamp stadium-local wall time with a `Z`, and 2001-2002 carry a bare
+    clock with no date at all. The points gate cannot see any of that, so
+    the clocks get a gate of their own: the earliest play instant must sit
+    within three hours of kickoff -- generous for a weather delay, well
+    inside the four-hour minimum a mislabelled timezone produces."""
+    try:
+        earliest = min(
+            datetime.fromisoformat(stamp.replace("Z", "+00:00")) for stamp in stamps
+        )
+        start = datetime.fromisoformat(kickoff)
+    except ValueError:
+        return False
+    return abs((earliest - start).total_seconds()) <= 3 * 3600
+
+
 def reconciled(
     game_records: dict[str, Record], rebuilt: dict[str, dict[str, int]]
 ) -> tuple[set[str], list[str]]:
@@ -370,9 +418,10 @@ def reconciled(
     for game_id, record in game_records.items():
         if not record["finished"]:
             continue
-        claimed = {
-            franchise(team): points for team, points in rebuilt.get(game_id, {}).items()
-        }
+        claimed: dict[str, int] = {}
+        for team, points in rebuilt.get(game_id, {}).items():
+            key = franchise(team)
+            claimed[key] = claimed.get(key, 0) + points
         final = {
             franchise(record["home_team"]): record["home_score"],
             franchise(record["away_team"]): record["away_score"],
@@ -463,7 +512,9 @@ def load_season(
         except urllib.error.HTTPError:
             print(f"  no play-by-play published for {season}")
         else:
-            by_game, rebuilt = play_facts(pbp)
+            by_game, rebuilt = play_facts(
+                pbp, {gid: str(r["game_type"]) for gid, r in game_records.items()}
+            )
 
     # The accuracy gate: a played game is imported only when its plays
     # rebuild its final score. Fixtures pass by having nothing to check.
@@ -478,6 +529,28 @@ def load_season(
     game_records = {gid: r for gid, r in game_records.items() if gid in admitted}
     side_records = {key: r for key, r in side_records.items() if key.split("@")[0] in kept}
     plays = {key: r for gid in kept for key, r in by_game.get(gid, {}).items()}
+
+    orphans = len(set(by_game) - set(admitted) - {gid for gid in dropped})
+    if orphans:
+        print(f"  ignored play-by-play for {orphans} games the schedule does not list")
+
+    # The clocks get their own per-game gate (see credible_clock): a game
+    # whose stamps disagree with its scheduled kickoff keeps its plays and
+    # loses their wall-clock instants, so the sub-day figures file only
+    # clocks the data itself has vouched for.
+    unclocked = 0
+    for gid in kept:
+        records = by_game.get(gid, {})
+        stamps = [str(r["clock_time"]) for r in records.values() if "clock_time" in r]
+        if stamps and not credible_clock(str(game_records[gid]["kickoff"]), stamps):
+            for record in records.values():
+                record.pop("clock_time", None)
+            unclocked += 1
+    if unclocked:
+        print(
+            f"  clocks unverifiable for {unclocked} games (they disagree with the "
+            "scheduled kickoff); their plays load without wall-clock instants"
+        )
 
     kickoffs = {gid: str(game_records[gid]["kickoff"]) for gid in kept}
     abbrs = {g["home_team"] for g in games} | {g["away_team"] for g in games}
@@ -516,9 +589,13 @@ def seasons_of(text: str) -> list[int]:
     for part in text.split(","):
         if "-" in part:
             first, last = part.split("-", 1)
+            if int(first) > int(last):
+                sys.exit(f"--seasons range {part!r} runs backwards")
             out.extend(range(int(first), int(last) + 1))
         else:
             out.append(int(part))
+    if not out:
+        sys.exit("--seasons named no seasons")
     return out
 
 

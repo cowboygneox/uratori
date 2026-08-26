@@ -263,60 +263,79 @@ figure nfl_player.yards_by_day:
 # these figures count is play-by-play the data itself has vouched for.
 group nfl_play.by_offense from offense through nfl_team.abbrs.abbr
 
-# Sub-day time buckets: every play that moved a scoreboard, filed into the
-# quarter-hour it happened in the tenant's own calendar, under whoever the
-# points went to -- pick-sixes and safeties credit the defence. A play that
-# scored nothing carries neither field and files nowhere.
+# Sub-day time buckets: every scoring play with a *verified* wall clock,
+# filed into the quarter-hour it happened in the tenant's own calendar,
+# under whoever the points went to -- pick-sixes and safeties credit the
+# defence. The loader vouches for the clocks per game (they must agree with
+# the scheduled kickoff) and early seasons recorded none, so this covers
+# what genuinely has a clock -- the season totals live on the scoring
+# reading, not here.
 group nfl_play.scoring_slots from (scored_by through nfl_team.abbrs.abbr, clock_time by 15 minutes in tenant.timezone)
 
+# Giveaways filed under whoever actually lost the ball -- on a muffed punt
+# that is the returner, not the team whose punt it was.
+group nfl_play.lost_by from lost_by through nfl_team.abbrs.abbr
+
+# A snap is a play the offence ran and the books kept: kickoffs carry the
+# *receiving* team as the offence, and a nullified play was wiped -- neither
+# is a snap run.
+filter nfl_play.snaps where snap == true label "a snap that counted"
+filter nfl_play.regular where season_type == "REG" label "regular season"
 filter nfl_play.third_downs where down == 3 label "on third down"
 filter nfl_play.conversions where third_down_converted == true label "converted"
-filter nfl_play.giveaways where turnover == true label "turned over"
+
+# Presence on a judgement: the league answers a third down "converted" or
+# "not converted", and a boolean false is an answer -- `is set` holds for
+# both, and only a blank is no judgement at all.
+filter nfl_play.judged where third_down_converted is set label "judged"
 
 measure nfl_play.yards = yards_gained in count
 measure nfl_play.points = points in count
 
-# How many snaps this team's offence ran. The count that shows the scale:
-# every one of these cites a real play.
+# Regular-season snaps this team's offence ran and the books kept -- the
+# count that shows the scale: every one of these cites a real play, and a
+# penalty that wiped a play wiped it here too.
 figure nfl_team.plays_run:
-    display "{nfl_team} offensive plays"
+    display "{nfl_team} offensive snaps"
 
     depends:
-        mine = nfl_play.by_offense:{nfl_team}
+        mine = nfl_play.by_offense:{nfl_team} & nfl_play.snaps & nfl_play.regular
 
     calculate:
         count(mine)
 
-# Yards gained, summed across every offensive snap.
+# Yards gained across those same snaps.
 figure nfl_team.yards_gained:
     display "{nfl_team} yards gained"
 
     depends:
-        mine = nfl_play.by_offense:{nfl_team}
+        mine = nfl_play.by_offense:{nfl_team} & nfl_play.snaps & nfl_play.regular
 
     calculate:
         sum(nfl_play.yards over mine)
 
-# Times the offence handed the ball over: interceptions thrown and fumbles
-# lost.
+# Regular-season giveaways: interceptions thrown and fumbles lost, charged
+# to whoever lost the ball.
 figure nfl_team.turnovers:
     display "{nfl_team} giveaways"
 
     depends:
-        mine = nfl_play.by_offense:{nfl_team} & nfl_play.giveaways
+        mine = nfl_play.lost_by:{nfl_team} & nfl_play.regular
 
     calculate:
         count(mine)
 
-# Third downs converted, as a share of third downs faced -- the drive-
-# sustaining stat, banded against dials a tenant can move.
+# Third downs converted, as a share of the regular-season third downs the
+# offence actually snapped and the league judged -- a nullified play was
+# replayed, not faced, and a blank judgement is no judgement. Banded
+# against dials a tenant can move.
 figure nfl_team.third_down_rate:
     display "{nfl_team} third-down conversion"
     unit share
 
     depends:
-        faced = nfl_play.by_offense:{nfl_team} & nfl_play.third_downs
-        moved = nfl_play.by_offense:{nfl_team} & nfl_play.third_downs & nfl_play.conversions
+        faced = nfl_play.by_offense:{nfl_team} & nfl_play.third_downs & nfl_play.snaps & nfl_play.regular & nfl_play.judged
+        moved = faced & nfl_play.conversions
 
     calculate:
         count(moved) / count(faced)
@@ -371,9 +390,9 @@ reading nfl_team.rest(range):
         worst(spans)
 
 # When the scoring happened, on the clock: the window's quarter-hour points
-# grouped into hours, a timeline at hour grain. The grain is declared and
-# hashed -- an hourly series and a daily one differ in what every point
-# means.
+# grouped into hours, a timeline at hour grain, covering the plays whose
+# clocks the loader could verify. The grain is declared and hashed -- an
+# hourly series and a daily one differ in what every point means.
 reading nfl_team.scoring_rhythm(range):
     display "{nfl_team} scoring, hour by hour"
 
@@ -527,9 +546,9 @@ projection nfl_team.standings:
         detail "{wins} wins from {played} games."
         severity info
 
-# The offence, one row per franchise: figures computed over every single
-# snap of the season, side by side. The evidence route under any of these
-# numbers lists the actual plays.
+# The offence, one row per franchise: regular-season figures computed over
+# the actual snaps, side by side. The evidence route under any of these
+# numbers lists the plays themselves.
 projection nfl_team.offense:
     sort by yards descending
 

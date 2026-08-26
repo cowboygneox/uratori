@@ -193,19 +193,108 @@ def test_every_play_is_a_fact_and_scoring_follows_the_scoreboard() -> None:
             _pbp_row("56", sp="1", posteam_score_post="0", defteam_score_post="5"),
             _pbp_row("57"),  # an ordinary snap: still a fact
             _pbp_row("58", time_of_day=""),  # no instant: a fact with no clock
-        ]
+        ],
+        GAME_TYPES,
     )
     plays = by_game["2025_01_ARI_NO"]
     assert len(plays) == 4, "every single play is a fact"
     ordinary = plays["2025_01_ARI_NO@57"]
     assert "points" not in ordinary and "scored_by" not in ordinary
+    assert "third_down_converted" not in ordinary, "a blank judgement stays absent"
+    assert "lost_by" not in ordinary, "only a giveaway names a loser"
     assert ordinary["offense"] == "NO" and ordinary["down"] == 3
+    assert ordinary["snap"] is True and ordinary["season_type"] == "REG"
     touchdown = plays["2025_01_ARI_NO@55"]
     assert touchdown["points"] == 6 and touchdown["scored_by"] == "NO"
     safety = plays["2025_01_ARI_NO@56"]
     assert safety["points"] == 2 and safety["scored_by"] == "ARI"
     assert "clock_time" not in plays["2025_01_ARI_NO@58"]
     assert rebuilt == {"2025_01_ARI_NO": {"NO": 6, "ARI": 2}}
+
+
+def test_a_snap_is_a_play_the_offence_ran_and_the_books_kept() -> None:
+    """Kickoffs carry the *receiving* team as nflverse's `posteam`, penalty
+    rows were wiped, and END QUARTER rows are not football -- none may count
+    as an offensive snap, or every team runs ~20% more plays than it did."""
+    module = _load_module()
+    by_game, _ = module.play_facts(
+        [
+            _pbp_row("60", play_type="kickoff"),
+            _pbp_row("61", play_type="no_play"),
+            _pbp_row("62", play_type=""),
+            _pbp_row("63", play_type="qb_kneel"),
+        ],
+        GAME_TYPES,
+    )
+    plays = by_game["2025_01_ARI_NO"]
+    assert "snap" not in plays["2025_01_ARI_NO@60"]
+    assert "snap" not in plays["2025_01_ARI_NO@61"]
+    assert "snap" not in plays["2025_01_ARI_NO@62"]
+    assert plays["2025_01_ARI_NO@63"]["snap"] is True
+
+
+def test_a_giveaway_names_whoever_actually_lost_the_ball() -> None:
+    """On a muffed punt nflverse marks `fumble_lost` on a row whose
+    `posteam` is the punting team -- who *recovered* the ball. Charging the
+    giveaway to the offence would count the opponent's mistake against
+    them; `lost_by` follows the fumbler. An interception is always the
+    offence's."""
+    module = _load_module()
+    by_game, _ = module.play_facts(
+        [
+            _pbp_row("70", fumble_lost="1", fumbled_1_team="ARI"),
+            _pbp_row("71", interception="1"),
+            _pbp_row("72", fumble_lost="1"),  # no fumbler named: the offence's
+        ],
+        GAME_TYPES,
+    )
+    plays = by_game["2025_01_ARI_NO"]
+    assert plays["2025_01_ARI_NO@70"]["lost_by"] == "ARI"
+    assert plays["2025_01_ARI_NO@71"]["lost_by"] == "NO"
+    assert plays["2025_01_ARI_NO@72"]["lost_by"] == "NO"
+
+
+def test_a_third_down_judgement_keeps_all_three_answers_apart() -> None:
+    """Converted, not converted, and never judged are three different
+    claims: the first two are the league's answer (a boolean false is
+    *present* to the language's `is set`), the blank is no answer, and
+    folding the blank into "not converted" would read an absence as a
+    definite negative."""
+    module = _load_module()
+    by_game, _ = module.play_facts(
+        [
+            _pbp_row("80", third_down_converted="1"),
+            _pbp_row("81", third_down_converted="0"),
+            _pbp_row("82", third_down_converted=""),
+        ],
+        GAME_TYPES,
+    )
+    plays = by_game["2025_01_ARI_NO"]
+    assert plays["2025_01_ARI_NO@80"]["third_down_converted"] is True
+    assert plays["2025_01_ARI_NO@81"]["third_down_converted"] is False
+    assert "third_down_converted" not in plays["2025_01_ARI_NO@82"]
+
+
+def test_a_scoring_play_missing_any_score_end_earns_no_points() -> None:
+    """All four ends or nothing, each end separately: a delta against any
+    baseline coerced to nought fabricates points from an absence."""
+    module = _load_module()
+    for end in ("posteam_score", "defteam_score", "posteam_score_post", "defteam_score_post"):
+        by_game, rebuilt = module.play_facts([_pbp_row("55", **{end: ""})], GAME_TYPES)
+        play = by_game["2025_01_ARI_NO"]["2025_01_ARI_NO@55"]
+        assert "points" not in play, f"points minted with {end} absent"
+        assert rebuilt == {}
+
+
+def test_a_score_correction_downwards_mints_no_points() -> None:
+    """A stat correction can move a scoreboard down; negative points on a
+    play would poison the rebuilt total and the clock figures both."""
+    module = _load_module()
+    by_game, rebuilt = module.play_facts(
+        [_pbp_row("55", sp="1", posteam_score="6", posteam_score_post="0")], GAME_TYPES
+    )
+    assert "points" not in by_game["2025_01_ARI_NO"]["2025_01_ARI_NO@55"]
+    assert rebuilt == {}
 
 
 # ---------------------------------------------------------------- fixtures --
@@ -311,7 +400,7 @@ def test_every_field_the_definitions_read_exists_on_a_loader_record() -> None:
     # scored and was somehow also fumbled away -- so every path the
     # definitions read resolves on it.
     by_game, _ = module.play_facts(
-        [_pbp_row("55", down="3", third_down_converted="1", fumble_lost="1")]
+        [_pbp_row("55", down="3", third_down_converted="1", fumble_lost="1")], GAME_TYPES
     )
     plays = by_game["2025_01_ARI_NO"]
     specimens = {
@@ -344,19 +433,47 @@ def test_every_field_the_definitions_read_exists_on_a_loader_record() -> None:
                 assert read_path(specimen, path), (
                     f"{name} reads {path}, which no loaded {measure.kind} record carries"
                 )
+    for plan in library.projections:
+        specimen = specimens[plan.kind]
+        for field_name, path, _ftype, join in plan.fields:
+            if join is None:
+                assert read_path(specimen, path), (
+                    f"{plan.name} field {field_name} reads {path}, which no loaded "
+                    f"{plan.kind} record carries"
+                )
+                continue
+            assert read_path(specimen, join.field), (
+                f"{plan.name} field {field_name} joins from {join.field}, which no "
+                f"loaded {plan.kind} record carries"
+            )
+            owner = specimens[join.kind]
+            assert read_path(owner, join.path), (
+                f"{plan.name} field {field_name} joins through {join.path}, which no "
+                f"loaded {join.kind} record carries"
+            )
+            assert read_path(owner, path), (
+                f"{plan.name} field {field_name} reads {path} off the joined "
+                f"{join.kind}, which no loaded record carries"
+            )
 
 
 def test_the_loader_pushes_every_kind_the_schema_declares() -> None:
     """A kind the push order misses is a kind that silently never loads --
-    the loader would still print its build counts and exit 0."""
-    import inspect
-
+    the loader would still print its build counts and exit 0. So: hand push
+    one record of every kind the schema declares and assert every one is
+    delivered, not that the source mentions the names."""
     module = _load_module()
     schema = json.loads((EXAMPLE / "schema.json").read_text())
-    pushed = {
-        kind for kind in schema["kinds"] if f'"{kind}"' in inspect.getsource(module.push)
-    }
-    assert pushed == set(schema["kinds"])
+
+    delivered: set[str] = set()
+
+    class FakeClient:
+        def call(self, method: str, path: str, body=None):
+            delivered.update(body["writes"])
+            return {"written": 0, "changed": 0}
+
+    module.push(FakeClient(), "t", {kind: {"k": {"name": "x"}} for kind in schema["kinds"]})
+    assert delivered == set(schema["kinds"])
 
 
 def test_push_delivers_every_record_exactly_once_across_batches() -> None:
@@ -479,9 +596,10 @@ def _pbp_row(play_id: str, **overrides: str):
         "posteam_score_post": "6" if play_id == "55" else "0",
         "defteam_score_post": "3" if play_id != "56" else "5",
         "qtr": "1",
-        "third_down_converted": "0",
+        "third_down_converted": "",
         "interception": "0",
         "fumble_lost": "0",
+        "fumbled_1_team": "",
         "desc": "A.Kamara right guard for 18 yards, TOUCHDOWN.",
     }
     if play_id == "57":
@@ -490,13 +608,16 @@ def _pbp_row(play_id: str, **overrides: str):
     return row
 
 
+GAME_TYPES = {"2025_01_ARI_NO": "REG"}
+
+
 def test_a_play_the_league_never_flagged_as_scoring_earns_no_points() -> None:
     """`sp` is the league's own scoring-play marker. Without the guard, any
     row whose scoreboard columns happen to move -- a correction, a stray
     charting artefact -- would mint points onto the clock figures. The play
     itself still loads: it happened."""
     module = _load_module()
-    by_game, rebuilt = module.play_facts([_pbp_row("55", sp="0")])
+    by_game, rebuilt = module.play_facts([_pbp_row("55", sp="0")], GAME_TYPES)
     play = by_game["2025_01_ARI_NO"]["2025_01_ARI_NO@55"]
     assert "points" not in play and "scored_by" not in play
     assert rebuilt == {}
@@ -508,7 +629,7 @@ def test_a_scoring_play_with_no_before_scores_earns_no_points() -> None:
     then fails the game's reconciliation, which is the gate doing its job."""
     module = _load_module()
     by_game, rebuilt = module.play_facts(
-        [_pbp_row("55", posteam_score="", defteam_score="NA")]
+        [_pbp_row("55", posteam_score="", defteam_score="NA")], GAME_TYPES
     )
     assert "points" not in by_game["2025_01_ARI_NO"]["2025_01_ARI_NO@55"]
     assert rebuilt == {}
@@ -527,17 +648,82 @@ def test_the_gate_keeps_games_whose_plays_rebuild_the_final_score() -> None:
             _game("2016_01_ARI_OAK", "2016-09-11", "ARI", "OAK", "3", "6"),
             _game("2016_02_OAK_TEN", "2016-09-18", "OAK", "TEN", "10", "17"),
             _game("2016_03_DEN_OAK", "2016-09-25", "DEN", "OAK", "", ""),
+            _game("2016_05_OAK_SD", "2016-10-09", "OAK", "SD", "13", "17"),
         ]
     )
     rebuilt = {
-        # Matches, with the modern abbreviation for the 2016 Raiders.
+        # Matches, with the modern abbreviation for the 2016 Raiders --
+        # the play-by-play and the schedule must meet through the map.
         "2016_01_ARI_OAK": {"LV": 6, "ARI": 3},
         # Accounts for only some of the points.
         "2016_02_OAK_TEN": {"TEN": 17, "LV": 3},
+        # Matches, in the *old* spellings -- the map must normalise both
+        # sides of the comparison, not just one.
+        "2016_05_OAK_SD": {"SD": 17, "OAK": 13},
     }
     kept, dropped = module.reconciled(games, rebuilt)
-    assert kept == {"2016_01_ARI_OAK"}
+    assert kept == {"2016_01_ARI_OAK", "2016_05_OAK_SD"}
     assert dropped == ["2016_02_OAK_TEN"], "the fixture is not checkable, so not dropped"
+
+
+def test_the_gate_drops_every_way_the_plays_can_disagree() -> None:
+    """Each failure mode the module docstring names is its own branch:
+    points invented, points credited to a team not in the game, and no
+    play-by-play at all -- and a 0-0 final with no scoring plays is
+    agreement, not a shortfall."""
+    module = _load_module()
+    games, _ = module.game_facts(
+        [
+            _game("2025_04_KC_LAC", "2025-09-28", "KC", "LAC", "20", "23"),
+            _game("2025_05_LAC_KC", "2025-10-05", "LAC", "KC", "10", "13"),
+            _game("2025_06_DEN_KC", "2025-10-12", "DEN", "KC", "0", "0"),
+            _game("2025_07_KC_DEN", "2025-10-19", "KC", "DEN", "7", "10"),
+        ]
+    )
+    kept, dropped = module.reconciled(
+        games,
+        {
+            # Over-claims: an extra field goal the scoreboard never saw.
+            "2025_04_KC_LAC": {"LAC": 23, "KC": 23},
+            # Credits a team that was not playing.
+            "2025_05_LAC_KC": {"KC": 13, "DEN": 10},
+            # 2025_06: a 0-0 final, absent from rebuilt entirely -- kept.
+            # 2025_07: played, but no play-by-play arrived -- dropped.
+        },
+    )
+    assert kept == {"2025_06_DEN_KC"}
+    assert dropped == ["2025_04_KC_LAC", "2025_05_LAC_KC", "2025_07_KC_DEN"]
+
+
+def test_the_gate_sums_points_claimed_under_two_spellings_of_one_franchise() -> None:
+    """One game's play-by-play spelling the Raiders both ways must not let
+    half the points vanish from the comparison: a last-spelling-wins read
+    would call 21 claimed points a match for a 14-point final."""
+    module = _load_module()
+    games, _ = module.game_facts(
+        [_game("2016_06_ARI_OAK", "2016-10-16", "ARI", "OAK", "0", "21")]
+    )
+    kept, dropped = module.reconciled(
+        games, {"2016_06_ARI_OAK": {"OAK": 7, "LV": 14}}
+    )
+    assert kept == {"2016_06_ARI_OAK"}, "7 + 14 under one franchise is the final 21"
+    _, dropped = module.reconciled(
+        games, {"2016_06_ARI_OAK": {"OAK": 7, "LV": 7}}
+    )
+    assert dropped == ["2016_06_ARI_OAK"], "14 claimed under two spellings is not 21"
+
+
+def test_clocks_are_credible_only_beside_their_own_kickoff() -> None:
+    """2003-2004 stamp stadium-local wall time with a Z and 2001-2002 carry
+    a bare clock; both must fail, real UTC must pass, and a mislabelled
+    timezone (four hours minimum) must stay distinguishable from a long
+    weather delay."""
+    module = _load_module()
+    kickoff = "2003-09-07T13:00:00-04:00"
+    assert module.credible_clock(kickoff, ["2003-09-07T17:04:26Z"])  # true UTC
+    assert not module.credible_clock(kickoff, ["2003-09-07T13:06:08Z"])  # local as Z
+    assert not module.credible_clock(kickoff, ["13:06:08"])  # no date at all
+    assert module.credible_clock(kickoff, ["2003-09-07T19:30:00Z"])  # a delay, inside 3h
 
 
 def test_the_gate_reads_a_shutout_as_accounted_for() -> None:
@@ -572,7 +758,143 @@ def test_the_showcase_keeps_the_constructs_the_readme_promises() -> None:
         "band high against pace.restDays",  # a reading's band
         "from nfl_game.finished & nfl_game.playoff",  # a set-expression population
         "omit when",  # the row-level gate
-        "days from now to",  # the signed calendar span
+        "days from now to",  # the signed calendar span, forwards
+        "days from played_on to now",  # and backwards
+        "max(",  # the two-argument extreme
+        "read:",  # stored figures bound per row
+        "band of",  # the figure's own band word as a row binding
+        "median(",  # the distribution statistics
         "summarise nfl_game.season over nfl_game.scoreboard",  # the one-row summary
     ):
         assert construct in source, f"the showcase no longer contains `{construct}`"
+
+
+def test_load_season_excludes_a_failed_game_everywhere() -> None:
+    """The gate's wiring, not just its judgement: a game whose plays cannot
+    rebuild its final score must vanish from every kind at once. A game
+    excluded from the plays but still counted by the team figures would be
+    wins the play-by-play cannot back -- the asymmetry this pins down. The
+    fixture with no result rides through untouched."""
+    import csv as csv_module
+    import io
+
+    module = _load_module()
+
+    games_csv = [
+        _game("2025_01_KC_LAC", "2025-09-05", "KC", "LAC", "0", "7"),
+        _game("2025_02_LAC_DEN", "2025-09-14", "LAC", "DEN", "10", "13"),
+        _game("2025_03_DEN_KC", "2025-09-21", "DEN", "KC", "", ""),
+        _game("2025_04_DEN_LAC", "2025-09-28", "DEN", "LAC", "0", "3"),
+    ]
+
+    def pbp_csv() -> bytes:
+        out = io.StringIO()
+        writer = csv_module.DictWriter(out, fieldnames=list(module.PBP_COLUMNS))
+        writer.writeheader()
+        base = {column: "" for column in module.PBP_COLUMNS}
+        # The first game rebuilt exactly: one touchdown-and-extra-point
+        # bundle for LAC's seven, stamped with a clock that agrees with
+        # the 1pm Eastern kickoff.
+        writer.writerow(
+            base
+            | {
+                "game_id": "2025_01_KC_LAC",
+                "play_id": "10",
+                "sp": "1",
+                "desc": "Touchdown LAC.",
+                "posteam": "LAC",
+                "defteam": "KC",
+                "time_of_day": "2025-09-05T17:12:00Z",
+                "posteam_score": "0",
+                "defteam_score": "0",
+                "posteam_score_post": "7",
+                "defteam_score_post": "0",
+            }
+        )
+        # The fourth game also rebuilds -- but its clock claims one in the
+        # morning UTC against a 1pm Eastern kickoff, so the clock gate must
+        # keep the play and strip the instant.
+        writer.writerow(
+            base
+            | {
+                "game_id": "2025_04_DEN_LAC",
+                "play_id": "40",
+                "sp": "1",
+                "desc": "Field goal LAC.",
+                "posteam": "LAC",
+                "defteam": "DEN",
+                "time_of_day": "2025-09-28T01:00:00Z",
+                "posteam_score": "0",
+                "defteam_score": "0",
+                "posteam_score_post": "3",
+                "defteam_score_post": "0",
+            }
+        )
+        # The second game accounted for only in part: three of thirteen.
+        writer.writerow(
+            base
+            | {
+                "game_id": "2025_02_LAC_DEN",
+                "play_id": "20",
+                "sp": "1",
+                "desc": "Field goal DEN.",
+                "posteam": "DEN",
+                "defteam": "LAC",
+                "posteam_score": "0",
+                "defteam_score": "0",
+                "posteam_score_post": "3",
+                "defteam_score_post": "0",
+            }
+        )
+        return out.getvalue().encode()
+
+    def stats_csv() -> bytes:
+        rows = [
+            _stat_row(),
+            _stat_row(game_id="2025_02_LAC_DEN", week="2", opponent_team="DEN"),
+        ]
+        out = io.StringIO()
+        writer = csv_module.DictWriter(out, fieldnames=list(rows[0]))
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+        return out.getvalue().encode()
+
+    def fake_fetch(url: str, cache: Path) -> bytes:
+        if "play_by_play" in url:
+            return pbp_csv()
+        if "stats_player_week" in url:
+            return stats_csv()
+        raise AssertionError(f"unexpected fetch: {url}")
+
+    module.fetch = fake_fetch
+
+    pushed: dict[str, dict] = {}
+
+    class FakeClient:
+        def call(self, method: str, path: str, body=None):
+            for kind, records in body["writes"].items():
+                pushed.setdefault(kind, {}).update(records)
+            return {"written": 0, "changed": 0}
+
+    module.load_season(FakeClient(), 2025, Path("/nonexistent"), TEAMS_CSV, games_csv)
+
+    def keys_for(kind: str, game_id: str) -> list[str]:
+        return [key for key in pushed.get(kind, {}) if key.startswith(f"{game_id}@")]
+
+    assert "2025_01_KC_LAC" in pushed["nfl_game"]
+    assert "2025_03_DEN_KC" in pushed["nfl_game"], "a fixture has nothing to check"
+    assert pushed["nfl_game"]["2025_03_DEN_KC"]["finished"] is False
+    assert "2025_02_LAC_DEN" not in pushed["nfl_game"]
+    for kind in ("nfl_team_game", "nfl_play", "nfl_stat_line"):
+        assert keys_for(kind, "2025_01_KC_LAC"), f"the reconciled game must load its {kind}"
+        assert not keys_for(kind, "2025_02_LAC_DEN"), (
+            f"the excluded game leaked {kind} records -- the exclusion must be whole"
+        )
+    credible = pushed["nfl_play"]["2025_01_KC_LAC@10"]
+    assert credible["clock_time"] == "2025-09-05T17:12:00Z", "a verified clock travels"
+    suspect = pushed["nfl_play"]["2025_04_DEN_LAC@40"]
+    assert "clock_time" not in suspect, (
+        "a clock that disagrees with its own kickoff must be stripped, not served"
+    )
+    assert suspect["points"] == 3, "the play itself stays -- only its clock goes"

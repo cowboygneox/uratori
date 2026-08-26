@@ -27,7 +27,10 @@ schedule, both teams, exactly. A played game that fails -- points missing,
 points invented, no play-by-play at all -- is excluded whole (game, sides,
 stat lines and plays) and counted out loud, because a silent cap reads as
 "covered everything". Fixtures with no result yet have nothing to be
-inaccurate about, and load as fixtures.
+inaccurate about, and load as fixtures. Play clocks get the same treatment:
+a game's wall-clock stamps are kept only when they agree with its scheduled
+kickoff, which quietly retires the early seasons that recorded local time
+wearing a UTC suffix -- their plays load, their clocks do not.
 
 ## Run it
 
@@ -41,7 +44,7 @@ python examples/nfl/load.py --seasons 2024-2026   # or start smaller
 ```
 
 Each season is a **tenant** -- the same definitions over different facts,
-which is exactly what a tenant is. The full era downloads roughly 600 MB of
+which is exactly what a tenant is. The full era downloads roughly 650 MB of
 nflverse CSV on the first run (cached under `examples/nfl/data/`), and the
 engine computes as it ingests -- expect a few minutes per season, with the
 run report printed batch by batch, and around 70,000 facts per tenant when
@@ -114,7 +117,7 @@ and `worst` -- withheld together under two games, and banded `high`
 against a `{good, poor}` dial. Thursday football is visible from here.
 
 **Scoring rhythm** (`nfl_team.scoring_rhythm`) is the sub-day grain:
-scoring plays stored by real UTC wall clock into quarter-hours of the
+scoring plays with a verified wall clock, stored into quarter-hours of the
 tenant's own calendar, then grouped into hours at read time --
 `series(slots) by hour`. Ask for a Sunday and watch the league's afternoon.
 
