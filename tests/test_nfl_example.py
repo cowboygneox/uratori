@@ -154,32 +154,48 @@ def test_a_finished_game_produces_two_sides_and_rest_gaps() -> None:
     assert second["previous_kickoff"] == opener["kickoff"]
 
 
+RAIDERS_CSV = [
+    {
+        "team_abbr": "OAK",
+        "team_name": "Oakland Raiders",
+        "team_conf": "AFC",
+        "team_division": "AFC West",
+        "team_logo_espn": "",
+    },
+    {
+        "team_abbr": "LV",
+        "team_name": "Las Vegas Raiders",
+        "team_conf": "AFC",
+        "team_division": "AFC West",
+        "team_logo_espn": "",
+    },
+]
+
+
 def test_a_relocated_franchise_is_one_subject() -> None:
     """OAK and LV are the same team; the loader files both abbreviations on
     one record so the `through nfl_team.abbrs.abbr` hop resolves either to
-    the same subject."""
+    the same subject. In a single-tenant world the franchise record wears
+    the *modern* name -- it fronts a quarter of a century, not one year."""
     module = _load_module()
-    teams_csv = [
-        {
-            "team_abbr": "OAK",
-            "team_name": "Oakland Raiders",
-            "team_conf": "AFC",
-            "team_division": "AFC West",
-            "team_logo_espn": "",
-        },
-        {
-            "team_abbr": "LV",
-            "team_name": "Las Vegas Raiders",
-            "team_conf": "AFC",
-            "team_division": "AFC West",
-            "team_logo_espn": "",
-        },
-    ]
-    facts = module.team_facts(teams_csv, {"OAK"})
+    facts = module.team_facts(RAIDERS_CSV, {"OAK"})
     assert set(facts) == {"LV"}, "the franchise key is the current abbreviation"
     record = facts["LV"]
-    assert record["name"] == "Oakland Raiders", "named as the loaded season knew it"
+    assert record["name"] == "Las Vegas Raiders", "the franchise fronts the whole era"
     assert {entry["abbr"] for entry in record["abbrs"]} == {"OAK", "LV"}
+
+
+def test_a_team_season_wears_the_seasons_own_spelling() -> None:
+    """The 2003 entry on the greatest-seasons page is the Oakland Raiders,
+    whoever holds the franchise now: the team-season key, name and team
+    field all use the era spelling, and the franchise join is left to the
+    definitions' hop through the abbrs list."""
+    module = _load_module()
+    facts = module.team_season_facts(2003, {"OAK"}, RAIDERS_CSV)
+    assert set(facts) == {"2003-OAK"}
+    record = facts["2003-OAK"]
+    assert record["name"] == "2003 Oakland Raiders"
+    assert record["team"] == "OAK" and record["season"] == 2003
 
 
 def test_every_play_is_a_fact_and_scoring_follows_the_scoreboard() -> None:
@@ -198,6 +214,8 @@ def test_every_play_is_a_fact_and_scoring_follows_the_scoreboard() -> None:
             _pbp_row("58", time_of_day=""),  # no instant: a fact with no clock
         ],
         GAME_TYPES,
+        2025,
+        ERA_2025,
     )
     plays = by_game["2025_01_ARI_NO"]
     assert len(plays) == 4, "every single play is a fact"
@@ -228,6 +246,8 @@ def test_a_snap_is_a_play_the_offence_ran_and_the_books_kept() -> None:
             _pbp_row("63", play_type="qb_kneel"),
         ],
         GAME_TYPES,
+        2025,
+        ERA_2025,
     )
     plays = by_game["2025_01_ARI_NO"]
     assert "snap" not in plays["2025_01_ARI_NO@60"]
@@ -250,6 +270,8 @@ def test_a_giveaway_names_whoever_actually_lost_the_ball() -> None:
             _pbp_row("72", fumble_lost="1"),  # no fumbler named: the offence's
         ],
         GAME_TYPES,
+        2025,
+        ERA_2025,
     )
     plays = by_game["2025_01_ARI_NO"]
     assert plays["2025_01_ARI_NO@70"]["lost_by"] == "ARI"
@@ -271,6 +293,8 @@ def test_a_third_down_judgement_keeps_all_three_answers_apart() -> None:
             _pbp_row("82", third_down_converted=""),
         ],
         GAME_TYPES,
+        2025,
+        ERA_2025,
     )
     plays = by_game["2025_01_ARI_NO"]
     assert plays["2025_01_ARI_NO@80"]["third_down_converted"] is True
@@ -283,7 +307,7 @@ def test_a_scoring_play_missing_any_score_end_earns_no_points() -> None:
     baseline coerced to nought fabricates points from an absence."""
     module = _load_module()
     for end in ("posteam_score", "defteam_score", "posteam_score_post", "defteam_score_post"):
-        by_game, rebuilt = module.play_facts([_pbp_row("55", **{end: ""})], GAME_TYPES)
+        by_game, rebuilt = module.play_facts([_pbp_row("55", **{end: ""})], GAME_TYPES, 2025, ERA_2025)
         play = by_game["2025_01_ARI_NO"]["2025_01_ARI_NO@55"]
         assert "points" not in play, f"points minted with {end} absent"
         assert rebuilt == {}
@@ -294,7 +318,7 @@ def test_a_score_correction_downwards_mints_no_points() -> None:
     play would poison the rebuilt total and the clock figures both."""
     module = _load_module()
     by_game, rebuilt = module.play_facts(
-        [_pbp_row("55", sp="1", posteam_score="6", posteam_score_post="0")], GAME_TYPES
+        [_pbp_row("55", sp="1", posteam_score="6", posteam_score_post="0")], GAME_TYPES, 2025, ERA_2025
     )
     assert "points" not in by_game["2025_01_ARI_NO"]["2025_01_ARI_NO@55"]
     assert rebuilt == {}
@@ -401,16 +425,21 @@ def test_every_field_the_definitions_read_exists_on_a_loader_record() -> None:
     players, lines = module.player_facts(
         [_stat_row(completions="20", attempts="30", passing_yards="200", passing_tds="2")],
         kickoffs,
+        2025,
     )
     # One snap carrying everything at once -- a converted third down that
     # scored and was somehow also fumbled away -- so every path the
     # definitions read resolves on it.
     by_game, _ = module.play_facts(
-        [_pbp_row("55", down="3", third_down_converted="1", fumble_lost="1")], GAME_TYPES
+        [_pbp_row("55", down="3", third_down_converted="1", fumble_lost="1")], GAME_TYPES, 2025, ERA_2025
     )
     plays = by_game["2025_01_ARI_NO"]
     specimens = {
         "nfl_team": next(iter(module.team_facts(TEAMS_CSV, {"KC"}).values())),
+        "nfl_season": module.season_fact(2025)["2025"],
+        "nfl_team_season": module.team_season_facts(2025, {"KC"}, TEAMS_CSV)["2025-KC"],
+        "nfl_game_slot": module.slot_facts(2)["2"],
+        "nfl_weekday": module.weekday_facts()["sunday"],
         "nfl_game": games["2025_01_KC_LAC"],
         # The *second* side a team plays: an opener has no previous_kickoff
         # by design, and the rest measure's paths must resolve somewhere.
@@ -482,7 +511,7 @@ def test_the_loader_pushes_every_kind_the_world_declares() -> None:
     delivered, not that the source mentions the names."""
     module = _load_module()
     kinds = set(_library().facts)
-    assert len(kinds) == 6, "the world lost a declared kind"
+    assert len(kinds) == 10, "the world lost a declared kind"
 
     delivered: set[str] = set()
 
@@ -491,7 +520,7 @@ def test_the_loader_pushes_every_kind_the_world_declares() -> None:
             delivered.update(body["writes"])
             return {"written": 0, "changed": 0}
 
-    module.push(FakeClient(), "t", {kind: {"k": {"name": "x"}} for kind in kinds})
+    module.push(FakeClient(), "t", {kind: {"k": {"name": "x"}} for kind in kinds}, "test")
     assert delivered == kinds
 
 
@@ -519,7 +548,7 @@ def test_push_delivers_every_record_exactly_once_across_batches() -> None:
             "nfl_game": {f"game-{n}": {"n": n} for n in range(2)},
         }
         client = FakeClient()
-        module.push(client, "t", facts)
+        module.push(client, "t", facts, "test")
     finally:
         module.BATCH = original
 
@@ -535,7 +564,196 @@ def test_push_delivers_every_record_exactly_once_across_batches() -> None:
     assert max(sum(len(keys) for keys in batch.values()) for batch in client.batches) <= 3
 
 
+def test_push_defers_every_batch_and_close_owes_the_one_full_run() -> None:
+    """A pass per batch reads buckets every earlier batch already filled, so
+    a two-million-record import must defer: each facts post carries
+    `defer: true`, no batch triggers a pass, and `close` sends the single
+    full run that computes everything. A loader that forgot the flag would
+    still import correctly -- days later."""
+    module = _load_module()
+
+    calls: list[tuple[str, dict]] = []
+
+    class FakeClient:
+        def call(self, method: str, path: str, body=None):
+            calls.append((path, body))
+            return {"written": 1, "changed": 0, "rebuilt": []}
+
+    # Batch size 1 so `every batch` quantifies over several: a loader that
+    # deferred only the first batch would pass a single-batch fixture.
+    original = module.BATCH
+    module.BATCH = 1
+    try:
+        module.push(
+            FakeClient(),
+            "nfl",
+            {"nfl_team": {abbr: {"name": "x"} for abbr in ("KC", "LAC", "DEN")}},
+            "test",
+        )
+    finally:
+        module.BATCH = original
+    assert len(calls) == 3
+    assert all(body.get("defer") is True for _, body in calls), (
+        "every import batch must defer its pass"
+    )
+
+    calls.clear()
+    module.close(FakeClient(), "nfl")
+    assert calls == [("/tenants/nfl/runs", {"full": True})], (
+        "the deferred batches owe exactly one closing full run"
+    )
+
+
+def test_an_update_push_carries_no_defer_flag() -> None:
+    """`--update` is the in-season refresh: one week of football is exactly
+    the batch the ordinary warm pass is for, so the batches must not carry
+    `defer` -- a deferred weekly update would leave the tenant's answers a
+    week stale until something settled the debt with a full pass."""
+    module = _load_module()
+
+    bodies: list[dict] = []
+
+    class FakeClient:
+        def call(self, method: str, path: str, body=None):
+            bodies.append(body)
+            return {"written": 1, "changed": 3}
+
+    module.push(FakeClient(), "nfl", {"nfl_team": {"KC": {"name": "x"}}}, "wk", defer=False)
+    assert bodies and all("defer" not in body for body in bodies)
+
+
+def test_the_loader_refuses_an_engine_that_ignored_defer() -> None:
+    """An engine that predates `defer` ignores the unknown field and runs a
+    pass per batch: correct answers, at a cost that turns an era import
+    into days. Figure movements on a deferred batch are that engine
+    announcing itself, and the loader must stop rather than grind on."""
+    module = _load_module()
+
+    class OldEngine:
+        def call(self, method: str, path: str, body=None):
+            return {"written": 1, "changed": 7}
+
+    import pytest
+
+    with pytest.raises(SystemExit):
+        module.push(OldEngine(), "nfl", {"nfl_team": {"KC": {"name": "x"}}}, "1999")
+
+
+def test_a_fixture_only_season_creates_no_team_season_rows() -> None:
+    """A roster record gets a measured nought for every count, so 32 rows of
+    played-0 won-0 for a season that has not kicked off would be noughts
+    about games that never happened. The team-season rows appear when the
+    season's football does; the season record itself stays, because its 0
+    finished games is a claim about a loaded schedule."""
+    module = _load_module()
+    games_csv = [
+        _game("2026_01_KC_LAC", "2026-09-10", "KC", "LAC", "", "", season="2026"),
+        _game("2026_02_LAC_DEN", "2026-09-17", "LAC", "DEN", "", "", season="2026"),
+    ]
+
+    pushed: dict[str, dict] = {}
+
+    class FakeClient:
+        def call(self, method: str, path: str, body=None):
+            for kind, records in body["writes"].items():
+                pushed.setdefault(kind, {}).update(records)
+            return {"written": 0, "changed": 0}
+
+    module.load_season(FakeClient(), "nfl", 2026, Path("/nonexistent"), TEAMS_CSV, games_csv)
+    assert pushed.get("nfl_team_season", {}) == {}, (
+        "an unplayed season must not put played-0 rows on the board"
+    )
+    assert set(pushed["nfl_season"]) == {"2026"}
+    assert len(pushed["nfl_game"]) == 2, "the fixtures themselves load"
+
+
 # ----------------------------------------------------------- shaping rules --
+
+
+def test_sides_carry_their_team_season_and_game_number() -> None:
+    """The single tenant's per-season cuts hang off the side records: each
+    names its team-season in the season's own spelling, and each finished
+    regular-season side knows which game of that team's year it was --
+    counted off the schedule in kickoff order, so a Thursday opener is Game
+    1 however the CSV was sorted. The postseason is deliberately
+    unnumbered: the slots are the regular season's schedule, and nobody's
+    playoff run is their Game 18."""
+    module = _load_module()
+    _, sides = module.game_facts(
+        [
+            _game("2025_02_LAC_DEN", "2025-09-14", "LAC", "DEN", "10", "13"),
+            _game("2025_01_KC_LAC", "2025-09-05", "KC", "LAC", "21", "27"),
+            _game("2025_19_LAC_KC", "2026-01-11", "LAC", "KC", "17", "23", game_type="WC"),
+        ]
+    )
+    opener = sides["2025_01_KC_LAC@LAC"]
+    assert opener["team_season"] == "2025-LAC" and opener["season"] == 2025
+    assert opener["game_number"] == 1
+    assert sides["2025_02_LAC_DEN@LAC"]["game_number"] == 2
+    assert sides["2025_01_KC_LAC@KC"]["game_number"] == 1
+    playoff = sides["2025_19_LAC_KC@LAC"]
+    assert "game_number" not in playoff, "a playoff side is not a schedule slot"
+    assert playoff["team_season"] == "2025-LAC", "but it still belongs to its season"
+
+
+def test_a_play_names_its_team_season_in_the_seasons_own_spelling() -> None:
+    """The play-by-play and the schedule can spell a relocated franchise
+    differently; the side records use the schedule's spelling, so the play's
+    team-season keys must land on the same one -- either spelling in, the
+    era's spelling out. A mismatch would put a team's snaps and its wins
+    under two different team-seasons, silently."""
+    module = _load_module()
+    era_2003 = {"LV": "OAK", "KC": "KC"}
+    by_game, _ = module.play_facts(
+        [
+            _pbp_row("90", game_id="2003_01_OAK_KC", posteam="OAK", defteam="KC"),
+            _pbp_row("91", game_id="2003_01_OAK_KC", posteam="LV", defteam="KC",
+                     fumble_lost="1", fumbled_1_team="LV"),
+        ],
+        {"2003_01_OAK_KC": "REG"},
+        2003,
+        era_2003,
+    )
+    plays = by_game["2003_01_OAK_KC"]
+    era_spelt = plays["2003_01_OAK_KC@90"]
+    assert era_spelt["offense_season"] == "2003-OAK" and era_spelt["season"] == 2003
+    modern_spelt = plays["2003_01_OAK_KC@91"]
+    assert modern_spelt["offense_season"] == "2003-OAK", "either spelling in, era out"
+    assert modern_spelt["lost_by_season"] == "2003-OAK", "the giveaway follows the same rule"
+
+
+def test_weekday_follows_the_eastern_calendar() -> None:
+    """The weekday dimension cuts by the league's own clock: a game record
+    names the day its Eastern kickoff falls on, and the weekday facts carry
+    the ISO order the slate page sorts by. The load-bearing fixture is the
+    night game: Sunday 20:20 Eastern is already Monday in UTC, so a loader
+    that shifted to UTC before asking the calendar would file Sunday Night
+    Football under Monday."""
+    module = _load_module()
+    games, _ = module.game_facts(
+        [
+            _game("2025_01_KC_LAC", "2025-09-05", "KC", "LAC", "21", "27"),  # a Friday
+            _game(
+                "2025_02_LAC_DEN", "2025-09-14", "LAC", "DEN", "10", "13", gametime="20:20"
+            ),  # Sunday night: 00:20 UTC Monday
+        ]
+    )
+    assert games["2025_01_KC_LAC"]["weekday"] == "friday"
+    assert games["2025_02_LAC_DEN"]["weekday"] == "sunday"
+    days = module.weekday_facts()
+    assert days["sunday"] == {"name": "Sunday", "order": 7}
+    assert days["monday"]["order"] == 1
+
+
+def test_the_dimension_facts_key_by_what_the_records_bucket_to() -> None:
+    """A numeric field buckets to the number's own spelling, so the slot and
+    season keys must be exactly that spelling -- pad a slot key to "07" and
+    every seventh game files into a bucket with no subject behind it."""
+    module = _load_module()
+    slots = module.slot_facts(17)
+    assert set(slots) == {str(n) for n in range(1, 18)}
+    assert slots["7"] == {"name": "Game 7", "order": 7}
+    assert module.season_fact(2003) == {"2003": {"name": "2003", "year": 2003}}
 
 
 def test_stat_line_composites_are_the_sum_of_their_parts() -> None:
@@ -549,7 +767,7 @@ def test_stat_line_composites_are_the_sum_of_their_parts() -> None:
     kickoffs = {"2025_01_KC_LAC": "2025-09-05T13:00:00-04:00"}
 
     _, lines = module.player_facts(
-        [_stat_row(passing_tds="2", receiving_tds="1")], kickoffs
+        [_stat_row(passing_tds="2", receiving_tds="1")], kickoffs, 2025
     )
     line = lines["2025_01_KC_LAC@00-0000001"]
     assert line["scrimmage_yards"] == 80 + 25
@@ -563,6 +781,7 @@ def test_stat_line_composites_are_the_sum_of_their_parts() -> None:
             )
         ],
         kickoffs,
+        2025,
     )
     quiet = empty["2025_01_KC_LAC@00-0000001"]
     assert quiet["scrimmage_yards"] == 0 and quiet["total_tds"] == 0
@@ -629,6 +848,8 @@ def _pbp_row(play_id: str, **overrides: str):
 
 GAME_TYPES = {"2025_01_ARI_NO": "REG"}
 
+ERA_2025 = {t: t for t in ("ARI", "NO", "KC", "LAC", "DEN")}
+
 
 def test_a_play_the_league_never_flagged_as_scoring_earns_no_points() -> None:
     """`sp` is the league's own scoring-play marker. Without the guard, any
@@ -636,7 +857,7 @@ def test_a_play_the_league_never_flagged_as_scoring_earns_no_points() -> None:
     charting artefact -- would mint points onto the clock figures. The play
     itself still loads: it happened."""
     module = _load_module()
-    by_game, rebuilt = module.play_facts([_pbp_row("55", sp="0")], GAME_TYPES)
+    by_game, rebuilt = module.play_facts([_pbp_row("55", sp="0")], GAME_TYPES, 2025, ERA_2025)
     play = by_game["2025_01_ARI_NO"]["2025_01_ARI_NO@55"]
     assert "points" not in play and "scored_by" not in play
     assert rebuilt == {}
@@ -648,7 +869,7 @@ def test_a_scoring_play_with_no_before_scores_earns_no_points() -> None:
     then fails the game's reconciliation, which is the gate doing its job."""
     module = _load_module()
     by_game, rebuilt = module.play_facts(
-        [_pbp_row("55", posteam_score="", defteam_score="NA")], GAME_TYPES
+        [_pbp_row("55", posteam_score="", defteam_score="NA")], GAME_TYPES, 2025, ERA_2025
     )
     assert "points" not in by_game["2025_01_ARI_NO"]["2025_01_ARI_NO@55"]
     assert rebuilt == {}
@@ -786,7 +1007,8 @@ def test_the_showcase_keeps_the_constructs_the_readme_promises() -> None:
         "read:",  # stored figures bound per row
         "band of",  # the figure's own band word as a row binding
         "median(",  # the distribution statistics
-        "summarise nfl_game.season over nfl_game.scoreboard",  # the one-row summary
+        "across nfl_season",  # the era split a rollup adds up
+        "summarise nfl_game.history over nfl_game.scoreboard",  # the one-row summary
     ):
         assert construct in source, f"the showcase no longer contains `{construct}`"
 
@@ -900,12 +1122,13 @@ def test_load_season_excludes_a_failed_game_everywhere() -> None:
     class FakeClient:
         def call(self, method: str, path: str, body=None):
             # Every batch faces the gate the live facts route applies.
+            assert body.get("defer") is True, "an import batch must not trigger a pass"
             verify_writes(library, frozenset(library.facts), body["writes"])
             for kind, records in body["writes"].items():
                 pushed.setdefault(kind, {}).update(records)
             return {"written": 0, "changed": 0}
 
-    module.load_season(FakeClient(), 2025, Path("/nonexistent"), TEAMS_CSV, games_csv)
+    module.load_season(FakeClient(), "nfl", 2025, Path("/nonexistent"), TEAMS_CSV, games_csv)
 
     def keys_for(kind: str, game_id: str) -> list[str]:
         return [key for key in pushed.get(kind, {}) if key.startswith(f"{game_id}@")]
@@ -926,6 +1149,165 @@ def test_load_season_excludes_a_failed_game_everywhere() -> None:
         "a clock that disagrees with its own kickoff must be stripped, not served"
     )
     assert suspect["points"] == 3, "the play itself stays -- only its clock goes"
+
+    # The referential sweep: every kind the world declares was built by
+    # load_season itself, and every cross-kind key names a record that
+    # exists. This is what catches a dropped dimension kind, an inverted
+    # era map, a mis-sized slot table or a numeric key spelt two ways --
+    # each of which is a silently empty bucket in production.
+    assert set(pushed) == set(module.KIND_ORDER)
+    seasons = set(pushed["nfl_team_season"])
+    assert {s["team_season"] for s in pushed["nfl_team_game"].values()} <= seasons
+    assert {
+        p["offense_season"] for p in pushed["nfl_play"].values() if "offense_season" in p
+    } <= seasons
+    assert {
+        p["lost_by_season"] for p in pushed["nfl_play"].values() if "lost_by_season" in p
+    } <= seasons
+    assert {g["weekday"] for g in pushed["nfl_game"].values()} <= set(pushed["nfl_weekday"])
+    # Slots are sized off the *kept* sides -- the dropped week-2 game does
+    # not stretch the table, and the fixture's deepest surviving ordinal
+    # (LAC's third game) does.
+    numbered = {
+        str(s["game_number"]) for s in pushed["nfl_team_game"].values() if "game_number" in s
+    }
+    assert set(pushed["nfl_game_slot"]) == {"1", "2", "3"} and numbered == {"1", "2", "3"}
+
+
+async def test_the_loaded_records_join_under_the_definitions_in_a_running_engine() -> None:
+    """The seams the compile cannot check: a numeric game_number bucketing
+    to the string key of a slot record, a season number meeting the
+    nfl_season key, and load_season's own era map sending a modern-spelt
+    play to the era-spelt team-season the sides use. Each is two spellings
+    of one join, and each wrong half is a silently empty bucket -- so this
+    runs the actual engine over actual load_season output and asserts the
+    buckets joined. The fixture is 2016 on purpose: the schedule says OAK
+    while the play-by-play says LV, which is the era where an inverted map
+    or a bare franchise() call stops being invisible."""
+    import csv as csv_module
+    import io
+
+    from uratori.engine.engine import Engine
+    from uratori.store import MemoryEngineStore, MemoryFactStore
+
+    module = _load_module()
+    library = _library()
+
+    teams_csv = RAIDERS_CSV + [
+        {
+            "team_abbr": abbr,
+            "team_name": name,
+            "team_conf": "AFC",
+            "team_division": "AFC West",
+            "team_logo_espn": "",
+        }
+        for abbr, name in (("ARI", "Arizona Cardinals"), ("KC", "Kansas City Chiefs"))
+    ]
+    games_csv = [
+        _game("2016_01_ARI_OAK", "2016-09-11", "ARI", "OAK", "3", "6", season="2016"),
+        _game("2016_02_OAK_KC", "2016-09-18", "OAK", "KC", "0", "3", season="2016"),
+    ]
+
+    def pbp_csv() -> bytes:
+        out = io.StringIO()
+        writer = csv_module.DictWriter(out, fieldnames=list(module.PBP_COLUMNS))
+        writer.writeheader()
+        base = {column: "" for column in module.PBP_COLUMNS}
+
+        def score(gid: str, pid: str, posteam: str, defteam: str, before: int, after: int):
+            writer.writerow(
+                base
+                | {
+                    "game_id": gid,
+                    "play_id": pid,
+                    "sp": "1",
+                    "desc": f"{posteam} scores.",
+                    "posteam": posteam,
+                    "defteam": defteam,
+                    "posteam_score": str(before),
+                    "defteam_score": "0",
+                    "posteam_score_post": str(after),
+                    "defteam_score_post": "0",
+                }
+            )
+
+        # The Raiders' six and the Cardinals' three, all spelt LV/ARI as
+        # the modern play-by-play does; the schedule above says OAK.
+        score("2016_01_ARI_OAK", "10", "LV", "ARI", 0, 3)
+        score("2016_01_ARI_OAK", "11", "LV", "ARI", 3, 6)
+        score("2016_01_ARI_OAK", "12", "ARI", "LV", 0, 3)
+        # A giveaway, also modern-spelt: it must land on 2016-OAK.
+        writer.writerow(
+            base
+            | {
+                "game_id": "2016_01_ARI_OAK",
+                "play_id": "13",
+                "sp": "0",
+                "desc": "Pass intercepted.",
+                "posteam": "LV",
+                "defteam": "ARI",
+                "interception": "1",
+            }
+        )
+        score("2016_02_OAK_KC", "20", "KC", "LV", 0, 3)
+        return out.getvalue().encode()
+
+    def stats_csv() -> bytes:
+        out = io.StringIO()
+        csv_module.DictWriter(out, fieldnames=list(_stat_row())).writeheader()
+        return out.getvalue().encode()
+
+    def fake_fetch(url: str, cache: Path) -> bytes:
+        if "play_by_play" in url:
+            return pbp_csv()
+        if "stats_player_week" in url:
+            return stats_csv()
+        raise AssertionError(f"unexpected fetch: {url}")
+
+    module.fetch = fake_fetch
+
+    pushed: dict[str, dict] = {}
+
+    class FakeClient:
+        def call(self, method: str, path: str, body=None):
+            for kind, records in body["writes"].items():
+                pushed.setdefault(kind, {}).update(records)
+            return {"written": 0, "changed": 0}
+
+    module.load_season(FakeClient(), "nfl", 2016, Path("/nonexistent"), teams_csv, games_csv)
+
+    schema = SchemaIn(**json.loads((EXAMPLE / "schema.json").read_text())).build()
+    facts = MemoryFactStore()
+    for kind, records in pushed.items():
+        for key, record in records.items():
+            facts.put("nfl", kind, key, record)
+    store = MemoryEngineStore()
+    engine = Engine(store, facts, library, schema)
+    settings = json.loads((EXAMPLE / "schema.json").read_text())["defaults"]
+    await engine.run("nfl", settings, full=True)
+
+    def value_of(figure: str, subject: str):
+        plan = library.figure(figure)
+        assert plan is not None
+        held = store._values.get(("nfl", figure, plan.version, subject))
+        return held.value if held is not None else None
+
+    # The era-spelt team-season joins from both directions: the sides
+    # (schedule spelling) and the plays (modern spelling, mapped by
+    # load_season's own era map).
+    assert value_of("nfl_team_season.wins", "2016-OAK") == 1
+    assert value_of("nfl_team_season.giveaways", "2016-OAK") == 1
+    # The numeric game_number met the slot records' string keys: three
+    # teams played a first game, one played a second.
+    assert value_of("nfl_game_slot.sides", "1") == 3
+    assert value_of("nfl_game_slot.sides", "2") == 1
+    # The season number met the nfl_season key, and the weekday the game
+    # records carry met the weekday roster.
+    assert value_of("nfl_season.games", "2016") == 2
+    assert value_of("nfl_weekday.games", "sunday") == 2
+    # And the franchise rollup: the split across seasons summed under the
+    # modern franchise key, with the era-spelt games inside it.
+    assert value_of("nfl_team.wins", "LV") == 1
 
 
 def test_teach_migrates_a_pre_fact_world_definitions_first() -> None:

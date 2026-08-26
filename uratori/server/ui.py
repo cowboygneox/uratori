@@ -645,9 +645,16 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             )
         async with s.lock_for(tenant):
             settings = await db.load_settings(s.pool, tenant)
-            report = await facade_for(s, world, library).run(tenant, settings, full=body.full)
+            # The same debt rule as the API's run door: a bulk import that
+            # deferred its pass left this tenant owing a FULL one, and an
+            # editor pass that ran incremental over that gap would settle
+            # the debt's flag without paying it.
+            full = body.full or await db.deferred(s.pool, tenant)
+            report = await facade_for(s, world, library).run(tenant, settings, full=full)
+            if full:
+                await db.clear_deferred(s.pool, tenant)
             out = run_out(report, world, library, settings, written=0, deleted=0)
-            await record_pass(s, tenant, "run", full=body.full, out=out)
+            await record_pass(s, tenant, "run", full=full, out=out)
         return EditRunOut(ok=True, changed=out.changed, rebuilt=out.rebuilt)
 
     # -------------------------------------------------------------- facts --

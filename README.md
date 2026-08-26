@@ -94,7 +94,7 @@ database beside it. Then teach it and feed it:
 | `PUT /schema`, `GET /schema` | Declare (or replace) the world; read it back. A replacement is refused whole if the loaded definitions no longer compile under it. |
 | `PUT /definitions`, `GET /definitions` | Compile and load source (a bad definition is a 422 in the checker's own words); read back the library described -- names, versions, prose, formulas and what each rests on. |
 | `PUT /tenants/{t}/settings` | Store a tenant's sparse dial document. |
-| `POST /tenants/{t}/facts` | Apply writes/deletes (with the provider's own stamps as the stale-write guard), run the pass, get back counts, a ranked change sample, and the re-served `Result`s. |
+| `POST /tenants/{t}/facts` | Apply writes/deletes (with the provider's own stamps as the stale-write guard), run the pass, get back counts, a ranked change sample, and the re-served `Result`s. `defer: true` writes without the pass, for bulk imports that close with one full run. |
 | `POST /tenants/{t}/runs` | A pass with no new facts (a moved dial, `{"full": true}` to rebuild). |
 | `GET /tenants/{t}/results[/{name}]` | Current answers. |
 | `GET /tenants/{t}/evidence/{name}?subject=…` | The records behind one stored value: the citation, joined back to the records it names. |
@@ -131,7 +131,7 @@ container, `localhost` is the container.
 | [Setup](docs/setup.md) | Deploying the container: environment, database, token, health, upgrades. |
 | [HTTP & websocket API](docs/http-api.md) | Every route and frame, with request and response shapes. |
 | [The definition language](docs/language.md) | Writing `.fig`: facts, groups, filters, measures, figures, readings, projections, summaries. |
-| [The NFL example](examples/nfl/) | A loadable showcase: real seasons of NFL data, one tenant per season, every construct the language has in one library. |
+| [The NFL example](examples/nfl/) | A loadable showcase: the whole play-by-play era in one tenant -- every play a fact, bucketed by season, game number and weekday -- every construct the language has in one library. |
 | [The built-in UI](docs/ui.md) | The investigation surface at `/ui/`: definitions as written, dependency traces, facts, and the activity log. |
 
 ## The rules it inherits

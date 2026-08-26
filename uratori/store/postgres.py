@@ -281,21 +281,27 @@ class PostgresEngineStore:
         A rebuild that deleted first and then failed half way would leave an
         index empty, and an empty index is a figure reading zero for everybody
         rather than an error anybody sees.
+
+        The insert is chunked because the pool carries a per-statement
+        timeout: a million-member index (an era of plays) rewritten as one
+        executemany is one statement, and it crossing the timeout killed the
+        pass that would have rebuilt it. Chunks keep every statement short;
+        the transaction still makes the rebuild all-or-nothing.
         """
+        rows = [
+            (tenant, index, bucket, member)
+            for member, buckets in wanted.items()
+            for bucket in buckets
+        ]
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.execute(
                 "delete from figure_index where tenant_id = $1 and index_name = $2", tenant, index
             )
-            rows = [
-                (tenant, index, bucket, member)
-                for member, buckets in wanted.items()
-                for bucket in buckets
-            ]
-            if rows:
+            for start in range(0, len(rows), 50_000):
                 await conn.executemany(
                     "insert into figure_index (tenant_id, index_name, bucket, member) "
                     "values ($1, $2, $3, $4) on conflict do nothing",
-                    rows,
+                    rows[start : start + 50_000],
                 )
 
     # --------------------------------------------------------------- values --

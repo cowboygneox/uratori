@@ -67,9 +67,11 @@ create table if not exists run_log (
   id        bigint generated always as identity primary key,
   tenant_id text not null,
   at        timestamptz not null default now(),
-  -- 'facts' or 'run': which door the pass came through. Named cause rather
-  -- than trigger so nobody ever has to remember which keyword class TRIGGER
-  -- falls into.
+  -- 'facts', 'facts-deferred' or 'run': which door the pass came through
+  -- (deferred batches log too -- an import that wrote a million records and
+  -- left no trace would be an unexplainable jump in every later cascade).
+  -- Named cause rather than trigger so nobody ever has to remember which
+  -- keyword class TRIGGER falls into.
   cause     text not null,
   full_pass boolean not null,
   written   int not null,
@@ -81,6 +83,16 @@ create table if not exists run_log (
 );
 
 create index if not exists run_log_tenant_idx on run_log (tenant_id, id desc);
+
+-- Tenants holding deferred (written, never computed) batches. A row here is
+-- a debt: the next pass for the tenant runs full whatever shape its caller
+-- asked for, because the alternative is stored answers served as current
+-- while silently describing the pre-import world. Cleared by the pass that
+-- settles it.
+create table if not exists import_debt (
+  tenant_id text primary key,
+  at        timestamptz not null default now()
+);
 """
 
 
@@ -226,6 +238,25 @@ async def save_settings(pool: asyncpg.Pool[Any], tenant: str, document: dict[str
         tenant,
         json.dumps(document),
     )
+
+
+# ------------------------------------------------------------ import debt --
+
+
+async def mark_deferred(pool: asyncpg.Pool[Any], tenant: str) -> None:
+    await pool.execute(
+        "insert into import_debt (tenant_id) values ($1) on conflict do nothing", tenant
+    )
+
+
+async def deferred(pool: asyncpg.Pool[Any], tenant: str) -> bool:
+    return (
+        await pool.fetchval("select 1 from import_debt where tenant_id = $1", tenant)
+    ) is not None
+
+
+async def clear_deferred(pool: asyncpg.Pool[Any], tenant: str) -> None:
+    await pool.execute("delete from import_debt where tenant_id = $1", tenant)
 
 
 # ---------------------------------------------------------------- run log --
@@ -667,6 +698,7 @@ async def remove_tenant(pool: asyncpg.Pool[Any], tenant: str) -> tuple[int, int]
         ("figure_value", "tenant_id"),
         ("tenant_settings", "tenant_id"),
         ("run_log", "tenant_id"),
+        ("import_debt", "tenant_id"),
     ):
         await pool.execute(f"delete from {table} where {column} = $1", tenant)
     return int(facts or 0), int(values or 0)

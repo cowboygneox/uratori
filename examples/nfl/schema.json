@@ -4,11 +4,15 @@
     "form.recentDays"
   ],
   "figure_settings": [
+    "thresholds.era.strong",
+    "thresholds.era.weak",
     "thresholds.contending.rate",
     "thresholds.fading.rate",
     "thresholds.passing.star",
     "thresholds.conversion.sharp",
-    "thresholds.conversion.stalling"
+    "thresholds.conversion.stalling",
+    "thresholds.scoring.high",
+    "thresholds.scoring.low"
   ],
   "reading_settings": [
     "pace.restDays"
@@ -27,6 +31,10 @@
       "recentDays": 45
     },
     "thresholds": {
+      "era": {
+        "strong": 0.55,
+        "weak": 0.45
+      },
       "contending": {
         "rate": 0.65
       },
@@ -34,13 +42,17 @@
         "rate": 0.35
       },
       "passing": {
-        "star": 3800
+        "star": 50000
       },
       "blowout": 17,
       "thisWeek": 7,
       "conversion": {
         "sharp": 0.45,
         "stalling": 0.35
+      },
+      "scoring": {
+        "high": 46,
+        "low": 41
       },
       "giveaways": 30
     },
