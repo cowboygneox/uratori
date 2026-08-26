@@ -47,7 +47,7 @@ from ..lang.source import declaration_prose, declaration_source
 from ..results import Evidence, Result
 from ..schema import Schema
 from . import db
-from .runtime import State, facade_for, ready, state_of
+from .runtime import State, facade_for, ready, state_of, taught_schema
 
 STATIC = Path(__file__).parent / "static"
 
@@ -60,7 +60,7 @@ whatever lands beside these; two known names cannot."""
 
 
 DeclarationKind = Literal[
-    "group", "filter", "measure", "figure", "reading", "projection", "summary"
+    "fact", "group", "filter", "measure", "figure", "reading", "projection", "summary"
 ]
 
 DependencyType = Literal[
@@ -223,12 +223,13 @@ def router(frame_ancestors: str) -> APIRouter:
             raise HTTPException(status_code=409, detail="No schema has been declared yet")
         held = s.world
         library = held.library
+        world_schema = taught_schema(held)
         return WorldOut(
             version=s.version,
-            kinds=sorted(held.schema.kinds),
-            name_fields=dict(held.schema.name_fields),
+            kinds=sorted(world_schema.kinds),
+            name_fields=dict(world_schema.name_fields),
             refusal=held.refusal,
-            declarations=_declarations(library, held.schema) if library else [],
+            declarations=_declarations(library, world_schema) if library else [],
         )
 
     # -------------------------------------------------------------- facts --
@@ -249,7 +250,7 @@ def router(frame_ancestors: str) -> APIRouter:
         if s.world is None:
             raise HTTPException(status_code=409, detail="No schema has been declared yet")
         counts = await db.fact_kind_counts(s.pool, tenant)
-        names = sorted(set(s.world.schema.kinds) | set(counts))
+        names = sorted(set(taught_schema(s.world).kinds) | set(counts))
         return FactKindsOut(
             kinds=[KindCount(kind=name, records=counts.get(name, 0)) for name in names]
         )
@@ -266,7 +267,7 @@ def router(frame_ancestors: str) -> APIRouter:
         s = _state(request)
         if s.world is None:
             raise HTTPException(status_code=409, detail="No schema has been declared yet")
-        name_field = s.world.schema.name_fields.get(kind)
+        name_field = taught_schema(s.world).name_fields.get(kind)
         records, more, total = await db.page_facts(
             s.pool, tenant, kind, after=after, q=q, limit=limit
         )
@@ -386,6 +387,23 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
     page groups them itself, but a stable order keeps the payload diffable.
     """
     out: list[DeclarationOut] = []
+
+    # Facts first: they are the leaves every trace bottoms out on, and a
+    # fact-taught world whose schema was invisible here would dead-end the
+    # exact reader the catalogue exists for. Schema-taught worlds have no
+    # entries -- their kinds have no declaration to show.
+    for name, fact in library.facts.items():
+        out.append(
+            DeclarationOut(
+                name=name,
+                kind="fact",
+                version=fact.version,
+                doc=declaration_prose(library, name),
+                source=declaration_source(library, name),
+                fact_kind=name,
+                rests_on=[],
+            )
+        )
 
     for name, index in library.indexes.items():
         edges = [Dependency(type="fact", name=index.kind)]

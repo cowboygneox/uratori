@@ -35,6 +35,9 @@ from .ast import (
     Decl,
     DurationMeasure,
     Extreme,
+    FactDecl,
+    FactField,
+    FieldDecl,
     FieldMeasure,
     FigureDecl,
     FigureUnit,
@@ -67,6 +70,8 @@ from .hash import version_of
 from .lex import DefinitionError
 from .parse import parse
 from .plan import (
+    CompiledFact,
+    CompiledFactField,
     CompiledIndex,
     CompiledMeasure,
     FigurePlan,
@@ -82,6 +87,16 @@ class CheckError(DefinitionError):
         super().__init__(f"line {line}: {message}")
         self.message = message
         self.line = line
+
+
+class WorldConflict(CheckError):
+    """The source declares facts and the schema also declares kinds.
+
+    Its own type because one caller has to recognise it: `PUT /definitions`
+    retries a conflicted compile against a kind-stripped schema so a live
+    schema-taught deployment can adopt facts without blanking its
+    definitions first -- and matching on message text would make that repair
+    hang off a comma."""
 
 
 def compile_source(source: str, schema: Schema) -> Library:
@@ -107,6 +122,7 @@ class _Checker:
         self._source = source
         self._schema = schema
         self._decls: list[Decl] = list(parse(source).decls)
+        self.facts: dict[str, CompiledFact] = {}
         self.indexes: dict[str, CompiledIndex] = {}
         self.measures: dict[str, CompiledMeasure] = {}
         self.figures: list[FigurePlan] = []
@@ -118,6 +134,13 @@ class _Checker:
     # --------------------------------------------------------------- run --
 
     def run(self) -> Library:
+        # Facts first, in a pass of their own and order-free: they are the
+        # world every other declaration is checked against, and unlike a
+        # figure they can rest on nothing, so there is no cycle to forbid.
+        for d in self._decls:
+            if isinstance(d, FactDecl):
+                self._fact_decl(d)
+        self._world()
         self._id_spaces()
         for d in self._decls:
             if isinstance(d, IndexDecl):
@@ -145,10 +168,11 @@ class _Checker:
             projections=tuple(self.projections),
             summaries=tuple(self.summaries),
             source=self._source,
+            facts=self.facts,
         )
 
     def _claim(self, name: str, what: str, line: int) -> None:
-        """One namespace for all seven declaration kinds -- groups, filters
+        """One namespace for all eight declaration kinds -- facts, groups, filters
         and measures included, not just the four rendered ones.
 
         A citation is `name@version`, so two declarations sharing a name would
@@ -168,13 +192,112 @@ class _Checker:
         self._names[name] = f"{article} {what}"
 
     def _fact_kind(self, named: str, where: str, line: int) -> str:
-        if not self._schema.is_kind(named):
+        if named not in self._kinds:
             raise CheckError(
                 f'{where} "{named}", which is not a fact kind. Those are: '
-                f'{", ".join(sorted(self._schema.kinds))}.',
+                f'{", ".join(sorted(self._kinds)) or "none"}.',
                 line,
             )
         return named
+
+    # --------------------------------------------------------------- fact --
+
+    def _fact_decl(self, d: FactDecl) -> None:
+        self._claim(d.name, "fact", d.line)
+        _unique_fields(d.name, d.fields, d.line)
+        top = {f.name: f for f in d.fields}
+        for pointer, word in ((d.name_field, "name"), (d.url_field, "url")):
+            if pointer is None:
+                continue
+            held = top.get(pointer)
+            if held is None:
+                # Refused rather than ignored, for the schema's own reason: a
+                # pointer at a field that does not exist is a typo, and
+                # ignoring it renders raw ids for ever while everything looks
+                # configured.
+                raise CheckError(
+                    f'fact {d.name} says its {word} is "{pointer}", which it does not '
+                    f'declare. Declared: {", ".join(sorted(top))}.',
+                    d.line,
+                )
+            if held.type != "text":
+                raise CheckError(
+                    f'fact {d.name}\'s {word} field "{pointer}" is '
+                    f'{"a nested record" if held.type is None else "a " + held.type}, '
+                    "and a record is rendered and linked by text.",
+                    d.line,
+                )
+        fields = _compiled_fields(d.fields)
+        self.facts[d.name] = CompiledFact(
+            name=d.name,
+            fields=fields,
+            name_field=d.name_field,
+            url_field=d.url_field,
+            doc=d.doc,
+            version=version_of({"name": d.name, "fields": _fact_field_hash(fields)}),
+        )
+
+    def _world(self) -> None:
+        """Kinds, name fields and url fields, from whichever door taught them.
+
+        One door or the other, never both: a schema with kinds beside a source
+        with facts is two declarations of one world, and whichever a reader
+        trusted, the other would drift.
+        """
+        if self.facts and self._schema.kinds:
+            first = next(d for d in self._decls if isinstance(d, FactDecl))
+            raise WorldConflict(
+                "the source declares facts, and the schema also declares kinds. The "
+                "world is declared in one place: drop the schema's kinds (and its name "
+                "and url fields) -- they derive from the facts.",
+                first.line,
+            )
+        if self.facts:
+            self._kinds: frozenset[str] = frozenset(self.facts)
+            self._name_fields: dict[str, str] = {
+                k: f.name_field for k, f in self.facts.items() if f.name_field is not None
+            }
+        else:
+            self._kinds = self._schema.kinds
+            self._name_fields = dict(self._schema.name_fields)
+
+    def _record_field(
+        self, kind: str, path: str, what: str, line: int
+    ) -> tuple[CompiledFactField, bool] | None:
+        """The declared field a path lands on, and whether it crossed a list.
+
+        None in a schema-taught world: no fields were declared, so nothing can
+        be checked -- the origin project's specimen tests are the host-side
+        stand-in there. In a fact-taught world a path that resolves to nothing
+        is a build failure here, because at run time it is a silently empty
+        bucket or a column of dashes, for everybody, for ever.
+        """
+        fact = self.facts.get(kind)
+        if fact is None:
+            return None
+        at = {f.name: f for f in fact.fields}
+        crossed = False
+        found: CompiledFactField | None = None
+        segments = path.split(".")
+        for i, segment in enumerate(segments):
+            found = at.get(segment)
+            if found is None:
+                level = kind if i == 0 else f'{kind}.{".".join(segments[:i])}'
+                raise CheckError(
+                    f'{what} reads "{path}", and "{segment}" is not a field of {level}. '
+                    f'Declared there: {", ".join(sorted(at)) or "nothing"}.',
+                    line,
+                )
+            crossed = crossed or found.many
+            at = {c.name: c for c in found.children}
+        assert found is not None
+        if found.type is None:
+            raise CheckError(
+                f'{what} reads "{path}", which is a nested record rather than a value. '
+                f'Its fields are: {", ".join(sorted(at))}.',
+                line,
+            )
+        return found, crossed
 
     # ---------------------------------------------------------- id space --
 
@@ -228,6 +351,7 @@ class _Checker:
                 f"setting a {word} may name. Those are: {', '.join(self._schema.bucket_settings)}.",
                 d.line,
             )
+        self._index_fields_exist(d, word)
 
         self.indexes[d.name] = CompiledIndex(
             name=d.name,
@@ -238,11 +362,87 @@ class _Checker:
             label=d.label,
         )
 
+    def _index_fields_exist(self, d: IndexDecl, word: str) -> None:
+        """Every field a group or filter reads, against the declared world.
+
+        Bucketing deliberately crosses lists -- `accounts.account_id` means
+        "any account_id of any account" -- so a `many` in the path is fine
+        everywhere here except an age filter, which reads *one* instant and
+        would otherwise take the first parseable element it met.
+        """
+        if not self.facts:
+            return
+        what = f"{word} {d.name}"
+        for part in _index_fields(d.spec):
+            found = self._record_field(d.kind, part.field, what, d.line)
+            assert found is not None
+            node, _ = found
+            if part.through is not None:
+                self._record_field(part.through.kind, part.through.path, what, d.line)
+            if part.truncate is not None and node.type != "moment":
+                raise CheckError(
+                    f"{what} buckets {part.field} by {part.truncate}, and {part.field} "
+                    f"is a {node.type}. A time bucket truncates an instant, so it needs "
+                    "a moment.",
+                    d.line,
+                )
+        spec = d.spec
+        if isinstance(spec, ByAge):
+            found = self._record_field(d.kind, spec.field, what, d.line)
+            assert found is not None
+            node, crossed = found
+            if node.type != "moment":
+                raise CheckError(
+                    f"{what} narrows by the age of {spec.field}, which is a {node.type} "
+                    "rather than a moment.",
+                    d.line,
+                )
+            if crossed:
+                raise CheckError(
+                    f"{what} narrows by the age of {spec.field}, which crosses a list -- "
+                    "several instants per record, and an age reads one.",
+                    d.line,
+                )
+        if isinstance(spec, ByPredicate):
+            found = self._record_field(d.kind, spec.field, what, d.line)
+            assert found is not None
+            node, _ = found
+            # A bare `true`/`false` and a quoted `"true"` are different claims
+            # -- the flag's value versus a word a text field holds -- and only
+            # the parser knows which was written, which is why `quoted` rides
+            # on the spec. Each refusal below is a predicate that would match
+            # nothing (or, with `!=`, everything) for ever, with nothing
+            # thrown.
+            boolean = not spec.quoted and spec.value in ("true", "false")
+            if node.type == "flag" and spec.value not in ("true", "false"):
+                raise CheckError(
+                    f'{what} compares {spec.field}, a flag, against "{spec.value}". A '
+                    "flag holds true or false, so nothing would ever match -- and with "
+                    f'"!=" everything would.',
+                    d.line,
+                )
+            if boolean and node.type != "flag":
+                raise CheckError(
+                    f"{what} compares {spec.field}, a {node.type}, against {spec.value}, "
+                    "which is how a flag is tested. Quote it if the field really holds "
+                    "that word.",
+                    d.line,
+                )
+            if node.type == "number" and spec.quoted:
+                raise CheckError(
+                    f'{what} compares {spec.field}, a number, against the quoted '
+                    f'"{spec.value}". A number\'s bucket key is the number\'s own '
+                    "spelling, so write it bare -- quoted, a stray decimal point is a "
+                    "predicate that never matches.",
+                    d.line,
+                )
+
     # ------------------------------------------------------------ measure --
 
     def _measure(self, d: DurationMeasure | FieldMeasure | MomentMeasure) -> None:
         self._claim(d.name, "measure", d.line)
         self._fact_kind(d.kind, f"measure {d.name} is over", d.line)
+        self._measure_fields_exist(d)
 
         if isinstance(d, DurationMeasure):
             self.measures[d.name] = CompiledMeasure(
@@ -261,6 +461,45 @@ class _Checker:
             self.measures[d.name] = CompiledMeasure(
                 name=d.name, kind=d.kind, shape="moment", moment=d.moment
             )
+        else:
+            assert_never(d)
+
+    def _measure_fields_exist(self, d: DurationMeasure | FieldMeasure | MomentMeasure) -> None:
+        """A measure reads one value off one record, so its paths are held to
+        both halves of that: the declared type, and no list anywhere on the
+        way. Across a `many`, `read_number` skips (a silent nothing for every
+        record with two elements) and `read_instant` first-wins (a
+        fabrication); the checker refusing here is what keeps either from
+        wearing a plausible number.
+        """
+        if not self.facts:
+            return
+        what = f"measure {d.name}"
+
+        def one(path: str, wanted: str, verb: str) -> None:
+            found = self._record_field(d.kind, path, what, d.line)
+            assert found is not None
+            node, crossed = found
+            if node.type != wanted:
+                raise CheckError(
+                    f'{what} {verb} "{path}", which is a {node.type} rather than a '
+                    f"{wanted}.",
+                    d.line,
+                )
+            if crossed:
+                raise CheckError(
+                    f'{what} {verb} "{path}", which crosses a list -- several values '
+                    "per record, and a measure reads one.",
+                    d.line,
+                )
+
+        if isinstance(d, DurationMeasure):
+            for side in ((d.earlier,) if d.clock else (d.later, d.earlier)):
+                one(side, "moment", "subtracts")
+        elif isinstance(d, FieldMeasure):
+            one(d.field, "number", "reads")
+        elif isinstance(d, MomentMeasure):
+            one(d.moment, "moment", "names")
         else:
             assert_never(d)
 
@@ -703,7 +942,7 @@ class _Checker:
                         f"second part through {through}.",
                         d.line,
                     )
-                if d.across not in self._schema.name_fields:
+                if d.across not in self._name_fields:
                     raise CheckError(
                         f"figure {d.name} is split across {d.across}, which has no name "
                         "field, so every row would be headed by a raw id.",
@@ -1424,6 +1663,7 @@ class _Checker:
             if f.join is not None:
                 self._fact_kind(f.join.kind, f"projection {d.name} joins through", f.line)
                 joins.append(f.join)
+            self._row_field_exists(d, kind, f)
             if f.type == "date":
                 moments.add(f.name)
                 bound[f.name] = "date"
@@ -1546,6 +1786,53 @@ class _Checker:
         self.projections.append(
             ProjectPlan(**{**plan.__dict__, "version": version_of(_project_hash(plan, self.indexes))})
         )
+
+    def _row_field_exists(self, d: ProjectDecl, kind: str, f: FieldDecl) -> None:
+        """A row field against the declared world: the path exists, the type
+        agrees, and nothing on the way is a list.
+
+        The type must agree *exactly* -- `as date` over a text field compiles
+        today and parses nothing at render time, a column of dashes wearing a
+        declared type. And a row is about one record, so a path crossing a
+        `many` is refused whole: a field holds one value, and "the first in
+        sorted order" is an answer about no element in particular.
+        """
+        if not self.facts:
+            return
+        what = f"projection {d.name}"
+        source_kind = kind
+        if f.join is not None:
+            found = self._record_field(kind, f.join.field, what, f.line)
+            assert found is not None
+            _, crossed = found
+            if crossed:
+                raise CheckError(
+                    f'{what} joins through "{f.join.field}", which crosses a list -- '
+                    "several candidate ids per record, so the join would answer "
+                    "nothing for every row that carries two.",
+                    f.line,
+                )
+            # The matching path on the other kind must exist too: unmatched,
+            # the join table is empty and every row's column is None -- a
+            # permanently blank column wearing a declared join.
+            self._record_field(f.join.kind, f.join.path, what, f.line)
+            source_kind = f.join.kind
+        found = self._record_field(source_kind, f.path, what, f.line)
+        assert found is not None
+        node, crossed = found
+        if crossed:
+            raise CheckError(
+                f'{what} binds "{f.name}" from "{f.path}", which crosses a list -- '
+                "several values per record, and a row's field holds one.",
+                f.line,
+            )
+        wanted = {"text": "text", "date": "moment", "number": "number", "flag": "flag"}[f.type]
+        if node.type != wanted:
+            raise CheckError(
+                f'{what} binds "{f.name}" as {f.type}, but {source_kind}.{f.path} is a '
+                f"{node.type} rather than a {wanted}.",
+                f.line,
+            )
 
     # ------------------------------------------------------------ summary --
 
@@ -1802,6 +2089,54 @@ class _Checker:
 
 
 # ------------------------------------------------------------- helpers --
+
+
+def _unique_fields(owner: str, fields: tuple[FactField, ...], line: int) -> None:
+    seen: set[str] = set()
+    for f in fields:
+        if f.name in seen:
+            raise CheckError(
+                f'fact {owner} declares "{f.name}" twice. One record, one field, one '
+                "type -- a second declaration is a first place for two to disagree.",
+                f.line or line,
+            )
+        seen.add(f.name)
+        _unique_fields(f"{owner}.{f.name}", f.children, f.line or line)
+
+
+def _compiled_fields(fields: tuple[FactField, ...]) -> tuple[CompiledFactField, ...]:
+    return tuple(
+        CompiledFactField(
+            name=f.name,
+            type=f.type,
+            many=f.many,
+            doc=f.doc,
+            children=_compiled_fields(f.children),
+        )
+        for f in fields
+    )
+
+
+def _fact_field_hash(fields: tuple[CompiledFactField, ...]) -> list[object]:
+    """The fields and their shapes, and nothing else: prose, the name field
+    and the url field are rendering, out of the hash for the reason a display
+    template is.
+
+    Sorted by name, because declaration order is rendering too -- every
+    consumer keys the fields by name, so reordering a fact's body is the
+    "plan built in a different order" case the hashing rules promise not to
+    fork a version over. Contrast a projection's row fields, where the list
+    order *is* the answer.
+    """
+    return [
+        {
+            "name": f.name,
+            "type": f.type,
+            "many": f.many or None,
+            "children": _fact_field_hash(f.children) or None,
+        }
+        for f in sorted(fields, key=lambda f: f.name)
+    ]
 
 
 def _decl_word(spec: IndexBy) -> str:
@@ -2261,4 +2596,4 @@ def _project_hash(plan: ProjectPlan, indexes: dict[str, CompiledIndex]) -> objec
     }
 
 
-__all__ = ["CheckError", "compile_source"]
+__all__ = ["CheckError", "WorldConflict", "compile_source"]

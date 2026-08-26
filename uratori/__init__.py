@@ -42,6 +42,7 @@ from .store import (
     Pointer,
     StoredValue,
 )
+from .verify import FactError, verify_writes
 
 __all__ = [
     "DEFAULT_TRAILING",
@@ -55,6 +56,7 @@ __all__ = [
     "DefinitionError",
     "Engine",
     "EngineStore",
+    "FactError",
     "FactRow",
     "FactSource",
     "Flag",
@@ -79,4 +81,5 @@ __all__ = [
     "Value",
     "Window",
     "compile_source",
+    "verify_writes",
 ]

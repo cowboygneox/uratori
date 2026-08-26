@@ -16,6 +16,72 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
+# ----------------------------------------------------------------- fact --
+
+FactFieldType: TypeAlias = Literal["text", "number", "flag", "moment"]
+"""What a fact field structurally is -- the value's form, never its reading.
+
+Four types and no more, because the fact layer describes the record as the
+provider shows it and interpretation lives in the definitions that read it: a
+correlation is a group's `through` claim, and a number's meaning (`effort`,
+`count`) is the measure's. `moment` survives that test where `key of <kind>`
+and `in <unit>` did not -- "this string is an instant" is a claim about the
+value's form, and it is what makes `merged_at - created_at` checkable.
+"""
+
+
+@dataclass(frozen=True)
+class FactField:
+    """One field of a fact -- `placed_at as moment`, or a nested block.
+
+    There is no `field` keyword: a fact's body *is* its fields, so the word
+    would be noise on every line. A line whose second token is `as` is a
+    field; `name <field>` and `url <field>` are the two directives; `one x:`
+    and `many x:` open nested blocks. A field literally called `name` is
+    still writable (`name as text`), so nothing here is a reserved word.
+    """
+
+    name: str
+    type: FactFieldType | None = None
+    """None exactly when this is a nested block (`one` / `many`)."""
+
+    many: bool = False
+    """`many events:` -- a list of objects. `one dropoff:` when false with
+    children. Declared rather than inferred from data, because cardinality is
+    semantics: a path crossing a `many` yields every element, which is right
+    for bucketing and a fabrication for a measure."""
+
+    children: tuple[FactField, ...] = ()
+    doc: str = ""
+    """The `#` run above the field -- the customer-facing description of what
+    the provider writes here. Never hashed."""
+
+    line: int = 0
+
+
+@dataclass(frozen=True)
+class FactDecl:
+    """`fact shop_order:` -- what a record of this kind is.
+
+    Named bare, no dot: every other declaration is `<fact kind>.<name>`, so a
+    kind name cannot collide with a definition name and the one-namespace rule
+    still holds. Structural only -- see `FactFieldType` for what was refused.
+    """
+
+    name: str
+    doc: str
+    fields: tuple[FactField, ...]
+    name_field: str | None = None
+    """`name ref` -- which field carries a record's human-facing name. A
+    directive pointing at a field rather than a marker on the field line,
+    because it is rendering, not data: fields are hashed, this is not, and
+    folding it onto the field would make a rendering choice look like part of
+    the field's semantics."""
+
+    url_field: str | None = None
+    line: int = 0
+
+
 # ---------------------------------------------------------------- index --
 
 Truncation: TypeAlias = Literal["day", "minute", "15 minutes"]
@@ -131,6 +197,13 @@ class ByPredicate:
     field: str
     op: Literal["==", "!="]
     value: str
+    quoted: bool = False
+    """Whether the value was written in quotes. Evaluation cannot tell --
+    bucket keys are strings either way -- but the checker must: against a
+    declared world, a bare `true` names a flag's value and a quoted `"true"`
+    names a word a text field holds, and a rule that could not tell them
+    apart refused the quoted spelling while advising the author to quote it.
+    Deliberately not hashed: it never changes what the arithmetic produces."""
 
 
 @dataclass(frozen=True)
@@ -1242,7 +1315,9 @@ class SummariseDecl:
     line: int = 0
 
 
-Decl: TypeAlias = IndexDecl | MeasureDecl | FigureDecl | ReadingDecl | ProjectDecl | SummariseDecl
+Decl: TypeAlias = (
+    FactDecl | IndexDecl | MeasureDecl | FigureDecl | ReadingDecl | ProjectDecl | SummariseDecl
+)
 
 
 @dataclass

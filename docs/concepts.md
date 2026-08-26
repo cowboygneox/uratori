@@ -100,11 +100,43 @@ One dial path is reserved rather than declared: `tenant.hoursPerDay`, which
 the renderer divides by to print an *effort* (seconds of working time) as
 days. A host that renders efforts must carry it in `defaults`.
 
+### Or declare the facts in the language
+
+Kinds, name fields and url fields can instead be declared where the
+definitions live, as `fact` declarations -- the courier world above, written
+that way:
+
+```
+# An order in the shop, as the provider last showed it.
+fact shop_order:
+    name ref
+    url url
+    ref as text
+    url as text
+    courier_id as text
+    status as text
+    handling_seconds as number
+
+# A courier on the road.
+fact shop_courier:
+    name name
+    name as text
+```
+
+The schema document then carries **settings and defaults alone**, and the
+compile refuses a schema that also declares kinds: one world, one door.
+What the fuller declaration buys -- field existence and type checks on every
+path a definition reads, verification of every record that arrives, and a
+schema a reader can trace a number back to -- is
+[the language guide's to tell](language.md); records themselves are still
+plain JSON, and a schema-taught world keeps working exactly as this page
+describes.
+
 ## Definitions and the compile
 
 Definitions are written in a small language (`.fig` files, by convention) and
-compiled against the schema into a `Library`. Seven kinds of declaration
-exist; the courier world uses the first four:
+compiled against the schema into a `Library`. Eight kinds of declaration
+exist; the courier world uses four:
 
 ```
 group shop_order.carried_by from courier_id
