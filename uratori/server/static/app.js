@@ -36,6 +36,17 @@ async function get(path) {
   return { ok: response.ok, status: response.status, body };
 }
 
+async function send(method, path, payload) {
+  const response = await fetch(`${API}/${path}`, {
+    method,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  let body = null;
+  try { body = await response.json(); } catch { /* a non-JSON error page */ }
+  return { ok: response.ok, status: response.status, body };
+}
+
 function safeDecode(text) {
   // A hand-typed '%zz' in the hash must land on the index, not a stuck page.
   try { return decodeURIComponent(text); } catch { return null; }
@@ -113,16 +124,22 @@ async function loadWorld() {
 
 // -------------------------------------------------------------- routing --
 
-const ROUTES = [
-  ['#/definitions', 'Definitions'],
-  ['#/facts', 'Facts'],
-  ['#/activity', 'Activity'],
-];
+function routes() {
+  const held = [
+    ['#/definitions', 'Definitions'],
+    ['#/facts', 'Facts'],
+    ['#/activity', 'Activity'],
+  ];
+  // The tab exists only where the deployment grants editing -- a door drawn
+  // on a wall is worse than no door, and the world payload already says.
+  if (world && world.editable) held.push(['#/edit', 'Editor']);
+  return held;
+}
 
 function drawTabs() {
   const here = location.hash || '#/definitions';
   tabs.replaceChildren(
-    ...ROUTES.map(([hash, label]) =>
+    ...routes().map(([hash, label]) =>
       el('a', { href: hash, class: here.startsWith(hash) ? 'active' : '' }, label)),
   );
 }
@@ -154,6 +171,7 @@ async function render() {
       view.replaceChildren(problem(answer, 'This server is not ready to be investigated:'));
       return;
     }
+    drawTabs(); // the Editor tab is known only once the world payload is
   }
 
   // flat(Infinity): a view may return nested arrays of nodes, and a nested
@@ -163,6 +181,7 @@ async function render() {
   const draw = (nodes) => view.replaceChildren(...nodes.flat(Infinity).filter((n) => n != null));
   if (route === 'facts') draw(await factsView(segments, params));
   else if (route === 'activity') draw(await activityView());
+  else if (route === 'edit') draw(await editorView(params));
   else draw(await definitionsView(argument, params));
 }
 
@@ -349,7 +368,11 @@ async function declarationPane(name, params) {
         el('h1', {}, declaration.name), ' ',
         el('span', { class: `badge ${declaration.kind}` }, declaration.kind),
         declaration.unit ? el('span', { class: 'badge' }, declaration.unit) : null,
-        declaration.mode ? el('span', { class: 'badge' }, declaration.mode) : null),
+        declaration.mode ? el('span', { class: 'badge' }, declaration.mode) : null,
+        world.editable
+          ? el('a', { class: 'tb-edit', href: `#/edit/?at=${encodeURIComponent(declaration.name)}` },
+              'edit source')
+          : null),
       declaration.doc
         ? el('div', { class: 'tb-doc' }, el('p', { class: 'prose' }, declaration.doc))
         : null,
@@ -1071,6 +1094,690 @@ async function activityView() {
             `showing the newest ${page.runs.length} of ${page.total} runs`)
         : null),
     runs.length ? runs : el('p', { class: 'faint' }, 'No runs recorded for this tenant.'),
+  ];
+}
+
+// --------------------------------------------------------------- editor --
+//
+// The drafting table. The stored source, editable in place: highlighted as
+// the lexer reads it, completed from what the world already knows, checked
+// against the real compiler as it is typed, and saved through the same teach
+// the API performs. The one calculation this section still never does is a
+// value's: the compile, the diff and every verdict come from the server; the
+// browser's contributions are colours, caret positions and word lists.
+
+// The language's closed vocabularies, mirrored from the parser. Mirrored
+// rather than served because they are compile-time constants of the engine
+// build this page shipped inside -- the world-dependent lists (kinds, fields,
+// dials, declared names) DO arrive from the server, on /ui/api/source.
+const FIG_DECLS = ['fact', 'group', 'filter', 'measure', 'figure', 'reading', 'projection', 'summarise'];
+const FIG_SECTIONS = {
+  fact: ['name', 'url', 'one', 'many'],
+  figure: ['display', 'unit', 'depends', 'combine', 'calculate', 'band'],
+  reading: ['display', 'band', 'depends', 'requires', 'calculate'],
+  projection: ['from', 'field', 'read', 'value', 'flag', 'omit', 'sort', 'limit'],
+  summarise: ['count', 'total', 'value', 'flag'],
+};
+const FIG_UNITS = ['share', 'days', 'effort', 'count', 'duration'];
+const FIG_FACT_TYPES = ['text', 'number', 'flag', 'moment'];
+const FIG_FIELD_TYPES = ['text', 'date', 'number', 'flag'];
+const FIG_WORDS = new Set([
+  ...FIG_DECLS.filter((word) => word !== 'fact'),
+  ...Object.values(FIG_SECTIONS).flat(),
+  'from', 'where', 'keyed', 'as', 'through', 'by', 'in', 'label', 'is', 'set', 'not',
+  'older', 'younger', 'than', 'against', 'on', 'at', 'least', 'values', 'over',
+  'when', 'then', 'otherwise', 'now', 'days', 'moment', 'ascending', 'descending',
+  'detail', 'action', 'severity', 'info', 'attention', 'true', 'false',
+  'mean', 'median', 'worst', 'sum', 'series', 'list', 'latest', 'earliest', 'max', 'min',
+  ...FIG_UNITS, ...FIG_FACT_TYPES, ...FIG_FIELD_TYPES,
+  'hour', 'hours', 'minute', 'minutes', 'day',
+]);
+
+// The draft outlives the view: a tenant switch or a wander to the Facts tab
+// re-renders everything, and an hour of drafting must not ride on nobody
+// touching the chrome. Cleared by a save, superseded by somebody else's.
+let draft = null; // { base: fingerprint the draft edits, text }
+
+window.addEventListener('beforeunload', (event) => {
+  if (draft) event.preventDefault(); // the browser words the warning itself
+});
+
+// One line, tokenised for colour only. Correctness lives in the server's
+// compiler; this must merely never mislead -- so it mirrors the lexer's
+// simple truths (strings, `#` outside a string, dots inside one name) and
+// classifies words by position, since the language reserves no keywords.
+function tokenizeLine(line, first) {
+  const out = [];
+  let i = 0;
+  const flush = (to, cls) => { if (to > i) { out.push([line.slice(i, to), cls]); i = to; } };
+  const indent = /^\s*/.exec(line)[0].length;
+  flush(indent, null);
+  let atWord = 0; // which word of the line we are on, for position classes
+  while (i < line.length) {
+    const ch = line[i];
+    if (ch === '#') { flush(line.length, 'cmt'); break; }
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < line.length && line[j] !== '"') j += line[j] === '\\' ? 2 : 1;
+      flush(Math.min(j + 1, line.length), 'str');
+      continue;
+    }
+    if (/[0-9]/.test(ch)) {
+      let j = i;
+      while (j < line.length && /[0-9.]/.test(line[j])) j += 1;
+      flush(j, 'num');
+      continue;
+    }
+    if (/[A-Za-z_]/.test(ch)) {
+      let j = i;
+      while (j < line.length && /[A-Za-z0-9_.]/.test(line[j])) j += 1;
+      const word = line.slice(i, j);
+      atWord += 1;
+      let cls = null;
+      if (first && indent === 0 && atWord === 1 && FIG_DECLS.includes(word)) cls = 'kw';
+      else if (word.includes('.')) cls = 'ref';
+      else if (FIG_WORDS.has(word)) cls = 'sec';
+      flush(j, cls);
+      continue;
+    }
+    if (/[&|:={}()<>!,+*/-]/.test(ch)) { flush(i + 1, 'op'); continue; }
+    flush(i + 1, null);
+  }
+  return out;
+}
+
+function highlightInto(hl, text, errorLine) {
+  const lines = text.split('\n');
+  hl.replaceChildren(...lines.map((line, index) =>
+    el('div', { class: `ed-line${index + 1 === errorLine ? ' err' : ''}` },
+      // Fixed-height rows in the stylesheet keep an empty line from
+      // collapsing and drifting every line below it off the textarea's grid.
+      tokenizeLine(line, true).map(([piece, cls]) =>
+        cls ? el('span', { class: `tok-${cls}` }, piece) : piece))));
+}
+
+async function editorView(params) {
+  const answer = await get('source');
+  if (!answer.ok) return [problem(answer, 'Nothing to edit yet:')];
+  const page = answer.body;
+  if (!page.editable) {
+    return [el('h1', {}, 'Editor'),
+      el('div', { class: 'notice' },
+        'This deployment does not grant editing from the UI — the source is ',
+        'readable under Definitions, and the operator can grant editing with ',
+        el('span', { class: 'mono' }, 'URATORI_UI_EDIT=on'), '.')];
+  }
+
+  // What the completion knows. `names` learns from every green check, so a
+  // figure drafted a minute ago completes inside the next one.
+  const vocab = {
+    kinds: page.kinds,
+    dials: page.dials,
+    names: new Map(page.declarations.map((d) => [d.name, d.kind])),
+  };
+
+  let base = page.fingerprint;
+  let restored = false;
+  let text = page.source;
+  if (draft && draft.base === base && draft.text !== page.source) {
+    text = draft.text;
+    restored = true;
+  } else if (draft && draft.base !== base) {
+    draft = null; // drafted against text that is gone; keeping it would lie
+  }
+
+  // ---- the surface -------------------------------------------------------
+  const gutterInner = el('div', { class: 'ed-lines mono' });
+  const gutter = el('div', { class: 'ed-gutter', 'aria-hidden': 'true' }, gutterInner);
+  const hl = el('pre', { class: 'ed-hl mono', 'aria-hidden': 'true' });
+  const input = el('textarea', {
+    class: 'ed-input mono', spellcheck: 'false', autocapitalize: 'off',
+    autocomplete: 'off', wrap: 'off', 'aria-label': 'definitions source',
+  });
+  input.value = text;
+  const popup = el('ul', { class: 'ed-popup', role: 'listbox', hidden: '' });
+  const scroll = el('div', { class: 'ed-scroll' }, hl, input, popup);
+  const shell = el('div', { class: 'ed-shell' }, gutter, scroll);
+
+  const status = el('span', { class: 'ed-status faint', 'aria-live': 'polite' }, 'checking…');
+  const saveButton = el('button', { class: 'ed-save', onclick: () => save() }, 'Save');
+  const discard = el('button', {
+    hidden: restored ? undefined : '',
+    onclick: () => {
+      draft = null;
+      input.value = page.source;
+      discard.hidden = true;
+      onEdit();
+    },
+  }, 'discard draft');
+  const bar = el('div', { class: 'controls ed-bar' },
+    status, el('span', { class: 'spacer' }), discard, saveButton);
+  const report = el('div', { class: 'ed-report' });
+  const outcome = el('div', {});
+
+  let lineHeight = 21;
+  let charWidth = 8.4;
+
+  function renumber() {
+    const count = input.value.split('\n').length;
+    if (gutterInner.childElementCount === count) return;
+    gutterInner.replaceChildren(...Array.from({ length: count }, (_, index) =>
+      el('div', { class: 'ed-no' }, String(index + 1))));
+  }
+
+  function markError(line) {
+    for (const [index, node] of [...gutterInner.children].entries()) {
+      node.classList.toggle('err', index + 1 === line);
+    }
+  }
+
+  function sync() {
+    hl.scrollTop = input.scrollTop;
+    hl.scrollLeft = input.scrollLeft;
+    gutterInner.style.transform = `translateY(${-input.scrollTop}px)`;
+  }
+
+  function caretTo(offset, line) {
+    input.focus();
+    input.setSelectionRange(offset, offset);
+    input.scrollTop = Math.max(0, (line - 1) * lineHeight - input.clientHeight / 3);
+    sync();
+  }
+
+  function lineOffset(line) {
+    const lines = input.value.split('\n');
+    let offset = 0;
+    for (let i = 0; i < Math.min(line - 1, lines.length - 1); i += 1) offset += lines[i].length + 1;
+    return offset;
+  }
+
+  // ---- the check loop ----------------------------------------------------
+  // Debounced against typing, sequenced against itself: a slow answer about
+  // an old draft must never repaint over a fresh one.
+  let checkTimer = null;
+  let checkSeq = 0;
+  let errorAt = null; // the checked refusal's line, kept on the highlight
+
+  function paint() {
+    highlightInto(hl, input.value, errorAt);
+    renumber();
+    markError(errorAt);
+    sync();
+  }
+
+  function scheduleCheck() {
+    clearTimeout(checkTimer);
+    status.textContent = 'checking…';
+    status.className = 'ed-status faint';
+    checkTimer = setTimeout(runCheck, 500);
+  }
+
+  async function runCheck() {
+    const seq = ++checkSeq;
+    const source = input.value;
+    const out = await send('POST', 'check', { source });
+    if (seq !== checkSeq || !shell.isConnected) return;
+    if (!out.ok) {
+      status.textContent = 'the check could not run';
+      status.className = 'ed-status finding';
+      report.replaceChildren(problem(out, 'The check itself failed:'));
+      return;
+    }
+    applyCheck(out.body, source);
+  }
+
+  function applyCheck(checked, source) {
+    if (!checked.ok) {
+      const refusal = checked.refusal;
+      errorAt = refusal.line;
+      paint();
+      status.textContent = refusal.line == null
+        ? 'does not compile'
+        : `does not compile — line ${refusal.line}`;
+      status.className = 'ed-status finding';
+      report.replaceChildren(el('div', { class: 'notice problem ed-refusal' },
+        el('p', { class: 'mono ed-message' },
+          refusal.line == null ? null : [el('a', {
+            class: 'mono', href: '#',
+            onclick: (event) => {
+              event.preventDefault();
+              const offset = lineOffset(refusal.line) + (refusal.column ?? 0);
+              caretTo(offset, refusal.line);
+            },
+          }, `line ${refusal.line}`), ' — '],
+          refusal.message)));
+      return;
+    }
+    errorAt = null;
+    paint();
+    const moves = checked.declarations.filter((d) => d.change !== 'unchanged');
+    const untouched = checked.declarations.length - moves.length;
+    status.textContent = `compiles — ${checked.declarations.length} declarations`;
+    status.className = 'ed-status good';
+    // The compile just proved these names; let the completion learn them,
+    // and forget the ones this draft removed.
+    for (const declaration of checked.declarations) {
+      if (declaration.change === 'removed') vocab.names.delete(declaration.name);
+      else vocab.names.set(declaration.name, declaration.kind);
+    }
+    if (!moves.length) {
+      report.replaceChildren(el('p', { class: 'faint' },
+        source === page.source && base === page.fingerprint
+          ? 'Unchanged from what is taught.'
+          : 'No calculation moves — the edit is prose or display only.'));
+      return;
+    }
+    report.replaceChildren(el('div', { class: 'ed-diff' },
+      el('p', { class: 'dim' }, 'What a save would change:'),
+      el('ul', {}, moves.map((d) => el('li', {},
+        el('span', { class: `badge change-${d.change}` }, d.change), ' ',
+        el('span', { class: `badge ${d.kind === 'summary' ? 'summary' : d.kind}` }, d.kind), ' ',
+        el('span', { class: 'mono' }, d.name)))),
+      untouched ? el('p', { class: 'faint' }, `${untouched} declarations untouched.`) : null));
+  }
+
+  // ---- saving ------------------------------------------------------------
+  async function save() {
+    completionClose();
+    saveButton.disabled = true;
+    saveButton.textContent = 'saving…';
+    const source = input.value;
+    const out = await send('PUT', 'source', { source, expected: base });
+    saveButton.disabled = false;
+    saveButton.textContent = 'Save';
+    if (!shell.isConnected) return;
+    if (out.status === 409 && out.body && typeof out.body.detail === 'string') {
+      // Two explicit ways forward, neither silent: keep the draft and aim it
+      // at the new base (a knowing overwrite -- the other save's text is
+      // readable under Definitions), or yield to what was saved.
+      outcome.replaceChildren(el('div', { class: 'notice problem' },
+        el('p', {}, out.body.detail),
+        el('div', { class: 'ed-runs' },
+          el('button', {
+            onclick: async () => {
+              const fresh = await get('source');
+              if (!fresh.ok) { outcome.replaceChildren(problem(fresh, 'Could not reload:')); return; }
+              base = fresh.body.fingerprint;
+              page.source = fresh.body.source;
+              page.fingerprint = base;
+              draft = { base, text: input.value };
+              outcome.replaceChildren(el('p', { class: 'dim' },
+                'Retargeted at the latest save. Saving now knowingly replaces ',
+                'it — its text is readable under Definitions first.'));
+            },
+          }, 'Keep my draft, retarget it'),
+          el('button', {
+            onclick: async () => {
+              const fresh = await get('source');
+              if (!fresh.ok) { outcome.replaceChildren(problem(fresh, 'Could not reload:')); return; }
+              base = fresh.body.fingerprint;
+              page.source = fresh.body.source;
+              page.fingerprint = base;
+              input.value = fresh.body.source;
+              draft = null;
+              outcome.replaceChildren();
+              onEdit();
+            },
+          }, 'Discard my draft, load theirs'))));
+      return;
+    }
+    if (out.status === 422 && out.body && out.body.detail) {
+      applyCheck({ ok: false, refusal: out.body.detail, declarations: [] }, source);
+      outcome.replaceChildren();
+      return;
+    }
+    if (!out.ok) {
+      outcome.replaceChildren(problem(out, 'The save was refused:'));
+      return;
+    }
+    base = out.body.fingerprint;
+    draft = null;
+    discard.hidden = true;
+    page.source = source;
+    page.fingerprint = base;
+    // The library moved; the other tabs must not keep describing the old
+    // one, and the stale "what a save would change" panel must re-check.
+    await loadWorld();
+    drawTabs();
+    scheduleCheck();
+    outcome.replaceChildren(await savedPanel(out.body));
+  }
+
+  async function savedPanel(saved) {
+    const moves = saved.declarations.filter((d) => d.change !== 'unchanged');
+    const tenants = await get('tenants');
+    const names = tenants.ok ? tenants.body.tenants.map((t) => t.tenant) : [];
+    return el('div', { class: 'notice ed-saved' },
+      el('p', {},
+        moves.length
+          ? `Saved. ${moves.length} declaration${moves.length === 1 ? '' : 's'} moved — `
+            + 'every tenant answers behind-deploy until its next pass. '
+            + 'Run one now, or let the next facts push do it:'
+          : 'Saved. No calculation moved, so nothing needs recomputing.'),
+      moves.length && names.length
+        ? el('div', { class: 'ed-runs' }, names.map((name) => {
+            const line = el('span', {});
+            const button = el('button', {
+              onclick: async () => {
+                button.disabled = true;
+                button.textContent = `running — ${name}…`;
+                const ran = await send('POST', `tenants/${encodeURIComponent(name)}/runs`, {});
+                if (!ran.ok) {
+                  button.remove();
+                  line.append(problem(ran, `The pass for ${name} failed:`));
+                  return;
+                }
+                button.remove();
+                // "values moved", not "moved": the saved panel above counts
+                // declarations, and one word doing both jobs reads as the
+                // two numbers disagreeing.
+                line.append(el('span', { class: 'dim' },
+                  `${name}: ${ran.body.changed} values moved`,
+                  ran.body.rebuilt.length ? `, rebuilt ${ran.body.rebuilt.length} groupings` : '',
+                  ' — ', el('a', { href: '#/activity' }, 'see the pass')));
+              },
+            }, `Run a pass — ${name}`);
+            return el('span', { class: 'ed-run' }, button, line);
+          }))
+        : null,
+      moves.length && !names.length
+        ? el('p', { class: 'faint' }, 'No tenants yet, so there is nothing to recompute.')
+        : null);
+  }
+
+  // ---- completion --------------------------------------------------------
+  let items = [];
+  let active = 0;
+  let wordStart = 0;
+
+  function completionClose() {
+    popup.hidden = true;
+    items = [];
+  }
+
+  function enclosingDeclaration(uptoLine) {
+    const lines = input.value.split('\n');
+    for (let i = uptoLine; i >= 0; i -= 1) {
+      const line = lines[i];
+      if (!line || /^\s/.test(line) || line.startsWith('#')) continue;
+      const m = /^([a-z]+)\s+([A-Za-z0-9_.]+)/.exec(line);
+      if (m && FIG_DECLS.includes(m[1])) return { kw: m[1], name: m[2], at: i };
+      return null;
+    }
+    return null;
+  }
+
+  function sectionAbove(uptoLine, declLine) {
+    const lines = input.value.split('\n');
+    for (let i = uptoLine; i > declLine; i -= 1) {
+      const m = /^\s+([a-z]+)\s*:\s*(#.*)?$/.exec(lines[i]);
+      if (m) return m[1];
+    }
+    return null;
+  }
+
+  function fieldsOf(kind) {
+    return (vocab.kinds[kind] || []).map((field) => [field, 'field']);
+  }
+
+  function namesOf(...kinds) {
+    const out = [];
+    for (const [name, kind] of vocab.names) {
+      if (kinds.includes(kind)) out.push([name, kind]);
+    }
+    return out;
+  }
+
+  function kindPaths() {
+    const out = [];
+    for (const [kind, fields] of Object.entries(vocab.kinds)) {
+      for (const field of fields) out.push([`${kind}.${field}`, 'field']);
+    }
+    return out;
+  }
+
+  // What may be written here. Deliberately modest: it reads one line and one
+  // enclosing block, offers the closed lists the parser will accept, and
+  // leaves being *right* to the compiler running underneath.
+  function candidates() {
+    const caret = input.selectionStart;
+    const before = input.value.slice(0, caret);
+    const lineStart = before.lastIndexOf('\n') + 1;
+    const lineNo = (before.match(/\n/g) || []).length;
+    let start = caret;
+    while (start > lineStart && /[A-Za-z0-9_.]/.test(input.value[start - 1])) start -= 1;
+    const prefix = input.value.slice(start, caret);
+    const head = input.value.slice(lineStart, start);
+    const decl = enclosingDeclaration(lineNo);
+    const ownLine = decl && decl.at === lineNo;
+    const kindOf = decl ? decl.name.split('.')[0] : null;
+    const prev = (/([A-Za-z0-9_.]+)\s+$/.exec(head)
+      || /([&|(=])\s*$/.exec(head) || [])[1] || null;
+
+    let list = null;
+    if (head.trim() === '' && !/^\s/.test(head + prefix) ) {
+      list = FIG_DECLS.map((word) => [word, 'kw']);
+    } else if (head.trim() === '' && decl && !ownLine) {
+      list = (FIG_SECTIONS[decl.kw] || []).map((word) => [word, 'kw']);
+      if (decl.kw === 'fact') list.push(...FIG_FACT_TYPES.map((w) => [w, 'kw']));
+    } else if (prev === 'through') {
+      list = kindPaths();
+    } else if (prev === 'where') {
+      list = kindOf ? fieldsOf(kindOf) : [];
+    } else if (prev === 'when') {
+      // Band ladders compare `value`; projection ladders and omits compare
+      // fields and bound names. The compiler is the judge of which.
+      list = [...(kindOf ? fieldsOf(kindOf) : []), ['value', 'kw']];
+    } else if (prev === 'unit') {
+      list = FIG_UNITS.map((word) => [word, 'kw']);
+    } else if (prev === 'as') {
+      list = (decl && decl.kw === 'projection' ? FIG_FIELD_TYPES : FIG_FACT_TYPES)
+        .map((word) => [word, 'kw']);
+    } else if (prev === 'in') {
+      list = [...vocab.dials.map((dial) => [dial, 'setting']),
+              ...FIG_UNITS.map((word) => [word, 'kw'])];
+    } else if (prev === 'from' || prev === 'over') {
+      list = ownLine && (decl.kw === 'group' || decl.kw === 'filter')
+        ? fieldsOf(kindOf)
+        : namesOf('group', 'filter');
+      if (prev === 'over') list.push(...namesOf('figure', 'projection'));
+    } else if (prev === '&' || prev === '|' || prev === '(') {
+      list = namesOf('group', 'filter');
+    } else if (prev === '=') {
+      const section = decl && !ownLine ? sectionAbove(lineNo, decl.at) : null;
+      if (decl && decl.kw === 'measure' && ownLine) {
+        list = [...fieldsOf(kindOf), ['moment', 'kw'], ['now', 'kw']];
+      } else if (section === 'combine') {
+        list = namesOf('figure');
+      } else if (section === 'depends') {
+        list = namesOf('group', 'filter');
+      } else {
+        list = [...(kindOf ? fieldsOf(kindOf) : []), ...namesOf('figure', 'measure')];
+      }
+    } else if (prefix.includes('.')) {
+      list = [...vocab.dials.map((dial) => [dial, 'setting']),
+              ...[...vocab.names].map(([name, kind]) => [name, kind]),
+              ...kindPaths()];
+    } else if (prefix.length >= 2) {
+      list = [...(kindOf ? fieldsOf(kindOf) : []),
+              ...[...vocab.names].map(([name, kind]) => [name, kind]),
+              ...[...FIG_WORDS].map((word) => [word, 'kw'])];
+    }
+    if (!list) return { start, prefix, found: [] };
+
+    const seen = new Set();
+    const found = [];
+    for (const rank of [0, 1]) {
+      for (const [label, type] of list) {
+        if (seen.has(label) || label === prefix) continue;
+        const hit = rank === 0
+          ? label.startsWith(prefix)
+          : prefix.length >= 2 && label.includes(prefix);
+        if (!hit) continue;
+        seen.add(label);
+        found.push({ label, type });
+        if (found.length >= 12) break;
+      }
+      if (found.length >= 12) break;
+    }
+    return { start, prefix, found };
+  }
+
+  function completionOpen(force) {
+    const { start, prefix, found } = candidates();
+    if (!found.length || (!force && prefix.length === 0)) { completionClose(); return; }
+    items = found;
+    active = 0;
+    wordStart = start;
+    popup.replaceChildren(...items.map((item, index) =>
+      el('li', {
+        role: 'option', class: index === active ? 'active' : '',
+        'aria-selected': index === active ? 'true' : 'false',
+        // mousedown, not click: click fires after the textarea loses focus
+        // and the popup has already been dismissed by the blur.
+        onmousedown: (event) => { event.preventDefault(); active = index; completionAccept(); },
+      },
+      el('span', { class: 'mono' }, item.label), ' ',
+      el('span', { class: `badge ${item.type}` }, item.type))));
+    // Monospace makes the caret's place arithmetic: column times one glyph.
+    const before = input.value.slice(0, input.selectionStart);
+    const lineNo = (before.match(/\n/g) || []).length;
+    const column = wordStart - (before.lastIndexOf('\n') + 1);
+    const pad = 12; // .ed-hl padding, kept in step with the stylesheet
+    popup.style.left = `${Math.max(0, pad + column * charWidth - input.scrollLeft)}px`;
+    popup.style.top = `${pad + (lineNo + 1) * lineHeight - input.scrollTop}px`;
+    popup.hidden = false;
+  }
+
+  function completionMove(delta) {
+    active = (active + delta + items.length) % items.length;
+    [...popup.children].forEach((node, index) => {
+      node.classList.toggle('active', index === active);
+      node.setAttribute('aria-selected', index === active ? 'true' : 'false');
+      if (index === active) node.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  function insertText(from, to, piece) {
+    // execCommand keeps the native undo stack; the fallback loses undo
+    // granularity but never the text.
+    input.setSelectionRange(from, to);
+    if (!document.execCommand('insertText', false, piece)) {
+      // The fallback fires no input event, so the bookkeeping is manual.
+      input.setRangeText(piece, from, to, 'end');
+      onEdit();
+    }
+  }
+
+  function completionAccept() {
+    const chosen = items[active];
+    if (!chosen) return;
+    insertText(wordStart, input.selectionStart, chosen.label);
+    completionClose();
+  }
+
+  // ---- wiring ------------------------------------------------------------
+  function onEdit() {
+    draft = input.value === page.source && base === page.fingerprint
+      ? null
+      : { base, text: input.value };
+    errorAt = null; // the old refusal points at lines that may have moved
+    paint();
+    scheduleCheck();
+  }
+
+  input.addEventListener('input', () => { onEdit(); completionOpen(false); });
+  input.addEventListener('scroll', () => { sync(); completionClose(); });
+  input.addEventListener('blur', () => completionClose());
+  input.addEventListener('keydown', (event) => {
+    if (!popup.hidden) {
+      if (event.key === 'ArrowDown') { event.preventDefault(); completionMove(1); return; }
+      if (event.key === 'ArrowUp') { event.preventDefault(); completionMove(-1); return; }
+      if (event.key === 'Enter' || event.key === 'Tab') {
+        event.preventDefault(); completionAccept(); return;
+      }
+      if (event.key === 'Escape') { event.preventDefault(); completionClose(); return; }
+    }
+    if (event.key === ' ' && event.ctrlKey) {
+      event.preventDefault(); completionOpen(true); return;
+    }
+    if (event.key === 's' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault(); save(); return;
+    }
+    if (event.key === 'Tab' && !event.shiftKey) {
+      event.preventDefault();
+      insertText(input.selectionStart, input.selectionEnd, '    ');
+      return;
+    }
+    if (event.key === 'Tab' && event.shiftKey) {
+      event.preventDefault();
+      const caret = input.selectionStart;
+      const lineStart = input.value.lastIndexOf('\n', caret - 1) + 1;
+      const eaten = /^ {1,4}/.exec(input.value.slice(lineStart, lineStart + 4));
+      if (eaten) {
+        insertText(lineStart, lineStart + eaten[0].length, '');
+        input.setSelectionRange(Math.max(lineStart, caret - eaten[0].length),
+          Math.max(lineStart, caret - eaten[0].length));
+      }
+      return;
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      const caret = input.selectionStart;
+      const lineStart = input.value.lastIndexOf('\n', caret - 1) + 1;
+      const line = input.value.slice(lineStart, caret);
+      const indent = /^\s*/.exec(line)[0];
+      const deeper = line.trimEnd().endsWith(':') ? '    ' : '';
+      insertText(caret, input.selectionEnd, `\n${indent}${deeper}`);
+    }
+  });
+
+  // Metrics are read from the mounted element, not assumed: the stylesheet
+  // owns the font, and a hardcoded width drifts the popup off the caret the
+  // day the font changes.
+  setTimeout(() => {
+    if (!shell.isConnected) return;
+    const style = getComputedStyle(input);
+    lineHeight = parseFloat(style.lineHeight) || lineHeight;
+    const probe = el('span', { class: 'mono' }, '0'.repeat(100));
+    probe.style.position = 'absolute';
+    probe.style.visibility = 'hidden';
+    probe.style.whiteSpace = 'pre';
+    probe.style.font = style.font;
+    document.body.append(probe);
+    charWidth = probe.getBoundingClientRect().width / 100 || charWidth;
+    probe.remove();
+
+    const at = params.get('at');
+    if (at) {
+      const pattern = new RegExp(
+        `^(?:${FIG_DECLS.join('|')})\\s+${at.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+      const found = input.value.split('\n').findIndex((line) => pattern.test(line));
+      if (found !== -1) caretTo(lineOffset(found + 1), found + 1);
+    }
+  }, 0);
+
+  paint();
+  scheduleCheck();
+
+  return [
+    el('div', { class: 'title-block' },
+      el('div', { class: 'tb-head' }, el('h1', {}, 'Editor')),
+      el('div', { class: 'tb-doc' }, el('p', { class: 'prose' },
+        'The definitions as stored, editable. Every keystroke is checked by ',
+        'the same compiler a save runs; a save is the same teach the API ',
+        'performs, and what it changes is stated before you commit to it.'))),
+    page.refusal
+      ? el('div', { class: 'notice problem' },
+          'The stored source does not compile under this build — this editor ',
+          'is the repair path: ', el('span', { class: 'mono' }, page.refusal))
+      : null,
+    restored
+      ? el('p', { class: 'faint' },
+          'An unsaved draft from this tab was restored; “discard draft” returns ',
+          'to the text as stored.')
+      : null,
+    bar, shell, report, outcome,
   ];
 }
 

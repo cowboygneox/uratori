@@ -585,3 +585,174 @@ tr.expansion li .trace { margin-left: auto; }
      default at this width: every character on screen. */
   pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 }
+
+/* ------------------------------------------------------------- editor --- */
+/* The drafting table. One hard rule underwrites everything here: the
+   highlight <pre>, the <textarea> over it and the line-number gutter share
+   one font, one line-height, one padding, and every .ed-line is exactly one
+   line-box tall -- the textarea's own text is transparent, so a half-pixel
+   of drift between the layers reads as a corrupted document. */
+
+.tb-edit {
+  margin-left: auto;
+  align-self: center;
+  font-size: 0.78rem;
+  color: var(--accent);
+}
+
+.ed-status.good { color: var(--good); }
+.ed-status.finding { color: var(--warm); }
+
+.ed-shell {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  height: min(62vh, 42rem);
+  min-height: 18rem;
+  overflow: hidden;
+}
+
+.ed-shell:focus-within { border-color: var(--accent); }
+
+.ed-gutter {
+  flex: none;
+  width: 3.4rem;
+  overflow: hidden;
+  border-right: 1px solid var(--line-faint);
+  background: var(--surface-2);
+}
+
+.ed-lines,
+.ed-hl,
+.ed-input {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+
+.ed-lines {
+  padding: 12px 10px 12px 0;
+  text-align: right;
+  color: var(--ink-faint);
+}
+
+.ed-no { height: 1.6em; }
+.ed-no.err { color: var(--bad); font-weight: 600; }
+
+.ed-scroll { position: relative; flex: 1; }
+
+/* Resets against the global `pre` styling (border, cap, mobile wrap): this
+   pre is a rendering layer, not a source block. */
+.ed-hl {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  max-height: none;
+  background: transparent;
+  padding: 12px; /* mirrored by the completion's caret arithmetic in app.js */
+  overflow: hidden;
+  white-space: pre;
+}
+
+.ed-line { white-space: pre; height: 1.6em; }
+.ed-line.err { background: rgba(224, 139, 139, 0.12); }
+
+.ed-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  border: 0;
+  padding: 12px;
+  background: transparent;
+  color: transparent;      /* the highlight layer is the visible text */
+  caret-color: var(--ink);
+  resize: none;
+  outline: none;
+  overflow: auto;
+  white-space: pre;
+}
+
+/* The kind-stamp temperatures, applied to the language itself: declaration
+   keywords in the drawing's accent, references (dotted names) in the cool
+   wiring teal, literals warm, comments the faint ink of margins. Connective
+   words stay dim -- they are the plumbing, not the point. */
+.tok-kw  { color: var(--accent); font-weight: 600; }
+.tok-sec { color: var(--ink-dim); }
+.tok-ref { color: #7cc7ce; }
+.tok-str { color: #cdb46b; }
+.tok-num { color: #d9a662; }
+.tok-cmt { color: var(--ink-faint); }
+.tok-op  { color: var(--ink-dim); }
+
+.ed-popup {
+  position: absolute;
+  z-index: 5;
+  margin: 0;
+  padding: 0.25rem;
+  list-style: none;
+  min-width: 15rem;
+  max-width: 28rem;
+  max-height: 14rem;
+  overflow: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.ed-popup li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  padding: 0.22rem 0.5rem;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.ed-popup li.active { background: var(--surface); outline: 1px solid var(--line); }
+
+.badge.kw    { color: var(--accent); border-color: #2c4a66; }
+.badge.field { color: var(--fact); border-style: dashed; }
+
+.badge.change-new     { color: var(--good); border-color: #43602f; background: rgba(147, 200, 128, 0.07); }
+.badge.change-changed { color: var(--warm); border-color: #6b5127; background: rgba(217, 166, 98, 0.07); }
+.badge.change-removed { color: var(--bad);  border-color: #6d3333; background: rgba(224, 139, 139, 0.07); }
+
+.ed-report { margin-top: 0.8rem; }
+
+.ed-diff ul {
+  list-style: none;
+  margin: 0.3rem 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.ed-diff .badge { min-width: 4.9rem; text-align: center; }
+
+.ed-refusal .ed-message { white-space: pre-wrap; }
+
+.ed-saved { border-left-color: var(--good); }
+
+.ed-runs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.5rem;
+}
+
+.ed-run { display: inline-flex; align-items: center; gap: 0.5rem; }
+
+@media (max-width: 60rem) {
+  .ed-shell { height: 55vh; }
+  .ed-gutter { width: 2.6rem; }
+}

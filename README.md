@@ -110,9 +110,12 @@ it migrates itself at boot.
 
 An open server also serves a [built-in investigation UI](docs/ui.md) at
 `/ui/` -- the library as written with dependencies traced down to the facts,
-the stored records themselves, and an activity log of what each pushed fact
-cascaded to. It is unauthenticated by design (the firewall is the door), so
-setting `URATORI_TOKEN` turns it off unless `URATORI_UI=on` says otherwise.
+the stored records themselves, an activity log of what each pushed fact
+cascaded to, and an editor that teaches definitions the same way
+`PUT /definitions` does, checked by the real compiler as you type. It is
+unauthenticated by design (the firewall is the door), so setting
+`URATORI_TOKEN` turns it off unless `URATORI_UI=on` says otherwise; editing
+is a second grant (`URATORI_UI_EDIT`), off by default beside a token.
 
 Images live on [Docker Hub](https://hub.docker.com/r/cowboygneox/uratori) as
 `cowboygneox/uratori` and on GHCR as `ghcr.io/cowboygneox/uratori`, built for

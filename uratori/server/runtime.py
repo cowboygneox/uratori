@@ -10,18 +10,26 @@ which is exactly the kind of ambient drift `World` exists to prevent.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 import asyncpg
 from fastapi import HTTPException, Request
 
-from ..facade import Uratori
+from ..engine.activity import shown_changes
+from ..facade import RunReport, Uratori
+from ..lang.check import WorldConflict, compile_source
 from ..lang.plan import Library
 from ..results import Result
 from ..schema import Schema
 from ..store.postgres import PostgresEngineStore, PostgresFactStore
+from . import db
+from .contract import RunOut, ShownChange, schema_out
 from .hub import Hub
+
+log = logging.getLogger("uratori.server")
 
 
 @dataclass
@@ -100,6 +108,97 @@ def taught_schema(world: World) -> Schema:
     if world.library is None:
         return world.schema
     return world.schema.taught_by(world.library)
+
+
+def compile_for_teach(source: str, world: World) -> tuple[Library, Schema, dict[str, Any]]:
+    """Compile a candidate source exactly the way `PUT /definitions` teaches.
+
+    Shared between the API door and the built-in editor so the two cannot
+    drift: a source the editor's dry-run check accepts must be a source the
+    save (and the API) accepts, adoption rules included. A source that brings
+    its own facts refuses a schema that also declares kinds -- but a live
+    schema-taught deployment must be able to adopt facts without blanking its
+    definitions first, so the conflict retires the schema's kinds, name fields
+    and url fields in the same compile: the source is the truth, and the retry
+    proves the new world whole before anything is persisted. Any other refusal
+    propagates verbatim as the `DefinitionError` it is; each door shapes its
+    own response from it.
+    """
+    schema = world.schema
+    try:
+        return compile_source(source, schema), schema, world.schema_document
+    except WorldConflict:
+        stripped = dataclasses.replace(
+            schema, kinds=frozenset(), name_fields={}, url_fields={}
+        )
+        library = compile_source(source, stripped)
+        return library, stripped, schema_out(stripped).model_dump()
+
+
+async def record_pass(s: State, tenant: str, cause: str, *, full: bool, out: RunOut) -> None:
+    """Freeze the pass into the run log, inside the tenant's lock so the
+    log's order is the order the passes actually ran in. The log is data,
+    not a UI feature -- it records whether or not the UI is mounted,
+    because the question it answers ("what did that fact cascade to")
+    is asked after the fact by definition.
+
+    A logging failure is swallowed, loudly: by the time this runs the
+    facts and values are committed, so raising would answer 500 for a
+    pass that happened -- and the retry that provokes would find nothing
+    changed, log a quiet run, and bury the real cascade for good. A hole
+    in the log is the smaller lie, and the error log says where it is.
+    """
+    try:
+        await db.record_run(
+            s.pool,
+            tenant,
+            cause,
+            full=full,
+            written=out.written,
+            deleted=out.deleted,
+            changed=out.changed,
+            rebuilt=out.rebuilt,
+            covered=out.covered,
+            shown=[c.model_dump() for c in out.shown],
+        )
+    except Exception:
+        log.exception("the pass for %s ran but could not be recorded", tenant)
+
+
+def run_out(
+    report: RunReport,
+    world: World,
+    library: Library,
+    settings: dict[str, Any],
+    *,
+    written: int,
+    deleted: int,
+) -> RunOut:
+    # The sample is rendered against the tenant's own dials as they stand
+    # now -- an effort formatted with the wrong working day is a wrong
+    # sentence frozen into the caller's activity log for ever.
+    document = world.schema.settings_for(settings)
+    return RunOut(
+        written=written,
+        deleted=deleted,
+        changed=len(report.outcome.changes),
+        rebuilt=list(report.outcome.rebuilt),
+        covered=sorted(report.outcome.covered),
+        shown=[
+            ShownChange(
+                figure=c.figure,
+                subject_id=c.subject_id,
+                kind=c.kind,
+                label=c.label,
+                before_display=c.before_display,
+                after_display=c.after_display,
+                unit=c.unit,
+                weight=c.weight,
+            )
+            for c in shown_changes(list(report.outcome.changes), library, document)
+        ],
+        results=list(report.results),
+    )
 
 
 def facade_for(s: State, world: World, library: Library) -> Uratori:

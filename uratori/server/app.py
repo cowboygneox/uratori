@@ -25,19 +25,17 @@ Design decisions a reader should not have to rediscover:
 """
 
 
-import dataclasses
 import hmac
 import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Literal, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 
-from ..engine.activity import shown_changes
-from ..facade import DEFAULT_TRAILING, RunReport
-from ..lang.check import WorldConflict, compile_source
+from ..facade import DEFAULT_TRAILING
+from ..lang.check import compile_source
 from ..lang.lex import DefinitionError
 from ..lang.plan import CompiledFactField, Library
 from ..results import Evidence, Result
@@ -59,13 +57,21 @@ from .contract import (
     RunOut,
     SchemaIn,
     SettingsIn,
-    ShownChange,
     Subscribe,
     TenantRemoved,
     schema_out,
 )
 from .hub import Client
-from .runtime import State, World, facade_for, ready, state_of
+from .runtime import (
+    State,
+    World,
+    compile_for_teach,
+    facade_for,
+    ready,
+    record_pass,
+    run_out,
+    state_of,
+)
 
 log = logging.getLogger("uratori.server")
 
@@ -77,17 +83,31 @@ def create_app(
     version: str | None = None,
     pg_schema: str | None = None,
     ui: bool | None = None,
+    ui_edit: bool | None = None,
     frame_ancestors: str | None = None,
 ) -> FastAPI:
     """Build the service. Parameters override the environment, for tests and
     for embedding; production reads DATABASE_URL / URATORI_TOKEN / APP_VERSION,
-    plus URATORI_UI / URATORI_UI_FRAME_ANCESTORS for the built-in UI."""
+    plus URATORI_UI / URATORI_UI_EDIT / URATORI_UI_FRAME_ANCESTORS for the
+    built-in UI."""
     resolved_dsn = dsn or os.environ.get("DATABASE_URL")
     resolved_token = token if token is not None else os.environ.get("URATORI_TOKEN")
     resolved_version = version or os.environ.get("APP_VERSION", "dev")
     resolved_ui = (
         ui if ui is not None else _ui_default(os.environ.get("URATORI_UI"), resolved_token)
     )
+    resolved_edit = (
+        ui_edit
+        if ui_edit is not None
+        else _edit_default(os.environ.get("URATORI_UI_EDIT"), resolved_token, resolved_ui)
+    )
+    if resolved_edit and not resolved_ui:
+        # A grant for an editor that is not mounted is a configuration
+        # contradiction: whoever set it believes editing is on somewhere.
+        # Refused rather than ignored, for the same reason as a junk value --
+        # a security-relevant flag that silently does nothing is a surprise
+        # deferred to the worst moment.
+        raise RuntimeError("URATORI_UI_EDIT is granted but the UI itself is off")
     resolved_ancestors = (
         frame_ancestors or os.environ.get("URATORI_UI_FRAME_ANCESTORS") or "'self'"
     )
@@ -243,28 +263,11 @@ def create_app(
                 status_code=409,
                 detail="Declare a schema before loading definitions; they compile against it",
             )
-        schema = s.world.schema
-        document = s.world.schema_document
+        # The compile, adoption rules included, is `compile_for_teach` --
+        # shared with the built-in editor so a source its dry-run check
+        # accepts is a source this door accepts, and vice versa.
         try:
-            library = compile_source(body.source, schema)
-        except WorldConflict:
-            # A source that brings its own facts refuses a schema that also
-            # declares kinds -- but a live schema-taught deployment must be
-            # able to adopt facts without blanking its definitions first, and
-            # the schema door refuses first for the same reason. So teaching
-            # facts through THIS door retires the schema's kinds, name fields
-            # and url fields in the same save: the source is the truth, and
-            # the recompile below proves the new world whole before anything
-            # is persisted. Any other refusal still surfaces verbatim.
-            stripped = dataclasses.replace(
-                schema, kinds=frozenset(), name_fields={}, url_fields={}
-            )
-            try:
-                library = compile_source(body.source, stripped)
-            except DefinitionError as refusal:
-                raise HTTPException(status_code=422, detail=str(refusal)) from refusal
-            schema = stripped
-            document = schema_out(stripped).model_dump()
+            library, schema, document = compile_for_teach(body.source, s.world)
         except DefinitionError as refusal:
             raise HTTPException(status_code=422, detail=str(refusal)) from refusal
         await db.save_world(s.pool, document, body.source)
@@ -339,7 +342,7 @@ def create_app(
                 deleted={k: list(v) for k, v in body.deletes.items()},
                 full=body.full,
             )
-            out = _run_out(
+            out = run_out(
                 report,
                 world,
                 library,
@@ -347,7 +350,7 @@ def create_app(
                 written=written,
                 deleted=sum(len(v) for v in body.deletes.values()),
             )
-            await _record(s, tenant, "facts", full=body.full, out=out)
+            await record_pass(s, tenant, "facts", full=body.full, out=out)
         return out
 
     @app.post("/tenants/{tenant}/runs", response_model=RunOut, dependencies=[auth])
@@ -358,73 +361,9 @@ def create_app(
         async with s.lock_for(tenant):
             settings = await db.load_settings(s.pool, tenant)
             report = await facade_for(s, world, library).run(tenant, settings, full=body.full)
-            out = _run_out(report, world, library, settings, written=0, deleted=0)
-            await _record(s, tenant, "run", full=body.full, out=out)
+            out = run_out(report, world, library, settings, written=0, deleted=0)
+            await record_pass(s, tenant, "run", full=body.full, out=out)
         return out
-
-    async def _record(s: State, tenant: str, cause: str, *, full: bool, out: RunOut) -> None:
-        """Freeze the pass into the run log, inside the tenant's lock so the
-        log's order is the order the passes actually ran in. The log is data,
-        not a UI feature -- it records whether or not the UI is mounted,
-        because the question it answers ("what did that fact cascade to")
-        is asked after the fact by definition.
-
-        A logging failure is swallowed, loudly: by the time this runs the
-        facts and values are committed, so raising would answer 500 for a
-        pass that happened -- and the retry that provokes would find nothing
-        changed, log a quiet run, and bury the real cascade for good. A hole
-        in the log is the smaller lie, and the error log says where it is.
-        """
-        try:
-            await db.record_run(
-                s.pool,
-                tenant,
-                cause,
-                full=full,
-                written=out.written,
-                deleted=out.deleted,
-                changed=out.changed,
-                rebuilt=out.rebuilt,
-                covered=out.covered,
-                shown=[c.model_dump() for c in out.shown],
-            )
-        except Exception:
-            log.exception("the pass for %s ran but could not be recorded", tenant)
-
-    def _run_out(
-        report: RunReport,
-        world: World,
-        library: Library,
-        settings: dict[str, Any],
-        *,
-        written: int,
-        deleted: int,
-    ) -> RunOut:
-        # The sample is rendered against the tenant's own dials as they stand
-        # now -- an effort formatted with the wrong working day is a wrong
-        # sentence frozen into the caller's activity log for ever.
-        document = world.schema.settings_for(settings)
-        return RunOut(
-            written=written,
-            deleted=deleted,
-            changed=len(report.outcome.changes),
-            rebuilt=list(report.outcome.rebuilt),
-            covered=sorted(report.outcome.covered),
-            shown=[
-                ShownChange(
-                    figure=c.figure,
-                    subject_id=c.subject_id,
-                    kind=c.kind,
-                    label=c.label,
-                    before_display=c.before_display,
-                    after_display=c.after_display,
-                    unit=c.unit,
-                    weight=c.weight,
-                )
-                for c in shown_changes(list(report.outcome.changes), library, document)
-            ],
-            results=list(report.results),
-        )
 
     # ------------------------------------------------------------ results --
 
@@ -568,7 +507,7 @@ def create_app(
             await s.hub.leave(client)
 
     if resolved_ui:
-        app.include_router(builtin_ui.router(resolved_ancestors))
+        app.include_router(builtin_ui.router(resolved_ancestors, edit=resolved_edit))
 
     return app
 
@@ -595,6 +534,27 @@ def _ui_default(env: str | None, token: str | None) -> bool:
     if value in {"0", "false", "off", "no"}:
         return False
     raise RuntimeError(f"URATORI_UI={env!r} is neither a yes nor a no")
+
+
+def _edit_default(env: str | None, token: str | None, ui: bool) -> bool:
+    """Whether the built-in UI may edit definitions when the caller did not say.
+
+    The same contract as `_ui_default`, one notch stricter: an open server's
+    API already accepts an unauthenticated `PUT /definitions`, so its UI
+    editing too grants nothing new -- but beside a token the API's writes are
+    gated, and a UI that could still save would hand "redefine every figure"
+    to anyone who can reach the port. So the default is editing only where
+    the UI is on AND the API itself is open; `URATORI_UI_EDIT` overrides in
+    either direction, and junk refuses to boot rather than guessing.
+    """
+    if env is None or env.strip() == "":
+        return ui and token is None
+    value = env.strip().lower()
+    if value in {"1", "true", "on", "yes"}:
+        return True
+    if value in {"0", "false", "off", "no"}:
+        return False
+    raise RuntimeError(f"URATORI_UI_EDIT={env!r} is neither a yes nor a no")
 
 
 def _parse(raw: str) -> Subscribe | None:

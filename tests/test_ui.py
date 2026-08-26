@@ -1679,3 +1679,486 @@ def test_uratori_ui_env_spellings(
         # The value is pasted into a response header; a newline in it is a
         # header-smuggling vector, refused at boot.
         create_app(dsn="postgres://unused")
+
+
+# ------------------------------------------------------------- the editor --
+#
+# The editor turns the investigation page into a workbench: the stored source
+# served for editing, a dry-run compile for validation, and a save that is the
+# same teach `PUT /definitions` performs -- same adoption rules, same refusal
+# prose, same persistence. These tests are the spec: what the endpoints serve,
+# what the grant gates, and what a save may never silently do.
+
+
+EDITED_SOURCE = '''
+group shop_order.carried_by from courier_id
+filter shop_order.open where status != "done"
+
+# How many orders this courier is carrying right now.
+figure shop_courier.carrying:
+    display "{value} orders in hand"
+    depends:
+        mine = shop_order.carried_by:{shop_courier} & shop_order.open
+    calculate:
+        count(mine)
+
+# Whether this courier is carrying anything at all.
+figure shop_courier.idle:
+    display "{value}"
+    combine:
+        carrying = shop_courier.carrying
+    calculate:
+        when carrying == 0 then "idle"
+        otherwise "busy"
+'''
+"""COURIER_SOURCE with one edit of every diff class: the filter's predicate
+moved (changed), `load_band` is gone (removed) and `idle` arrived (new)."""
+
+
+FACT_SOURCE = '''
+# A courier on shift.
+fact shop_courier:
+    name name
+    name as text
+
+# An order somebody placed.
+fact shop_order:
+    name ref
+    url url
+    ref as text
+    url as text
+    courier_id as text
+    status as text
+    many tags:
+        tag as text
+''' + COURIER_SOURCE
+"""The same world, taught by the source itself -- the editor's road to
+declaring facts without touching `PUT /schema`."""
+
+
+async def test_the_editor_serves_the_source_the_deployment_holds(
+    pg_dsn: str,
+) -> None:
+    """The text served is the text stored, verbatim -- an editor loading a
+    reconstruction would save back its own artefacts as if a person wrote
+    them. Beside it, everything a completion needs: the kinds (fields unknown
+    in a schema-taught world, and the payload must say so with an empty list
+    rather than invent them), every declarable dial plus the reserved
+    rendering dial, and the declared names."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+
+        page = (await http.get("/ui/api/source")).json()
+        assert page["source"] == COURIER_SOURCE
+        assert page["editable"] is True, "an open server grants editing"
+        assert page["refusal"] is None
+        assert len(page["fingerprint"]) == 12
+        assert page["dials"] == ["limits.carrying.over", "tenant.hoursPerDay"]
+        assert page["kinds"] == {"shop_courier": [], "shop_order": []}
+        assert {d["name"]: d["kind"] for d in page["declarations"]} == {
+            "shop_order.carried_by": "group",
+            "shop_order.open": "filter",
+            "shop_courier.carrying": "figure",
+            "shop_courier.load_band": "figure",
+        }
+
+        world = (await http.get("/ui/api/world")).json()
+        assert world["editable"] is True, (
+            "the page decides whether to offer the editor from the world "
+            "payload it already loads"
+        )
+
+
+async def test_the_editor_without_a_schema_names_the_gap(pg_dsn: str) -> None:
+    async with serve(pg_dsn) as http:
+        answer = await http.get("/ui/api/source")
+        assert answer.status_code == 409
+        assert "schema" in answer.json()["detail"].lower()
+
+
+async def test_check_reports_a_syntax_refusal_with_line_and_column(
+    pg_dsn: str,
+) -> None:
+    """The lexer and parser know the column; the editor needs it as a number
+    to place a caret, not re-parsed out of prose."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+
+        bad = '\nfilter shop_order.bad where status == "x'
+        out = (await http.post("/ui/api/check", json={"source": bad})).json()
+        assert out["ok"] is False
+        assert out["declarations"] == []
+        assert out["refusal"]["line"] == 2
+        assert isinstance(out["refusal"]["column"], int)
+        assert out["refusal"]["message"]
+
+
+async def test_check_reports_a_checker_refusal_by_line_alone(pg_dsn: str) -> None:
+    """The checker carries no column, and the payload must say so with null
+    rather than a fabricated zero a client would dutifully point at."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+
+        bad = (
+            "# Sums a set nobody declared.\n"
+            "figure shop_courier.x:\n"
+            '    display "x"\n'
+            "    depends:\n"
+            "        mine = shop_order.nowhere:{shop_courier}\n"
+            "    calculate:\n"
+            "        count(mine)\n"
+        )
+        out = (await http.post("/ui/api/check", json={"source": bad})).json()
+        assert out["ok"] is False
+        assert out["refusal"]["column"] is None
+        assert out["refusal"]["line"] == 5
+        assert "nowhere" in out["refusal"]["message"]
+
+
+async def test_check_classifies_what_a_save_would_change(pg_dsn: str) -> None:
+    """The diff is the review surface, and it must tell the cascade's truth:
+    editing the filter moves the version of every figure whose plan hashes its
+    text in, so `carrying` reports changed though its own lines are untouched.
+    A diff that only marked the edited lines would promise stability the
+    engine will not deliver."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+
+        out = (await http.post("/ui/api/check", json={"source": EDITED_SOURCE})).json()
+        assert out["ok"] is True and out["refusal"] is None
+        changes = {d["name"]: d["change"] for d in out["declarations"]}
+        assert changes == {
+            "shop_order.carried_by": "unchanged",
+            "shop_order.open": "changed",
+            "shop_courier.carrying": "changed",
+            "shop_courier.idle": "new",
+            "shop_courier.load_band": "removed",
+        }
+
+        # A check is a dry run: nothing was taught, nothing was stored.
+        held = (await http.get("/ui/api/source")).json()
+        assert held["source"] == COURIER_SOURCE
+        names = {d["name"] for d in (await http.get("/ui/api/world")).json()["declarations"]}
+        assert "shop_courier.load_band" in names and "shop_courier.idle" not in names
+
+
+async def test_a_save_teaches_and_survives_a_restart(pg_dsn: str) -> None:
+    """A save is `db.save_world`, not a swap of process memory -- the proof is
+    a second boot serving the edited text."""
+    name = f"uratori_ui_{os.urandom(4).hex()}"
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await connection.execute(f"create schema {name}")
+    finally:
+        await connection.close()
+    try:
+        first = create_app(dsn=pg_dsn, pg_schema=name, token=None, version="test")
+        async with first.router.lifespan_context(first):
+            transport = httpx.ASGITransport(app=first)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://uratori"
+            ) as http:
+                await _teach(http)
+                held = (await http.get("/ui/api/source")).json()
+                saved = await http.put(
+                    "/ui/api/source",
+                    json={"source": EDITED_SOURCE, "expected": held["fingerprint"]},
+                )
+                assert saved.status_code == 200, saved.text
+                body = saved.json()
+                assert body["fingerprint"] != held["fingerprint"]
+                changes = {d["name"]: d["change"] for d in body["declarations"]}
+                assert changes["shop_courier.idle"] == "new"
+
+        second = create_app(dsn=pg_dsn, pg_schema=name, token=None, version="test")
+        async with second.router.lifespan_context(second):
+            transport = httpx.ASGITransport(app=second)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://uratori"
+            ) as http:
+                page = (await http.get("/ui/api/source")).json()
+                assert page["source"] == EDITED_SOURCE
+                names = {
+                    d["name"]
+                    for d in (await http.get("/ui/api/world")).json()["declarations"]
+                }
+                assert "shop_courier.idle" in names
+                assert "shop_courier.load_band" not in names
+    finally:
+        connection = await asyncpg.connect(pg_dsn)
+        try:
+            await connection.execute(f"drop schema {name} cascade")
+        finally:
+            await connection.close()
+
+
+async def test_a_save_that_does_not_compile_changes_nothing(pg_dsn: str) -> None:
+    """The refusal arrives structured (message, line, column) because the
+    editor is the caller -- and the stored world must be exactly what it was,
+    because a half-taught save is a server that cannot boot."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        held = (await http.get("/ui/api/source")).json()
+
+        bad = '\nfilter shop_order.bad where status == "x'
+        refused = await http.put(
+            "/ui/api/source", json={"source": bad, "expected": held["fingerprint"]}
+        )
+        assert refused.status_code == 422
+        detail = refused.json()["detail"]
+        assert detail["line"] == 2 and detail["message"]
+
+        again = (await http.get("/ui/api/source")).json()
+        assert again["source"] == COURIER_SOURCE
+        assert again["fingerprint"] == held["fingerprint"]
+
+
+async def test_two_editors_cannot_silently_overwrite_each_other(
+    pg_dsn: str,
+) -> None:
+    """The fingerprint is the whole concurrency story: a save names the text
+    it was editing, and a save against text that has moved is refused with the
+    state of play, never merged and never silently last-writer-wins."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        held = (await http.get("/ui/api/source")).json()
+
+        stale = await http.put(
+            "/ui/api/source",
+            json={"source": EDITED_SOURCE, "expected": "000000000000"},
+        )
+        assert stale.status_code == 409
+        assert "changed" in stale.json()["detail"].lower()
+        assert (await http.get("/ui/api/source")).json()["source"] == COURIER_SOURCE
+
+        fresh = await http.put(
+            "/ui/api/source",
+            json={"source": EDITED_SOURCE, "expected": held["fingerprint"]},
+        )
+        assert fresh.status_code == 200, fresh.text
+
+
+async def test_the_editor_can_declare_facts_and_adopt_the_world(
+    pg_dsn: str,
+) -> None:
+    """A fact-bearing save through the editor is the same adoption
+    `PUT /definitions` performs: the schema's kinds retire, the source's fact
+    declarations become the world -- and the completion payload now knows the
+    fields, nested ones flattened to the dotted paths definitions write."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+
+        checked = (await http.post("/ui/api/check", json={"source": FACT_SOURCE})).json()
+        assert checked["ok"] is True, checked
+
+        held = (await http.get("/ui/api/source")).json()
+        saved = await http.put(
+            "/ui/api/source",
+            json={"source": FACT_SOURCE, "expected": held["fingerprint"]},
+        )
+        assert saved.status_code == 200, saved.text
+
+        page = (await http.get("/ui/api/source")).json()
+        assert page["kinds"] == {
+            "shop_courier": ["name"],
+            "shop_order": ["courier_id", "ref", "status", "tags.tag", "url"],
+        }
+        world = (await http.get("/ui/api/world")).json()
+        assert sorted(world["kinds"]) == ["shop_courier", "shop_order"]
+        assert world["name_fields"]["shop_order"] == "ref"
+
+
+async def test_the_editor_repairs_a_world_this_build_refused(pg_dsn: str) -> None:
+    """The boot path's promise -- unready, repairable by a corrected teach --
+    is only kept if the editor can see the refused text and save over it. A
+    404 or an empty editor here would leave curl as the only repair tool."""
+    name = f"uratori_ui_{os.urandom(4).hex()}"
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await connection.execute(f"create schema {name}")
+    finally:
+        await connection.close()
+    try:
+        first = create_app(dsn=pg_dsn, pg_schema=name, token=None, version="test")
+        async with first.router.lifespan_context(first):
+            transport = httpx.ASGITransport(app=first)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://uratori"
+            ) as http:
+                await _teach(http)
+
+        connection = await asyncpg.connect(pg_dsn)
+        try:
+            await connection.execute(
+                f"update {name}.engine_world set source = 'this is not a definition'"
+            )
+        finally:
+            await connection.close()
+
+        second = create_app(dsn=pg_dsn, pg_schema=name, token=None, version="test")
+        async with second.router.lifespan_context(second):
+            transport = httpx.ASGITransport(app=second)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://uratori"
+            ) as http:
+                page = (await http.get("/ui/api/source")).json()
+                assert page["source"] == "this is not a definition"
+                assert page["refusal"], "the editor must say why the library is bare"
+
+                checked = (
+                    await http.post("/ui/api/check", json={"source": COURIER_SOURCE})
+                ).json()
+                assert checked["ok"] is True
+                assert all(d["change"] == "new" for d in checked["declarations"]), (
+                    "against a refused (empty) library everything is new -- "
+                    "there is no old version to diff against"
+                )
+
+                saved = await http.put(
+                    "/ui/api/source",
+                    json={"source": COURIER_SOURCE, "expected": page["fingerprint"]},
+                )
+                assert saved.status_code == 200, saved.text
+                health = (await http.get("/health")).json()
+                assert health["ready"] is True
+    finally:
+        connection = await asyncpg.connect(pg_dsn)
+        try:
+            await connection.execute(f"drop schema {name} cascade")
+        finally:
+            await connection.close()
+
+
+async def test_the_editor_can_teach_the_first_definitions(pg_dsn: str) -> None:
+    """A schema-taught server with no definitions yet serves an empty editor,
+    not an error: teaching the first source is the experiment the editor
+    exists for."""
+    async with serve(pg_dsn) as http:
+        put = await http.put("/schema", json=COURIER_WORLD.to_document())
+        assert put.status_code == 200, put.text
+
+        page = (await http.get("/ui/api/source")).json()
+        assert page["source"] == ""
+        assert page["declarations"] == []
+
+        saved = await http.put(
+            "/ui/api/source",
+            json={"source": COURIER_SOURCE, "expected": page["fingerprint"]},
+        )
+        assert saved.status_code == 200, saved.text
+        names = {
+            d["name"] for d in (await http.get("/ui/api/world")).json()["declarations"]
+        }
+        assert "shop_courier.carrying" in names
+
+
+async def test_a_pass_can_be_run_from_the_editor(pg_dsn: str) -> None:
+    """A save leaves every tenant honestly behind-deploy until a pass runs;
+    without a door to run one, the editor's loop dead-ends at curl. The pass
+    is recorded in the activity log like any other, because it IS one."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        fed = await http.post(
+            "/tenants/t1/facts",
+            json={"writes": {"shop_courier": COURIER, "shop_order": _orders(2)}},
+        )
+        assert fed.status_code == 200, fed.text
+
+        held = (await http.get("/ui/api/source")).json()
+        saved = await http.put(
+            "/ui/api/source",
+            json={"source": EDITED_SOURCE, "expected": held["fingerprint"]},
+        )
+        assert saved.status_code == 200, saved.text
+
+        stale = (
+            await http.get("/ui/api/tenants/t1/membership/shop_order.open")
+        ).json()
+        assert stale["state"]["ok"] is False
+        assert stale["state"]["because"] == "behind-deploy"
+
+        ran = await http.post("/ui/api/tenants/t1/runs", json={})
+        assert ran.status_code == 200, ran.text
+        assert "changed" in ran.json()
+
+        fresh = (
+            await http.get("/ui/api/tenants/t1/membership/shop_order.open")
+        ).json()
+        assert fresh["state"]["ok"] is True
+
+        page = (await http.get("/ui/api/tenants/t1/activity?quiet=1")).json()
+        assert page["runs"][0]["trigger"] == "run"
+
+
+async def test_editing_is_a_grant_not_a_default_beside_a_token(
+    pg_dsn: str,
+) -> None:
+    """Beside a token the UI is read-only unless the operator says otherwise:
+    a token'd API with a silently writable UI would let anyone who can reach
+    the port redefine every figure the token was protecting."""
+    async with serve(pg_dsn, token="secret", ui=True) as http:
+        await _teach(http, headers={"Authorization": "Bearer secret"})
+
+        page = (await http.get("/ui/api/source")).json()
+        assert page["editable"] is False, "reading the source stays fine"
+        assert (await http.get("/ui/api/world")).json()["editable"] is False
+
+        checked = await http.post("/ui/api/check", json={"source": COURIER_SOURCE})
+        assert checked.status_code == 403
+        assert "URATORI_UI_EDIT" in checked.json()["detail"]
+        saved = await http.put(
+            "/ui/api/source",
+            json={"source": EDITED_SOURCE, "expected": page["fingerprint"]},
+        )
+        assert saved.status_code == 403
+        ran = await http.post("/ui/api/tenants/t1/runs", json={})
+        assert ran.status_code == 403, (
+            "a pass rebuilds and recomputes; without the grant the UI may "
+            "not spend that either"
+        )
+
+    async with serve(pg_dsn, token="secret", ui=True, ui_edit=True) as http:
+        await _teach(http, headers={"Authorization": "Bearer secret"})
+        page = (await http.get("/ui/api/source")).json()
+        assert page["editable"] is True
+        saved = await http.put(
+            "/ui/api/source",
+            json={"source": EDITED_SOURCE, "expected": page["fingerprint"]},
+        )
+        assert saved.status_code == 200, (
+            "the explicit grant is the whole gate -- the editor itself "
+            "carries no token"
+        )
+
+
+def test_uratori_ui_edit_env_spellings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same contract as URATORI_UI: documented spellings parse, empty means
+    unset, garbage refuses to boot -- and a grant on a server whose UI is off
+    is a contradiction refused at boot, not a flag that silently does
+    nothing."""
+    monkeypatch.delenv("URATORI_UI", raising=False)
+    monkeypatch.delenv("URATORI_UI_EDIT", raising=False)
+
+    for yes in ("on", "True", "1", "yes"):
+        monkeypatch.setenv("URATORI_UI_EDIT", yes)
+        create_app(dsn="postgres://unused")
+    for no in ("off", "False", "0", "no"):
+        monkeypatch.setenv("URATORI_UI_EDIT", no)
+        create_app(dsn="postgres://unused")
+
+    monkeypatch.setenv("URATORI_UI_EDIT", "")
+    create_app(dsn="postgres://unused")
+
+    monkeypatch.setenv("URATORI_UI_EDIT", "fales")
+    with pytest.raises(RuntimeError, match="URATORI_UI_EDIT"):
+        create_app(dsn="postgres://unused")
+
+    monkeypatch.setenv("URATORI_UI_EDIT", "on")
+    with pytest.raises(RuntimeError, match="URATORI_UI_EDIT"):
+        # The UI is off (token, no override); granting edits to a UI that is
+        # not mounted is a configuration contradiction, not a no-op.
+        create_app(dsn="postgres://unused", token="secret")
+
+    monkeypatch.delenv("URATORI_UI_EDIT", raising=False)
+    with pytest.raises(RuntimeError, match="URATORI_UI_EDIT"):
+        create_app(dsn="postgres://unused", token="secret", ui=False, ui_edit=True)

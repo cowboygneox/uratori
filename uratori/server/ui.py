@@ -33,6 +33,7 @@ Decisions a reader should not have to rediscover:
 
 from __future__ import annotations
 
+import hashlib
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -46,12 +47,23 @@ from ..engine.buckets import measure_of
 from ..engine.project import format_value
 from ..facade import DEFAULT_TRAILING
 from ..lang.ast import ByAge, ByComposite, ByField, FigureUnit, IndexBy, IndexField
-from ..lang.plan import CompiledIndex, CompiledMeasure, Library
+from ..lang.lex import DefinitionError
+from ..lang.plan import CompiledFactField, CompiledIndex, CompiledMeasure, Library
 from ..lang.source import declaration_prose, declaration_source
 from ..results import Availability, Evidence, Ok, Result, Unavailable
 from ..schema import EFFORT_HOURS_SETTING, Schema
 from . import db
-from .runtime import State, facade_for, ready, state_of, taught_schema
+from .runtime import (
+    State,
+    World,
+    compile_for_teach,
+    facade_for,
+    ready,
+    record_pass,
+    run_out,
+    state_of,
+    taught_schema,
+)
 
 STATIC = Path(__file__).parent / "static"
 
@@ -119,7 +131,108 @@ class WorldOut(BaseModel):
     the declarations list is then empty and this says why, so the page can
     state the truth instead of rendering an inexplicably bare library."""
 
+    editable: bool
+    """Whether this deployment grants editing from the UI -- the page decides
+    whether to offer the editor from the payload it already loads, rather than
+    probing a write route to see what happens."""
+
     declarations: list[DeclarationOut]
+
+
+class DeclaredName(BaseModel):
+    """A declaration's name and kind, and nothing else -- what a completion
+    list needs, without the full catalogue's traced edges."""
+
+    name: str
+    kind: DeclarationKind
+
+
+class SourceOut(BaseModel):
+    """The stored definitions source, served for editing.
+
+    `source` is the text as stored, verbatim -- an editor loading a
+    reconstruction would save its own artefacts back as if a person wrote
+    them. Beside it rides what a completion engine cannot mine from the text
+    alone: the fact kinds with their declared fields (empty lists in a
+    schema-taught world, which knows its kinds but not their fields), every
+    dial a definition may name plus the reserved rendering dial, and the
+    declared names.
+    """
+
+    source: str
+    fingerprint: str
+    """Names the exact text served, so a save can say which text it edited --
+    see `SaveIn.expected`."""
+
+    editable: bool
+    refusal: str | None
+    """Why the library is bare when it is: the stored source no longer
+    compiles under this build. The editor is the repair tool the boot path
+    promised, so it must see the refused text and the reason together."""
+
+    kinds: dict[str, list[str]]
+    dials: list[str]
+    declarations: list[DeclaredName]
+
+
+class CheckIn(BaseModel):
+    source: str
+
+
+class RefusalOut(BaseModel):
+    """A compile refusal, structured for an editor: the message to print and
+    the position to point at. The lexer and parser know their column; the
+    checker only its line, and `column` is then null rather than a fabricated
+    zero a client would dutifully point a caret at."""
+
+    message: str
+    line: int | None
+    column: int | None
+
+
+class DeclChange(BaseModel):
+    """One declaration's fate under a candidate source.
+
+    `changed` means the engine would treat it as moved: its version hash
+    moved (which happens when a group, filter or measure it reads moved,
+    even if its own lines are untouched -- the diff must tell the cascade's
+    truth) or its calculation text moved. Display and prose edits move no
+    plan and are reported `unchanged`; the save still stores them.
+    """
+
+    name: str
+    kind: DeclarationKind
+    change: Literal["new", "changed", "unchanged", "removed"]
+
+
+class CheckOut(BaseModel):
+    ok: bool
+    refusal: RefusalOut | None
+    declarations: list[DeclChange]
+
+
+class SaveIn(BaseModel):
+    source: str
+    expected: str
+    """The fingerprint of the text this editor loaded. A save names what it
+    edited, so a save against text that has moved is refused with the state
+    of play rather than silently overwriting the other author's work."""
+
+
+class SaveOut(BaseModel):
+    ok: bool
+    fingerprint: str
+    declarations: list[DeclChange]
+
+
+class EditRunIn(BaseModel):
+    full: bool = False
+
+
+class EditRunOut(BaseModel):
+    ok: bool
+    changed: int
+    rebuilt: list[str]
 
 
 class TenantOut(BaseModel):
@@ -309,11 +422,26 @@ class RecordOut(BaseModel):
     measured: list[RecordMeasureOut]
 
 
-def router(frame_ancestors: str) -> APIRouter:
+def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
     ui = APIRouter()
 
     def _state(request: Request) -> State:
         return state_of(request)
+
+    def _granted() -> None:
+        """The editor's whole gate. Request-time rather than mount-time, so a
+        read-only deployment still serves the source (it already serves every
+        declaration's text) and answers a write attempt with the fix instead
+        of a 404 that reads as a broken page."""
+        if not edit:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "This deployment does not grant editing from the UI. "
+                    "Set URATORI_UI_EDIT=on (an explicit operator choice) to enable it; "
+                    "the default grants editing only where the API itself is open."
+                ),
+            )
 
     # ------------------------------------------------------------- page --
 
@@ -360,8 +488,109 @@ def router(frame_ancestors: str) -> APIRouter:
             kinds=sorted(world_schema.kinds),
             name_fields=dict(world_schema.name_fields),
             refusal=held.refusal,
+            editable=edit,
             declarations=_declarations(library, world_schema) if library else [],
         )
+
+    # ------------------------------------------------------------- editor --
+
+    @ui.get("/ui/api/source", response_model=SourceOut, include_in_schema=False)
+    async def source(request: Request) -> SourceOut:
+        s = _state(request)
+        if s.world is None:
+            raise HTTPException(status_code=409, detail="No schema has been declared yet")
+        held = s.world
+        text = held.source or ""
+        return SourceOut(
+            source=text,
+            fingerprint=_fingerprint(text),
+            editable=edit,
+            refusal=held.refusal,
+            kinds=_kind_fields(held),
+            dials=sorted({*taught_schema(held).declarable, EFFORT_HOURS_SETTING}),
+            declarations=[
+                DeclaredName(name=name, kind=kind)
+                for name, (kind, _) in sorted(_named(held.library).items())
+            ],
+        )
+
+    @ui.post("/ui/api/check", response_model=CheckOut, include_in_schema=False)
+    async def check(body: CheckIn, request: Request) -> CheckOut:
+        """A dry run of the save: the same compile, nothing stored.
+
+        Gated like the writes even though it writes nothing: it is the
+        editor's inner loop, and a deployment that refuses the save has no
+        business inviting the drafting either.
+        """
+        s = _state(request)
+        _granted()
+        if s.world is None:
+            raise HTTPException(status_code=409, detail="No schema has been declared yet")
+        try:
+            library, _schema, _document = compile_for_teach(body.source, s.world)
+        except DefinitionError as refusal:
+            return CheckOut(ok=False, refusal=_refusal_out(refusal), declarations=[])
+        return CheckOut(
+            ok=True, refusal=None, declarations=_changes(s.world.library, library)
+        )
+
+    @ui.put("/ui/api/source", response_model=SaveOut, include_in_schema=False)
+    async def save(body: SaveIn, request: Request) -> SaveOut:
+        """The same teach `PUT /definitions` performs, with two editor-shaped
+        differences: the refusal arrives structured rather than as prose, and
+        the save names the text it edited so two editors cannot silently
+        overwrite each other."""
+        s = _state(request)
+        _granted()
+        if s.world is None:
+            raise HTTPException(status_code=409, detail="No schema has been declared yet")
+        held = s.world
+        if body.expected != _fingerprint(held.source or ""):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "The stored source has changed since this editor loaded it. "
+                    "Reload, reapply the edit, and save again -- saving now would "
+                    "silently overwrite what the other author taught."
+                ),
+            )
+        try:
+            library, schema, document = compile_for_teach(body.source, held)
+        except DefinitionError as refusal:
+            raise HTTPException(
+                status_code=422, detail=_refusal_out(refusal).model_dump()
+            ) from refusal
+        # The diff against what was taught before, not after: the response is
+        # the review record of what this save did.
+        changes = _changes(held.library, library)
+        await db.save_world(s.pool, document, body.source)
+        s.world = World(
+            schema=schema,
+            schema_document=document,
+            source=body.source,
+            library=library,
+        )
+        return SaveOut(ok=True, fingerprint=_fingerprint(body.source), declarations=changes)
+
+    @ui.post(
+        "/ui/api/tenants/{tenant}/runs",
+        response_model=EditRunOut,
+        include_in_schema=False,
+    )
+    async def run_pass(tenant: str, body: EditRunIn, request: Request) -> EditRunOut:
+        """A pass with no new facts, from the editor: a save leaves every
+        tenant honestly behind-deploy until one runs, and without this door
+        the editing loop dead-ends at curl. Same lock, same log, same helpers
+        as the API's `POST /tenants/{tenant}/runs` -- it IS that pass."""
+        s = _state(request)
+        _granted()
+        world, library = ready(s)
+        async with s.lock_for(tenant):
+            settings = await db.load_settings(s.pool, tenant)
+            report = await facade_for(s, world, library).run(tenant, settings, full=body.full)
+            out = run_out(report, world, library, settings, written=0, deleted=0)
+            await record_pass(s, tenant, "run", full=body.full, out=out)
+        return EditRunOut(ok=True, changed=out.changed, rebuilt=out.rebuilt)
 
     # -------------------------------------------------------------- facts --
 
@@ -1066,6 +1295,93 @@ def _fill_moved_by(declarations: list[DeclarationOut]) -> None:
         declaration.moved_by = sorted(
             leaves.values(), key=lambda e: (e.type != "fact", e.name)
         )
+
+
+def _fingerprint(source: str) -> str:
+    """Names a source text, for the editor's edited-since-loaded check. The
+    same twelve-hex convention as declaration versions, over the raw text."""
+    return hashlib.sha256(source.encode()).hexdigest()[:12]
+
+
+def _refusal_out(refusal: DefinitionError) -> RefusalOut:
+    line = getattr(refusal, "line", None)
+    column = getattr(refusal, "column", None)
+    message = getattr(refusal, "message", None) or str(refusal)
+    return RefusalOut(message=message, line=line, column=column)
+
+
+def _flat_fields(fields: tuple[CompiledFactField, ...], prefix: str = "") -> list[str]:
+    """Field names flattened to the dotted paths definitions write: a nested
+    `many abbrs: abbr` completes as `abbrs.abbr`, because that is the token a
+    `through` clause needs."""
+    out: list[str] = []
+    for field in fields:
+        if field.children:
+            out += _flat_fields(field.children, f"{prefix}{field.name}.")
+        else:
+            out.append(f"{prefix}{field.name}")
+    return out
+
+
+def _kind_fields(world: World) -> dict[str, list[str]]:
+    library = world.library
+    if library is not None and library.facts:
+        return {name: sorted(_flat_fields(f.fields)) for name, f in library.facts.items()}
+    # Schema-taught: the kinds are known, their fields are not -- an empty
+    # list is the honest answer, not a guess mined from stored records.
+    return {kind: [] for kind in sorted(taught_schema(world).kinds)}
+
+
+def _named(library: Library | None) -> dict[str, tuple[DeclarationKind, str | None]]:
+    """Every declared name with its kind and version (None for the unversioned
+    three, whose text hashes into their readers instead)."""
+    if library is None:
+        return {}
+    held: dict[str, tuple[DeclarationKind, str | None]] = {}
+    for name, fact in library.facts.items():
+        held[name] = ("fact", fact.version)
+    for name, index in library.indexes.items():
+        held[name] = (_grouping_kind(index), None)
+    for name in library.measures:
+        held[name] = ("measure", None)
+    for figure in library.figures:
+        held[figure.name] = ("figure", figure.version)
+    for reading in library.readings:
+        held[reading.name] = ("reading", reading.version)
+    for projection in library.projections:
+        held[projection.name] = ("projection", projection.version)
+    for summary in library.summaries:
+        held[summary.name] = ("summary", summary.version)
+    return held
+
+
+def _changes(old: Library | None, new: Library) -> list[DeclChange]:
+    """What teaching `new` over `old` does to each declaration.
+
+    `changed` is version-moved OR calculation-text-moved, because each catches
+    what the other misses: a figure's version moves when a filter it reads is
+    edited (its own text untouched -- the cascade's truth), and a fact's text
+    moves when its name directive is repointed (its version deliberately
+    blind to rendering). Display and prose edits move neither, and are
+    reported `unchanged` -- the save stores them, but no plan moves.
+    """
+    before = _named(old)
+    after = _named(new)
+    out: list[DeclChange] = []
+    for name, (kind, version) in after.items():
+        if name not in before or old is None:
+            out.append(DeclChange(name=name, kind=kind, change="new"))
+            continue
+        moved = version != before[name][1] or (
+            declaration_source(old, name) != declaration_source(new, name)
+        )
+        out.append(
+            DeclChange(name=name, kind=kind, change="changed" if moved else "unchanged")
+        )
+    for name, (kind, _version) in before.items():
+        if name not in after:
+            out.append(DeclChange(name=name, kind=kind, change="removed"))
+    return sorted(out, key=lambda change: change.name)
 
 
 def _grouping_kind(index: CompiledIndex) -> Literal["group", "filter"]:
