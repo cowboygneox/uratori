@@ -223,6 +223,18 @@ class FactsIn(BaseModel):
     what moved. The right call after a destructive change whose scope the
     warm path cannot see."""
 
+    defer: bool = False
+    """Write the batch and run no pass. For bulk imports: a pass per batch
+    reads buckets every earlier batch already filled, so an import's cost
+    grows with the square of its size. Verification still gates the batch
+    whole; stored answers simply do not include it until the caller closes
+    the import with `POST /tenants/{t}/runs {"full": true}`. The engine
+    remembers the debt -- the tenant's next pass runs full whatever shape
+    its caller asked for -- so a forgotten close costs one expensive pass,
+    never stale answers served as current. Refused (422) together with
+    `full`: defer skips the pass, full forces the biggest one, and either
+    honoured would silently ignore the other."""
+
 
 class RunIn(BaseModel):
     full: bool = False

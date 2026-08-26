@@ -372,6 +372,7 @@ Request fields, all optional:
 | `stamps` | `{kind: {key: instant}}` | The provider's own updated-at instant per record, ISO 8601, where one exists. Sparse. |
 | `deletes` | `{kind: [key]}` | Keys gone from the world. |
 | `full` | bool | Force a full pass: reindex and recompute everything rather than only what moved. The right call after a destructive change whose scope the warm path cannot see. Default `false`. |
+| `defer` | bool | Write the batch and run **no pass**. For bulk imports: a pass per batch reads buckets every earlier batch already filled, so an import's cost grows with the square of its size. Verification still gates the batch whole. The caller owes the close -- `POST /tenants/{t}/runs {"full": true}` -- because until it runs, the tenant's stored answers describe the world as it stood before the deferred batches. The engine remembers the debt: the tenant's **next pass, whatever shape its caller asked for** -- a warm run, an ordinary push -- runs full and settles it, so a forgotten close costs one expensive pass rather than stale values served as current for ever. Contradicts `full`, and the pair is refused (`422`) rather than one silently winning. Default `false`. |
 
 **Send everything you saw; the server decides what moved.** `writes` may --
 should -- include records whose value has not changed. The server's copy is
@@ -395,6 +396,8 @@ pass -- the engine reads the fact table to work out whose numbers a departure
 moves, so the table must already say what the batch said. A batch that carries
 any deletion escalates to a full pass (visible as a populated `rebuilt` in
 the response); correctness over cheapness, and rare enough to be a fair price.
+A **deferred** batch's deletes are applied with it and swept out of every
+figure by the closing run, not before.
 
 Passes are serialised per tenant: two concurrent posts for one tenant queue,
 posts for different tenants overlap.
@@ -446,6 +449,11 @@ known/unknown, not required/optional.
 | `covered` | The fact kinds this pass actually read, sorted. A webhook covers almost nothing and a reconcile covers everything, and the difference says which values were *confirmed* unchanged rather than merely not checked. |
 | `shown` | A **ranked sample** of the movements, capped at 40, for an activity log. See below. |
 | `results` | The re-served `Result` for everything the pass moved -- plus every projection, always, because the clock is one of a projection's inputs. The same objects `GET /tenants/{t}/results` returns and the websocket pushes; there is no run-only shape to drift. (One spelling difference: HTTP responses write absent fields as `null`, the socket omits them -- treat both as absent.) |
+
+A **deferred** post answers the same shape with only `written` and `deleted`
+populated -- `changed` 0, everything else empty -- because nothing recomputed,
+and re-serving the stored answers would present pre-import values as the
+batch's outcome.
 
 Each entry in `shown` is one movement, rendered at the instant it happened
 against the tenant's dials as they stood, and never re-derived -- a log line

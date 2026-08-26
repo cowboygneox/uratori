@@ -72,6 +72,13 @@ def _orders(n: int) -> dict[str, dict[str, Any]]:
     }
 
 
+def _more_orders(n: int) -> dict[str, dict[str, Any]]:
+    """Keys disjoint from `_orders`, for batches that must not overwrite."""
+    return {
+        f"x{i}": {"ref": f"B-{i}", "courier_id": "c1", "status": "riding"} for i in range(n)
+    }
+
+
 COURIER = {"c1": {"name": "Aki"}}
 
 
@@ -169,6 +176,210 @@ async def test_taught_fed_and_asked_end_to_end(server: Server) -> None:
     )
     assert again.json()["written"] == 0
     assert again.json()["changed"] == 0
+
+
+async def test_a_deferred_batch_lands_facts_and_leaves_the_pass_to_the_closing_run(
+    server: Server,
+) -> None:
+    """A bulk import is many batches and one computation. Without `defer`,
+    every batch runs a pass over buckets the earlier batches already filled,
+    so an import's cost grows with the square of its size -- the pass, not the
+    writing, is what made a two-million-record import take days. `defer`
+    writes a batch and runs nothing; the import closes with one full run."""
+    await _teach(server.http)
+
+    pushed = await server.http.post(
+        "/tenants/t1/facts",
+        json={"writes": {"shop_courier": COURIER, "shop_order": _orders(3)}, "defer": True},
+    )
+    assert pushed.status_code == 200, pushed.text
+    run = pushed.json()
+    assert run["written"] == 4
+    assert run["changed"] == 0
+    assert run["results"] == []
+    # Nothing was rebuilt, read or shown -- `covered` in particular is what a
+    # host re-dates evidence on, and a deferred write confirmed nothing.
+    assert (run["rebuilt"], run["covered"], run["shown"]) == ([], [], [])
+
+    # Nothing has computed, and the answer says so honestly -- deferred facts
+    # are facts the engine has not yet looked at, not a page of zeroes.
+    answer = await server.http.get("/tenants/t1/results/shop_courier.carrying")
+    assert answer.json()["state"]["ok"] is False
+    assert answer.json()["state"]["because"] == "never-computed"
+
+    closed = await server.http.post("/tenants/t1/runs", json={"full": True})
+    assert closed.status_code == 200, closed.text
+    assert closed.json()["changed"] > 0
+
+    answer = await server.http.get("/tenants/t1/results/shop_courier.carrying")
+    result = answer.json()
+    assert result["state"]["ok"] is True
+    assert [(s["name"], s["value"]) for s in result["subjects"]] == [("Aki", 3.0)]
+
+
+async def test_a_deferred_batch_is_still_verified_whole(server: Server) -> None:
+    """Deferring the pass must not defer the write boundary: a record that
+    does not match the declared world lands nowhere, batch-mates included,
+    exactly as it would on an ordinary push. Taught through `fact`
+    declarations, because only a declared world has a boundary to enforce."""
+    schema = {
+        "kinds": [],
+        "figure_settings": ["limits.carrying.over"],
+        "defaults": {"tenant": {"hoursPerDay": 8}, "limits": {"carrying": {"over": 3}}},
+    }
+    declared = (
+        "# An order.\n"
+        "fact shop_order:\n"
+        "    ref as text\n"
+        "    courier_id as text\n"
+        "    status as text\n"
+        "# A courier.\n"
+        "fact shop_courier:\n"
+        "    name display_name\n"
+        "    display_name as text\n"
+        "group shop_order.carried_by from courier_id\n"
+        "# Orders in this courier's hands.\n"
+        "figure shop_courier.carrying:\n"
+        '    display "{value} orders in hand"\n'
+        "    depends:\n"
+        "        mine = shop_order.carried_by:{shop_courier}\n"
+        "    calculate:\n"
+        "        count(mine)\n"
+    )
+    assert (await server.http.put("/schema", json=schema)).status_code == 200
+    assert (
+        await server.http.put("/definitions", json={"source": declared})
+    ).status_code == 200, "the fact-declared world must teach cleanly"
+
+    # A healthy courier and a healthy-looking order beside the mistyped one:
+    # if per-record quarantine crept in, the batch-mates would land, the
+    # order would bucket under c1, and the closing run would serve a
+    # confident count of 1 -- exactly the narrowed population the whole-batch
+    # refusal exists to prevent.
+    refused = await server.http.post(
+        "/tenants/t1/facts",
+        json={
+            "writes": {
+                "shop_courier": {"c1": {"display_name": "Aki"}},
+                "shop_order": {
+                    "o1": {"ref": 7, "courier_id": "c1", "status": "riding"},
+                    "o2": {"ref": "A-2", "courier_id": "c1", "status": "riding"},
+                },
+            },
+            "defer": True,
+        },
+    )
+    assert refused.status_code == 422, refused.text
+
+    closed = await server.http.post("/tenants/t1/runs", json={"full": True})
+    assert closed.status_code == 200
+    answer = await server.http.get("/tenants/t1/results/shop_courier.carrying")
+    assert answer.json()["state"]["because"] == "nothing-collected", (
+        "nothing may land from a refused batch -- batch-mates included"
+    )
+
+
+async def test_a_deferred_delete_lands_and_the_closing_run_sweeps_it(server: Server) -> None:
+    """Deletes ride deferred batches too: the rows go, nothing recomputes,
+    and the stored answers honestly describe the pre-import world until the
+    closing full run sweeps the departed records out of every figure."""
+    await _teach(server.http)
+    first = await server.http.post(
+        "/tenants/t1/facts",
+        json={"writes": {"shop_courier": COURIER, "shop_order": _orders(3)}},
+    )
+    assert first.status_code == 200
+
+    deferred = await server.http.post(
+        "/tenants/t1/facts", json={"deletes": {"shop_order": ["o0"]}, "defer": True}
+    )
+    assert deferred.status_code == 200, deferred.text
+    assert deferred.json()["deleted"] == 1
+    assert deferred.json()["changed"] == 0
+
+    # The stored answer still says 3: the pass has not run, and that is the
+    # documented deal -- stale-but-computed, never a silently wrong rebuild.
+    held = await server.http.get("/tenants/t1/results/shop_courier.carrying")
+    assert [s["value"] for s in held.json()["subjects"]] == [3.0]
+
+    closed = await server.http.post("/tenants/t1/runs", json={"full": True})
+    assert closed.status_code == 200
+    answer = await server.http.get("/tenants/t1/results/shop_courier.carrying")
+    assert [s["value"] for s in answer.json()["subjects"]] == [2.0]
+
+
+async def test_a_deferred_debt_escalates_the_next_pass_whatever_its_shape(
+    server: Server,
+) -> None:
+    """The documented close is `POST /runs {"full": true}` -- but a caller
+    who closes any other way must not be served stale values as current,
+    silently, for ever. A deferred batch leaves a debt on the tenant, and
+    the next pass -- here a plain warm run -- runs full and settles it. The
+    tenant starts *warm* (pointers current from an ordinary push), because
+    on a cold tenant every pass rebuilds anyway and the debt would be
+    invisible."""
+    await _teach(server.http)
+    first = await server.http.post(
+        "/tenants/t1/facts",
+        json={"writes": {"shop_courier": COURIER, "shop_order": _orders(3)}},
+    )
+    assert first.status_code == 200
+
+    deferred = await server.http.post(
+        "/tenants/t1/facts", json={"writes": {"shop_order": _more_orders(2)}, "defer": True}
+    )
+    assert deferred.status_code == 200 and deferred.json()["written"] == 2
+
+    # The wrong close: a warm run, not the documented full one. The debt
+    # escalates it, so the deferred orders are computed all the same.
+    closed = await server.http.post("/tenants/t1/runs", json={})
+    assert closed.status_code == 200
+    assert closed.json()["rebuilt"], "the owed pass must escalate to full"
+    answer = await server.http.get("/tenants/t1/results/shop_courier.carrying")
+    assert [s["value"] for s in answer.json()["subjects"]] == [5.0]
+
+    # Settled: the next warm run is ordinary again, and does nothing.
+    quiet = await server.http.post("/tenants/t1/runs", json={})
+    assert quiet.json()["rebuilt"] == [] and quiet.json()["changed"] == 0
+
+
+async def test_an_ordinary_push_settles_a_deferred_debt_too(server: Server) -> None:
+    """The other wrong close: deferred batches followed by an ordinary push.
+    Without the debt, that push's warm pass would recount only its own
+    batch's buckets -- the deferred records were never indexed, so the
+    served count would confidently miss them."""
+    await _teach(server.http)
+    first = await server.http.post(
+        "/tenants/t1/facts",
+        json={"writes": {"shop_courier": COURIER, "shop_order": _orders(1)}},
+    )
+    assert first.status_code == 200
+
+    deferred = await server.http.post(
+        "/tenants/t1/facts", json={"writes": {"shop_order": _more_orders(2)}, "defer": True}
+    )
+    assert deferred.status_code == 200
+
+    pushed = await server.http.post(
+        "/tenants/t1/facts",
+        json={"writes": {"shop_order": {"o9": {"ref": "A-9", "courier_id": "c1", "status": "riding"}}}},
+    )
+    assert pushed.status_code == 200
+    assert pushed.json()["rebuilt"], "the owed pass must escalate this push to full"
+    answer = await server.http.get("/tenants/t1/results/shop_courier.carrying")
+    assert [s["value"] for s in answer.json()["subjects"]] == [4.0]
+
+
+async def test_defer_and_full_together_are_refused(server: Server) -> None:
+    """`full` demands the most expensive pass and `defer` demands none;
+    honouring either would silently ignore the other, so the contradiction is
+    named instead of resolved."""
+    await _teach(server.http)
+    refused = await server.http.post(
+        "/tenants/t1/facts", json={"writes": {}, "defer": True, "full": True}
+    )
+    assert refused.status_code == 422
+    assert "defer" in refused.json()["detail"]
 
 
 async def test_a_departed_subject_is_a_reported_removal(server: Server) -> None:

@@ -305,6 +305,15 @@ def create_app(
         """
         world, library = ready(s)
         facade = facade_for(s, world, library)
+        if body.defer and body.full:
+            # `full` demands the most expensive pass and `defer` demands none;
+            # honouring either would silently ignore the other.
+            raise HTTPException(
+                status_code=422,
+                detail="defer and full contradict each other: defer skips the pass, "
+                "full forces the biggest one. Send the batches with defer, then "
+                'close the import with POST /tenants/{tenant}/runs {"full": true}.',
+            )
         try:
             facade.verify(body.writes, body.deletes)
         except FactError as refusal:
@@ -331,14 +340,41 @@ def create_app(
                     written += len(changed)
                     if changed:
                         moved[kind] = changed
+            if body.defer:
+                # The batch is landed and verified; the pass is the caller's
+                # to run. No results are re-served because nothing recomputed
+                # -- an empty list is the honest shape, where re-serving the
+                # stored answers would present pre-import values as this
+                # batch's outcome. The debt row is what makes the obligation
+                # enforceable rather than documentary: a caller who closes
+                # the import any way other than the documented full run
+                # would otherwise be served stale values as current, for
+                # ever, with nothing to see.
+                await db.mark_deferred(s.pool, tenant)
+                out = RunOut(
+                    written=written,
+                    deleted=sum(len(v) for v in body.deletes.values()),
+                    changed=0,
+                    rebuilt=[],
+                    covered=[],
+                    shown=[],
+                    results=[],
+                )
+                await _record(s, tenant, "facts-deferred", full=False, out=out)
+                return out
             settings = await db.load_settings(s.pool, tenant)
+            full = body.full or await db.deferred(s.pool, tenant)
             report = await facade.run(
                 tenant,
                 settings,
                 written=moved,
                 deleted={k: list(v) for k, v in body.deletes.items()},
-                full=body.full,
+                full=full,
             )
+            if full:
+                # Settled after the pass actually ran: a debt cleared up
+                # front would be forgiven, not paid, if the pass died.
+                await db.clear_deferred(s.pool, tenant)
             out = _run_out(
                 report,
                 world,
@@ -347,7 +383,7 @@ def create_app(
                 written=written,
                 deleted=sum(len(v) for v in body.deletes.values()),
             )
-            await _record(s, tenant, "facts", full=body.full, out=out)
+            await _record(s, tenant, "facts", full=full, out=out)
         return out
 
     @app.post("/tenants/{tenant}/runs", response_model=RunOut, dependencies=[auth])
@@ -357,9 +393,12 @@ def create_app(
         world, library = ready(s)
         async with s.lock_for(tenant):
             settings = await db.load_settings(s.pool, tenant)
-            report = await facade_for(s, world, library).run(tenant, settings, full=body.full)
+            full = body.full or await db.deferred(s.pool, tenant)
+            report = await facade_for(s, world, library).run(tenant, settings, full=full)
+            if full:
+                await db.clear_deferred(s.pool, tenant)
             out = _run_out(report, world, library, settings, written=0, deleted=0)
-            await _record(s, tenant, "run", full=body.full, out=out)
+            await _record(s, tenant, "run", full=full, out=out)
         return out
 
     async def _record(s: State, tenant: str, cause: str, *, full: bool, out: RunOut) -> None:
