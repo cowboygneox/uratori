@@ -1,25 +1,4 @@
 {
-  "kinds": [
-    "nfl_team",
-    "nfl_game",
-    "nfl_team_game",
-    "nfl_player",
-    "nfl_stat_line",
-    "nfl_play"
-  ],
-  "name_fields": {
-    "nfl_team": "name",
-    "nfl_game": "name",
-    "nfl_team_game": "name",
-    "nfl_player": "name",
-    "nfl_stat_line": "name",
-    "nfl_play": "name"
-  },
-  "url_fields": {
-    "nfl_team": "url",
-    "nfl_game": "url",
-    "nfl_player": "url"
-  },
   "bucket_settings": [
     "tenant.timezone",
     "form.recentDays"

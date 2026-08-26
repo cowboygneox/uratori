@@ -457,13 +457,13 @@ def test_every_field_the_definitions_read_exists_on_a_loader_record() -> None:
             )
 
 
-def test_the_loader_pushes_every_kind_the_schema_declares() -> None:
+def test_the_loader_pushes_every_kind_the_world_declares() -> None:
     """A kind the push order misses is a kind that silently never loads --
     the loader would still print its build counts and exit 0. So: hand push
-    one record of every kind the schema declares and assert every one is
+    one record of every declared fact kind and assert every one is
     delivered, not that the source mentions the names."""
     module = _load_module()
-    schema = json.loads((EXAMPLE / "schema.json").read_text())
+    kinds = set(_library().facts)
 
     delivered: set[str] = set()
 
@@ -472,8 +472,8 @@ def test_the_loader_pushes_every_kind_the_schema_declares() -> None:
             delivered.update(body["writes"])
             return {"written": 0, "changed": 0}
 
-    module.push(FakeClient(), "t", {kind: {"k": {"name": "x"}} for kind in schema["kinds"]})
-    assert delivered == set(schema["kinds"])
+    module.push(FakeClient(), "t", {kind: {"k": {"name": "x"}} for kind in kinds})
+    assert delivered == kinds
 
 
 def test_push_delivers_every_record_exactly_once_across_batches() -> None:
@@ -744,6 +744,8 @@ def test_the_showcase_keeps_the_constructs_the_readme_promises() -> None:
     deliberate here -- the claim is about what the showcase *shows*."""
     source = (EXAMPLE / "definitions.fig").read_text()
     for construct in (
+        "fact nfl_play:",  # the world, declared beside the definitions
+        "many abbrs:",  # nesting as cardinality
         "through nfl_team.abbrs.abbr",  # the identity hop
         "by day in tenant.timezone",  # calendar bucketing
         "by 15 minutes in tenant.timezone",  # the sub-day grain

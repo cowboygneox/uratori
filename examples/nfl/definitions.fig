@@ -5,6 +5,121 @@
 # their team is any good. Load a season with examples/nfl/load.py and every
 # number this file defines is served with its version and its evidence.
 
+# ------------------------------------------------------------- the world --
+# The facts, declared where the definitions that read them live. Every path
+# a definition names is checked against these at compile time, and every
+# record the loader pushes is verified against them at the write boundary --
+# a typo'd field is a build failure or a refused batch, never a silently
+# empty bucket.
+
+# A franchise. One subject however the sheet spells it: the abbrs list is
+# every abbreviation the franchise has answered to, and the groups' through
+# hops resolve any of them here.
+fact nfl_team:
+    name name
+    url url
+    name as text
+    url as text
+    conference as text
+    division as text
+    logo as text
+    many abbrs:
+        abbr as text
+
+# A scheduled game: a fixture until it finishes, a result after. An
+# unplayed game carries no score fields at all -- finished says which it
+# is, explicitly, because a shutout's 0 is a measured nought.
+fact nfl_game:
+    name name
+    url url
+    name as text
+    url as text
+    season as number
+    week as number
+    game_type as text
+    kickoff as moment
+    away_team as text
+    home_team as text
+    stadium as text
+    went_overtime as flag
+    division_game as flag
+    finished as flag
+    away_score as number
+    home_score as number
+    total as number
+
+# One team's side of one finished game -- the shape the record figures
+# count. previous_kickoff is absent on a season opener, which is exactly
+# why the rest measure can read the gap honestly.
+fact nfl_team_game:
+    name name
+    name as text
+    team as text
+    opponent as text
+    week as number
+    game_type as text
+    kickoff as moment
+    previous_kickoff as moment
+    points_for as number
+    points_against as number
+    won as flag
+    tied as flag
+    home as flag
+
+# A player, as the most recent loaded season knew them.
+fact nfl_player:
+    name name
+    url url
+    name as text
+    url as text
+    position as text
+    team as text
+
+# One player's line in one game, from the league's weekly stats.
+fact nfl_stat_line:
+    name name
+    name as text
+    player_id as text
+    team as text
+    opponent as text
+    week as number
+    game_type as text
+    kickoff as moment
+    completions as number
+    attempts as number
+    passing_yards as number
+    passing_tds as number
+    passing_interceptions as number
+    carries as number
+    rushing_yards as number
+    rushing_tds as number
+    receptions as number
+    targets as number
+    receiving_yards as number
+    receiving_tds as number
+    scrimmage_yards as number
+    total_tds as number
+
+# A single play. Points and scored_by exist only when a scoreboard moved;
+# lost_by only when somebody gave the ball away; snap only when the offence
+# ran a play the books kept; clock_time only when the loader could verify
+# the stamp against the game's own kickoff.
+fact nfl_play:
+    name name
+    name as text
+    season_type as text
+    offense as text
+    play_type as text
+    snap as flag
+    clock_time as moment
+    down as number
+    yards_gained as number
+    quarter as number
+    third_down_converted as flag
+    lost_by as text
+    points as number
+    scored_by as text
+
 # -------------------------------------------------- teams and their games --
 
 # The hop through nfl_team.abbrs.abbr is the identity join: a franchise is

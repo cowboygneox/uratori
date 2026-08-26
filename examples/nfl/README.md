@@ -12,9 +12,14 @@ Three files do all the work:
 
 | | |
 |---|---|
-| `schema.json` | The world: six fact kinds, the dials a tenant can turn, their defaults. |
-| `definitions.fig` | Every number the demo serves, defined. Each construct the language has appears at least once, with its explanation attached. |
+| `schema.json` | The dials a tenant can turn, and their defaults. |
+| `definitions.fig` | The world -- six `fact` declarations, every field typed -- and every number the demo serves, defined beside it. Each construct the language has appears at least once, with its explanation attached. |
 | `load.py` | The host: downloads seasons from [nflverse](https://github.com/nflverse/nflverse-data), shapes them into plain records, teaches the engine and pushes the facts. Stdlib only. |
+
+Because the facts are declared in the language, every field a definition
+reads is checked at compile time, and every record the loader pushes is
+verified at the write boundary -- a drifted field name is a refused batch
+naming the kind, key and field, never a silently empty bucket.
 
 The data is nflverse's community-maintained public record of NFL games,
 weekly player stat lines and play-by-play. The loader computes no figure of

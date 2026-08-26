@@ -4,8 +4,8 @@ The data is nflverse (https://github.com/nflverse/nflverse-data): the
 community-maintained public record of NFL games, weekly player stat lines and
 play-by-play. This script is a *host*: it downloads the seasons, shapes them
 into plain records -- **every single play is a fact** -- teaches the engine
-the world (examples/nfl/schema.json + examples/nfl/definitions.fig) and
-pushes it all over the HTTP API. It computes no figure of its own: every
+its settings (schema.json) and its world and numbers (definitions.fig, where
+the fact declarations live) and pushes it all over the HTTP API. It computes no figure of its own: every
 number the demo serves comes from a definition, with its version and its
 evidence.
 
