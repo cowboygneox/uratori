@@ -487,24 +487,32 @@ async def index_set_version(pool: asyncpg.Pool[Any], tenant: str) -> str | None:
 
 
 async def bucket_counts(
-    pool: asyncpg.Pool[Any], tenant: str, index: str, *, limit: int
-) -> tuple[list[dict[str, Any]], int, int]:
-    """Buckets with member counts, bucket order, plus the two honest totals:
-    distinct members across every bucket (a record can be in several), and how
-    many buckets exist -- a capped list under no total reads as complete."""
+    pool: asyncpg.Pool[Any], tenant: str, index: str, *, after: str | None, limit: int
+) -> tuple[list[dict[str, Any]], bool, int, int]:
+    """One keyset page of buckets with member counts, bucket order, plus the
+    two honest totals: distinct members across every bucket (a record can be
+    in several), and how many buckets exist. Paged like every other list on
+    this surface -- a group can hold thousands of buckets (one per player per
+    day), and a capped list with no way forward makes most of them
+    unreachable from the page whose claim is that everything is."""
+    conditions = ["tenant_id = $1", "index_name = $2"]
+    args: list[Any] = [tenant, index]
+    if after is not None:
+        args.append(after)
+        conditions.append(f"bucket > ${len(args)}")
+    args.append(limit + 1)  # one past the page is how `more` is a fact, not a guess
     rows = await pool.fetch(
-        """
+        f"""
         select bucket, count(*)::int as members
         from figure_index
-        where tenant_id = $1 and index_name = $2
+        where {" and ".join(conditions)}
         group by bucket
         order by bucket
-        limit $3
+        limit ${len(args)}
         """,
-        tenant,
-        index,
-        limit,
+        *args,
     )
+    more = len(rows) > limit
     members = await pool.fetchval(
         "select count(distinct member) from figure_index "
         "where tenant_id = $1 and index_name = $2",
@@ -518,7 +526,8 @@ async def bucket_counts(
         index,
     )
     return (
-        [{"bucket": row["bucket"], "members": row["members"]} for row in rows],
+        [{"bucket": row["bucket"], "members": row["members"]} for row in rows[:limit]],
+        more,
         int(members or 0),
         int(buckets_total or 0),
     )
@@ -588,8 +597,9 @@ async def memberships_of(
     pool: asyncpg.Pool[Any], tenant: str, member: str, indexes: list[str]
 ) -> dict[str, list[str]]:
     """Every bucket holding this member, per index, restricted to the given
-    index names -- the caller restricts to the current library, so a dropped
-    index's leftover rows cannot resurface as classification."""
+    index names. The caller passes the current library's indexes, which is
+    the guard against dropped-index leftovers; the `any()` clause here only
+    keeps this query from returning rows the caller would have to filter."""
     rows = await pool.fetch(
         """
         select index_name, bucket

@@ -493,8 +493,60 @@ dl.kv {
 .trace:hover { color: var(--accent); }
 
 /* The bucket the reader is standing in, marked the way the roster marks the
-   open declaration: one accent rule at the row's edge. */
+   open declaration: an accent rule plus the roster's raised surface — the
+   rule alone disappears at a glance on rows this wide. */
+tr.here > td { background: var(--surface-2); }
 tr.here td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+
+/* Verdict and value tables hug their content. The default full-width table
+   puts 400px of dead canvas between a label and its verdict, and a verdict
+   the eye has to travel for is a verdict that gets skimmed past. Same call
+   as the activity log's .moves. */
+table.ledger { width: auto; }
+.ledger td, .ledger th { padding-right: 2.5rem; }
+.ledger td:last-child, .ledger th:last-child { padding-right: 0.6rem; }
+/* Numbers align right so magnitudes compare down the column. */
+.ledger .num { text-align: right; }
+
+/* Nested mono must not compound: 0.92em inside 0.92em gives three type
+   sizes in one table row. */
+.mono .mono { font-size: 1em; }
+
+/* What a change to these records can reach: an index rendered as an index —
+   wrapped mono chips, not a comma-run of serif prose. */
+.movers {
+  list-style: none;
+  margin: 0.35rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.6rem;
+}
+.movers li {
+  border: 1px solid var(--line-faint);
+  border-radius: 3px;
+  padding: 0.1rem 0.45rem;
+  background: var(--surface);
+}
+
+/* The way back up from a record: a quiet line above the title block, so the
+   page keeps one h1 — the record's own name. */
+.crumbs { font-size: 0.85rem; color: var(--ink-dim); margin: 0 0 0.75rem; }
+
+/* An expansion is the row's own annex: the accent rule says whose it is,
+   and each cited line keeps its trace link at a fixed right edge instead of
+   seventeen ragged positions. */
+tr.expansion > td {
+  border-left: 2px solid var(--accent);
+  padding-left: 0.85rem;
+}
+tr.expansion li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.15rem 0.5rem;
+}
+tr.expansion li .trace { margin-left: auto; }
 
 /* ------------------------------------------------------------- motion --- */
 
@@ -528,4 +580,8 @@ tr.here td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
   #chrome { gap: 0.5rem 0.75rem; flex-wrap: wrap; height: auto; padding: 0.5rem 1rem; }
   #tabs a { padding: 0.25rem 0.6rem; border-bottom: 0; border-radius: 4px; }
   #tabs a.active { background: var(--surface-2); }
+  /* On a phone a pre scrolls with no visible scrollbar, so a clipped
+     definition reads as the whole definition. Wrapping is the honest
+     default at this width: every character on screen. */
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 }

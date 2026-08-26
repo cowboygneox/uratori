@@ -49,7 +49,7 @@ from ..lang.ast import ByAge, ByComposite, ByField, FigureUnit, IndexBy, IndexFi
 from ..lang.plan import CompiledIndex, CompiledMeasure, Library
 from ..lang.source import declaration_prose, declaration_source
 from ..results import Availability, Evidence, Ok, Result, Unavailable
-from ..schema import Schema
+from ..schema import EFFORT_HOURS_SETTING, Schema
 from . import db
 from .runtime import State, facade_for, ready, state_of, taught_schema
 
@@ -227,6 +227,18 @@ class MembershipOut(BaseModel):
     buckets_total: int
     """How many buckets exist, beside a limit-capped list."""
 
+    buckets_more: bool = False
+    """Whether buckets follow the last one listed -- the pager's fact."""
+
+    note: str | None = None
+    """A server-rendered caveat the counts cannot carry themselves. Today:
+    this index's spec reads dials (an age threshold, a zone), and a dial that
+    moved since the last pass shows here only after the next one -- the
+    index-set hash deliberately excludes settings, so `state` cannot see it.
+    Figures over the same index refuse with `setting-moved` in that window;
+    membership states its weaker guarantee instead of silently wearing an Ok
+    it has not earned."""
+
 
 class MemberRecordOut(BaseModel):
     key: str
@@ -395,7 +407,7 @@ def router(frame_ancestors: str) -> APIRouter:
             records=[
                 FactRecordOut(
                     key=row["key"],
-                    name=_name_of(row["value"], name_field),
+                    name=_field_at(row["value"], name_field),
                     value=row["value"],
                     source_stamp=row["source_stamp"],
                 )
@@ -423,7 +435,11 @@ def router(frame_ancestors: str) -> APIRouter:
                 status_code=404, detail=f"Nothing is stored for {key} under {kind}"
             )
         value = row["value"]
-        schema = s.world.schema
+        # Through taught_schema, like every surface that describes the world:
+        # a fact-taught library carries the name and url fields, and reading
+        # the stored document here would leave every record on this page
+        # nameless while the Facts tab two clicks away names it fine.
+        schema = taught_schema(s.world)
         library = s.world.library
 
         filed: list[FiledOut] = []
@@ -459,16 +475,23 @@ def router(frame_ancestors: str) -> APIRouter:
                 ]
             settings = schema.settings_for(await db.load_settings(s.pool, tenant))
             at_ms = time.time() * 1000.0
-            for name in sorted(library.measures):
-                measure = library.measures[name]
-                if measure.kind != kind:
-                    continue
-                measured.append(
-                    RecordMeasureOut(
-                        measure=name,
-                        display=_measured_display(measure, value, settings, at_ms),
+            try:
+                for name in sorted(library.measures):
+                    measure = library.measures[name]
+                    if measure.kind != kind:
+                        continue
+                    measured.append(
+                        RecordMeasureOut(
+                            measure=name,
+                            display=_measured_display(measure, value, settings, at_ms),
+                        )
                     )
-                )
+            except KeyError as gap:
+                # Same fixable configuration as the measured route (an effort
+                # measure with no hoursPerDay dial): the sentence, not a 500.
+                raise HTTPException(
+                    status_code=409, detail=gap.args[0] if gap.args else str(gap)
+                ) from gap
 
         return RecordOut(
             kind=kind,
@@ -493,7 +516,8 @@ def router(frame_ancestors: str) -> APIRouter:
         tenant: str,
         name: str,
         request: Request,
-        buckets_limit: Annotated[int, Query(ge=1, le=1000)] = 200,
+        buckets_after: str | None = None,
+        buckets_limit: Annotated[int, Query(ge=1, le=1000)] = 50,
     ) -> MembershipOut:
         s = _state(request)
         _world, library = ready(s)
@@ -515,9 +539,10 @@ def router(frame_ancestors: str) -> APIRouter:
                 buckets=[],
                 buckets_total=0,
             )
-        buckets, members, buckets_total = await db.bucket_counts(
-            s.pool, tenant, name, limit=buckets_limit
+        buckets, more, members, buckets_total = await db.bucket_counts(
+            s.pool, tenant, name, after=buckets_after, limit=buckets_limit
         )
+        dials = [e.name for e in _spec_edges(index.spec) if e.type == "setting"]
         return MembershipOut(
             name=name,
             kind=_grouping_kind(index),
@@ -528,6 +553,14 @@ def router(frame_ancestors: str) -> APIRouter:
             population=await db.count_kind(s.pool, tenant, index.id_space),
             buckets=[MembershipBucket(**b) for b in buckets],
             buckets_total=buckets_total,
+            buckets_more=more,
+            note=(
+                f"Membership here reads {' and '.join(dials)}: the filing shown "
+                "is from the last pass, so a dial moved since then shows only "
+                "after the next one."
+                if dials
+                else None
+            ),
         )
 
     @ui.get(
@@ -557,7 +590,7 @@ def router(frame_ancestors: str) -> APIRouter:
         rows, more, total = await db.page_members(
             s.pool, tenant, name, bucket, index.id_space, after=after, limit=limit
         )
-        name_field = world.schema.name_fields.get(index.id_space)
+        name_field = taught_schema(world).name_fields.get(index.id_space)
         return MemberPageOut(
             name=name,
             bucket=bucket,
@@ -602,21 +635,32 @@ def router(frame_ancestors: str) -> APIRouter:
         records, more, total = await db.page_facts(
             s.pool, tenant, measure.kind, after=after, q=q, limit=limit
         )
-        settings = world.schema.settings_for(await db.load_settings(s.pool, tenant))
+        held_schema = taught_schema(world)
+        settings = held_schema.settings_for(await db.load_settings(s.pool, tenant))
         at_ms = time.time() * 1000.0
-        name_field = world.schema.name_fields.get(measure.kind)
-        return MeasuredPageOut(
-            name=name,
-            fact_kind=measure.kind,
-            unit=_measure_unit(measure),
-            records=[
+        name_field = held_schema.name_fields.get(measure.kind)
+        try:
+            measured_rows = [
                 MeasuredRecordOut(
                     key=row["key"],
                     name=_field_at(row["value"], name_field),
                     display=_measured_display(measure, row["value"], settings, at_ms),
                 )
                 for row in records
-            ],
+            ]
+        except KeyError as gap:
+            # An effort measure in a world that provides no hoursPerDay dial
+            # compiles fine and only fails at render time. That is a fixable
+            # configuration, so it must be the raiser's own sentence naming
+            # the dial -- never a 500 the operator has to go digging for.
+            raise HTTPException(
+                status_code=409, detail=gap.args[0] if gap.args else str(gap)
+            ) from gap
+        return MeasuredPageOut(
+            name=name,
+            fact_kind=measure.kind,
+            unit=_measure_unit(measure),
+            records=measured_rows,
             more=more,
             total=total,
         )
@@ -704,25 +748,16 @@ def router(frame_ancestors: str) -> APIRouter:
     return ui
 
 
-def _name_of(value: dict[str, Any], name_field: str | None) -> str | None:
-    if name_field is None:
-        return None
-    held = value.get(name_field)
-    return held if isinstance(held, str) else None
-
-
 def _field_at(value: Mapping[str, Any] | None, field: str | None) -> str | None:
     """A record's schema-declared field, path-aware, or nothing -- never a
-    guess. `read_path` rather than `.get` because a name field is a path in
-    the schema's own terms (`accounts.account_id` is legal), and the flat
-    lookup would silently un-name every record of such a kind."""
-    from ..engine.buckets import read_path
+    guess. The engine's own resolver rather than a `.get`: a name field is a
+    path in the schema's terms (`accounts.account_id` is legal), and every
+    surface -- the facts list, the drill pages, evidence -- must name one
+    record identically, so there is exactly one implementation to disagree
+    with."""
+    from ..engine.serve import _field_of
 
-    if value is None or field is None:
-        return None
-    found = read_path(value, field)
-    text = found[0] if found else None
-    return text if isinstance(text, str) and text else None
+    return _field_of(value, field)
 
 
 async def _membership_state(pool: Any, library: Library, tenant: str) -> Availability:
@@ -886,7 +921,10 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
                 source=declaration_source(library, name),
                 unit=measure.unit,
                 fact_kind=measure.kind,
-                rests_on=[Dependency(type="fact", name=measure.kind)],
+                rests_on=[
+                    Dependency(type="fact", name=measure.kind),
+                    *_effort_edges(measure.unit),
+                ],
             )
         )
 
@@ -905,6 +943,7 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
             Dependency(type="setting", name=n)
             for n in (*figure.settings, *figure.band_settings)
         ]
+        edges += _effort_edges(figure.unit)
         out.append(
             DeclarationOut(
                 name=figure.name,
@@ -925,6 +964,7 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
             edges.append(Dependency(type="measure", name=reading.live_measure))
         edges += [_grouping_edge(library, n) for n in reading.indexes]
         edges += [Dependency(type="setting", name=n) for n in reading.settings]
+        edges += _effort_edges(reading.unit)
         out.append(
             DeclarationOut(
                 name=reading.name,
@@ -945,6 +985,10 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
         edges += [_grouping_edge(library, n) for n in projection.indexes]
         edges += [Dependency(type="fact", name=j.kind) for j in projection.joins]
         edges += [Dependency(type="setting", name=n) for n in projection.settings]
+        edges += _effort_edges(
+            *(unit for _, _, unit, _ in projection.reads),
+            *(unit for _, _, unit in projection.values),
+        )
         out.append(
             DeclarationOut(
                 name=projection.name,
@@ -960,6 +1004,10 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
     for summary in library.summaries:
         edges = [Dependency(type="projection", name=summary.over)]
         edges += [Dependency(type="setting", name=n) for n in summary.settings]
+        edges += _effort_edges(
+            *(unit for _, _, unit, _ in summary.totals),
+            *(unit for _, _, unit in summary.values),
+        )
         out.append(
             DeclarationOut(
                 name=summary.name,
@@ -973,6 +1021,21 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
 
     _fill_moved_by(out)
     return out
+
+
+def _effort_edges(*units: str | None) -> list[Dependency]:
+    """The render-time dial an `effort` unit reads, as a dependency edge.
+
+    `format_value` divides an effort by `tenant.hoursPerDay` when the number
+    becomes text, so the dial never appears in any compiled plan -- and a
+    closure built only from plan edges would let the page claim "nothing else
+    can move this" about a number whose rendered text moves the moment the
+    dial does. The edge is added at the declaration, so the closure carries
+    it to everything built on top.
+    """
+    if any(unit == "effort" for unit in units):
+        return [Dependency(type="setting", name=EFFORT_HOURS_SETTING)]
+    return []
 
 
 def _fill_moved_by(declarations: list[DeclarationOut]) -> None:

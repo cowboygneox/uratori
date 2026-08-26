@@ -99,7 +99,11 @@ async function loadWorld() {
   usedBy = new Map();
   for (const declaration of world.declarations) {
     for (const edge of declaration.rests_on) {
-      if (edge.type === 'fact' || edge.type === 'setting') continue;
+      if (edge.type === 'setting') continue;
+      // A fact edge counts as usage when the kind is DECLARED (0.4.0 fact
+      // declarations): its page must say who reads it, or the leaves every
+      // trace bottoms out on would all claim nobody does.
+      if (edge.type === 'fact' && !byName.has(edge.name)) continue;
       if (!usedBy.has(edge.name)) usedBy.set(edge.name, []);
       usedBy.get(edge.name).push(declaration.name);
     }
@@ -164,7 +168,7 @@ async function render() {
 
 // -------------------------------------------------------- definitions --
 
-const KIND_ORDER = ['figure', 'reading', 'projection', 'summary', 'group', 'filter', 'measure'];
+const KIND_ORDER = ['figure', 'reading', 'projection', 'summary', 'group', 'filter', 'measure', 'fact'];
 
 function namespaceOf(name) {
   const dot = name.indexOf('.');
@@ -296,12 +300,15 @@ function edgeLine(edge) {
 
 // The keyset pager every paged section shares: `trail` carries the stack of
 // prior cursors, so ← back re-asks the exact previous page rather than
-// guessing at one.
-function pager(params, page, lastKey, go) {
-  const after = params.get('after');
-  const crumbs = (params.get('trail') || '').split('|').filter((s) => s !== '');
-  if (!crumbs.length && !after && !page.more) return null;
-  return el('div', { class: 'controls' },
+// guessing at one. Returns the two buttons bare, so each caller can seat
+// them in its own controls row beside the count — a pager fifty rows away
+// from the total it pages is how a reader loses their place.
+function pager(params, more, lastKey, go, names) {
+  const afterKey = (names && names.after) || 'after';
+  const trailKey = (names && names.trail) || 'trail';
+  const after = params.get(afterKey);
+  const crumbs = (params.get(trailKey) || '').split('|').filter((s) => s !== '');
+  return [
     el('button', {
       disabled: crumbs.length === 0 && !after ? 'disabled' : undefined,
       onclick: () => {
@@ -310,14 +317,15 @@ function pager(params, page, lastKey, go) {
       },
     }, '← back'),
     el('button', {
-      disabled: page.more ? undefined : 'disabled',
+      disabled: more ? undefined : 'disabled',
       onclick: () => {
         // Each crumb is encoded before joining, so a '|' inside a key can
         // never split the trail.
         crumbs.push(encodeURIComponent(after || ''));
         go(lastKey, crumbs.join('|'));
       },
-    }, 'next →'));
+    }, 'next →'),
+  ];
 }
 
 function unavailable(state) {
@@ -359,27 +367,32 @@ async function declarationPane(name, params) {
 
   // The impact answer, precomputed by the server: leaves only, so a reader
   // learns in one glance whether a change to some data can reach this number.
+  // A fact declaration IS a leaf -- saying "nothing moves it" would be the
+  // wrong sentence about the records everything else moves with.
   const movedBy = declaration.moved_by || [];
-  parts.push(el('h2', {}, 'Moved by'));
-  if (movedBy.length) {
-    parts.push(
-      el('p', { class: 'prose' },
-        'A change to any of these records or dials can move this ',
-        declaration.kind, ' — nothing else can.'),
-      el('ul', { class: 'tree' }, movedBy.map(leafLine)));
-  } else {
-    parts.push(el('p', { class: 'faint' }, 'Nothing — it reads no records and no dials.'));
+  if (declaration.kind !== 'fact') {
+    parts.push(el('h2', {}, 'Moved by'));
+    if (movedBy.length) {
+      parts.push(
+        el('p', { class: 'prose' },
+          'A change to any of these records or dials can move this ',
+          declaration.kind, ' — nothing else can.'),
+        el('ul', { class: 'tree' }, movedBy.map(leafLine)));
+    } else {
+      parts.push(el('p', { class: 'faint' }, 'Nothing — it reads no records and no dials.'));
+    }
   }
 
-  // Structure, only when there is structure: for a group or a measure the
-  // direct edges ARE the leaves above, and repeating them under a second
-  // heading would be noise. Each entry is a link, one hop — the deep walk
-  // belongs to Moved by now.
-  const structural = declaration.rests_on.some(
+  // Structure, only when there is structure: the declarations this one
+  // composes, one hop each. Leaves are left out — Moved by just stated every
+  // fact and dial, and repeating them under a second heading would make the
+  // two lists read as different answers to one question. For a group or a
+  // measure every direct edge is a leaf, so the section vanishes entirely.
+  const structural = declaration.rests_on.filter(
     (edge) => edge.type !== 'fact' && edge.type !== 'setting');
-  if (structural) {
+  if (structural.length) {
     parts.push(el('h2', {}, 'Built from'),
-      el('ul', { class: 'tree' }, declaration.rests_on.map((edge) => edgeLine(edge))));
+      el('ul', { class: 'tree' }, structural.map((edge) => edgeLine(edge))));
   }
 
   const dependants = usedBy.get(name) || [];
@@ -391,7 +404,11 @@ async function declarationPane(name, params) {
         ]))
       : el('p', { class: 'faint' }, 'Nothing in the library reads this.'));
 
-  if (declaration.kind === 'group' || declaration.kind === 'filter') {
+  if (declaration.kind === 'fact') {
+    parts.push(el('h2', {}, 'Records — tenant ',
+      el('span', { class: 'verbatim' }, tenant() || '?')));
+    parts.push(await factCountLine(declaration));
+  } else if (declaration.kind === 'group' || declaration.kind === 'filter') {
     parts.push(el('h2', {},
       declaration.kind === 'filter' ? 'Matching records — tenant ' : 'Buckets — tenant ',
       el('span', { class: 'verbatim' }, tenant() || '?')));
@@ -412,37 +429,82 @@ async function declarationPane(name, params) {
 
 // ------------------------------------------------- membership & measures --
 
+// A fact declaration's data section: the count from the same endpoint the
+// Facts tab reads, and the door to the records themselves.
+async function factCountLine(declaration) {
+  if (!tenant()) return el('p', { class: 'faint' }, 'No tenant to ask.');
+  const kind = declaration.fact_kind || declaration.name;
+  const answer = await get(`tenants/${encodeURIComponent(tenant())}/facts`);
+  if (!answer.ok) return problem(answer, 'Could not count the records:');
+  const entry = answer.body.kinds.find((k) => k.kind === kind);
+  const held = entry ? entry.records : 0;
+  if (!held) {
+    return el('p', { class: 'finding' },
+      'Nothing collected — declared, and no record of this kind is stored.');
+  }
+  return el('p', { class: 'dim' },
+    `${held} records stored. `,
+    el('a', { href: `#/facts/${encodeURIComponent(kind)}` }, 'Browse them →'));
+}
+
 async function membershipSection(declaration, params) {
   if (!tenant()) return el('p', { class: 'faint' }, 'No tenant to ask.');
+  const bq = new URLSearchParams();
+  const bafter = params.get('bafter');
+  if (bafter) bq.set('buckets_after', bafter);
   const answer = await get(
-    `tenants/${encodeURIComponent(tenant())}/membership/${encodeURIComponent(declaration.name)}`);
+    `tenants/${encodeURIComponent(tenant())}/membership/`
+    + `${encodeURIComponent(declaration.name)}${bq.toString() ? '?' + bq : ''}`);
   if (!answer.ok) return problem(answer, 'The engine declined to answer:');
   const m = answer.body;
   if (!m.state.ok) return unavailable(m.state);
+  if (m.population === 0 && m.members === 0) {
+    // The pass ran and found nothing to read: the same finding sentence the
+    // measured section and the facts list use, not a "0 of 0" that dresses
+    // an empty collection up as a filter verdict.
+    return el('p', { class: 'faint' },
+      'Nothing collected for ', el('span', { class: 'mono' }, m.id_space),
+      ', so there is nothing to file.');
+  }
 
   const blocks = [];
-  // Chrome, not a computation: every number in the sentence arrived from the
-  // server; this only places them side by side.
+  // Chrome, not a computation: every number in these sentences arrived from
+  // the server; this only places them side by side. Under `keyed as` the
+  // members are another kind's ids, so "N of M records" would compare two
+  // different populations — the sentence says what the ids are instead.
+  const keyed = m.fact_kind !== m.id_space;
   blocks.push(el('p', { class: 'dim' },
-    `${m.members} of ${m.population} `,
-    el('span', { class: 'mono' }, m.id_space),
-    m.kind === 'filter'
-      ? ' records match.'
-      : ` records are filed, across ${m.buckets_total} buckets.`));
+    keyed
+      ? [`${m.members} `, el('span', { class: 'mono' }, m.id_space),
+         ' ids are filed, keyed from ', el('span', { class: 'mono' }, m.fact_kind),
+         ' records',
+         m.kind === 'group' ? ` across ${m.buckets_total} buckets.` : '.']
+      : [`${m.members} of ${m.population} `, el('span', { class: 'mono' }, m.id_space),
+         m.kind === 'filter'
+           ? ' records match.'
+           : ` records are filed, across ${m.buckets_total} buckets.`]));
+  if (m.note) blocks.push(el('p', { class: 'faint' }, m.note));
 
   const chosen = m.kind === 'filter' ? '' : params.get('bucket');
   if (m.kind === 'group') {
-    blocks.push(el('table', {},
-      el('tr', {}, el('th', {}, 'bucket'), el('th', {}, 'records')),
+    const lastBucket = m.buckets.length ? m.buckets[m.buckets.length - 1].bucket : null;
+    blocks.push(el('table', { class: 'ledger' },
+      el('tr', {}, el('th', {}, 'bucket'), el('th', { class: 'num' }, 'records')),
       m.buckets.map((b) => el('tr', { class: b.bucket === chosen ? 'here' : '' },
         el('td', {}, el('a', {
           class: 'mono',
-          href: defHash(declaration.name, { bucket: b.bucket }),
+          href: defHash(declaration.name, { bucket: b.bucket, bafter, btrail: params.get('btrail') }),
+          ...(b.bucket === chosen ? { 'aria-current': 'true' } : {}),
         }, b.bucket)),
-        el('td', { class: 'mono' }, String(b.members))))));
-    if (m.buckets.length < m.buckets_total) {
-      blocks.push(el('p', { class: 'faint' },
-        `showing the first ${m.buckets.length} of ${m.buckets_total} buckets.`));
+        el('td', { class: 'mono num' }, String(b.members))))));
+    if (m.buckets_total > m.buckets.length || m.buckets_more || params.get('btrail')) {
+      blocks.push(el('div', { class: 'controls' },
+        el('span', { class: 'faint' },
+          `${m.buckets_total} buckets`),
+        el('span', { class: 'spacer' }),
+        pager(params, m.buckets_more, lastBucket, (nextAfter, trail) => {
+          location.hash = defHash(declaration.name, { bafter: nextAfter, btrail: trail });
+        }, { after: 'bafter', trail: 'btrail' })));
     }
   }
   if (chosen !== null) {
@@ -464,13 +526,25 @@ async function memberList(declaration, m, bucket, params) {
   if (!answer.ok) return problem(answer, 'Could not read the members:');
   const page = answer.body;
   const lastKey = page.records.length ? page.records[page.records.length - 1].key : null;
+  const go = (nextAfter, trail) => {
+    location.hash = defHash(declaration.name, {
+      bucket: m.kind === 'group' ? bucket : null,
+      bafter: params.get('bafter'), btrail: params.get('btrail'),
+      after: nextAfter, trail,
+    });
+  };
   return el('div', {},
-    m.kind === 'group'
-      ? el('p', { class: 'dim' }, 'bucket ', el('span', { class: 'mono' }, bucket),
-          ` — ${page.total} records`)
-      : null,
+    // Count and pager in one bar, above the rows: a pager fifty rows below
+    // the total is a pager the reader has already lost their place by.
+    el('div', { class: 'controls' },
+      el('span', { class: 'dim' },
+        m.kind === 'group'
+          ? ['bucket ', el('span', { class: 'mono' }, bucket), ` — ${page.total} records`]
+          : `${page.total} records`),
+      el('span', { class: 'spacer' }),
+      pager(params, page.more, lastKey, go)),
     page.records.length
-      ? el('table', {},
+      ? el('table', { class: 'ledger' },
           el('tr', {}, el('th', {}, 'key'), el('th', {}, 'name')),
           page.records.map((record) => el('tr', {},
             el('td', {}, record.held
@@ -480,11 +554,10 @@ async function memberList(declaration, m, bucket, params) {
               : [el('span', { class: 'mono' }, record.key),
                  el('span', { class: 'faint' }, ' (no record stored)')]),
             el('td', {}, record.name ?? el('span', { class: 'faint' }, '—')))))
-      : el('p', { class: 'faint' }, 'Nothing here.'),
-    pager(params, page, lastKey, (nextAfter, trail) => {
-      location.hash = defHash(declaration.name,
-        { bucket: m.kind === 'group' ? bucket : null, after: nextAfter, trail });
-    }));
+      : el('p', { class: 'faint' },
+          // Reachable by a hand-typed cursor: the population is above, so
+          // "nothing" here means past-the-cursor, and ← back is the way out.
+          page.total ? 'No records past this cursor.' : 'Nothing here.'));
 }
 
 async function measuredSection(declaration, params) {
@@ -495,29 +568,38 @@ async function measuredSection(declaration, params) {
     + (after ? `?after=${encodeURIComponent(after)}` : ''));
   if (!answer.ok) return problem(answer, 'The engine declined to answer:');
   const page = answer.body;
-  if (!page.records.length) {
+  if (!page.total) {
+    // total, not this page's rows: an empty page past a cursor is not an
+    // empty population, and claiming "nothing collected" over 17,000 records
+    // strands the reader on a lie.
     return el('p', { class: 'faint' },
       'Nothing collected for ', el('span', { class: 'mono' }, page.fact_kind),
       ', so there is nothing to measure.');
   }
-  const lastKey = page.records[page.records.length - 1].key;
+  const lastKey = page.records.length ? page.records[page.records.length - 1].key : null;
+  const go = (nextAfter, trail) => {
+    location.hash = defHash(declaration.name, { after: nextAfter, trail });
+  };
   return el('div', {},
-    el('p', { class: 'dim' },
-      `${page.total} `, el('span', { class: 'mono' }, page.fact_kind), ' records.'),
-    el('table', {},
-      el('tr', {}, el('th', {}, 'key'), el('th', {}, 'name'), el('th', {}, 'measures as')),
-      page.records.map((record) => el('tr', {},
-        el('td', {}, el('a', {
-          class: 'mono', href: recordHash(page.fact_kind, record.key),
-        }, record.key)),
-        el('td', {}, record.name ?? el('span', { class: 'faint' }, '—')),
-        // null is the server saying "no measurement for this record" — an
-        // absence to show as one, never a rendered nought.
-        el('td', { class: 'mono' },
-          record.display ?? el('span', { class: 'faint' }, '— no measurement'))))),
-    pager(params, page, lastKey, (nextAfter, trail) => {
-      location.hash = defHash(declaration.name, { after: nextAfter, trail });
-    }));
+    el('div', { class: 'controls' },
+      el('span', { class: 'dim' },
+        `${page.total} `, el('span', { class: 'mono' }, page.fact_kind), ' records'),
+      el('span', { class: 'spacer' }),
+      pager(params, page.more, lastKey, go)),
+    page.records.length
+      ? el('table', { class: 'ledger' },
+          el('tr', {}, el('th', {}, 'key'), el('th', {}, 'name'),
+            el('th', { class: 'num' }, 'measures as')),
+          page.records.map((record) => el('tr', {},
+            el('td', {}, el('a', {
+              class: 'mono', href: recordHash(page.fact_kind, record.key),
+            }, record.key)),
+            el('td', {}, record.name ?? el('span', { class: 'faint' }, '—')),
+            // null is the server saying "no measurement for this record" — an
+            // absence to show as one, never a rendered nought.
+            el('td', { class: 'mono num' },
+              record.display ?? el('span', { class: 'faint' }, '— no measurement')))))
+      : el('p', { class: 'faint' }, 'No records past this cursor.'));
 }
 
 async function answerSection(declaration) {
@@ -659,6 +741,10 @@ async function factsView(segments, params) {
     return [el('h1', {}, 'Facts'),
       el('p', { class: 'faint' }, 'No tenant holds any facts yet.')];
   }
+  // A segment that failed to decode is null; asking the server for a record
+  // literally called "null" would be a page about a key nobody wrote.
+  // A hand-typed '%zz' lands on the kind list, as safeDecode promises.
+  if (segments.some((segment) => segment === null)) return kindListView();
   const kind = segments.length ? segments[0] : null;
   if (!kind) return kindListView();
   if (segments.length > 1) {
@@ -680,13 +766,15 @@ function moversOf(kind) {
 function moverLinks(kind) {
   const movers = moversOf(kind);
   if (!movers.length) return null;
-  return el('p', { class: 'prose' },
-    'A change to these records can move ',
-    movers.map((declaration, i) => [
-      i ? ', ' : null,
-      el('a', { class: 'mono', href: `#/definitions/${encodeURIComponent(declaration.name)}` },
-        declaration.name),
-    ]), '.');
+  // A chip row, not a comma-run: twenty-odd names in serif prose read as a
+  // paragraph to skim past; a wrapped list of mono chips reads as the index
+  // it is.
+  return el('div', {},
+    el('p', { class: 'faint' }, 'A change to these records can move:'),
+    el('ul', { class: 'movers' }, movers.map((declaration) =>
+      el('li', {}, el('a', {
+        class: 'mono', href: `#/definitions/${encodeURIComponent(declaration.name)}`,
+      }, declaration.name)))));
 }
 
 async function recordView(kind, key) {
@@ -697,8 +785,10 @@ async function recordView(kind, key) {
   const record = answer.body;
   const link = record.url ? safeUrl(record.url) : null;
 
+  // One h1 per page — the record's name in the title block. The way back up
+  // is a quiet crumb line, not a second heading louder than the name itself.
   const parts = [
-    el('h1', {},
+    el('nav', { class: 'crumbs' },
       el('a', { href: '#/facts' }, 'Facts'), ' / ',
       el('a', { class: 'mono', href: `#/facts/${encodeURIComponent(kind)}` }, kind), ' / ',
       el('span', { class: 'mono' }, key)),
@@ -716,8 +806,15 @@ async function recordView(kind, key) {
             'open at the source')] : null)),
   ];
 
-  parts.push(el('h2', {}, 'Filed under'));
-  if (!record.filed_state.ok) {
+  // Both verdict sections are tenant-scoped, and must say so the way every
+  // definition page does — switching the tenant switches every verdict here.
+  const bare = !world.declarations.length;
+  parts.push(el('h2', {}, 'Filed under — tenant ',
+    el('span', { class: 'verbatim' }, tenant() || '?')));
+  if (bare) {
+    parts.push(el('p', { class: 'faint' },
+      'No definitions are loaded, so there is no classification to report.'));
+  } else if (!record.filed_state.ok) {
     parts.push(unavailable(record.filed_state));
   } else if (!record.filed.length) {
     parts.push(el('p', { class: 'faint' },
@@ -725,7 +822,9 @@ async function recordView(kind, key) {
   } else {
     // Every grouping over this kind reports, the rejections included: "this
     // filter did not take it" is exactly the verdict a verifier came to check.
-    parts.push(el('table', {},
+    parts.push(el('table', { class: 'ledger' },
+      el('tr', {}, el('th', {}, 'declaration'), el('th', {}, 'kind'),
+        el('th', {}, 'verdict')),
       record.filed.map((filed) => el('tr', {},
         el('td', {}, el('a', {
           class: 'mono', href: `#/definitions/${encodeURIComponent(filed.index)}`,
@@ -743,22 +842,28 @@ async function recordView(kind, key) {
                : el('span', { class: 'dim' }, 'in no bucket')))))));
   }
 
-  parts.push(el('h2', {}, 'Measured as'));
-  if (!record.measured.length) {
+  parts.push(el('h2', {}, 'Measured as — tenant ',
+    el('span', { class: 'verbatim' }, tenant() || '?')));
+  if (bare) {
+    parts.push(el('p', { class: 'faint' },
+      'No definitions are loaded, so there is nothing to measure with.'));
+  } else if (!record.measured.length) {
     parts.push(el('p', { class: 'faint' },
       'No measure reads ', el('span', { class: 'mono' }, kind), ' records.'));
   } else {
-    parts.push(el('table', {},
+    parts.push(el('table', { class: 'ledger' },
+      el('tr', {}, el('th', {}, 'measure'), el('th', { class: 'num' }, 'value')),
       record.measured.map((entry) => el('tr', {},
         el('td', {}, el('a', {
           class: 'mono', href: `#/definitions/${encodeURIComponent(entry.measure)}`,
         }, entry.measure)),
-        el('td', { class: 'mono' },
+        el('td', { class: 'mono num' },
           entry.display ?? el('span', { class: 'faint' }, '— no measurement'))))));
   }
 
-  const movers = moverLinks(kind);
-  if (movers) parts.push(el('h2', {}, 'Can move'), movers);
+  parts.push(el('h2', {}, 'Can move'),
+    moverLinks(kind)
+      ?? el('p', { class: 'faint' }, 'Nothing in the library reads these records.'));
 
   parts.push(el('h2', {}, 'As stored'),
     el('pre', {}, JSON.stringify(record.value, null, 2)));
@@ -818,7 +923,7 @@ async function kindView(kind, q, after, trail) {
   const rows = page.records.map((record) => {
     // tabindex + keydown: the expansion is the only way to read a record,
     // so it cannot be mouse-only.
-    const row = el('tr', { class: 'record-row', tabindex: '0' },
+    const row = el('tr', { class: 'record-row', tabindex: '0', 'aria-expanded': 'false' },
       // The key is the door to the record's own page (classification,
       // measurements, the full JSON); the row click stays the quick peek.
       // stopPropagation so following the link does not also toggle the row.
@@ -831,14 +936,21 @@ async function kindView(kind, q, after, trail) {
     const toggle = () => {
       if (row.nextSibling && row.nextSibling.classList.contains('expansion')) {
         row.nextSibling.remove();
+        row.setAttribute('aria-expanded', 'false');
         return;
       }
       row.after(el('tr', { class: 'expansion' },
         el('td', { colspan: '3' },
           el('pre', {}, JSON.stringify(record.value, null, 2)))));
+      row.setAttribute('aria-expanded', 'true');
     };
     row.addEventListener('click', toggle);
     row.addEventListener('keydown', (event) => {
+      // Only when the ROW itself holds focus: a keydown bubbling up from the
+      // key's link would otherwise be cancelled here, and Enter on that link
+      // would toggle the peek instead of navigating -- the whole drill made
+      // mouse-only.
+      if (event.target !== row) return;
       if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggle(); }
     });
     return row;

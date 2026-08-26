@@ -246,9 +246,12 @@ async def test_facts_are_browsable_with_paging_search_and_honest_counts(
 
 
 async def test_a_record_without_its_name_field_is_named_nothing(pg_dsn: str) -> None:
-    """None, not a KeyError and not str(whatever was there): the name column
-    is the schema's claim applied to the record, and a record that does not
-    carry the field has no name to claim."""
+    """None, not a KeyError: a record that does not carry the field has no
+    name to claim. A record that carries it as a *number* is named by the
+    engine's own resolver ("42"), because evidence titles already resolve
+    names that way and one record must be named identically on every
+    surface -- a list that dashes what the evidence pane titles is two
+    answers to one question."""
     async with serve(pg_dsn) as http:
         await _teach(http)
         await http.post(
@@ -264,7 +267,7 @@ async def test_a_record_without_its_name_field_is_named_nothing(pg_dsn: str) -> 
         )
         page = (await http.get("/ui/api/tenants/t1/facts/shop_order")).json()
         names = {r["key"]: r["name"] for r in page["records"]}
-        assert names == {"bare": None, "odd": None}
+        assert names == {"bare": None, "odd": "42"}
 
 
 async def test_tenants_are_listed_with_their_fact_counts(pg_dsn: str) -> None:
@@ -1030,6 +1033,485 @@ async def test_a_record_page_carries_its_measurements(pg_dsn: str) -> None:
             "every measure over this record's kind reports, and only those -- "
             "a review-request measure has nothing to say about a change"
         )
+
+
+async def test_the_drill_reads_the_taught_schema_not_the_stored_one(
+    pg_dsn: str,
+) -> None:
+    """A fact-taught world (0.4.0) carries its name and url fields in the
+    .fig, not in the stored schema document. The drill surfaces must read
+    through the same completion the world route does, or every record on
+    them is nameless while the Facts tab two clicks away names it fine."""
+    from .test_facts import SOURCE, TAUGHT
+
+    async with serve(pg_dsn) as http:
+        assert (await http.put("/schema", json=TAUGHT.to_document())).status_code == 200
+        put = await http.put(
+            "/definitions",
+            json={
+                "source": SOURCE
+                + "\nmeasure shop_order.wait_seconds = delivered_at - placed_at\n"
+            },
+        )
+        assert put.status_code == 200, put.text
+        pushed = await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_courier": {"c1": {"display_name": "Aki"}},
+                    "shop_order": {
+                        "o0": {
+                            "ref": "A-0",
+                            "link": "https://shop.example/o0",
+                            "courier_id": "c1",
+                            "status": "riding",
+                        }
+                    },
+                }
+            },
+        )
+        assert pushed.status_code == 200, pushed.text
+
+        record = (await http.get("/ui/api/tenants/t1/facts/shop_order/o0")).json()
+        assert record["name"] == "A-0"
+        assert record["url"] == "https://shop.example/o0"
+
+        members = (
+            await http.get(
+                "/ui/api/tenants/t1/membership/shop_order.open/members?bucket="
+            )
+        ).json()
+        assert [r["name"] for r in members["records"]] == ["A-0"]
+
+        # The measured page reads the same taught completion.
+        measured = (
+            await http.get("/ui/api/tenants/t1/measured/shop_order.wait_seconds")
+        ).json()
+        assert [r["name"] for r in measured["records"]] == ["A-0"]
+
+        # A fact declaration IS a leaf: its impact answer is deliberately
+        # empty, and the page words that differently rather than printing
+        # "nothing moves this" about the records everything moves with.
+        world = (await http.get("/ui/api/world")).json()
+        for declaration in world["declarations"]:
+            if declaration["kind"] == "fact":
+                assert declaration["moved_by"] == []
+
+
+# ------------------------------------------------------ the drill's edges --
+
+
+async def test_keyed_as_membership_resolves_in_the_id_space(pg_dsn: str) -> None:
+    """`keyed as` files one kind's records under another kind's ids. The
+    members page must join the id space (or every member reads missing and
+    unnamed), the ghost half must stay listed (`held: false` with the total
+    still counting it -- hiding a membership row would un-say the engine's
+    claim), and the record pages on BOTH sides must classify honestly."""
+    from uratori import Schema
+
+    world = Schema(
+        kinds=frozenset({"shop_order", "shop_review"}),
+        name_fields={"shop_order": "ref", "shop_review": "note"},
+    )
+    source = 'filter shop_review.signed_off keyed as shop_order where approved == true'
+    async with serve(pg_dsn) as http:
+        assert (await http.put("/schema", json=world.to_document())).status_code == 200
+        put = await http.put("/definitions", json={"source": source})
+        assert put.status_code == 200, put.text
+        pushed = await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_order": {"o0": {"ref": "A-0"}},
+                    "shop_review": {
+                        "o0": {"note": "looks fine", "approved": True},
+                        "o9": {"note": "orphan", "approved": True},
+                    },
+                }
+            },
+        )
+        assert pushed.status_code == 200, pushed.text
+
+        held = (
+            await http.get("/ui/api/tenants/t1/membership/shop_review.signed_off")
+        ).json()
+        assert held["fact_kind"] == "shop_review"
+        assert held["id_space"] == "shop_order"
+        assert held["members"] == 2
+        assert held["population"] == 1, "the population is the id space's records"
+
+        page = (
+            await http.get(
+                "/ui/api/tenants/t1/membership/shop_review.signed_off/members?bucket="
+            )
+        ).json()
+        rows = {r["key"]: r for r in page["records"]}
+        assert rows["o0"]["name"] == "A-0", (
+            "member names come from the id space's table -- joining the fact "
+            "kind's would mark every member missing"
+        )
+        assert rows["o0"]["held"] is True
+        assert rows["o9"]["held"] is False and rows["o9"]["name"] is None
+        assert page["total"] == 2, "the ghost stays counted as well as listed"
+
+        order = (await http.get("/ui/api/tenants/t1/facts/shop_order/o0")).json()
+        filed = {f["index"]: f for f in order["filed"]}
+        assert filed["shop_review.signed_off"]["member"] is True, (
+            "the id-space record is what the membership is keyed by"
+        )
+        review = (await http.get("/ui/api/tenants/t1/facts/shop_review/o0")).json()
+        assert review["filed"] == [], (
+            "no grouping is keyed by shop_review ids; claiming membership "
+            "here would classify under ids the index never used"
+        )
+
+
+async def test_member_pages_and_the_record_page_refuse_a_stale_filing(
+    pg_dsn: str,
+) -> None:
+    """Rule three reaches the pages, not just the summary: a members page for
+    a tenant never bucketed is a 409, and after the definitions move, both
+    the members page and the record page's classification are withheld with
+    the reason -- serving the old filing as current would show records
+    matching a predicate they do not."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        never = await http.get(
+            "/ui/api/tenants/nobody/membership/shop_order.open/members?bucket="
+        )
+        assert never.status_code == 409
+        assert "bucketed" in never.json()["detail"]
+
+        await _feed_couriers(http)
+        moved = COURIER_SOURCE.replace('status != "delivered"', 'status == "delivered"')
+        assert (
+            await http.put("/definitions", json={"source": moved})
+        ).status_code == 200
+
+        stale = await http.get(
+            "/ui/api/tenants/t1/membership/shop_order.open/members?bucket="
+        )
+        assert stale.status_code == 409
+        assert "moved" in stale.json()["detail"]
+
+        record = (await http.get("/ui/api/tenants/t1/facts/shop_order/o0")).json()
+        assert record["filed_state"]["ok"] is False
+        assert record["filed_state"]["because"] == "behind-deploy"
+        assert record["filed"] == [], (
+            "a classification served beside a not-ok state would be read "
+            "instead of it"
+        )
+
+
+async def test_a_clock_measure_renders_and_shares_one_instant(pg_dsn: str) -> None:
+    """`now - x` must actually render (the earlier empty-kind assertion never
+    reached measure_of), and two identical records must render identically --
+    the cheap purchase on the one-instant-per-page claim."""
+    from datetime import UTC, datetime, timedelta
+
+    from .world import WORLD
+
+    async with serve(pg_dsn) as http:
+        assert (await http.put("/schema", json=WORLD.to_document())).status_code == 200
+        assert (
+            await http.put("/definitions", json={"source": FULL_SOURCE})
+        ).status_code == 200
+        asked = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+        await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "code_review_request": {
+                        "r1": {"title": "first", "requested_at": asked},
+                        "r2": {"title": "second", "requested_at": asked},
+                    }
+                }
+            },
+        )
+        page = (
+            await http.get(
+                "/ui/api/tenants/t1/measured/code_review_request.waiting_seconds"
+            )
+        ).json()
+        displays = [r["display"] for r in page["records"]]
+        assert displays == ["2.0h", "2.0h"], (
+            "a clock measurement must render, and identically for identical "
+            "records -- a per-record clock would let the two waits disagree"
+        )
+
+
+async def test_measured_pages_honestly(pg_dsn: str) -> None:
+    from .world import WORLD
+
+    async with serve(pg_dsn) as http:
+        assert (await http.put("/schema", json=WORLD.to_document())).status_code == 200
+        assert (
+            await http.put("/definitions", json={"source": FULL_SOURCE})
+        ).status_code == 200
+        await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "code_change": {
+                        f"mr{i}": {
+                            "title": f"change {i}",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "merged_at": "2026-01-01T01:00:00Z",
+                            "author_account_id": "acc1",
+                            "updated_at": "2026-01-01T01:00:00Z",
+                        }
+                        for i in range(3)
+                    }
+                }
+            },
+        )
+        first = (
+            await http.get("/ui/api/tenants/t1/measured/code_change.open_seconds?limit=2")
+        ).json()
+        assert len(first["records"]) == 2
+        assert first["more"] is True
+        assert first["total"] == 3, "a page must never shrink the population it reports"
+
+        rest = (
+            await http.get(
+                "/ui/api/tenants/t1/measured/code_change.open_seconds"
+                f"?limit=2&after={first['records'][-1]['key']}"
+            )
+        ).json()
+        assert [r["key"] for r in rest["records"]] == ["mr2"]
+        assert rest["more"] is False and rest["total"] == 3
+
+        found = (
+            await http.get("/ui/api/tenants/t1/measured/code_change.open_seconds?q=change 1")
+        ).json()
+        assert [r["key"] for r in found["records"]] == ["mr1"]
+        assert found["total"] == 1, "a search's total is the number of hits"
+
+
+async def test_a_fanned_out_member_counts_once_and_buckets_page(pg_dsn: str) -> None:
+    """One record in two buckets is one member (the distinct count is the
+    claim), and the bucket list pages like everything else -- a group can
+    hold thousands of buckets, and a capped list with no way forward makes
+    most of them unreachable."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        put = await http.put(
+            "/definitions",
+            json={"source": COURIER_SOURCE + "\ngroup shop_order.by_tag from tags\n"},
+        )
+        assert put.status_code == 200, put.text
+        await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_order": {
+                        "o0": {
+                            "ref": "A-0",
+                            "courier_id": "c1",
+                            "status": "riding",
+                            "tags": ["blue", "red"],
+                        }
+                    }
+                }
+            },
+        )
+        held = (
+            await http.get("/ui/api/tenants/t1/membership/shop_order.by_tag")
+        ).json()
+        assert held["members"] == 1, "two buckets, one record: distinct, not doubled"
+        assert held["buckets_total"] == 2
+
+        first = (
+            await http.get(
+                "/ui/api/tenants/t1/membership/shop_order.by_tag?buckets_limit=1"
+            )
+        ).json()
+        assert [b["bucket"] for b in first["buckets"]] == ["blue"]
+        assert first["buckets_more"] is True
+        assert first["buckets_total"] == 2, "the cap must not shrink the total"
+
+        rest = (
+            await http.get(
+                "/ui/api/tenants/t1/membership/shop_order.by_tag"
+                "?buckets_limit=1&buckets_after=blue"
+            )
+        ).json()
+        assert [b["bucket"] for b in rest["buckets"]] == ["red"]
+        assert rest["buckets_more"] is False
+
+
+async def test_effort_rendering_reads_the_dial_and_names_it_in_moved_by(
+    pg_dsn: str,
+) -> None:
+    """`format_value` divides an effort by tenant.hoursPerDay at render time,
+    so the dial appears in no compiled plan -- and a closure built only from
+    plan edges would let the page claim 'nothing else can move this' about a
+    number whose text moves the moment the dial does."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        put = await http.put(
+            "/definitions",
+            json={
+                "source": COURIER_SOURCE
+                + "\nmeasure shop_order.spent = work_seconds in effort\n"
+            },
+        )
+        assert put.status_code == 200, put.text
+        world = (await http.get("/ui/api/world")).json()
+        spent = next(d for d in world["declarations"] if d["name"] == "shop_order.spent")
+        assert {"type": "setting", "name": "tenant.hoursPerDay"} in spent["moved_by"]
+
+        await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_order": {
+                        "o0": {
+                            "ref": "A-0",
+                            "courier_id": "c1",
+                            "status": "riding",
+                            "work_seconds": 28_800,
+                        }
+                    }
+                }
+            },
+        )
+        page = (await http.get("/ui/api/tenants/t1/measured/shop_order.spent")).json()
+        assert page["records"][0]["display"] == "1.0d", "28,800s at 8h/day is one day"
+
+        await http.put(
+            "/tenants/t1/settings",
+            json={"document": {"tenant": {"hoursPerDay": 4}}},
+        )
+        moved = (await http.get("/ui/api/tenants/t1/measured/shop_order.spent")).json()
+        assert moved["records"][0]["display"] == "2.0d", (
+            "the dial is read at render time -- which is exactly why it must "
+            "appear in moved_by"
+        )
+
+
+async def test_an_effort_measure_without_the_dial_is_a_409_naming_it(
+    pg_dsn: str,
+) -> None:
+    """The checker never requires the dial, so this misconfiguration compiles
+    and only fails at render time. It must fail as the raiser's own sentence
+    naming the dial, not as a 500 the operator has to go digging for."""
+    from uratori import Schema
+
+    bare = Schema(kinds=frozenset({"shop_order"}), name_fields={"shop_order": "ref"})
+    async with serve(pg_dsn) as http:
+        assert (await http.put("/schema", json=bare.to_document())).status_code == 200
+        put = await http.put(
+            "/definitions",
+            json={"source": "measure shop_order.spent = work_seconds in effort"},
+        )
+        assert put.status_code == 200, put.text
+        await http.post(
+            "/tenants/t1/facts",
+            json={"writes": {"shop_order": {"o0": {"ref": "A-0", "work_seconds": 60}}}},
+        )
+        refused = await http.get("/ui/api/tenants/t1/measured/shop_order.spent")
+        assert refused.status_code == 409
+        assert "hoursPerDay" in refused.json()["detail"]
+
+        record = await http.get("/ui/api/tenants/t1/facts/shop_order/o0")
+        assert record.status_code == 409
+        assert "hoursPerDay" in record.json()["detail"]
+
+
+async def test_a_dotted_name_field_names_records_on_every_surface(
+    pg_dsn: str,
+) -> None:
+    """A name field is a path in the schema's own terms. The list and the
+    record page share one resolver now, so both must name a nested field --
+    two surfaces disagreeing about one record's name is two answers to one
+    question."""
+    from uratori import Schema
+
+    nested = Schema(
+        kinds=frozenset({"shop_order"}), name_fields={"shop_order": "dropoff.street"}
+    )
+    async with serve(pg_dsn) as http:
+        assert (await http.put("/schema", json=nested.to_document())).status_code == 200
+        assert (
+            await http.put(
+                "/definitions", json={"source": 'filter shop_order.any where x != "y"'}
+            )
+        ).status_code == 200
+        await http.post(
+            "/tenants/t1/facts",
+            json={"writes": {"shop_order": {"o0": {"dropoff": {"street": "Elm"}}}}},
+        )
+        listed = (await http.get("/ui/api/tenants/t1/facts/shop_order")).json()
+        assert listed["records"][0]["name"] == "Elm"
+        record = (await http.get("/ui/api/tenants/t1/facts/shop_order/o0")).json()
+        assert record["name"] == "Elm"
+
+
+async def test_membership_states_its_dial_caveat(pg_dsn: str) -> None:
+    """An age filter's filing depends on a dial the index-set hash cannot
+    see, so a moved dial with no pass since is invisible to `state`. The
+    response says so itself -- the weaker guarantee stated beats an Ok it
+    has not earned. A predicate filter carries no such caveat."""
+    from uratori import Schema
+
+    world = Schema(
+        kinds=frozenset({"shop_order"}),
+        bucket_settings=("thresholds.staleDays",),
+        defaults={"thresholds": {"staleDays": 3}},
+    )
+    source = (
+        "filter shop_order.stale where placed_at older than thresholds.staleDays\n"
+        'filter shop_order.open where status != "delivered"\n'
+    )
+    async with serve(pg_dsn) as http:
+        assert (await http.put("/schema", json=world.to_document())).status_code == 200
+        put = await http.put("/definitions", json={"source": source})
+        assert put.status_code == 200, put.text
+        await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_order": {
+                        "o0": {"placed_at": "2020-01-01T00:00:00Z", "status": "riding"}
+                    }
+                }
+            },
+        )
+        aged = (await http.get("/ui/api/tenants/t1/membership/shop_order.stale")).json()
+        assert aged["note"] is not None and "thresholds.staleDays" in aged["note"]
+        plain = (await http.get("/ui/api/tenants/t1/membership/shop_order.open")).json()
+        assert plain["note"] is None
+
+
+async def test_measured_of_a_grouping_forwards_to_membership(pg_dsn: str) -> None:
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        refused = await http.get("/ui/api/tenants/t1/measured/shop_order.open")
+        assert refused.status_code == 404
+        assert "membership" in refused.json()["detail"], (
+            "'no' with no forwarding address dead-ends the reader"
+        )
+
+
+async def test_a_key_with_a_slash_reaches_its_record_page(pg_dsn: str) -> None:
+    """Provider keys are the provider's business -- GitLab writes `grp/proj!7`
+    shapes -- and the route must resolve a percent-encoded slash rather than
+    404 on half the key."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_order": {"grp/proj!7": {"ref": "A-7", "status": "riding"}}
+                }
+            },
+        )
+        record = await http.get("/ui/api/tenants/t1/facts/shop_order/grp%2Fproj!7")
+        assert record.status_code == 200, record.text
+        assert record.json()["key"] == "grp/proj!7"
+        assert record.json()["name"] == "A-7"
 
 
 # ----------------------------------------------------- the log's history --
