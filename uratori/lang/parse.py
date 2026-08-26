@@ -35,6 +35,8 @@ from .ast import (
     Document,
     DurationMeasure,
     Extreme,
+    FactDecl,
+    FactField,
     FieldDecl,
     FieldMeasure,
     FigureDecl,
@@ -80,6 +82,7 @@ from .ast import (
 )
 from .lex import SyntaxError_, Token, lex, prose_above
 
+_FACT_TYPES: frozenset[str] = frozenset({"text", "number", "flag", "moment"})
 _DECLARED_UNITS: frozenset[str] = frozenset({"share", "days", "effort", "count", "duration"})
 _DERIVED_UNITS: frozenset[str] = frozenset({"level", "moment"})
 _MEASURE_UNITS: frozenset[str] = frozenset({"effort", "count"})
@@ -108,14 +111,29 @@ def _explained(decl: Decl, lines: list[str]) -> Decl:
     """Attach the `#` comment run above a declaration as its doc.
 
     The comments are the customer-facing explanation -- one spelling for all
-    seven declaration kinds, kept out of the block so the directives a reviewer
+    eight declaration kinds, kept out of the block so the directives a reviewer
     came to check are not buried in prose. The lexer strips comments, so this
     reads the raw lines; the declaration's own line number says where to look.
 
     The four rendered kinds are refused without one: each is served to a
     reader, and an unexplained number on screen is the thing this language
-    exists to prevent.
+    exists to prevent. A fact is refused too -- it is the schema a reader
+    tracing a number lands on, and a schema nobody can read dead-ends the
+    trace exactly where it was meant to bottom out. Its fields may carry a
+    run of their own, at the field's indent, attached the same way.
     """
+    if isinstance(decl, FactDecl):
+        prose = prose_above(lines, decl.line)
+        if not prose:
+            raise SyntaxError_(
+                f"fact {decl.name} has no explanation. Write `#` comment lines directly "
+                "above the declaration -- they are what a reader tracing a number back "
+                "to the schema sees, and a record kind nobody can read dead-ends the "
+                "trace at its last step.",
+                decl.line,
+                0,
+            )
+        return replace(decl, doc=prose, fields=_field_docs(decl.fields, lines))
     if not isinstance(decl, (FigureDecl, ReadingDecl, ProjectDecl, SummariseDecl)):
         return decl
     what = _RENDERED[type(decl)]
@@ -131,6 +149,23 @@ def _explained(decl: Decl, lines: list[str]) -> Decl:
             0,
         )
     return replace(decl, doc=prose)
+
+
+def _field_docs(fields: tuple[FactField, ...], lines: list[str]) -> tuple[FactField, ...]:
+    """A fact field's `#` run, at the field's own indent.
+
+    The same contiguity rules a declaration's explanation follows, via the
+    same `prose_above` -- one implementation, so a comment that counts as
+    prose here cannot fail to count on the served source pane.
+    """
+    return tuple(
+        replace(
+            f,
+            doc=prose_above(lines, f.line, indented=True),
+            children=_field_docs(f.children, lines),
+        )
+        for f in fields
+    )
 
 
 class _Parser:
@@ -221,10 +256,12 @@ class _Parser:
             tok = self._peek()
             if tok.kind != "name":
                 raise self._error(
-                    'expected "group", "filter", "measure", "figure", "reading", '
+                    'expected "fact", "group", "filter", "measure", "figure", "reading", '
                     f'"projection" or "summarise", got {self._describe()}'
                 )
-            if tok.value in ("group", "filter"):
+            if tok.value == "fact":
+                doc.decls.append(self._fact())
+            elif tok.value in ("group", "filter"):
                 doc.decls.append(self._index(tok.value))
             elif tok.value == "measure":
                 doc.decls.append(self._measure())
@@ -261,11 +298,160 @@ class _Parser:
                 )
             else:
                 raise self._error(
-                    'expected "group", "filter", "measure", "figure", "reading", '
+                    'expected "fact", "group", "filter", "measure", "figure", "reading", '
                     f'"projection" or "summarise", got {self._describe()}'
                 )
             self._skip_newlines()
         return doc
+
+    # -------------------------------------------------------------- fact --
+
+    def _fact(self) -> FactDecl:
+        line = self._peek().line
+        self._keyword("fact")
+        name = self._name("a fact kind, e.g. shop_order")
+        if "." in name:
+            raise self._error(
+                f'"{name}" cannot be a fact kind: a kind is named bare, and a dot would '
+                "make it indistinguishable from a figure name.",
+                line,
+            )
+        self._punct(":")
+        self._end_of_line()
+        self._expect("indent", "an indented block after the fact kind")
+
+        name_field: str | None = None
+        url_field: str | None = None
+        fields: list[FactField] = []
+        seen: set[str] = set()
+
+        while not self._is("dedent") and not self._is("eof"):
+            word = self._peek().value
+            if word in ("name", "url") and self._directive_ahead():
+                self._once(seen, word, f"fact {name}")
+                self._next()
+                pointed = self._name("the field this points at")
+                self._end_of_line()
+                if word == "name":
+                    name_field = pointed
+                else:
+                    url_field = pointed
+            else:
+                fields.append(self._fact_member(top=True))
+            self._skip_newlines()
+        self._expect("dedent", "the end of the fact block")
+
+        if not fields:
+            raise self._error(
+                f"fact {name} has no fields, so it verifies nothing and no definition "
+                "can read it.",
+                line,
+            )
+        return FactDecl(
+            name=name,
+            doc="",
+            fields=tuple(fields),
+            name_field=name_field,
+            url_field=url_field,
+            line=line,
+        )
+
+    def _directive_ahead(self) -> bool:
+        """`name ref` -- exactly a pointer and the end of the line.
+
+        `name as text` is a *field* called name: the directive shape never
+        contains `as`, so nothing here is a reserved word and the lookahead
+        is one token.
+        """
+        after = self._tokens[self._at + 1 : self._at + 3]
+        return (
+            len(after) == 2
+            and after[0].kind == "name"
+            and after[1].kind in ("newline", "dedent", "eof")
+        )
+
+    def _fact_member(self, *, top: bool) -> FactField:
+        line = self._peek().line
+        word = self._peek().value
+        following = self._tokens[self._at + 1]
+
+        if word in ("one", "many") and following.kind == "name" and following.value != "as":
+            return self._fact_nested(many=word == "many", top=top)
+
+        if word in ("name", "url") and not top and self._directive_ahead():
+            raise self._error(
+                f'"{word}" lives at the top of the fact, not inside a nested block: it '
+                "points at the field a whole record is rendered by, and a nested one "
+                "would name an element nothing renders.",
+                line,
+            )
+
+        if word == "field" and following.kind == "name":
+            # The plausible spelling from every other schema language. A
+            # fact's body is its fields, so the keyword would be noise on
+            # every line -- and left to the generic path this fails as
+            # 'expected "as"', pointing at nothing.
+            raise self._error(
+                'there is no "field" keyword here: a fact\'s body is its fields. '
+                "Write the field bare -- `ref as text`.",
+                line,
+            )
+
+        fname = self._name("a field, e.g. placed_at as moment")
+        if not self._at_word("as"):
+            raise self._error(
+                f'expected "as" after "{fname}" -- a field is `<name> as <type>`, '
+                f"got {self._describe()}"
+            )
+        self._next()
+        ftype = self._name("a field type")
+        if ftype == "date":
+            raise self._error(
+                '"date" is the projection binding; a fact field holding an instant is '
+                f'a "moment". Write `{fname} as moment`.',
+                line,
+            )
+        if ftype not in _FACT_TYPES:
+            raise self._error(
+                f'"{ftype}" is not a field type. Those are: '
+                f'{", ".join(sorted(_FACT_TYPES))}. A fact declares what the record '
+                "structurally carries -- how a number is read is the measure's claim, "
+                "not the field's.",
+                line,
+            )
+        self._end_of_line()
+        return FactField(name=fname, type=ftype, line=line)  # type: ignore[arg-type]
+
+    def _fact_nested(self, *, many: bool, top: bool) -> FactField:
+        line = self._peek().line
+        word = self._next().value
+        name = self._name("the nested field")
+        if self._at_word("as"):
+            if many:
+                raise self._error(
+                    f"a list of scalars is not declarable: no construct can read one -- "
+                    "a predicate compares one field against one literal and cannot test "
+                    f"membership. `many {name}:` with an indented block declares a list "
+                    "of records; a field the provider sends but nothing reads is left "
+                    "out of the mapping.",
+                    line,
+                )
+            raise self._error(
+                f'"one" declares a nested record, and this is a single value. Write '
+                f"`{name} as <type>` bare.",
+                line,
+            )
+        self._punct(":")
+        self._end_of_line()
+        self._expect("indent", f"the fields of {name}")
+        children: list[FactField] = []
+        while not self._is("dedent") and not self._is("eof"):
+            children.append(self._fact_member(top=False))
+            self._skip_newlines()
+        self._expect("dedent", f"the end of {name}")
+        if not children:  # pragma: no cover - the lexer yields no empty indent
+            raise self._error(f"{word} {name}: declares nothing.", line)
+        return FactField(name=name, many=many, children=tuple(children), line=line)
 
     # ------------------------------------------------------------- index --
 

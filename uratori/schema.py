@@ -50,10 +50,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any
 
 from .lang.settings import merge_settings
+
+if TYPE_CHECKING:  # a type-only import; schema.py must stay importable first
+    from .lang.plan import Library
 
 _KIND = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -99,6 +102,29 @@ class Schema:
 
     def is_kind(self, name: str) -> bool:
         return name in self.kinds
+
+    def taught_by(self, library: Library) -> Schema:
+        """This schema, completed by a fact-taught library.
+
+        When the source declares facts, the kinds, name fields and url fields
+        derive from those declarations -- the compile has already refused a
+        schema that declared kinds of its own. Everything that consumes a
+        `Schema` at run time (the engine freezing labels, evidence resolving
+        links) goes through this, so the two doors cannot disagree about the
+        world. A schema-taught world passes through untouched.
+        """
+        if not library.facts:
+            return self
+        return replace(
+            self,
+            kinds=frozenset(library.facts),
+            name_fields={
+                k: f.name_field for k, f in library.facts.items() if f.name_field is not None
+            },
+            url_fields={
+                k: f.url_field for k, f in library.facts.items() if f.url_field is not None
+            },
+        )
 
     @property
     def declarable(self) -> frozenset[str]:

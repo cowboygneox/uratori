@@ -30,7 +30,7 @@ import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 
@@ -38,9 +38,10 @@ from ..engine.activity import shown_changes
 from ..facade import DEFAULT_TRAILING, RunReport
 from ..lang.check import compile_source
 from ..lang.lex import DefinitionError
-from ..lang.plan import Library
+from ..lang.plan import CompiledFactField, Library
 from ..results import Evidence, Result
 from ..store.postgres import PostgresFactStore
+from ..verify import FactError
 from . import db
 from . import ui as builtin_ui
 from .contract import (
@@ -48,6 +49,8 @@ from .contract import (
     DeclarationOut,
     DefinitionsIn,
     Envelope,
+    FactFieldOut,
+    FactOut,
     FactsIn,
     Health,
     LibraryOut,
@@ -272,8 +275,19 @@ def create_app(
         buckets a deleted record held to work out whose numbers move, and the
         fact table is what the departed-subject sweep walks -- both need the
         table to already say what the batch said.
+
+        Verification comes before any of it, and refuses the batch whole: a
+        record that does not match the declared world must land nowhere, and
+        landing its batch-mates while dropping it would narrow a population
+        by a cheap path. The 422 names the kind, key and field, because the
+        fix is in the host's mapping.
         """
         world, library = ready(s)
+        facade = facade_for(s, world, library)
+        try:
+            facade.verify(body.writes, body.deletes)
+        except FactError as refusal:
+            raise HTTPException(status_code=422, detail=str(refusal)) from refusal
         facts = PostgresFactStore(s.pool)
         async with s.lock_for(tenant):
             for kind, keys in body.deletes.items():
@@ -290,7 +304,7 @@ def create_app(
                 if changed:
                     moved[kind] = changed
             settings = await db.load_settings(s.pool, tenant)
-            report = await facade_for(s, world, library).run(
+            report = await facade.run(
                 tenant,
                 settings,
                 written=moved,
@@ -638,7 +652,37 @@ def _library_out(library: Library) -> LibraryOut:
             return "moment"
         return unit
 
+    def fact_leaves(
+        fields: tuple[CompiledFactField, ...], prefix: str, repeats: bool
+    ) -> list[FactFieldOut]:
+        """The body flattened to its leaves, dotted the way a definition
+        reads them, so the manifest and the paths in `fields`/`through`
+        speak one spelling."""
+        out: list[FactFieldOut] = []
+        for f in fields:
+            path = f"{prefix}{f.name}"
+            if f.type is None:
+                out.extend(fact_leaves(f.children, f"{path}.", repeats or f.many))
+            else:
+                leaf_type = cast('Literal["text", "number", "flag", "moment"]', f.type)
+                out.append(
+                    FactFieldOut(path=path, type=leaf_type, repeats=repeats, prose=f.doc)
+                )
+        return out
+
     return LibraryOut(
+        facts=[
+            FactOut(
+                name=f.name,
+                version=f.version,
+                prose=declaration_prose(library, f.name),
+                source=declaration_source(library, f.name) or "",
+                name_field=f.name_field,
+                url_field=f.url_field,
+                fields=fact_leaves(f.fields, "", False),
+            )
+            for f in library.facts.values()
+        ],
         figures=[
             described(
                 p.name,

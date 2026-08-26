@@ -42,6 +42,7 @@ def read_definitions(directory: Path) -> str:
 
 def as_json(library: Library) -> dict[str, Any]:
     return {
+        "facts": {k: _plain(v) for k, v in library.facts.items()},
         "indexes": {k: _plain(v) for k, v in library.indexes.items()},
         "measures": {k: _plain(v) for k, v in library.measures.items()},
         "figures": [_plain(p) for p in library.figures],

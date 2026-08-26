@@ -157,7 +157,12 @@ curl -s -X PUT "$BASE/schema" -H "$AUTH" -H 'Content-Type: application/json' -d 
 | `project_settings` | `[string]` | projection setting is free, because nothing is stored. |
 | `defaults` | object | The shipped settings document, as a nested object. A tenant's stored settings are sparse; the engine completes them over these at every use. A dial a definition names that resolves to nothing under the completed document **raises** rather than guessing. |
 
-All fields except `kinds` default to empty. One dial path is reserved:
+Every field defaults to empty, `kinds` included: a host that declares its
+facts **in the definition language** (`fact shop_order:` -- see
+[the language guide](language.md)) PUTs a schema of settings and defaults
+alone, and the kinds, name fields and url fields derive from the source at
+`PUT /definitions`. Declaring both is refused at compile time -- one world,
+one door. One dial path is reserved:
 `tenant.hoursPerDay`, which the renderer divides by to print an `effort`
 (seconds of working time) as days -- a world that renders efforts must carry
 it in `defaults`.
@@ -210,17 +215,34 @@ Responses:
 
 - `409` when no schema is declared yet (definitions compile against it).
 - `422` with the compiler's message, verbatim, whichever layer refused --
-  the parser's (`line 1: expected "group", "filter", …` for text that does
-  not parse) or the checker's (`"not a fact kind"` when a definition names a
-  kind the schema does not declare). A refused load changes nothing: the
-  previously loaded definitions (or the untaught state) stand whole, and
-  `/health` still says so.
-- `200` with the library, **described**: every declaration of all six kinds,
-  each carrying its prose, its formula, and the names it rests on. One entry
-  of each shape, abridged:
+  the parser's (`line 1: expected "fact", "group", "filter", …` for text
+  that does not parse) or the checker's (`"not a fact kind"` when a
+  definition names a kind the world does not declare). A refused load
+  changes nothing: the previously loaded definitions (or the untaught state)
+  stand whole, and `/health` still says so.
+- `200` with the library, **described**: every declaration, each carrying
+  its prose, its formula, and the names it rests on. A fact-taught world
+  additionally carries `facts` -- per kind, the version, the prose, the
+  name/url pointers, and every leaf field as a dotted path with its type,
+  whether it `repeats` (a `many` on the way), and its own prose. That array
+  is the schema a UI walks a number back to. One entry of each shape,
+  abridged:
 
 ```json
 {
+  "facts": [
+    {
+      "name": "shop_order",
+      "version": "58f1f2a9c30d",
+      "prose": "An order in the shop, as the provider last showed it.",
+      "name_field": "ref",
+      "url_field": "url",
+      "fields": [
+        {"path": "ref", "type": "text", "repeats": false, "prose": ""},
+        {"path": "courier_id", "type": "text", "repeats": false, "prose": "Which courier holds it; absent until assigned."}
+      ]
+    }
+  ],
   "figures": [
     {
       "name": "shop_courier.carrying",
@@ -335,7 +357,7 @@ Request fields, all optional:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `writes` | `{kind: {key: record}}` | Records as the provider shows them now. Each record is arbitrary JSON. |
+| `writes` | `{kind: {key: record}}` | Records as the provider shows them now. Arbitrary JSON in a schema-taught world; verified against the declaration in a fact-taught one. |
 | `stamps` | `{kind: {key: instant}}` | The provider's own updated-at instant per record, ISO 8601, where one exists. Sparse. |
 | `deletes` | `{kind: [key]}` | Keys gone from the world. |
 | `full` | bool | Force a full pass: reindex and recompute everything rather than only what moved. The right call after a destructive change whose scope the warm path cannot see. Default `false`. |
@@ -365,6 +387,16 @@ the response); correctness over cheapness, and rare enough to be a fair price.
 
 Passes are serialised per tenant: two concurrent posts for one tenant queue,
 posts for different tenants overlap.
+
+**A batch is verified before anything lands.** A kind the world does not
+declare is a `422` in either mode. In a fact-taught world every written body
+is checked against its declaration -- an undeclared field, a wrong type or a
+wrong shape (`one` receiving a list, a scalar receiving an object) refuses
+the **whole batch**, with the kind, key and field in the detail. Not
+per-record quarantine: silently landing a record's batch-mates would narrow a
+population by a cheap path, and the fix is in the pushing host's mapping. An
+*absent* field -- omitted or an explicit null -- is never an error: the
+declaration's claim is known/unknown, not required/optional.
 
 `409` while the server is untaught; otherwise `200` with a **run report**:
 

@@ -1206,7 +1206,7 @@ def test_a_projection_is_still_refused_when_it_is_not_a_keyword_at_all() -> None
     `projct` to write `projection` -- true, unhelpful, and hiding the typo."""
     with pytest.raises(SyntaxError_) as caught:
         compile_source(BASE + PROJECTION.replace("projection ", "projekt "))
-    assert 'expected "group"' in caught.value.message
+    assert 'expected "fact"' in caught.value.message
     assert '"projection"' in caught.value.message
 
 

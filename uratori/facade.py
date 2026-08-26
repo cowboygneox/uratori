@@ -41,6 +41,7 @@ from .lang.plan import Library
 from .results import Evidence, Result
 from .schema import Schema
 from .store import EngineStore, FactSource
+from .verify import verify_writes
 
 log = logging.getLogger("uratori")
 
@@ -71,11 +72,15 @@ class Uratori:
         store: EngineStore,
         facts: FactSource,
     ) -> None:
-        self._schema = schema
+        # A fact-taught library carries the world; the declared schema then
+        # holds only settings and defaults. Completing it here, once, is what
+        # keeps every consumer below -- the engine freezing labels, evidence
+        # resolving links, `verify` checking kinds -- reading one world.
+        self._schema = schema.taught_by(library)
         self._library = library
         self._store = store
         self._facts = facts
-        self._engine = Engine(store, facts, library, schema)
+        self._engine = Engine(store, facts, library, self._schema)
         self._listeners: list[Listener] = []
 
     # ---------------------------------------------------------- listeners --
@@ -105,6 +110,22 @@ class Uratori:
                     await out
             except Exception:
                 log.exception("a listener raised; the run is unaffected")
+
+    # ------------------------------------------------------------- writes --
+
+    def verify(
+        self,
+        writes: Mapping[str, Mapping[str, Mapping[str, Any]]] | None = None,
+        deletes: Mapping[str, Sequence[str]] | None = None,
+    ) -> None:
+        """A batch against the world, before anything lands.
+
+        Raises `FactError` naming the kind, key and field. The engine never
+        writes facts, so the host (or the service's facts route) calls this
+        at the door -- storage is the host's, but what a stored record may
+        look like is the declaration's.
+        """
+        verify_writes(self._library, self._schema.kinds, writes, deletes)
 
     # --------------------------------------------------------------- runs --
 

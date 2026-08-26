@@ -54,6 +54,7 @@ from .lex import prose_above
 from .plan import Library
 
 _HEADERS = (
+    r"^fact\s+{name}\s*:",
     r"^(?:group|filter)\s+{name}\s",
     r"^measure\s+{name}\s*=",
     r"^figure\s+{name}(\s+across\s+\w+)?\s*:",

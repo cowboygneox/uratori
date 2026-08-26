@@ -86,6 +86,19 @@ def ready(s: State) -> tuple[World, Library]:
     return s.world, s.world.library
 
 
+def taught_schema(world: World) -> Schema:
+    """The world as taught, whichever door taught it.
+
+    A fact-taught library carries the kinds and name fields; the declared
+    schema then holds only settings. Every surface that describes the world
+    (the UI's kind list, its record names) reads through this, so the two
+    doors cannot disagree -- the facade does the same completion internally.
+    """
+    if world.library is None:
+        return world.schema
+    return world.schema.taught_by(world.library)
+
+
 def facade_for(s: State, world: World, library: Library) -> Uratori:
     facade = Uratori(
         schema=world.schema,

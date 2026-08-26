@@ -44,6 +44,37 @@ absence means for it, and none of them may coerce.
 
 
 @dataclass(frozen=True)
+class CompiledFactField:
+    name: str
+    type: str | None = None
+    """text | number | flag | moment, or None for a nested block."""
+
+    many: bool = False
+    doc: str = ""
+    children: tuple[CompiledFactField, ...] = ()
+
+
+@dataclass(frozen=True)
+class CompiledFact:
+    """What a record of this kind is -- the world, as one declaration of it.
+
+    Versioned like everything else, and the version is the hash of the fields
+    and their types alone: prose, the name field and the url field are
+    rendering. **No downstream version reads it.** A fact schema decides what
+    the checker permits and what the write boundary accepts -- like `keyed
+    as`, it never changes what the arithmetic produces, so a host adopting
+    fact declarations moves no figure's hash and rebuilds nothing.
+    """
+
+    name: str
+    fields: tuple[CompiledFactField, ...]
+    name_field: str | None = None
+    url_field: str | None = None
+    doc: str = ""
+    version: str = ""
+
+
+@dataclass(frozen=True)
 class CompiledIndex:
     name: str
     kind: str
@@ -204,6 +235,11 @@ class Library:
     """The concatenated `.fig` text, kept so the Data screen can show any
     declaration exactly as written. A figure whose formula is only readable by
     checking the repository out is a figure nobody checks."""
+
+    facts: dict[str, CompiledFact] = field(default_factory=dict)
+    """The declared world, when the source declares one. Empty for a
+    schema-taught world -- and that emptiness is load-bearing: it is what
+    tells the write boundary there are no fields to verify against."""
 
     def figure(self, name: str) -> FigurePlan | None:
         for plan in self.figures:
