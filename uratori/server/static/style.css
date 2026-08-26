@@ -1,191 +1,520 @@
-/* Dark, dense, and quiet: an investigation surface, not a product page.
-   Names and values are monospace because they are identifiers and evidence;
-   prose is the system face. Colour is spent only on declaration kinds and on
-   the moved/removed distinction in the activity log. */
+/* The drafting office.
+
+   This page's one promise is that every number can be traced to how it was
+   drawn, so the surface borrows the vernacular of an engineering drawing:
+   deep drafting-blue canvas, hairline rules, a title block on the headers,
+   and kind-stamps whose temperature is semantic -- warm stamps mark the
+   structural kinds that have no version of their own (group, filter,
+   measure), cool stamps the versioned, servable kinds (figure, reading,
+   projection, summary), green the facts at the bottom of every trace, grey
+   the tenant dials. Colour is information here, never decoration.
+
+   Three voices, all system stacks because this page must render identically
+   on an air-gapped machine: monospace for identifiers and evidence (the
+   dominant voice), a serif for the written prose (docstrings and page
+   intros -- the parts a person authored), sans for chrome and labels. */
 
 :root {
-  --canvas: #101216;
-  --surface: #171a20;
-  --surface-2: #1e2229;
-  --line: #2a2f38;
-  --ink: #e6e9ee;
-  --ink-dim: #9aa3b2;
-  --ink-faint: #6b7484;
-  --accent: #7aa2f7;
-  --good: #9ece6a;
-  --bad: #f7768e;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --canvas: #0c131d;
+  --surface: #101a27;
+  --surface-2: #162334;
+  --line: #223349;
+  --line-faint: #1a2839;
+  --ink: #dbe4f0;
+  --ink-dim: #93a5bd;
+  --ink-faint: #6d829c; /* the dimmest ink still clears WCAG AA on these surfaces */
+  --accent: #8ab8dd;
+
+  --warm: #d9a662;      /* structure without a version */
+  --fact: #93c880;      /* ground truth */
+  --bad: #e08b8b;
+  --good: #93c880;
+
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --serif: ui-serif, Georgia, "Times New Roman", serif;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
 * { box-sizing: border-box; }
 
+html { height: 100%; }
+
 body {
   margin: 0;
-  background: var(--canvas);
+  min-height: 100%;
+  background:
+    linear-gradient(180deg, rgba(138, 184, 221, 0.03), transparent 240px),
+    var(--canvas);
   color: var(--ink);
-  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 14px/1.55 var(--sans);
   font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
 }
+
+::selection { background: rgba(138, 184, 221, 0.25); }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+/* ------------------------------------------------------------- chrome --- */
 
 #chrome {
   display: flex;
   align-items: center;
-  gap: 1.25rem;
-  padding: 0.6rem 1.25rem;
+  gap: 1.5rem;
+  padding: 0 1.25rem;
+  height: 3rem;
   border-bottom: 1px solid var(--line);
+  /* The plain surface first: a browser without color-mix() must not drop
+     the only background on a sticky header and let the page scroll through
+     it. */
   background: var(--surface);
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
   position: sticky;
   top: 0;
+  z-index: 10;
 }
 
-#brand { font-family: var(--mono); font-weight: 600; letter-spacing: 0.04em; }
+#brand {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 0.95rem;
+  letter-spacing: 0.14em;
+  color: var(--ink);
+}
+/* The brand carries the one ornament on the page: the trace glyph, a value
+   underlined by the rule it was read off. */
+#brand::after {
+  content: "";
+  display: block;
+  height: 2px;
+  margin-top: 1px;
+  background: linear-gradient(90deg, var(--accent) 0 30%, var(--warm) 30% 55%, var(--fact) 55% 100%);
+  opacity: 0.85;
+}
+
 #spacer, .spacer { flex: 1; }
 
+#tabs { display: flex; gap: 0.25rem; align-self: stretch; align-items: stretch; }
 #tabs a {
+  display: flex;
+  align-items: center;
   color: var(--ink-dim);
   text-decoration: none;
-  padding: 0.25rem 0.6rem;
-  border-radius: 4px;
+  padding: 0 0.85rem;
+  font-size: 0.9rem;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px; /* sit on the chrome's own rule */
 }
-#tabs a.active { color: var(--ink); background: var(--surface-2); }
-#tabs a:hover { color: var(--ink); }
+#tabs a.active { color: var(--ink); border-bottom-color: var(--accent); }
+#tabs a:hover { color: var(--ink); text-decoration: none; }
 
-#tenant-box { color: var(--ink-faint); font-size: 0.85rem; }
+#tenant-box {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--ink-faint);
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
 #tenant {
   background: var(--surface-2);
-  color: var(--ink);
+  color: var(--ink-dim);
   border: 1px solid var(--line);
   border-radius: 4px;
-  padding: 0.15rem 0.35rem;
+  padding: 0.25rem 0.4rem;
   font-family: var(--mono);
+  font-size: 0.78rem;
+  max-width: 19rem;
+  text-overflow: ellipsis;
 }
+#tenant:hover { color: var(--ink); border-color: var(--ink-faint); }
 
-#view { padding: 1.25rem; max-width: 72rem; margin: 0 auto; }
+#view { padding: 1.5rem 1.5rem 3rem; max-width: 76rem; margin: 0 auto; }
+
+/* --------------------------------------------------------------- text --- */
 
 a { color: var(--accent); text-decoration: none; }
-a:hover { text-decoration: underline; }
+a:hover { text-decoration: underline; text-underline-offset: 3px; }
 
-h1 { font-size: 1.15rem; margin: 0 0 0.75rem; }
-h2 { font-size: 0.95rem; margin: 1.5rem 0 0.5rem; color: var(--ink-dim); }
+h1 {
+  font-size: 1.3rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0 0 0.75rem;
+}
+
+/* Section heads are drawing labels: small caps riding a hairline rule. */
+h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-family: var(--sans);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 2rem 0 0.75rem;
+}
+h2::after { content: ""; flex: 1; height: 1px; background: var(--line-faint); }
+/* Server-rendered text inside a drawing label appears verbatim: the
+   uppercase treatment is for chrome the client wrote, never for a name or
+   an identifier the server sent. */
+h2 .verbatim { text-transform: none; letter-spacing: normal; font-family: var(--mono); }
+h2.subject {
+  text-transform: none;
+  letter-spacing: normal;
+  font-family: var(--sans);
+  font-size: 0.95rem;
+  color: var(--ink);
+}
+
+/* Authored prose -- docstrings, page intros -- speaks in the serif voice. */
+.prose {
+  font-family: var(--serif);
+  font-size: 0.98rem;
+  line-height: 1.65;
+  color: var(--ink-dim);
+  max-width: 46rem;
+}
 
 .mono, code { font-family: var(--mono); font-size: 0.92em; }
 .dim { color: var(--ink-dim); }
 .faint { color: var(--ink-faint); }
+.finding { color: var(--warm); }
 
 .notice {
   border: 1px solid var(--line);
+  border-left: 3px solid var(--ink-faint);
   background: var(--surface);
-  border-radius: 6px;
+  border-radius: 4px;
   padding: 0.75rem 1rem;
   color: var(--ink-dim);
+  margin: 0.75rem 0;
 }
-.notice.problem { border-color: var(--bad); color: var(--ink); }
+.notice.problem { border-left-color: var(--bad); color: var(--ink); }
+
+/* -------------------------------------------------------------- stamps --- */
 
 .badge {
   display: inline-block;
   font-family: var(--mono);
-  font-size: 0.72rem;
-  padding: 0.05rem 0.45rem;
-  border-radius: 999px;
+  font-size: 0.68rem;
+  line-height: 1.5;
+  padding: 0 0.45rem;
+  border-radius: 3px;
   border: 1px solid var(--line);
   color: var(--ink-dim);
-  vertical-align: 0.1em;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
 }
-.badge.figure     { color: #7aa2f7; border-color: #3d5288; }
-.badge.reading    { color: #bb9af7; border-color: #5a4a85; }
-.badge.projection { color: #7dcfff; border-color: #3c6a85; }
-.badge.summary    { color: #73daca; border-color: #396b62; }
-.badge.group      { color: #e0af68; border-color: #7a5f36; }
-.badge.filter     { color: #d4b56a; border-color: #6f5c2f; }
-.badge.measure    { color: #ff9e64; border-color: #8a5535; }
-.badge.fact       { color: #9ece6a; border-color: #4f6b33; }
-.badge.setting    { color: var(--ink-dim); }
+/* Cool: versioned and servable. */
+.badge.figure     { color: #8ab8dd; border-color: #2c4a66; background: rgba(138, 184, 221, 0.07); }
+.badge.reading    { color: #a3a8e6; border-color: #3c4076; background: rgba(163, 168, 230, 0.07); }
+.badge.projection { color: #7cc7ce; border-color: #2b5c61; background: rgba(124, 199, 206, 0.07); }
+.badge.summary    { color: #8eccb2; border-color: #315e4c; background: rgba(142, 204, 178, 0.07); }
+/* Warm: structure with no version of its own. */
+.badge.group      { color: #d9a662; border-color: #6b5127; background: rgba(217, 166, 98, 0.07); }
+.badge.filter     { color: #cdb46b; border-color: #63562b; background: rgba(205, 180, 107, 0.07); }
+.badge.measure    { color: #dd9679; border-color: #6d4633; background: rgba(221, 150, 121, 0.07); }
+/* The leaves. */
+.badge.fact       { color: #93c880; border-color: #43602f; background: rgba(147, 200, 128, 0.07); }
+.badge.setting    { color: var(--ink-dim); border-style: dashed; }
+
+/* -------------------------------------------------------------- tables --- */
 
 table { border-collapse: collapse; width: 100%; }
 th, td {
   text-align: left;
-  padding: 0.35rem 0.75rem 0.35rem 0;
-  border-bottom: 1px solid var(--line);
+  padding: 0.4rem 1rem 0.4rem 0;
+  border-bottom: 1px solid var(--line-faint);
   vertical-align: top;
 }
-th { color: var(--ink-faint); font-weight: 500; font-size: 0.8rem; }
+th {
+  color: var(--ink-faint);
+  font-weight: 600;
+  font-size: 0.7rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  border-bottom-color: var(--line);
+}
+tr:last-child > td { border-bottom-color: transparent; }
 
 pre {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 0.75rem 1rem;
-  overflow-x: auto;
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  padding: 0.85rem 1.1rem;
+  overflow: auto;
+  /* Capped: a long definition must not push its own answer thousands of
+     pixels below the fold. The text scrolls inside its block. */
+  max-height: 32rem;
   font-family: var(--mono);
   font-size: 0.85rem;
-  line-height: 1.45;
+  line-height: 1.5;
 }
 
-.split { display: grid; grid-template-columns: 19rem 1fr; gap: 1.5rem; align-items: start; }
+/* --------------------------------------------------------------- split --- */
 
-.roster { border-right: 1px solid var(--line); padding-right: 1rem; }
+.split {
+  display: grid;
+  grid-template-columns: 20rem minmax(0, 1fr);
+  gap: 2rem;
+  align-items: start;
+}
+/* The pane precedes the roster in the DOM so a keyboard reaches the content
+   without tabbing through every declaration; the grid puts the roster back
+   on the left. */
+.split > .pane { grid-column: 2; grid-row: 1; min-width: 0; }
+.split > .roster { grid-column: 1; grid-row: 1; }
+
+/* -------------------------------------------------------------- roster --- */
+
+.roster {
+  border-right: 1px solid var(--line-faint);
+  padding-right: 1.25rem;
+  position: sticky;
+  top: 4rem;
+  max-height: calc(100vh - 5rem);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
 .roster .kind-head {
-  font-family: var(--mono);
-  font-size: 0.8rem;
-  color: var(--ink-dim);
-  margin: 0.9rem 0 0.2rem;
+  font-family: var(--sans);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 1.1rem 0 0.25rem;
+  padding: 0 0.5rem;
 }
-.roster a { display: block; padding: 0.1rem 0.4rem; border-radius: 4px; color: var(--ink); }
-.roster a .badge { float: right; margin-top: 0.2rem; }
-.roster a.here { background: var(--surface-2); }
-.roster input {
+/* One row, one line: the name may shorten, the stamp never wraps. The old
+   float layout let a long name push its stamp onto the next row, where it
+   read as the neighbour's. */
+.roster a {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.16rem 0.5rem;
+  border-radius: 4px;
+  color: var(--ink);
+  font-size: 0.86rem;
+}
+.roster a .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.roster a:hover { background: var(--surface-2); text-decoration: none; }
+.roster a.here { background: var(--surface-2); box-shadow: inset 2px 0 0 var(--accent); }
+.roster a.here .name { color: var(--ink); }
+.roster input { margin-bottom: 0.25rem; }
+/* Stamps are a column, not a ragged right margin: equal widths keep the
+   list's right register as straight as its left. */
+.roster .badge, .tree .badge { min-width: 4.9rem; text-align: center; }
+
+input[type="search"] {
   width: 100%;
-  background: var(--surface-2);
+  background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 4px;
   color: var(--ink);
-  padding: 0.3rem 0.5rem;
+  padding: 0.4rem 0.6rem;
   font-family: var(--mono);
+  font-size: 0.85rem;
 }
+input[type="search"]::placeholder { color: var(--ink-faint); }
+/* A border tint only -- the global :focus-visible ring stays, so keyboard
+   focus here is exactly as loud as everywhere else. */
+input[type="search"]:focus { border-color: var(--accent); }
 
-.tree { list-style: none; padding-left: 1.1rem; margin: 0.25rem 0; border-left: 1px dotted var(--line); }
-.tree > li { margin: 0.15rem 0; }
-.tree .leaf { color: var(--ink-dim); }
+/* --------------------------------------------------------- title block --- */
+
+/* The signature: a drawing's title block. The landing pane and every
+   declaration head carry one -- the artefact's name, its classification
+   stamp, and the citation line (the version hash every value carries). */
+.title-block {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  margin-bottom: 1.5rem;
+}
+.title-block .tb-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.9rem 1.1rem 0.75rem;
+}
+.title-block .tb-head h1 {
+  margin: 0;
+  font-family: var(--mono);
+  font-weight: 600;
+  min-width: 0;
+  overflow-wrap: anywhere; /* a long declaration name wraps, never overflows */
+}
+.title-block .tb-cite {
+  border-top: 1px solid var(--line-faint);
+  padding: 0.5rem 1.1rem;
+  font-size: 0.8rem;
+  color: var(--ink-faint);
+}
+.title-block .tb-cite .mono { color: var(--ink-dim); }
+.title-block .tb-doc {
+  border-top: 1px solid var(--line-faint);
+  padding: 0.75rem 1.1rem;
+}
+.title-block .tb-doc p { margin: 0; }
+
+/* The library plate: the landing pane's overview of what this deployment
+   holds. Counts here are chrome -- the client counts list entries the same
+   way it says "3 records", it never derives a value. */
+.plate-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+  padding: 0.75rem 1.1rem;
+  border-top: 1px solid var(--line-faint);
+}
+.plate-counts .cell { display: flex; align-items: baseline; gap: 0.5rem; }
+.plate-counts .n { font-family: var(--mono); font-size: 1.05rem; color: var(--ink); }
+
+/* ---------------------------------------------------------------- tree --- */
+
+.tree {
+  list-style: none;
+  padding-left: 1.25rem;
+  margin: 0.3rem 0;
+  border-left: 1px solid var(--line);
+}
+.tree > li { margin: 0.28rem 0; position: relative; }
+/* The elbow that joins a dependency to the rule above it: a drawn
+   connector, not an indent the eye has to infer. */
+.tree > li::before {
+  content: "";
+  position: absolute;
+  left: -1.25rem;
+  top: 0.72em;
+  width: 0.85rem;
+  height: 1px;
+  background: var(--line);
+}
+.tree .leaf { color: var(--ink-faint); }
+
+/* ------------------------------------------------------------ activity --- */
 
 .run {
   border: 1px solid var(--line);
-  background: var(--surface);
-  border-radius: 6px;
-  padding: 0.75rem 1rem;
-  margin-bottom: 0.9rem;
-}
-.run .head { display: flex; gap: 0.9rem; align-items: baseline; flex-wrap: wrap; }
-.run .when { font-family: var(--mono); color: var(--ink-dim); font-size: 0.85rem; }
-.move { display: flex; gap: 0.6rem; padding: 0.2rem 0; align-items: baseline; flex-wrap: wrap; }
-.move .arrow { color: var(--ink-faint); }
-.move .after { font-family: var(--mono); }
-.move.removed .after { color: var(--bad); }
-
-.controls { display: flex; gap: 0.75rem; align-items: center; margin: 0.75rem 0; flex-wrap: wrap; }
-.controls input[type="search"] {
-  background: var(--surface-2);
-  border: 1px solid var(--line);
   border-radius: 4px;
-  color: var(--ink);
-  padding: 0.3rem 0.6rem;
-  font-family: var(--mono);
-  min-width: 16rem;
+  background: var(--surface);
+  padding: 0.85rem 1.1rem;
+  margin-bottom: 1rem;
 }
+.run .head {
+  display: flex;
+  gap: 0.9rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--line-faint);
+  margin-bottom: 0.5rem;
+}
+.run .when { font-family: var(--mono); color: var(--ink); font-size: 0.85rem; }
+.moves { width: auto; }
+.moves td { border-bottom: 0; padding: 0.18rem 1.1rem 0.18rem 0; }
+.moves .arrow { color: var(--ink-faint); padding-right: 0.6rem; }
+.moves .after { font-family: var(--mono); color: var(--ink); }
+.moves .removed .after { color: var(--bad); }
+
+/* ------------------------------------------------------------ controls --- */
+
+.controls { display: flex; gap: 0.75rem; align-items: center; margin: 1rem 0; flex-wrap: wrap; }
+.controls input[type="search"] { width: auto; min-width: 17rem; }
+
 button {
   background: var(--surface-2);
   border: 1px solid var(--line);
   color: var(--ink);
   border-radius: 4px;
-  padding: 0.25rem 0.7rem;
+  padding: 0.28rem 0.75rem;
   cursor: pointer;
   font: inherit;
+  font-size: 0.85rem;
 }
 button:disabled { color: var(--ink-faint); cursor: default; }
 button:hover:not(:disabled) { border-color: var(--ink-faint); }
 
+/* Buttons inside a table row are asides, not calls to action: a hundred
+   subject rows must not read as a hundred capsules. */
+td button {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink-faint);
+  padding: 0.1rem 0.5rem;
+  font-size: 0.78rem;
+}
+td button:hover:not(:disabled) { color: var(--ink); border-color: var(--line); }
+
 .record-row { cursor: pointer; }
 .record-row:hover td { background: var(--surface); }
+tr.expansion > td { background: var(--surface); }
+/* Both expansions speak the same voice: no browser bullets, no UA gutter. */
+tr.expansion ul { list-style: none; margin: 0.25rem 0; padding-left: 0; }
+tr.expansion li { padding: 0.12rem 0; }
 
 .kv { margin: 0.2rem 0; }
+dl.kv {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 1.25rem;
+  margin: 0.4rem 0;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--line-faint);
+}
+.kv .pair { white-space: nowrap; }
 .kv dt { display: inline; color: var(--ink-faint); font-size: 0.85rem; }
-.kv dd { display: inline; margin: 0 0.9rem 0 0.3rem; font-family: var(--mono); font-size: 0.85rem; }
+.kv dd { display: inline; margin: 0 0 0 0.35rem; font-family: var(--mono); font-size: 0.85rem; }
+
+/* ------------------------------------------------------------- motion --- */
+
+@media (prefers-reduced-motion: no-preference) {
+  #view > * { animation: settle 140ms ease-out; }
+  @keyframes settle {
+    from { opacity: 0; transform: translateY(2px); }
+    to { opacity: 1; transform: none; }
+  }
+  #tabs a, .roster a, button, a { transition: color 80ms, background-color 80ms, border-color 80ms; }
+}
+
+/* --------------------------------------------------------------- small --- */
+
+@media (max-width: 60rem) {
+  /* minmax(0, ...) matters: a bare 1fr's minimum is min-content, and the
+     source pre's min-content is wider than any phone. */
+  .split { grid-template-columns: minmax(0, 1fr); }
+  /* One column: content first (that is the DOM order), the list below it. */
+  .split > .pane, .split > .roster { grid-column: 1; grid-row: auto; }
+  .roster {
+    position: static;
+    /* Tall enough that the cut is visibly a scroll, not the end of the
+       list -- at 14rem the sixth row's border read as "that's all". */
+    max-height: 50vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    padding: 0 0 1rem;
+  }
+  #tenant { max-width: 12rem; }
+  #chrome { gap: 0.5rem 0.75rem; flex-wrap: wrap; height: auto; padding: 0.5rem 1rem; }
+  #tabs a { padding: 0.25rem 0.6rem; border-bottom: 0; border-radius: 4px; }
+  #tabs a.active { background: var(--surface-2); }
+}

@@ -19,7 +19,10 @@ function el(tag, attrs, ...children) {
     else if (key.startsWith('on')) node.addEventListener(key.slice(2), value);
     else node.setAttribute(key, value);
   }
-  for (const child of children.flat()) {
+  // flat(Infinity), not flat(): views build children with nested maps
+  // (a projection's dt/dd pairs, a reading's stat runs), and a depth-1
+  // flatten leaves inner arrays to stringify as "[object HTMLElement]".
+  for (const child of children.flat(Infinity)) {
     if (child == null) continue;
     node.append(child.nodeType ? child : document.createTextNode(String(child)));
   }
@@ -177,11 +180,15 @@ function roster(selected) {
       members.sort((a, b) =>
         KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || a.name.localeCompare(b.name));
       for (const declaration of members) {
+        // The name is its own span so it may ellipsise; the stamp keeps the
+        // row's right edge whatever the name's length.
         list.append(el('a', {
           href: `#/definitions/${encodeURIComponent(declaration.name)}`,
-          class: declaration.name === selected ? 'here mono' : 'mono',
-        }, declaration.name.slice(group.length + 1) || declaration.name,
-          ' ', el('span', { class: `badge ${declaration.kind}` }, declaration.kind)));
+          class: declaration.name === selected ? 'here' : '',
+          title: declaration.name, // the ellipsis needs a recovery path
+        }, el('span', { class: 'name mono' },
+            declaration.name.slice(group.length + 1) || declaration.name),
+          el('span', { class: `badge ${declaration.kind}` }, declaration.kind)));
       }
     }
   };
@@ -191,23 +198,53 @@ function roster(selected) {
     type: 'search', placeholder: 'filter…',
     oninput: (event) => fill(event.target.value),
   });
-  return el('div', { class: 'roster' }, search, list);
+  const holder = el('div', { class: 'roster' }, search, list);
+  // The roster scrolls on its own now, and it is rebuilt on every
+  // navigation, so the fresh element starts at the top. Bring the selected
+  // row back into view, or clicking the fortieth entry snaps the list away
+  // from it.
+  queueMicrotask(() => {
+    const here = holder.querySelector('.here');
+    if (here && holder.isConnected) here.scrollIntoView({ block: 'nearest' });
+  });
+  return holder;
 }
 
 async function definitionsView(name) {
-  const pane = name ? await declarationPane(name) : [
-    el('h1', {}, 'Definitions'),
-    el('p', { class: 'dim' },
-      'Every declaration this deployment computes from, including the indexes ',
-      'and measures that have no version of their own. Pick one to read it as ',
-      'written and walk its dependencies down to the facts.'),
+  const pane = name ? await declarationPane(name) : [libraryPlate()];
+  // Pane before roster: a keyboard should reach the content in a few tabs,
+  // not after all 75 roster links. The stylesheet places the roster left.
+  return [el('div', { class: 'split' }, el('div', { class: 'pane' }, pane), roster(name))];
+}
+
+// The landing pane's title block: what this deployment holds, at a glance.
+// The per-kind counts are chrome -- entries counted off the list the server
+// sent, like the evidence view's "cites N records" and the activity view's
+// "showing the newest N of M"; no value is ever derived here.
+function libraryPlate() {
+  const counts = new Map(KIND_ORDER.map((kind) => [kind, 0]));
+  for (const declaration of world.declarations) {
+    counts.set(declaration.kind, (counts.get(declaration.kind) || 0) + 1);
+  }
+  return el('div', {},
+    el('div', { class: 'title-block' },
+      el('div', { class: 'tb-head' }, el('h1', {}, 'The library')),
+      el('div', { class: 'plate-counts' },
+        [...counts.entries()].filter(([, n]) => n > 0).map(([kind, n]) =>
+          el('span', { class: 'cell' },
+            el('span', { class: 'n' }, String(n)),
+            el('span', { class: `badge ${kind}` }, kind)))),
+      el('div', { class: 'tb-doc' },
+        el('p', { class: 'prose' },
+          'Every declaration this deployment computes from, including the ',
+          'groups, filters and measures that have no version of their own. ',
+          'Pick one to read it as written and walk its dependencies down ',
+          'to the facts.'))),
     world.refusal
       ? el('div', { class: 'notice problem' },
           'Definitions are stored but refused by this build’s compiler: ',
           el('span', { class: 'mono' }, world.refusal))
-      : null,
-  ];
-  return [el('div', { class: 'split' }, roster(name), el('div', {}, pane))];
+      : null);
 }
 
 function dependencyNode(edge, seen) {
@@ -251,18 +288,23 @@ async function declarationPane(name) {
       ' — the library may have been redeployed since this link was made.')];
   }
   const parts = [
-    el('h1', {},
-      el('span', { class: 'mono' }, declaration.name), ' ',
-      el('span', { class: `badge ${declaration.kind}` }, declaration.kind),
-      declaration.unit ? el('span', { class: 'badge' }, declaration.unit) : null,
-      declaration.mode ? el('span', { class: 'badge' }, declaration.mode) : null),
-    declaration.doc ? el('p', { class: 'dim' }, declaration.doc) : null,
-    el('p', { class: 'faint' },
-      declaration.version
-        ? ['version ', el('span', { class: 'mono' }, declaration.version),
-           ' — the citation every value computed by this text carries']
-        : ['no version of its own — this text is hashed into every ',
-           'definition that reads it, so editing it moves their versions']),
+    // The declaration's title block: name and stamps, the authored prose,
+    // and the citation line beneath -- the drawing's legend, not a heading.
+    el('div', { class: 'title-block' },
+      el('div', { class: 'tb-head' },
+        el('h1', {}, declaration.name), ' ',
+        el('span', { class: `badge ${declaration.kind}` }, declaration.kind),
+        declaration.unit ? el('span', { class: 'badge' }, declaration.unit) : null,
+        declaration.mode ? el('span', { class: 'badge' }, declaration.mode) : null),
+      declaration.doc
+        ? el('div', { class: 'tb-doc' }, el('p', { class: 'prose' }, declaration.doc))
+        : null,
+      el('div', { class: 'tb-cite' },
+        declaration.version
+          ? ['version ', el('span', { class: 'mono' }, declaration.version),
+             ' — the citation every value computed by this text carries']
+          : ['no version of its own — this text is hashed into every ',
+             'definition that reads it, so editing it moves their versions'])),
     el('h2', {}, 'As written'),
     declaration.source
       ? el('pre', {}, declaration.source)
@@ -288,7 +330,10 @@ async function declarationPane(name) {
       : el('p', { class: 'faint' }, 'Nothing in the library reads this.'));
 
   if (['figure', 'reading', 'projection', 'summary'].includes(declaration.kind)) {
-    parts.push(el('h2', {}, `Current answer — tenant ${tenant() || '?'}`));
+    // The tenant id rides in a verbatim span: the label style uppercases,
+    // and a case-mangled identifier on this page would be a small lie.
+    parts.push(el('h2', {}, 'Current answer — tenant ',
+      el('span', { class: 'verbatim' }, tenant() || '?')));
     parts.push(await answerSection(declaration));
   }
   return parts;
@@ -337,7 +382,9 @@ async function answerSection(declaration) {
       })));
   } else if (result.kind === 'reading') {
     for (const subject of result.subjects) {
-      blocks.push(el('h2', {}, subject.name));
+      // class 'subject': the drawing-label h2 uppercases, and this text is
+      // a server-rendered name that must appear verbatim.
+      blocks.push(el('h2', { class: 'subject' }, subject.name));
       blocks.push(el('table', {},
         el('tr', {}, el('th', {}, 'window'), el('th', {}, 'statistics'),
           el('th', {}, 'sample'), el('th', {}, 'coverage')),
@@ -357,11 +404,13 @@ async function answerSection(declaration) {
     // Projection and summary rows: named, server-rendered cells.
     for (const subject of result.subjects) {
       if (!subject.row) continue;
+      // Each dt/dd pair rides in a div (the dl content model allows it), so
+      // a wrap happens between pairs, never between a label and its value.
       blocks.push(el('div', { class: 'kv' },
         el('dl', { class: 'kv' },
-          el('dt', {}, 'row'), el('dd', {}, subject.name),
+          el('div', { class: 'pair' }, el('dt', {}, 'row'), el('dd', {}, subject.name)),
           Object.entries(subject.row.display).map(([column, text]) =>
-            [el('dt', {}, column), el('dd', {}, text)])),
+            el('div', { class: 'pair' }, el('dt', {}, column), el('dd', {}, text)))),
         subject.row.flags.map((flag) =>
           el('div', { class: flag.severity === 'attention' ? 'dim' : 'faint' },
             `⚑ ${flag.label} — ${flag.detail}`))));
@@ -370,7 +419,7 @@ async function answerSection(declaration) {
       blocks.push(el('h2', {}, 'Summary'),
         el('dl', { class: 'kv' },
           Object.entries(result.summary.display).map(([column, text]) =>
-            [el('dt', {}, column), el('dd', {}, text)])));
+            el('div', { class: 'pair' }, el('dt', {}, column), el('dd', {}, text)))));
     }
   }
   blocks.push(el('p', { class: 'faint' },
@@ -393,7 +442,9 @@ async function evidenceRow(row, figure, subject) {
     holder.append(problem(answer, 'No evidence:'));
   } else {
     const evidence = answer.body;
-    holder.append(el('p', { class: 'dim' },
+    // Through el(), not bare append(): append() stringifies a null child
+    // into the visible word "null", el() skips it.
+    holder.append(el('div', {}, el('p', { class: 'dim' },
       evidence.members.length
         ? `This value cites ${evidence.members.length} ${evidence.parts ? 'parts' : 'records'}:`
         : 'This value cites nothing.'),
@@ -408,7 +459,7 @@ async function evidenceRow(row, figure, subject) {
             : (member.title || member.key),
           member.display ? el('span', { class: 'dim' }, ` — ${member.display}`) : null,
           member.held ? null : el('span', { class: 'faint' }, ' (no longer held)'));
-      })));
+      }))));
   }
   row.after(expansion);
 }
@@ -429,7 +480,7 @@ async function kindListView() {
   if (!answer.ok) return [problem(answer, 'Could not list fact kinds:')];
   return [
     el('h1', {}, 'Facts'),
-    el('p', { class: 'dim' },
+    el('p', { class: 'prose' },
       'What the server actually holds, per kind — the bottom of every trace. ',
       'A kind at zero is a finding: declared in the schema, never collected.'),
     el('table', {},
@@ -438,8 +489,12 @@ async function kindListView() {
         el('td', {}, el('a', {
           class: 'mono', href: `#/facts/${encodeURIComponent(entry.kind)}`,
         }, entry.kind)),
-        el('td', { class: entry.records ? 'mono' : 'mono faint' },
-          String(entry.records), entry.records ? '' : ' — nothing collected')))),
+        // A kind at zero is a finding, so it must not be the dimmest thing
+        // on the page -- the warm ink is the same voice the unversioned
+        // stamps use: look here, something structural.
+        el('td', { class: entry.records ? 'mono' : 'mono finding' },
+          String(entry.records),
+          entry.records ? '' : el('span', { class: 'faint' }, ' — nothing collected'))))),
   ];
 }
 
@@ -471,11 +526,13 @@ async function kindView(kind, q, after, trail) {
   });
 
   const rows = page.records.map((record) => {
-    const row = el('tr', { class: 'record-row' },
+    // tabindex + keydown: the expansion is the only way to read a record,
+    // so it cannot be mouse-only.
+    const row = el('tr', { class: 'record-row', tabindex: '0' },
       el('td', { class: 'mono' }, record.key),
       el('td', {}, record.name ?? el('span', { class: 'faint' }, '—')),
       el('td', { class: 'mono faint' }, record.source_stamp ?? '—'));
-    row.addEventListener('click', () => {
+    const toggle = () => {
       if (row.nextSibling && row.nextSibling.classList.contains('expansion')) {
         row.nextSibling.remove();
         return;
@@ -483,6 +540,10 @@ async function kindView(kind, q, after, trail) {
       row.after(el('tr', { class: 'expansion' },
         el('td', { colspan: '3' },
           el('pre', {}, JSON.stringify(record.value, null, 2)))));
+    };
+    row.addEventListener('click', toggle);
+    row.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggle(); }
     });
     return row;
   });
@@ -550,19 +611,23 @@ async function activityView() {
   // surface as itself, never be mislabelled as one of today's two.
   const TRIGGERS = { facts: 'facts arrived', run: 'manual run' };
 
+    // A table, not stacked flex rows: the whole point of the log is
+    // comparing movements, and comparison needs the befores under each
+    // other and the afters under each other.
   const runs = page.runs.map((run) => {
-    const moves = run.shown.map((change) => el('div', {
-      class: change.kind === 'removed' ? 'move removed' : 'move',
-    },
-      el('a', {
-        class: 'mono',
-        href: `#/definitions/${encodeURIComponent(change.figure)}`,
-      }, change.figure),
-      el('span', { class: 'dim' }, change.label),
-      change.kind === 'removed' ? el('span', { class: 'badge' }, 'removed') : null,
-      el('span', { class: 'mono faint' }, change.before_display),
-      el('span', { class: 'arrow' }, '→'),
-      el('span', { class: 'after' }, change.after_display)));
+    const moves = run.shown.length ? el('table', { class: 'moves' },
+      run.shown.map((change) => el('tr', {
+        class: change.kind === 'removed' ? 'move removed' : 'move',
+      },
+        el('td', {}, el('a', {
+          class: 'mono',
+          href: `#/definitions/${encodeURIComponent(change.figure)}`,
+        }, change.figure)),
+        el('td', { class: 'dim' }, change.label,
+          change.kind === 'removed' ? [' ', el('span', { class: 'badge' }, 'removed')] : null),
+        el('td', { class: 'mono faint' }, change.before_display),
+        el('td', { class: 'arrow' }, '→'),
+        el('td', { class: 'after' }, change.after_display)))) : null;
 
     return el('div', { class: 'run' },
       el('div', { class: 'head' },
@@ -578,7 +643,7 @@ async function activityView() {
         ? el('p', { class: 'faint' }, 'rebuilt: ',
             el('span', { class: 'mono' }, run.rebuilt.join(', ')))
         : null,
-      moves.length ? moves : el('p', { class: 'faint' }, 'No figure moved.'),
+      moves ?? el('p', { class: 'faint' }, 'No figure moved.'),
       run.not_shown > 0
         ? el('p', { class: 'faint' },
             `${run.not_shown} more moved and are not listed — the log stores `
@@ -588,7 +653,7 @@ async function activityView() {
 
   return [
     el('h1', {}, 'Activity'),
-    el('p', { class: 'dim' },
+    el('p', { class: 'prose' },
       'Cause before effect: each pass with the movements it caused, frozen ',
       'when they happened. Push a fact and the newest run says what it cascaded to.'),
     el('div', { class: 'controls' }, toggle,
