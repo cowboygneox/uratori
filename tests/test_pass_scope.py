@@ -174,3 +174,9 @@ async def test_a_facts_pass_is_still_the_serving_moment() -> None:
         "a sync pass re-serves the board; gating it here would freeze every "
         "clock-worded sentence until a definition happened to change"
     )
+
+    # The door decides, not the batch: a scheduled sync whose writes
+    # deduplicated to nothing is still the sync moment, and the quiet weeks
+    # are exactly when the clock is the only thing moving the sentences.
+    report = await facade.run(TENANT, written={})
+    assert {"code_change.card", "work_issue.list"} <= _served(report.results)

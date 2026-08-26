@@ -204,13 +204,17 @@ class Uratori:
             tenant, settings, written=written, deleted=deleted, full=full
         )
         touched = {change.figure for change in outcome.changes}
-        # A pass carrying facts (or `full`) is the host's sync moment: every
-        # projection re-serves on it, clock refresh included. A definition-only
-        # pass is a deploy step whose reach is known with certainty -- the
-        # dependency graph is compile-time -- so it serves exactly the
-        # projections a rebuilt grouping or a moved figure can touch, and a
-        # change that reaches nothing serves nothing and wakes nobody.
-        sync = full or bool(written) or bool(deleted)
+        # A pass through the facts door (or `full`) is the host's sync
+        # moment: every projection re-serves on it, clock refresh included --
+        # and `is not None`, not truthiness, because a scheduled sync whose
+        # batch deduplicated to nothing is still the sync, and gating on the
+        # batch's contents would freeze every clock-worded sentence exactly
+        # when the data goes quiet. A definition-only pass is a deploy step
+        # whose reach is known with certainty -- the dependency graph is
+        # compile-time -- so it serves exactly the projections a rebuilt
+        # grouping or a moved figure can touch, and a change that reaches
+        # nothing serves nothing and wakes nobody.
+        sync = full or written is not None or deleted is not None
         projections = None if sync else self._reached(outcome.reindexed, touched)
         results = await self.results(
             tenant,
