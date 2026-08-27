@@ -293,5 +293,11 @@ def _fill(frm: str, to: str, per_day: Mapping[str, float | None]) -> list[tuple[
     while day <= end:
         key = day.isoformat()
         out.append((key, per_day.get(key)))
+        if day == date.max:
+            # A window may legitimately end on the calendar's last day --
+            # 9999-12-31 is a well-formed anchor -- and the step beyond it
+            # that this loop's condition would catch overflows before the
+            # condition ever runs.
+            break
         day += timedelta(days=1)
     return out

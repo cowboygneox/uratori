@@ -1212,6 +1212,12 @@ async def test_an_anchored_reading_ends_its_windows_on_the_anchor_day(server: Se
     assert served.date().isoformat() == "2026-06-30"
     assert (served.hour, served.minute, served.second) == (23, 59, 59)
 
+    # The anchor is an argument, never part of the definition's identity: the
+    # anchored answer and the current one cite the same version, or a cited
+    # number's definition would depend on when it was asked about.
+    unanchored = await server.http.get("/tenants/t1/results/shop_courier.typical_ride")
+    assert unanchored.json()["version"] == result["version"]
+
     # The bulk route accepts the same anchor -- the first paint of a board
     # deliberately looking at June must not mix June readings with July ones.
     listed = await server.http.get(
@@ -1267,11 +1273,33 @@ async def test_an_anchor_before_any_data_is_an_absence_not_a_zero(server: Server
 
 
 async def test_an_anchor_that_is_not_a_date_is_refused(server: Server) -> None:
-    """"June 30th" and "2026-6-30" are requests the server cannot resolve to
-    a calendar day; guessing one silently would serve a window nobody asked
-    for. 422, the same refusal every other malformed input gets."""
+    """Anything but YYYY-MM-DD is a 422, and the epoch numbers are the rows
+    that earn this test: pydantic's lax `date` coerces a bare integer as a
+    unix timestamp, so `?at=1782000000` would quietly become 2026-06-21 and
+    serve a plausible window nobody asked for -- a wrong population wearing
+    a right-looking label, to exactly the caller most likely to make the
+    mistake, since epoch millis are what the engine speaks internally."""
     await _teach_rides(server.http)
-    got = await server.http.get(
-        "/tenants/t1/results/shop_courier.typical_ride", params={"at": "June 30th"}
-    )
-    assert got.status_code == 422, got.text
+    for wrong in ("June 30th", "2026-6-30", "20260630", "1782000000", "1782000000000", "0"):
+        got = await server.http.get(
+            "/tenants/t1/results/shop_courier.typical_ride", params={"at": wrong}
+        )
+        assert got.status_code == 422, f"{wrong!r}: {got.status_code} {got.text}"
+
+
+async def test_an_anchor_at_the_calendars_edge_is_an_answer_not_a_500(server: Server) -> None:
+    """9999-12-31 and 0001-01-01 are well-formed calendar days, so they get
+    the same honest answer any other data-free anchor gets -- empty windows
+    ending on the day asked about. Both used to overflow `date` arithmetic
+    and surface as a 500, which reads as the server's fault for a question
+    that merely has an empty answer."""
+    await _teach_rides(server.http)
+    for edge in ("9999-12-31", "0001-01-01"):
+        got = await server.http.get(
+            "/tenants/t1/results/shop_courier.typical_ride",
+            params={"at": edge, "trailing": 30},
+        )
+        assert got.status_code == 200, f"{edge}: {got.status_code} {got.text}"
+        [window] = got.json()["empty"]["windows"]
+        assert window["to"] == edge
+        assert window["days_covered"] == 0

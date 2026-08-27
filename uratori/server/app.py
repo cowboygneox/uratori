@@ -28,6 +28,7 @@ Design decisions a reader should not have to rediscover:
 import hmac
 import logging
 import os
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date
@@ -425,14 +426,38 @@ def create_app(
     # zone. An argument like `trailing` -- windows and their anchor are the
     # things a client may choose, because both only move which stored days
     # take part; the calculation itself is hashed into the version and no
-    # query parameter reaches it. FastAPI's `date` parsing is the validation:
-    # anything that is not a calendar day is a 422 before the engine sees it.
+    # query parameter reaches it.
+    def anchor_of(at: str | None) -> str | None:
+        """The anchor, validated as a bare calendar day or refused as a 422.
+
+        A `str` validated by hand rather than a pydantic `date`, because
+        pydantic's lax mode coerces bare integers as unix timestamps --
+        `?at=1782000000` would quietly become 2026-06-21 and serve a
+        plausible window nobody asked for, when the caller who sends epoch
+        seconds (or millis, same acceptance) needs to be told the parameter
+        is a day. The spelling is pinned to YYYY-MM-DD first, so ISO's
+        undashed basic form is refused too rather than depending on which
+        parser this build's `fromisoformat` happens to be.
+        """
+        if at is None:
+            return None
+        refusal = HTTPException(
+            status_code=422,
+            detail=f"`at` must be a calendar day, YYYY-MM-DD; got {at!r}",
+        )
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", at):
+            raise refusal
+        try:
+            return date.fromisoformat(at).isoformat()
+        except ValueError:
+            raise refusal from None
+
     @app.get("/tenants/{tenant}/results", response_model=list[Result], dependencies=[auth])
     async def get_results(
         tenant: str,
         s: S,
         trailing: Annotated[list[int] | None, Query()] = None,
-        at: Annotated[date | None, Query()] = None,
+        at: Annotated[str | None, Query()] = None,
     ) -> list[Result]:
         world, library = ready(s)
         facade = facade_for(s, world, library)
@@ -441,7 +466,7 @@ def create_app(
                 tenant,
                 await db.load_settings(s.pool, tenant),
                 trailing=trailing or DEFAULT_TRAILING,
-                at=at.isoformat() if at is not None else None,
+                at=anchor_of(at),
             )
         )
 
@@ -451,7 +476,7 @@ def create_app(
         name: str,
         s: S,
         trailing: Annotated[list[int] | None, Query()] = None,
-        at: Annotated[date | None, Query()] = None,
+        at: Annotated[str | None, Query()] = None,
     ) -> Result:
         world, library = ready(s)
         facade = facade_for(s, world, library)
@@ -461,7 +486,7 @@ def create_app(
                 name,
                 await db.load_settings(s.pool, tenant),
                 trailing=trailing or DEFAULT_TRAILING,
-                at=at.isoformat() if at is not None else None,
+                at=anchor_of(at),
             )
         except ValueError as refusal:
             raise HTTPException(status_code=400, detail=str(refusal)) from refusal

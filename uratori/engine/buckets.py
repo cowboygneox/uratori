@@ -227,6 +227,16 @@ def end_of_day_ms(day: str, zone: str | None) -> float:
     """
     anchor = date.fromisoformat(day)
     tz = _zone(zone) if zone is not None else UTC
+    if anchor == date.max:
+        # The one day with no next midnight inside `date`'s range, so it is
+        # built from its own midnight instead: every zone's transition rules
+        # end centuries earlier, making this day exactly 24 hours long. Not
+        # `datetime.max.timestamp()`, because a float second at year 9999
+        # cannot carry the last microsecond -- it rounds up to the midnight
+        # beyond `datetime`'s range and the very overflow this branch exists
+        # to answer comes back during rendering.
+        midnight = datetime.combine(anchor, dt_time(), tzinfo=tz)
+        return midnight.timestamp() * 1000.0 + 86_400_000.0 - 1.0
     next_midnight = datetime.combine(anchor + timedelta(days=1), dt_time(), tzinfo=tz)
     return next_midnight.timestamp() * 1000.0 - 1.0
 
@@ -240,15 +250,23 @@ def day_range(at_ms: float, zone: str | None, days: int) -> tuple[str, str]:
     morning. One function computes both ends, so they cannot disagree.
 
     The start is calendar arithmetic on the end day, not millisecond
-    subtraction from the instant: a spring-forward inside the window makes one
-    of its days 23 hours long, so exact-day subtraction from an instant within
-    an hour of midnight lands on the wrong side of it and the window quietly
-    opens a day late -- and an anchored request sits at a day's last
-    millisecond, which is exactly the exposed hour.
+    subtraction from the instant: a fall-back inside the window makes one of
+    its days 25 hours long, so stepping back exact days from an instant
+    within an hour of midnight crosses one midnight too few and the window
+    quietly opens a day late -- and an anchored request sits at a day's last
+    millisecond, which is exactly the exposed hour. (The spring-forward
+    direction only pushes the wall clock further from midnight, which is why
+    the bug hid for as long as every request was anchored on now.)
+
+    The start clamps at the calendar's own edge rather than raising: enough
+    trailing days from an early enough anchor walk out of `date`'s range, and
+    "the window opens where the calendar begins" is an honest answer where an
+    OverflowError is a 500.
     """
     end = day_in(at_ms, zone)
-    start = date.fromisoformat(end) - timedelta(days=days - 1)
-    return start.isoformat(), end
+    end_date = date.fromisoformat(end)
+    back = min(days - 1, (end_date - date.min).days)
+    return (end_date - timedelta(days=back)).isoformat(), end
 
 
 # ------------------------------------------------------------ bucketing --
