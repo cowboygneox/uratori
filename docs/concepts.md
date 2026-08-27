@@ -191,6 +191,11 @@ they are plumbing, not numbers a reader meets.
 - **Summaries** (`summarise ... over ...`) put a projection's population into
   one row: counts and totals *defined* as being over the rows, so there is no
   second route that could count them differently.
+- **Bundles** name definitions whose answers travel together in one request
+  -- a precalculated dashboard tile. A bundle defines no calculation: its
+  members are names plus arguments, its response is their ordinary answers
+  in declaration order, and its hash exists only for review -- it appears in
+  no storage key and no number's citation.
 
 Compilation is a real checker, not a parser with opinions kept to itself. A
 definition that names an unknown kind, reads a dial from a position the

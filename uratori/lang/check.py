@@ -16,13 +16,15 @@ message that only says "invalid" sends somebody looking for a typo.
 
 from __future__ import annotations
 
-from typing import Literal, assert_never
+from typing import Literal, NoReturn, assert_never
 
 from ..schema import Schema
 from .ast import (
     Arith,
     BucketAll,
     BucketScope,
+    BundleDecl,
+    BundleMember,
     ByAge,
     ByComposite,
     ByField,
@@ -70,6 +72,8 @@ from .hash import version_of
 from .lex import DefinitionError
 from .parse import parse
 from .plan import (
+    BundleMemberPlan,
+    BundlePlan,
     CompiledFact,
     CompiledFactField,
     CompiledIndex,
@@ -129,6 +133,7 @@ class _Checker:
         self.readings: list[ReadingPlan] = []
         self.projections: list[ProjectPlan] = []
         self.summaries: list[SummarisePlan] = []
+        self.bundles: list[BundlePlan] = []
         self._names: dict[str, str] = {}
 
     # --------------------------------------------------------------- run --
@@ -160,6 +165,13 @@ class _Checker:
         for d in self._decls:
             if isinstance(d, SummariseDecl):
                 self._summary(d)
+        # Bundles last, deliberately: a member may only be one of the seven
+        # computing kinds, all checked above, so a bundle may sit anywhere in
+        # the source and still resolve -- there is no cycle to order against,
+        # because a bundle cannot name a bundle.
+        for d in self._decls:
+            if isinstance(d, BundleDecl):
+                self._bundle(d)
         return Library(
             indexes=self.indexes,
             measures=self.measures,
@@ -169,11 +181,12 @@ class _Checker:
             summaries=tuple(self.summaries),
             source=self._source,
             facts=self.facts,
+            bundles=tuple(self.bundles),
         )
 
     def _claim(self, name: str, what: str, line: int) -> None:
-        """One namespace for all eight declaration kinds -- facts, groups, filters
-        and measures included, not just the four rendered ones.
+        """One namespace for all nine declaration kinds -- facts, groups, filters
+        and measures included, not just the rendered ones.
 
         A citation is `name@version`, so two declarations sharing a name would
         make a citation ambiguous -- and the Data screen addresses a definition
@@ -1931,6 +1944,109 @@ class _Checker:
             )
         )
 
+    # ------------------------------------------------------------- bundle --
+
+    def _bundle(self, d: BundleDecl) -> None:
+        """A bundle names things; the checker's whole job here is making sure
+        each name is the thing its keyword claims, so a broken tile is a
+        build error and never a serve-time surprise."""
+        self._claim(d.name, "bundle", d.line)
+        self._fact_kind(d.name.split(".", 1)[0], f"bundle {d.name} is named under", d.line)
+
+        seen: set[str] = set()
+        members: list[BundleMemberPlan] = []
+        for m in d.members:
+            if m.name in seen:
+                raise CheckError(
+                    f"bundle {d.name} names {m.name} twice. One request serves each "
+                    "member once; a second entry would be a second copy of the same "
+                    "answer, and which one a screen bound to would be arbitrary.",
+                    m.line,
+                )
+            seen.add(m.name)
+            members.append(self._bundle_member(d, m))
+
+        plan = BundlePlan(name=d.name, doc=d.doc, members=tuple(members))
+        self.bundles.append(
+            BundlePlan(**{**plan.__dict__, "version": version_of(_bundle_hash(plan))})
+        )
+
+    def _bundle_member(self, d: BundleDecl, m: BundleMember) -> BundleMemberPlan:
+        if m.kind == "figure":
+            figure = _find(self.figures, m.name)
+            if figure is None:
+                self._not_a_member(d, m, "figure")
+            # The two shapes the bulk results surface deliberately does not
+            # push, refused here for the same reason at compile time: a tile
+            # is a subscription, and neither shape is what a tile wants.
+            if figure.grain is not None:
+                raise CheckError(
+                    f"bundle {d.name} names {m.name}, which is time-keyed: one value per "
+                    f"subject per {figure.grain}, so the tile would carry every stored "
+                    "bucket of every subject on every request. What a tile wants from a "
+                    "time-keyed figure is a statistic over a window -- declare a reading "
+                    "over it and name that.",
+                    m.line,
+                )
+            if figure.across is not None:
+                raise CheckError(
+                    f"bundle {d.name} names {m.name}, which is split across "
+                    f"{figure.across}: one value per pair rather than one per subject. "
+                    "Name the rollup that adds its parts up -- a tile serving raw pairs "
+                    "would put a slice of a population under a heading naming the whole "
+                    "of it.",
+                    m.line,
+                )
+            return BundleMemberPlan(kind="figure", name=m.name)
+
+        if m.kind == "reading":
+            reading = _find(self.readings, m.name)
+            if reading is None:
+                self._not_a_member(d, m, "reading")
+            if reading.mode == "live" and m.windows is not None:
+                raise CheckError(
+                    f"bundle {d.name} gives {m.name} windows, and {m.name} measures "
+                    "records as they stand -- there is nothing stored to window. A live "
+                    "member is named bare, the way a live reading declares `()`: the "
+                    "member's argument list and the reading's source form encode "
+                    "liveness twice, loudly.",
+                    m.line,
+                )
+            return BundleMemberPlan(kind="reading", name=m.name, windows=m.windows)
+
+        if m.kind == "projection":
+            if _find(self.projections, m.name) is None:
+                self._not_a_member(d, m, "projection")
+            return BundleMemberPlan(kind="projection", name=m.name)
+
+        if m.kind == "summarise":
+            if _find(self.summaries, m.name) is None:
+                self._not_a_member(d, m, "summary")
+            return BundleMemberPlan(kind="summary", name=m.name)
+
+        assert_never(m.kind)
+
+    def _not_a_member(self, d: BundleDecl, m: BundleMember, wanted: str) -> NoReturn:
+        """Why a member did not resolve, said in terms of what the name
+        actually is -- a keyword mismatch is a different mistake from a typo,
+        and a bundle smuggled in under `figure` is a third."""
+        held = self._names.get(m.name)
+        if held == "a bundle":
+            raise CheckError(
+                f"bundle {d.name} names {m.name}, which is a bundle. A bundle may not "
+                "name another bundle: composition stays flat, so there is no nesting to "
+                "walk and no cycle to refuse.",
+                m.line,
+            )
+        if held is not None:
+            raise CheckError(
+                f"bundle {d.name} names {m.name} as a {wanted}, but it is {held}. A "
+                "member is written under its own keyword, so what travels -- a value, "
+                "windows, rows, or the population row alone -- is never a surprise.",
+                m.line,
+            )
+        raise CheckError(f'there is no {wanted} called "{m.name}".', m.line)
+
     # ------------------------------------------------------------- shared --
 
     def _bind(self, bound: dict[str, str], name: str, what: str, owner: str, line: int) -> None:
@@ -2459,6 +2575,25 @@ def _cond_hash(c: Condition | None) -> object:
         "left": _calc_hash(c.left),
         "op": c.op,
         "right": _calc_hash(c.right) if c.right is not None else None,
+    }
+
+
+def _bundle_hash(plan: BundlePlan) -> object:
+    """The member list, in written order, and nothing else.
+
+    Windows ride as a third element only when declared, the same
+    absent-unless-declared shape a statistic's grain hashes with, so a bare
+    member and one written before windows existed cannot differ. Prose is out
+    like everywhere else; member *versions* are out deliberately -- each
+    member's answer carries its own version, so a member moving underneath is
+    that member's moved hash on the artifact, not a second copy of it here.
+    """
+    return {
+        "name": plan.name,
+        "members": [
+            [m.kind, m.name] if m.windows is None else [m.kind, m.name, list(m.windows)]
+            for m in plan.members
+        ],
     }
 
 

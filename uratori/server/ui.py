@@ -52,7 +52,7 @@ from ..lang.ast import ByAge, ByComposite, ByField, FigureUnit, IndexBy, IndexFi
 from ..lang.lex import DefinitionError, lex
 from ..lang.plan import CompiledFactField, CompiledIndex, CompiledMeasure, Library
 from ..lang.source import declaration_prose, declaration_source
-from ..results import Availability, Evidence, Ok, Result, Subject, Unavailable
+from ..results import Availability, BundleResult, Evidence, Ok, Result, Subject, Unavailable
 from ..schema import EFFORT_HOURS_SETTING, Schema
 from ..store.postgres import PostgresEngineStore
 from . import db
@@ -1022,7 +1022,11 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 # what the page says, and a bespoke single-row path would show a
                 # row the real page refused.
                 answer = await facade.answer(tenant, project.name, raw)
-                if answer is None:  # pragma: no cover - the plan came from the library
+                if not isinstance(answer, Result):
+                    # pragma: no cover - the plan came from the library, so
+                    # the name is a projection and a projection answers a
+                    # Result; the guard is for the type checker, which cannot
+                    # see that from the union.
                     continue
                 match = next((sub for sub in answer.subjects if sub.id == key), None)
                 note = None
@@ -1246,13 +1250,17 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
 
     # ------------------------------------------------------------ answers --
 
-    @ui.get("/ui/api/tenants/{tenant}/results/{name}", response_model=Result, include_in_schema=False)
+    @ui.get(
+        "/ui/api/tenants/{tenant}/results/{name}",
+        response_model=Result | BundleResult,
+        include_in_schema=False,
+    )
     async def result(
         tenant: str,
         name: str,
         request: Request,
         trailing: Annotated[list[int] | None, Query()] = None,
-    ) -> Result:
+    ) -> Result | BundleResult:
         """The same answer the API serves, reachable from the definition's own
         page -- refusal semantics identical to the authenticated route, so the
         UI never shows a number the API would not."""

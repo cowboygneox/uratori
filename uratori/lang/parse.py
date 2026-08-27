@@ -10,6 +10,7 @@ alternatives, and a parser has neither the library nor the vocabulary to do it.
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Literal
 
 from .ast import (
     AbsenceTest,
@@ -18,6 +19,8 @@ from .ast import (
     Band,
     BucketAll,
     BucketScope,
+    BundleDecl,
+    BundleMember,
     ByAge,
     ByComposite,
     ByField,
@@ -104,6 +107,7 @@ _RENDERED: dict[type, str] = {
     ReadingDecl: "reading",
     ProjectDecl: "projection",
     SummariseDecl: "summary",
+    BundleDecl: "bundle",
 }
 
 
@@ -111,11 +115,11 @@ def _explained(decl: Decl, lines: list[str]) -> Decl:
     """Attach the `#` comment run above a declaration as its doc.
 
     The comments are the customer-facing explanation -- one spelling for all
-    eight declaration kinds, kept out of the block so the directives a reviewer
+    nine declaration kinds, kept out of the block so the directives a reviewer
     came to check are not buried in prose. The lexer strips comments, so this
     reads the raw lines; the declaration's own line number says where to look.
 
-    The four rendered kinds are refused without one: each is served to a
+    The five rendered kinds are refused without one: each is served to a
     reader, and an unexplained number on screen is the thing this language
     exists to prevent. A fact is refused too -- it is the schema a reader
     tracing a number lands on, and a schema nobody can read dead-ends the
@@ -134,7 +138,7 @@ def _explained(decl: Decl, lines: list[str]) -> Decl:
                 0,
             )
         return replace(decl, doc=prose, fields=_field_docs(decl.fields, lines))
-    if not isinstance(decl, (FigureDecl, ReadingDecl, ProjectDecl, SummariseDecl)):
+    if not isinstance(decl, (FigureDecl, ReadingDecl, ProjectDecl, SummariseDecl, BundleDecl)):
         return decl
     what = _RENDERED[type(decl)]
     prose = prose_above(lines, decl.line)
@@ -257,7 +261,7 @@ class _Parser:
             if tok.kind != "name":
                 raise self._error(
                     'expected "fact", "group", "filter", "measure", "figure", "reading", '
-                    f'"projection" or "summarise", got {self._describe()}'
+                    f'"projection", "summarise" or "bundle", got {self._describe()}'
                 )
             if tok.value == "fact":
                 doc.decls.append(self._fact())
@@ -273,6 +277,8 @@ class _Parser:
                 doc.decls.append(self._project())
             elif tok.value == "summarise":
                 doc.decls.append(self._summarise())
+            elif tok.value == "bundle":
+                doc.decls.append(self._bundle())
             # The keyword was `project` for one release, which read as an
             # imperative -- "project this record" -- where every other keyword
             # here names the thing being declared. Named rather than silently
@@ -299,7 +305,7 @@ class _Parser:
             else:
                 raise self._error(
                     'expected "fact", "group", "filter", "measure", "figure", "reading", '
-                    f'"projection" or "summarise", got {self._describe()}'
+                    f'"projection", "summarise" or "bundle", got {self._describe()}'
                 )
             self._skip_newlines()
         return doc
@@ -1657,6 +1663,89 @@ class _Parser:
             when = Condition(left=left, op=op, right=right)
         self._end_of_line()
         return TotalDecl(name=name, of=of, unit=unit, when=when, line=line)
+
+    # ------------------------------------------------------------ bundle --
+
+    def _bundle(self) -> BundleDecl:
+        line = self._peek().line
+        self._keyword("bundle")
+        name = self._name("a bundle name, e.g. team_person.card")
+        self._prefix_of(name, "a bundle", line)
+        self._punct(":")
+        self._end_of_line()
+        self._expect("indent", "an indented block after the bundle name")
+
+        members: list[BundleMember] = []
+        while not self._is("dedent") and not self._is("eof"):
+            members.append(self._bundle_member())
+            self._skip_newlines()
+        self._expect("dedent", "the end of the bundle block")
+        if not members:  # pragma: no cover - the lexer yields no empty indent
+            raise self._error(f"bundle {name} names nothing.", line)
+        return BundleDecl(name=name, doc="", members=tuple(members), line=line)
+
+    def _bundle_member(self) -> BundleMember:
+        """One member: a declaration keyword, a name, and (for a reading) an
+        optional window list. Names plus arguments and nothing else -- a
+        member line that could carry a calculation would be a second place
+        for a number to be defined, which is what a bundle exists not to be.
+        """
+        line = self._peek().line
+        word = self._peek().value
+        if word == "bundle":
+            raise self._error(
+                "a bundle may not name another bundle. Composition stays flat -- one "
+                "level of bundles over the declarations that compute -- so there is no "
+                "nesting to walk and no cycle to refuse.",
+                line,
+            )
+        if word not in ("figure", "reading", "projection", "summarise"):
+            raise self._error(
+                'expected "figure", "reading", "projection" or "summarise", got '
+                f"{self._describe()}"
+            )
+        self._next()
+        member_kind: Literal["figure", "reading", "projection", "summarise"] = (
+            "figure"
+            if word == "figure"
+            else "reading"
+            if word == "reading"
+            else "projection"
+            if word == "projection"
+            else "summarise"
+        )
+        name = self._name(f"a {word} name")
+
+        windows: tuple[int, ...] | None = None
+        if self._at_word("over"):
+            if word != "reading":
+                raise self._error(
+                    f"only a reading member takes a window list; a {word} has no stored "
+                    "days to window. A projection member means rows, a summarise member "
+                    "means the population row alone, and a figure member is its current "
+                    "value.",
+                    line,
+                )
+            self._next()
+            out: list[int] = []
+            while True:
+                tok = self._expect("number", "a number of trailing days")
+                raw = float(tok.value)
+                if not raw.is_integer() or raw < 1:
+                    raise self._error(
+                        f'"{tok.value}" is not a window. A window is a whole number of '
+                        "trailing days, at least one.",
+                        line,
+                    )
+                out.append(int(raw))
+                if self._at_op(","):
+                    self._next()
+                    continue
+                break
+            windows = tuple(out)
+
+        self._end_of_line()
+        return BundleMember(kind=member_kind, name=name, windows=windows, line=line)
 
     # ------------------------------------------------------------ shared --
 

@@ -19,9 +19,18 @@ from typing import Any, Literal
 
 from ..lang.ast import Count, Extreme, ListOf, SetExpr, SetIndex, SetOp, SetRef
 from ..lang.ast import Sum as LangSum
-from ..lang.plan import FigurePlan, Library, ProjectPlan, ReadingPlan, SummarisePlan, Value
+from ..lang.plan import (
+    BundlePlan,
+    FigurePlan,
+    Library,
+    ProjectPlan,
+    ReadingPlan,
+    SummarisePlan,
+    Value,
+)
 from ..lang.settings import fingerprint as settings_fingerprint
 from ..results import (
+    BundleResult,
     Evidence,
     EvidenceMember,
     Level,
@@ -886,6 +895,7 @@ async def answer_projection(
     tenant: str,
     plan: ProjectPlan,
     settings: Mapping[str, Any],
+    at_ms: float | None = None,
 ) -> Result:
     """A projection, whole: read every row, summarise them, then page.
 
@@ -901,12 +911,26 @@ async def answer_projection(
     and each was one careless reordering away from not being, which is exactly
     the shape of thing that should be written once.
     """
-    from .project import ordered, summarise
-
-    at = now_ms()
+    at = at_ms if at_ms is not None else now_ms()
     rows, state, _missing = await project_rows(
         store, facts, library, tenant, plan, settings, at
     )
+    return _compose_projection(library, plan, rows, state, settings, at)
+
+
+def _compose_projection(
+    library: Library,
+    plan: ProjectPlan,
+    rows: list[ProjectedRow],
+    state: Ok | Unavailable,
+    settings: Mapping[str, Any],
+    at: float,
+) -> Result:
+    """Summarise, then page -- the tail of `answer_projection`, split out so a
+    bundle can serve a projection member from rows it already evaluated
+    without re-reading (or, worse, re-ordering) anything."""
+    from .project import ordered, summarise
+
     summary_plan = next((s for s in library.summaries if s.over == plan.name), None)
     # **No summary over a population the server has just said it does not
     # have.** `summarise` is total: handed no rows it answers every count as
@@ -1088,6 +1112,153 @@ async def _population(store: EngineStore, tenant: str, plan: ProjectPlan) -> fro
     )
     assert plan.frm is not None
     return _resolve(plan.frm, "", {}, readers)
+
+
+# -------------------------------------------------------------- bundles --
+
+
+def serve_summary(
+    plan: SummarisePlan,
+    summary: Summary | None,
+    settings: Mapping[str, Any],
+    at_ms: float,
+    state: Ok | Unavailable,
+) -> Result:
+    """A summary alone: the one row about the population, without the rows.
+
+    The new serving capability a bundle adds -- everywhere else a summary
+    travels on its projection's result. What must not change with the rows
+    staying home is what the row is *about*: it is computed over ALL the
+    projection's rows (the caller hands in a `Summary` built from them),
+    because a summary of a page is a wrong number that reads right.
+
+    `subjects` stays empty and `summary` carries the row -- the same two
+    fields a projection result uses, so a reader of one shape has read the
+    other. A withheld summary (`state` not ok) travels as `None` beside the
+    reason: an absence, never a zero.
+    """
+    return Result(
+        kind="summary",
+        name=plan.name,
+        version=plan.version,
+        at=_iso(at_ms),
+        unit="count",
+        label=_label_of(plan.name),
+        doc=plan.doc,
+        state=state,
+        banded=False,
+        summary=(
+            _row(summary.values, summary.units, summary.flags, settings)
+            if summary is not None
+            else None
+        ),
+    )
+
+
+async def answer_bundle(
+    store: EngineStore,
+    facts: Any,
+    library: Library,
+    tenant: str,
+    plan: BundlePlan,
+    settings: Mapping[str, Any],
+    default_trailing: Sequence[int],
+    at_day: str | None = None,
+) -> BundleResult:
+    """A bundle, whole: every member's ordinary answer, in declaration order,
+    at one instant.
+
+    A bundle defines no calculation, so this function composes and computes
+    nothing: each member is served by the same code that serves it alone,
+    and the wrapper adds only the name, the hash and the order. Two things
+    are deliberate here:
+
+    - **One clock.** `at` is read once and handed to every member that takes
+      an instant, extending the projection rule -- one instant reaches every
+      row -- to the tile: a page beside a headline evaluated at two different
+      moments can disagree with itself. (An anchored reading member resolves
+      the caller's `at_day` in its own zone, exactly as it would alone.)
+    - **A shared projection evaluates once.** When the bundle names a
+      summary and the projection it is over, the rows are read once and both
+      members are served from them -- so the two cannot disagree, and the
+      tile does not pay twice for one population.
+    """
+    from .project import summarise
+
+    at = now_ms()
+    evaluated: dict[str, tuple[list[ProjectedRow], Ok | Unavailable]] = {}
+
+    async def rows_of(name: str) -> tuple[list[ProjectedRow], Ok | Unavailable]:
+        held = evaluated.get(name)
+        if held is None:
+            projection = library.projection(name)
+            if projection is None:  # pragma: no cover - the checker refuses this
+                raise ValueError(f"{plan.name} names a projection that is not compiled")
+            rows, state, _missing = await project_rows(
+                store, facts, library, tenant, projection, settings, at
+            )
+            held = (rows, state)
+            evaluated[name] = held
+        return held
+
+    results: list[Result] = []
+    for member in plan.members:
+        if member.kind == "figure":
+            figure = library.figure(member.name)
+            if figure is None:  # pragma: no cover - the checker refuses this
+                raise ValueError(f"{plan.name} names a figure that is not compiled")
+            results.append(
+                await serve_figure(store, library, tenant, figure, settings, at_ms=at)
+            )
+        elif member.kind == "reading":
+            reading = library.reading(member.name)
+            if reading is None:  # pragma: no cover - the checker refuses this
+                raise ValueError(f"{plan.name} names a reading that is not compiled")
+            if reading.mode == "live":
+                # The same refusal the reading's own route gives. Serving the
+                # rest of the tile around a silently dropped member would be
+                # a response quietly shorter than its definition.
+                raise NotImplementedError("live readings are not servable yet")
+            results.append(
+                await serve_reading(
+                    store,
+                    library,
+                    tenant,
+                    reading,
+                    settings,
+                    list(member.windows) if member.windows is not None else list(default_trailing),
+                    at_ms=at,
+                    at_day=at_day,
+                )
+            )
+        elif member.kind == "projection":
+            projection = library.projection(member.name)
+            if projection is None:  # pragma: no cover - the checker refuses this
+                raise ValueError(f"{plan.name} names a projection that is not compiled")
+            rows, state = await rows_of(member.name)
+            results.append(
+                _compose_projection(library, projection, rows, state, settings, at)
+            )
+        else:  # summary
+            summary_plan = library.summary(member.name)
+            if summary_plan is None:  # pragma: no cover - the checker refuses this
+                raise ValueError(f"{plan.name} names a summary that is not compiled")
+            rows, state = await rows_of(summary_plan.over)
+            summary = (
+                summarise(summary_plan, rows, settings, at)
+                if isinstance(state, Ok)
+                else None
+            )
+            results.append(serve_summary(summary_plan, summary, settings, at, state))
+
+    return BundleResult(
+        name=plan.name,
+        version=plan.version,
+        at=_iso(at),
+        label=_label_of(plan.name),
+        doc=plan.doc,
+        results=results,
+    )
 
 
 async def _joined(

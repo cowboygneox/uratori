@@ -367,4 +367,47 @@ class Result(BaseModel):
     summary: Row | None = None
     """For a projection, the summary declared over it -- computed at the same
     instant over the same population, which is why it travels with the rows
-    rather than on a route of its own."""
+    rather than on a route of its own.
+
+    For a `kind: "summary"` result -- a bundle's summarise member -- the same
+    row travelling *without* the projection's rows: `subjects` stays empty
+    and this carries the one row about the population. It is still computed
+    over ALL the projection's rows, never the page; only the row payload
+    stays home."""
+
+
+class BundleResult(BaseModel):
+    """A bundle's answer: its members' ordinary `Result`s, in declaration
+    order, from one request.
+
+    A wrapper and nothing more. The bundle defines no calculation, so there
+    is no `state`, no `unit` and no `subjects` here -- each member carries its
+    own, absence reasons included, because "the tile is fine but one number
+    is behind a deploy" is a per-member fact the wrapper must not flatten.
+
+    `version` is the bundle's content hash -- the member list, hashed at
+    compile time. It exists for the review surface (a changed tile is a
+    moved hash in the committed artifact) and appears in no storage key and
+    no number's citation: every number inside cites its own member's
+    `name@version`, exactly as it would served alone.
+
+    `kind` is a discriminator against `Result`, so the one results route can
+    serve either and a typed client branches on a field rather than sniffing
+    shapes.
+    """
+
+    kind: Literal["bundle"] = "bundle"
+    name: str
+    version: str
+    at: str
+    """When the server evaluated the bundle -- the one instant handed to
+    every member that takes one, so a tile cannot disagree with itself. An
+    anchored reading member resolves the caller's anchor in its own zone,
+    exactly as it would served alone, and says so on its own `at`."""
+
+    label: str
+    doc: str
+    results: list[Result]
+    """The members' answers, in the bundle's declaration order -- request
+    order is substantive, and a screen binds to positions the definition
+    wrote."""

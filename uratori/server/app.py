@@ -39,7 +39,7 @@ from ..facade import DEFAULT_TRAILING
 from ..lang.check import compile_source
 from ..lang.lex import DefinitionError
 from ..lang.plan import CompiledFactField, Library
-from ..results import Evidence, Result
+from ..results import BundleResult, Evidence, Result
 from ..store.postgres import PostgresFactStore
 from ..verify import FactError
 from . import db
@@ -445,14 +445,23 @@ def create_app(
             )
         )
 
-    @app.get("/tenants/{tenant}/results/{name}", response_model=Result, dependencies=[auth])
+    # A bundle answers here too, as a `BundleResult` -- the wrapper carrying
+    # its members' ordinary Results in declaration order. `kind` is the
+    # discriminator between the two shapes, so a typed client branches on a
+    # field rather than sniffing. Bundles are deliberately absent from the
+    # bulk route above: every member already serves there under its own name.
+    @app.get(
+        "/tenants/{tenant}/results/{name}",
+        response_model=Result | BundleResult,
+        dependencies=[auth],
+    )
     async def get_result(
         tenant: str,
         name: str,
         s: S,
         trailing: Annotated[list[int] | None, Query()] = None,
         at: Annotated[date | None, Query()] = None,
-    ) -> Result:
+    ) -> Result | BundleResult:
         world, library = ready(s)
         facade = facade_for(s, world, library)
         try:
@@ -646,7 +655,7 @@ def _library_out(library: Library) -> LibraryOut:
         name: str,
         *,
         declaration: Literal[
-            "group", "filter", "measure", "figure", "reading", "projection", "summary"
+            "group", "filter", "measure", "figure", "reading", "projection", "summary", "bundle"
         ],
         version: str | None = None,
         display: str | None = None,
@@ -666,6 +675,7 @@ def _library_out(library: Library) -> LibraryOut:
         statistics: list[str] | None = None,
         fields: list[str] | None = None,
         through: list[str] | None = None,
+        members: list[str] | None = None,
     ) -> DeclarationOut:
         # Spelled out rather than **kwargs, so pydantic-mypy's init guard
         # reaches every call site: routed through Any, a misspelled field
@@ -693,6 +703,7 @@ def _library_out(library: Library) -> LibraryOut:
             statistics=statistics or [],
             fields=fields or [],
             through=through or [],
+            members=members or [],
         )
 
     def measure_unit(shape: str, unit: str | None) -> str | None:
@@ -804,6 +815,15 @@ def _library_out(library: Library) -> LibraryOut:
                 settings=list(p.settings),
             )
             for p in library.summaries
+        ],
+        bundles=[
+            described(
+                p.name,
+                declaration="bundle",
+                version=p.version,
+                members=[m.name for m in p.members],
+            )
+            for p in library.bundles
         ],
         indexes=[
             described(

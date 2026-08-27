@@ -61,6 +61,7 @@ _HEADERS = (
     r"^reading\s+{name}\s*\(",
     r"^projection\s+{name}\s*:",
     r"^summarise\s+{name}\s+over\s",
+    r"^bundle\s+{name}\s*:",
 )
 
 

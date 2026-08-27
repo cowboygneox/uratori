@@ -36,11 +36,17 @@ from typing import Any
 
 from .engine.change import Outcome
 from .engine.engine import Engine
-from .engine.serve import answer_projection, serve_evidence, serve_figure, serve_reading
+from .engine.serve import (
+    answer_bundle,
+    answer_projection,
+    serve_evidence,
+    serve_figure,
+    serve_reading,
+)
 from .lang.plan import Library
 from .lang.settings import fingerprint as settings_fingerprint
 from .lang.source import declaration_source
-from .results import Evidence, Result
+from .results import BundleResult, Evidence, Result
 from .schema import Schema
 from .store import EngineStore, FactSource, Pointer
 from .verify import verify_writes
@@ -354,6 +360,10 @@ class Uratori:
         ignore it: they are point-in-time answers with no window to move, and
         each result's own `at` says when it was computed.
 
+        Bundles are deliberately not served here: every member already is,
+        under its own name, and a tile is a by-name request (`answer`) --
+        pushing each bundle too would put every answer on the wire twice.
+
         Every projection serves, every time, from here: a projection stores
         nothing and is evaluated at the instant it is asked, so its rows move
         when a record of its kind changes, when a figure it reads changes, or
@@ -426,13 +436,22 @@ class Uratori:
         *,
         trailing: Sequence[int] = DEFAULT_TRAILING,
         at: str | None = None,
-    ) -> Result | None:
+    ) -> Result | BundleResult | None:
         """One definition's current answer, by name. None when nothing is
         called that; a live reading raises, because "no such definition" and
         "not built yet" send a caller to different fixes.
 
         `at` anchors a window reading's spans on that ISO date's end instead
-        of on now; everything else serves as it always did and ignores it."""
+        of on now; everything else serves as it always did and ignores it.
+
+        A bundle answers a `BundleResult`: its members' ordinary results, in
+        declaration order, evaluated at one instant. A reading member's
+        windows come from the bundle's own definition (or the serving default
+        when unwritten) -- `trailing` deliberately does not reach inside a
+        bundle, because a tile whose windows the caller could move would be a
+        different tile under the same hash. `at` does reach in: it is an
+        anchor, not a definition change, exactly as it is for a reading
+        served alone."""
         document = self._schema.settings_for(settings)
         lib = self._library
 
@@ -472,6 +491,19 @@ class Uratori:
                 raise ValueError(f"{name} summarises a projection that is not compiled")
             return await answer_projection(
                 self._store, self._facts, lib, tenant, over, document
+            )
+
+        bundle = lib.bundle(name)
+        if bundle is not None:
+            return await answer_bundle(
+                self._store,
+                self._facts,
+                lib,
+                tenant,
+                bundle,
+                document,
+                default_trailing=DEFAULT_TRAILING,
+                at_day=at,
             )
 
         return None
@@ -517,5 +549,11 @@ class Uratori:
             raise LookupError(
                 f"{name} is re-evaluated on every request and stores no values; its "
                 "rows are the evidence, and the results route serves them."
+            )
+        if lib.bundle(name) is not None:
+            raise LookupError(
+                f"{name} is a bundle: it composes definitions, computes nothing and "
+                "cites nothing. Each member's evidence lives on the member, under the "
+                "member's own name."
             )
         raise LookupError(f"No figure called {name}")

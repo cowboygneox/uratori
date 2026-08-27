@@ -276,6 +276,16 @@ Responses:
   "readings": [],
   "projections": [],
   "summaries": [],
+  "bundles": [
+    {
+      "name": "shop_courier.card",
+      "declaration": "bundle",
+      "version": "3f6f37a01c22",
+      "prose": "The courier tile.",
+      "source": "bundle shop_courier.card:\n    reading shop_courier.typical_ride over 9, 2\n    figure shop_courier.carrying",
+      "members": ["shop_courier.typical_ride", "shop_courier.carrying"]
+    }
+  ],
   "indexes": [
     {
       "name": "shop_order.carried_by",
@@ -306,7 +316,9 @@ and `reads` are what a declaration rests on, one hop -- enough to draw a
 derivation pane by following names -- and `fields`/`through` are the record
 paths it reads, enough for a host to hold its own drift guard ("every path
 my definitions read exists on the records I collect") without compiling
-anything.
+anything. A bundle's `members` are its members' names in declaration order --
+the order its response preserves -- and its `version` is the review-only
+hash of that list: it appears in no storage key and no number's citation.
 
 The versions are the review surface, and the check is pure API: start the
 same image your deploy pins against a scratch database, `PUT /schema` and
@@ -553,10 +565,45 @@ summary -- a summary is answered by evaluating the projection it is declared
 over, because its counts are *defined* as being over those rows and a cheaper
 second route would be duplicate arithmetic wearing a shortcut's name.
 
-- `200` with a single `Result`.
+The name may also be a **bundle**, and the answer is then the other shape
+this route serves -- a wrapper, discriminated from a plain `Result` by
+`kind`:
+
+```json
+{
+  "kind": "bundle",
+  "name": "shop_courier.card",
+  "version": "3f6f37a01c22",
+  "at": "2026-06-30T23:59:59+00:00",
+  "label": "Card",
+  "doc": "The courier tile.",
+  "results": [ …the members' ordinary Result objects, in declaration order… ]
+}
+```
+
+Each entry in `results` is exactly what requesting that member by name would
+return, own `version`, `state` and provenance included -- there is no
+bundle-only member shape, and there is no bundle-level `state`: "one number
+is behind a deploy" is a per-member fact the wrapper must not flatten. The
+members are evaluated at one instant; a reading member's windows come from
+the bundle's definition (`trailing` deliberately does not reach inside a
+bundle -- a tile whose windows the caller could move would be a different
+tile under the same hash), while `at` anchors its reading members exactly as
+it would each served alone. A summarise member arrives with `subjects` empty
+and the population row in `summary` -- computed over ALL the projection's
+rows, never the page; only the row payload stays home. The wrapper's
+`version` is the bundle's content hash -- the review token for the committed
+artifact -- and appears in no storage key and no number's citation. Bundles
+are deliberately absent from the bulk route above: every member already
+serves there under its own name.
+
+- `200` with a single `Result` -- or, for a bundle, a single wrapper as
+  above.
 - `404` `"No definition called {name}"`.
 - `501` for a reading declared `live` -- declared but not yet servable, and
   "no such definition" and "not built yet" send a caller to different fixes.
+  A bundle naming a live reading answers the same `501`, rather than
+  silently serving a tile one member short.
 - `400` when the engine refuses the request, in its own words.
 
 ### `GET /tenants/{tenant}/evidence/{name}?subject={id}`

@@ -1315,8 +1315,65 @@ class SummariseDecl:
     line: int = 0
 
 
+# --------------------------------------------------------------- bundle --
+
+
+@dataclass(frozen=True)
+class BundleMember:
+    """One line of a bundle: a declaration's kind, its name, and (for a
+    windowed reading) the windows to serve it over.
+
+    Names plus arguments and nothing else, by design. There is no `depends`,
+    no `calculate`, no cross-member arithmetic: a bundle defines no
+    calculation, so every rule that makes a member's number trustworthy stays
+    in the member's own definition and hash. A number derived from two
+    members is a `combine` figure's job; a trend across windows is the
+    server's job inside the reading's own response.
+    """
+
+    kind: Literal["figure", "reading", "projection", "summarise"]
+    name: str
+    windows: tuple[int, ...] | None = None
+    """`over 7, 14, 30` -- which trailing windows the reading serves. Only a
+    windowed reading may carry one, mirroring the language's rule that the
+    argument list and the source form encode liveness twice, loudly: a live
+    member is named bare the way a live reading declares `()`. Absent on a
+    windowed reading, the serving default decides -- the same default an
+    unqualified request to the results surface gets."""
+
+    line: int = 0
+
+
+@dataclass(frozen=True)
+class BundleDecl:
+    """`bundle team_person.card:` -- a named composition of definitions,
+    served as one request.
+
+    The composition stratum: the other declarations answer "how is this
+    computed", a bundle answers "what travels together" -- a precalculated
+    dashboard tile. Serving one *triggers* evaluation of its members; it
+    computes nothing of its own, which is why its hash appears in no storage
+    key and no number's citation.
+
+    Member order is substantive -- the response preserves it -- so the
+    members are a tuple in written order, and the hash covers that order.
+    """
+
+    name: str
+    doc: str
+    members: tuple[BundleMember, ...]
+    line: int = 0
+
+
 Decl: TypeAlias = (
-    FactDecl | IndexDecl | MeasureDecl | FigureDecl | ReadingDecl | ProjectDecl | SummariseDecl
+    FactDecl
+    | IndexDecl
+    | MeasureDecl
+    | FigureDecl
+    | ReadingDecl
+    | ProjectDecl
+    | SummariseDecl
+    | BundleDecl
 )
 
 

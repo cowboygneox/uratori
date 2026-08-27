@@ -146,7 +146,7 @@ The pieces:
   either shape, so a typo is reported with the list of what was actually
   bound.
 
-**One namespace covers all eight declaration kinds.** Two definitions sharing a
+**One namespace covers all nine declaration kinds.** Two definitions sharing a
 name would make a citation ambiguous, so the checker refuses the second
 whatever kind it is.
 
@@ -160,7 +160,7 @@ a real constraint on naming, better stated than discovered.
 
 ---
 
-## Eight declarations
+## Nine declarations
 
 | | Answers | Stores |
 |---|---|---|
@@ -172,6 +172,7 @@ a real constraint on naming, better stated than discovered.
 | `reading` | a statistic over stored days, or over records right now | nothing |
 | `projection` | one row per record | nothing |
 | `summarise` | one row about a whole population | nothing |
+| `bundle` | which answers travel together in one request | nothing -- it composes |
 
 Only a **figure** stores anything, and that single fact decides which
 constructs may read a clock: a stored value computed from `now` is stale the
@@ -1335,6 +1336,90 @@ means moves every count that reads it.
 
 ---
 
+## `bundle` -- what travels together
+
+```
+# Everything the person card shows.
+bundle team_person.card:
+    reading team_person.to_merge over 7, 14, 30
+    figure team_person.wip
+    projection work_issue.item
+    summarise work_issue.backlog
+```
+
+The composition stratum. The eight declarations above answer *how is this
+computed*; a bundle answers *what travels together* -- a precalculated
+dashboard tile, requestable by name on the results surface as one request.
+The response is the members' ordinary answers, in the written order (order is
+substantive: a screen binds to positions the definition wrote), each carrying
+its own version and provenance exactly as it would served alone.
+
+**A bundle defines no calculation.** Members are names plus arguments,
+nothing else -- no `depends`, no `calculate`, no unit, no band, no
+cross-member arithmetic of any kind. A number derived from two members is a
+`combine` figure's job; a trend across windows is the server's job inside the
+reading's own response. Serving a bundle *triggers* evaluation of its
+members, and every rule that makes a number trustworthy stays in the member's
+own definition and hash.
+
+### The members
+
+Each line is a declaration keyword, a name, and (for a windowed reading
+alone) an optional window list:
+
+- **`reading <name> [over 7, 14, 30]`** -- the trailing windows to serve the
+  reading over, unwritten meaning the serving default. Only a *windowed*
+  reading may carry the list; a live one is named bare, mirroring the
+  language's rule that the argument list and the source form encode liveness
+  twice, loudly -- written `over 7` a live member would accept a window,
+  ignore it, and answer today under a heading saying seven days.
+- **`figure <name>`** -- its current value per subject. The same two shapes
+  the bulk results surface declines to push are refused here at compile
+  time: a **time-keyed** figure member would drag every stored bucket of
+  every subject along on every request (declare a reading over it and name
+  that), and a figure **split across** a dimension serves pairs, not
+  subjects (name the rollup that adds its parts up).
+- **`projection <name>`** -- the page: rows, with the projection's own sort
+  and limit, and its summary attached as always.
+- **`summarise <name>`** -- **the population row alone, without the
+  projection's rows.** This is the serving capability the bundle adds: the
+  row payload stays home, but the summary is still computed over ALL the
+  projection's rows, never the page -- a summary of a page is a wrong number
+  that reads right. There is deliberately no `with rows` modifier: a
+  projection member means rows, a summarise member means the one row, and a
+  tile wanting both names both -- in which case the projection is evaluated
+  once and both members are served from it, so the two cannot disagree.
+
+Every member must resolve to an existing declaration of its keyword's kind --
+a name that is really something else is refused by what it actually is,
+because `figure work_issue.item` compiling as "whatever that is" would make
+what travels a surprise. Duplicate members are refused (one request serves
+each member once). And **a bundle may not name another bundle**: composition
+stays flat -- one level of bundles over the declarations that compute -- so
+there is no nesting to walk and no cycle to refuse.
+
+Members are served at **one instant**: the clock is read once per bundle
+request and handed to every member that takes one, extending the projection's
+one-instant rule to the tile -- a page beside a headline evaluated at two
+different moments can disagree with itself.
+
+### A hash that cites nothing
+
+A bundle is versioned like every other declaration -- so a changed tile shows
+as a moved hash in the committed library artifact, which is the review
+surface -- but the hash exists for that surface *only*: it appears in **no
+storage key and no number's citation**. Nothing on screen ever cites the
+bundle; every number inside cites its own member's `name@version`.
+
+What is hashed is the member list -- kinds, names and window arguments, in
+written order. Prose stays out, like everywhere else. Member *versions* stay
+out too, deliberately -- the same asymmetry a windowed reading has with its
+source figure: a member redefined underneath shows as that member's own moved
+hash, on the artifact and on the wire, while the tile's composition -- which
+did not change -- keeps its version.
+
+---
+
 ## Settings dials
 
 A definition never contains a tenant's numbers. It names **dials** --
@@ -1411,6 +1496,7 @@ What *is* hashed, and why each one had to be:
 | a projection's fields, joins, reads (including whether a read is `band of`), values, sort and limit | a join decides *which record* a path is read off; `band of X` and `X` are different columns off one figure |
 | a projection's flag templates | a flag's sentence is the whole content of that row |
 | a summary's counts, totals, values, flags and its **projection's version** | rename what a row value means and every count moves |
+| a bundle's member list -- kinds, names and window arguments, in written order | the response preserves that order, so a re-ordered tile is a different tile. Member *versions* are out (a moved member is its own moved hash, on the artifact and on the wire), and the bundle's hash is review-only: it appears in no storage key and no number's citation |
 
 What deliberately is not: explanations, `display` templates, group and
 filter labels,
@@ -1451,7 +1537,7 @@ The ones most worth recognising, in the checker's own words:
 - *"...needs a prefix: a figure is named `<fact kind>.<what>`..."* -- every
   declaration carries its kind, because a citation is `name@version`.
 - *"...is already a figure. A reading needs its own name..."* -- one
-  namespace across all eight kinds.
+  namespace across all nine kinds.
 - *"there is no group or filter called ... Declared: ..."* / *"...is not a
   set defined in depends. Defined: ..."* -- a typo, answered with what was
   actually bound.
@@ -1521,6 +1607,15 @@ The ones most worth recognising, in the checker's own words:
 - *"...is not a setting a group may name. Those are: ..."* (and the
   filter, calculation, band and projection variants) -- the four settings lists, each
   enforced at the position that pays its cost.
+- *"bundle ... names X as a figure, but it is a projection"* -- a member is
+  written under its own keyword, so what travels is never a surprise.
+- *"bundle ... names X, which is time-keyed... declare a reading over it"* /
+  *"...which is split across... Name the rollup"* -- the two figure shapes a
+  tile must not subscribe to, refused at compile time rather than at serve
+  time.
+- *"a bundle may not name another bundle"* -- composition stays flat.
+- *"bundle ... gives X windows, and X measures records as they stand"* -- a
+  live member is named bare, the liveness-encoded-twice rule one level up.
 
 ---
 

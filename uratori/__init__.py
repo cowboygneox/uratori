@@ -21,6 +21,7 @@ from .lang.lex import DefinitionError, SyntaxError_
 from .lang.plan import Library, Value
 from .results import (
     Availability,
+    BundleResult,
     Flag,
     Level,
     Ok,
@@ -51,6 +52,7 @@ __all__ = [
     "SHOWN_KEEP",
     "Availability",
     "BucketChange",
+    "BundleResult",
     "Change",
     "CheckError",
     "DefinitionError",

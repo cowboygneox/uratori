@@ -49,6 +49,7 @@ def as_json(library: Library) -> dict[str, Any]:
         "readings": [_plain(p) for p in library.readings],
         "projections": [_plain(p) for p in library.projections],
         "summaries": [_plain(p) for p in library.summaries],
+        "bundles": [_plain(p) for p in library.bundles],
         "source": library.source,
     }
 

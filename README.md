@@ -130,7 +130,7 @@ container, `localhost` is the container.
 | [Concepts](docs/concepts.md) | Facts, schemas, definitions, versions, tenants -- the model in full. |
 | [Setup](docs/setup.md) | Deploying the container: environment, database, token, health, upgrades. |
 | [HTTP & websocket API](docs/http-api.md) | Every route and frame, with request and response shapes. |
-| [The definition language](docs/language.md) | Writing `.fig`: facts, groups, filters, measures, figures, readings, projections, summaries. |
+| [The definition language](docs/language.md) | Writing `.fig`: facts, groups, filters, measures, figures, readings, projections, summaries, bundles. |
 | [The NFL example](examples/nfl/) | A loadable showcase: the whole play-by-play era in one tenant -- every play a fact, bucketed by season, game number and weekday -- every construct the language has in one library. |
 | [The built-in UI](docs/ui.md) | The investigation surface at `/ui/`: definitions as written, dependency traces, facts, and the activity log. |
 

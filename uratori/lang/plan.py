@@ -224,6 +224,43 @@ class SummarisePlan:
 
 
 @dataclass(frozen=True)
+class BundleMemberPlan:
+    """One member of a compiled bundle: a kind, a name, and (for a windowed
+    reading) the windows to serve it over. `kind` speaks the plan vocabulary
+    -- a `summarise` declaration compiles to a `summary` member, matching the
+    `Result.kind` its answer travels under."""
+
+    kind: Literal["figure", "reading", "projection", "summary"]
+    name: str
+    windows: tuple[int, ...] | None = None
+
+
+@dataclass(frozen=True)
+class BundlePlan:
+    """A named composition of definitions, served as one request.
+
+    It defines no calculation and stores no values, so its version is unlike
+    every other: a content hash over the member list alone (kinds, names and
+    window arguments, in written order -- order is substantive because the
+    response preserves it). The hash exists for exactly one surface, the
+    committed library artifact, where a changed tile shows as a moved hash in
+    the diff. It appears in **no storage key and no number's citation**: each
+    member's `Result` carries its own version and provenance, and nothing on
+    screen ever cites the bundle.
+
+    Member *versions* are deliberately not hashed in -- the same asymmetry a
+    windowed reading has with its source figure. A member redefined
+    underneath shows as that member's own moved version, on the artifact and
+    on the wire; the tile's composition did not change, so its hash does not.
+    """
+
+    name: str
+    doc: str
+    members: tuple[BundleMemberPlan, ...]
+    version: str = ""
+
+
+@dataclass(frozen=True)
 class Library:
     indexes: dict[str, CompiledIndex]
     measures: dict[str, CompiledMeasure]
@@ -240,6 +277,11 @@ class Library:
     """The declared world, when the source declares one. Empty for a
     schema-taught world -- and that emptiness is load-bearing: it is what
     tells the write boundary there are no fields to verify against."""
+
+    bundles: tuple[BundlePlan, ...] = ()
+    """The composition stratum: named tiles over the declarations above.
+    Defaulted so a library built without them is a library with none, which
+    is also what keeps every pre-bundle artifact readable."""
 
     def figure(self, name: str) -> FigurePlan | None:
         for plan in self.figures:
@@ -261,6 +303,12 @@ class Library:
 
     def summary(self, name: str) -> SummarisePlan | None:
         for plan in self.summaries:
+            if plan.name == name:
+                return plan
+        return None
+
+    def bundle(self, name: str) -> BundlePlan | None:
+        for plan in self.bundles:
             if plan.name == name:
                 return plan
         return None

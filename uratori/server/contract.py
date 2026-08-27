@@ -75,7 +75,9 @@ class DeclarationOut(BaseModel):
     """
 
     name: str
-    declaration: Literal["group", "filter", "measure", "figure", "reading", "projection", "summary"]
+    declaration: Literal[
+        "group", "filter", "measure", "figure", "reading", "projection", "summary", "bundle"
+    ]
     version: str | None = None
     """The content hash, for the kinds that version (a group, filter or
     measure is hashed into its readers instead, so alone it has none)."""
@@ -136,6 +138,12 @@ class DeclarationOut(BaseModel):
     """Identity hops, as `kind.path`: the relations an index resolves through
     or a projection joins through."""
 
+    members: list[str] = Field(default_factory=list)
+    """A bundle's members, by name, in declaration order -- the order the
+    response preserves, so a host binding tiles to positions can check them
+    at build time. Window arguments live in `source` (the formula as
+    written); the hash already covers them."""
+
 
 class FactFieldOut(BaseModel):
     """One leaf of a fact's body, flattened for a reader.
@@ -186,6 +194,10 @@ class LibraryOut(BaseModel):
     facts: list[FactOut] = Field(default_factory=list)
     """The declared world, when the source declares one. Empty for a
     schema-taught deployment -- the kinds live on `GET /schema` there."""
+
+    bundles: list[DeclarationOut] = Field(default_factory=list)
+    """The composition stratum: each bundle's members in declaration order,
+    and the hash a committed artifact reviews tiles by."""
 
 
 class SettingsIn(BaseModel):

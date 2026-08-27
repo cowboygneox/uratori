@@ -1275,3 +1275,107 @@ async def test_an_anchor_that_is_not_a_date_is_refused(server: Server) -> None:
         "/tenants/t1/results/shop_courier.typical_ride", params={"at": "June 30th"}
     )
     assert got.status_code == 422, got.text
+
+
+# ---------------------------------------------------------------- bundles --
+
+
+async def _teach_bundle(http: httpx.AsyncClient) -> None:
+    from .test_bundle import SERVE_SOURCE, SERVE_WORLD, _feed
+
+    assert (await http.put("/schema", json=SERVE_WORLD.to_document())).status_code == 200
+    put = await http.put("/definitions", json={"source": SERVE_SOURCE})
+    assert put.status_code == 200, put.text
+
+    class _Sink:
+        def __init__(self) -> None:
+            self.rows: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+        def put(self, tenant: str, kind: str, key: str, value: dict[str, Any]) -> None:
+            self.rows[(tenant, kind, key)] = value
+
+    sink = _Sink()
+    _feed(sink)  # type: ignore[arg-type]  # the fixture only calls .put
+    writes: dict[str, dict[str, dict[str, Any]]] = {}
+    for (_tenant, kind, key), value in sink.rows.items():
+        writes.setdefault(kind, {})[key] = value
+    pushed = await http.post("/tenants/t1/facts", json={"writes": writes})
+    assert pushed.status_code == 200, pushed.text
+
+
+async def test_a_bundle_is_one_request_on_the_results_surface(server: Server) -> None:
+    """The wire shape: a wrapper with the bundle's name and hash, and the
+    members' ordinary Results in declaration order -- discriminated from a
+    plain Result by `kind`, so a typed client branches on a field."""
+    await _teach_bundle(server.http)
+
+    got = await server.http.get(
+        "/tenants/t1/results/shop_courier.card", params={"at": "2026-06-30"}
+    )
+    assert got.status_code == 200, got.text
+    body = got.json()
+    assert body["kind"] == "bundle"
+    assert body["name"] == "shop_courier.card"
+
+    from uratori import compile_source as compile_against
+
+    from .test_bundle import SERVE_SOURCE, SERVE_WORLD
+
+    library = compile_against(SERVE_SOURCE, SERVE_WORLD)
+    card = library.bundle("shop_courier.card")
+    assert card is not None
+    assert body["version"] == card.version
+
+    assert [(r["kind"], r["name"]) for r in body["results"]] == [
+        ("reading", "shop_courier.typical_ride"),
+        ("figure", "shop_courier.carrying"),
+        ("projection", "shop_order.board"),
+        ("summary", "shop_order.book"),
+    ]
+    reading, figure, projection, summary = body["results"]
+    # The member arguments made it through HTTP: the bundle's own windows,
+    # not the route's defaults.
+    assert [w["trailing"] for w in reading["subjects"][0]["windows"]] == [9, 2]
+    assert figure["subjects"][0]["value"] == 5.0
+    # The summary member travels without rows and still counts them all;
+    # the projection member keeps its own page.
+    assert summary["subjects"] == []
+    assert summary["summary"]["values"]["orders"] == 7.0
+    assert len(projection["subjects"]) == 2
+
+    # The bulk surface does not repeat the tile: every member serves there
+    # under its own name already.
+    listed = await server.http.get("/tenants/t1/results")
+    assert listed.status_code == 200
+    assert all(r["kind"] != "bundle" for r in listed.json())
+    assert "shop_courier.card" not in {r["name"] for r in listed.json()}
+
+
+async def test_the_described_library_lists_the_bundle_and_its_members_in_order(
+    server: Server,
+) -> None:
+    await _teach_bundle(server.http)
+    body = (await server.http.get("/definitions")).json()
+    [bundle] = body["bundles"]
+    assert bundle["declaration"] == "bundle"
+    assert bundle["name"] == "shop_courier.card"
+    assert bundle["version"]
+    assert bundle["members"] == [
+        "shop_courier.typical_ride",
+        "shop_courier.carrying",
+        "shop_order.board",
+        "shop_order.book",
+    ]
+    assert bundle["prose"] == "The courier tile."
+    assert "reading shop_courier.typical_ride over 9, 2" in bundle["source"]
+
+
+async def test_bundle_evidence_over_http_says_where_the_evidence_lives(
+    server: Server,
+) -> None:
+    await _teach_bundle(server.http)
+    got = await server.http.get(
+        "/tenants/t1/evidence/shop_courier.card", params={"subject": "c1"}
+    )
+    assert got.status_code == 404
+    assert "member" in got.json()["detail"]
