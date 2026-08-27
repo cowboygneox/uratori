@@ -814,6 +814,22 @@ reading team_person.quarter_fine(range):
     calculate:
         sum(m)
         series(m) by 15 minutes
+
+# d
+figure team_person.minute_lead:
+    display "x"
+    depends:
+        mine = work_issue.by_minute:{team_person}
+    calculate:
+        list(work_issue.lead over mine)
+
+# d
+reading team_person.minute_typical(range):
+    display "x"
+    depends:
+        m = team_person.minute_lead in range
+    calculate:
+        median(m)
 """
 )
 
@@ -1241,17 +1257,21 @@ async def test_offset_buckets_partition_the_days_with_no_overlap_and_no_gap() ->
 async def test_a_bare_number_and_its_explicit_span_are_one_window() -> None:
     """`3` and `1-3` are two spellings of one question and must serve
     byte-identically -- canonical spelling included, so a client cannot see
-    two shapes for one answer."""
+    two shapes for one answer. Served as two requests, because one request
+    naming both is refused as the duplicate it is."""
     figure = READINGS.figure("team_person.per_day")
     reading = READINGS.reading("team_person.pace")
     assert figure is not None and reading is not None
     store = await _day_reading_store(
         figure, (("p1@2025-08-24", [10.0]), ("p1@2025-08-22", [20.0]))
     )
-    result = await serve_reading(
-        store, READINGS, "t1", reading, DEFAULTS, [3, "1-3"], at_day="2025-08-24"
-    )
-    bare, explicit = result.subjects[0].windows
+    served = []
+    for spelling in (3, "1-3"):
+        result = await serve_reading(
+            store, READINGS, "t1", reading, DEFAULTS, [spelling], at_day="2025-08-24"
+        )
+        served.append(result.subjects[0].windows[0])
+    bare, explicit = served
     assert bare == explicit
     assert bare.span == "3" and bare.trailing == 3
 
@@ -1295,6 +1315,9 @@ async def test_an_hour_span_slices_hours_not_whole_days() -> None:
         figure,
         (
             ("p1@2025-08-24T04:45", [100.0]),  # one hour ago: inside
+            ("p1@2025-08-24T05:15", [500.0]),  # the anchor hour's later quarter:
+            # inside -- and only via hour truncation, since the label sorts
+            # after the bucket's own "T05:00"
             ("p1@2025-08-24T02:00", [300.0]),  # the span's oldest hour: inside
             ("p1@2025-08-24T01:45", [900.0]),  # same local day, older: OUT
             ("p1@2025-08-23T06:15", [700.0]),  # yesterday: OUT
@@ -1306,9 +1329,10 @@ async def test_an_hour_span_slices_hours_not_whole_days() -> None:
     assert (window.frm, window.to) == ("2025-08-24T02:00", "2025-08-24T05:00")
     assert (window.span, window.bucket) == ("4", "hour")
     assert window.trailing is None, "an hour span is not a count of trailing days"
-    assert window.median == 200.0, (
-        "the median must run over the two in-span values alone; 300 or more "
-        "means a same-day value leaked in through day arithmetic"
+    assert window.median == 300.0, (
+        "the median must run over exactly the three in-span values; more "
+        "means a same-day value leaked in through day arithmetic, less means "
+        "the anchor hour's later quarter fell out of its own bucket"
     )
     assert window.days_requested == 1 and window.days_covered == 1
 
@@ -1480,3 +1504,117 @@ async def test_a_sub_day_span_under_a_day_anchor_ends_in_the_anchor_days_last_bu
     [window] = result.subjects[0].windows
     assert (window.frm, window.to) == ("2025-08-24T20:00", "2025-08-24T23:00")
     assert window.median == 200.0
+
+
+async def test_a_calendar_edge_anchor_answers_at_every_grain_and_span_shape() -> None:
+    """The overflow this guards has moved twice: `end_of_day_ms` was fixed,
+    then the traceback reappeared one frame later in `_labels_between`,
+    which steps its cursor past the last label with no `date.max` guard --
+    for a day range ending 9999-12-31 and for a sub-day label range on that
+    day alike. An anchor at the calendar's far edge must answer, empty
+    windows and all, at both grains."""
+    figure = READINGS.figure("team_person.per_day")
+    pace = READINGS.reading("team_person.pace")
+    assert figure is not None and pace is not None
+    store = await _day_reading_store(figure, ())
+    result = await serve_reading(
+        store, READINGS, "t1", pace, DEFAULTS, [7], at_day="9999-12-31"
+    )
+    assert result.empty is not None
+    assert result.empty.windows[0].to == "9999-12-31"
+
+    quarter_figure = GRAINED.figure("team_person.quarter_volume")
+    throughput = GRAINED.reading("team_person.quarter_throughput")
+    assert quarter_figure is not None and throughput is not None
+    grained_store = await _quarter_store(quarter_figure, ())
+    for windows in (["1-4h"], [7]):
+        result = await serve_reading(
+            grained_store, GRAINED, "t1", throughput, DEFAULTS, windows, at_day="9999-12-31"
+        )
+        assert result.empty is not None
+        assert result.empty.windows[0].to.startswith("9999-12-31")
+
+
+async def test_a_minute_span_serves_minute_storage_bucket_for_bucket() -> None:
+    """The finest unit, end to end: `1-90m` over a minute-grain figure is the
+    last ninety stored minutes, both edges inclusive -- the 03:31 bucket is
+    bucket 90 and in, the 03:29 bucket is out."""
+    figure = GRAINED.figure("team_person.minute_lead")
+    reading = GRAINED.reading("team_person.minute_typical")
+    assert figure is not None and reading is not None
+    store = MemoryEngineStore()
+    stamp = fingerprint(dict(DEFAULTS), list(figure.settings))
+    await store.set_pointer(
+        "t1", figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
+    )
+    await store.set_buckets("t1", "work_issue.by_minute", "w1", ["p1@2025-08-24T04:45"])
+    for subject, values in (
+        ("p1@2025-08-24T04:45", [100.0]),  # in
+        ("p1@2025-08-24T03:31", [300.0]),  # the oldest minute of the span: in
+        ("p1@2025-08-24T03:29", [900.0]),  # two minutes too early: out
+    ):
+        await store.save("t1", figure.name, figure.version, subject, values, (), "P One")
+
+    at = 1_756_036_800_000.0  # 05:00 in Los Angeles
+    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, ["1-90m"], at_ms=at)
+    [window] = result.subjects[0].windows
+    assert (window.frm, window.to) == ("2025-08-24T03:31", "2025-08-24T05:00")
+    assert (window.span, window.bucket, window.trailing) == ("90", "minute", None)
+    assert window.median == 200.0
+
+
+def test_a_sub_day_span_clamps_at_the_calendars_floor_rather_than_overflowing() -> None:
+    """Enough hour buckets back from the calendar's first day walk out of
+    `datetime`'s range; the span opens where the calendar begins, the same
+    answer the day branch gives, instead of an OverflowError worn as a 500."""
+    from uratori.engine.buckets import bucket_span
+    from uratori.windows import WindowSpec
+
+    frm, to = bucket_span(
+        end_of_day_ms("0001-01-01", "UTC"), "UTC", WindowSpec(first=1, last=1000, unit="hour")
+    )
+    assert (frm, to) == ("0001-01-01T00:00", "0001-01-01T23:00")
+
+
+async def test_a_duplicate_span_in_one_request_is_refused_across_spellings() -> None:
+    """The bundle grammar's rule at the request door: the same span twice is
+    the same answer twice, and a repeatable parameter with no duplicate
+    check is a cost multiplier the reach ceiling cannot see. Canonical, so
+    `30` and `1-30` collide the way they hash."""
+    from uratori.windows import WindowError
+
+    figure = READINGS.figure("team_person.per_day")
+    reading = READINGS.reading("team_person.pace")
+    assert figure is not None and reading is not None
+    store = await _day_reading_store(figure, ())
+    with pytest.raises(WindowError, match="twice"):
+        await serve_reading(store, READINGS, "t1", reading, DEFAULTS, ["30", "1-30"])
+
+
+async def test_the_fetch_reaches_no_further_than_the_spans_it_serves() -> None:
+    """An offset span (`391-400`) ends far behind the anchor; fetching up to
+    the anchor anyway would walk the whole offset -- the very cost the reach
+    ceiling bounds -- to serve a ten-day window. The fetch's bounds are the
+    resolved spans' own."""
+    figure = READINGS.figure("team_person.per_day")
+    reading = READINGS.reading("team_person.pace")
+    assert figure is not None and reading is not None
+    store = await _day_reading_store(figure, (("p1@2025-08-24", [10.0]),))
+
+    asked: list[tuple[str, str]] = []
+    original = store.values_in_range
+
+    async def recording(tenant, name, version, frm, to):  # type: ignore[no-untyped-def]
+        asked.append((frm, to))
+        return await original(tenant, name, version, frm, to)
+
+    store.values_in_range = recording  # type: ignore[method-assign]
+    await serve_reading(
+        store, READINGS, "t1", reading, DEFAULTS, ["391-400"], at_day="2025-08-24"
+    )
+    [(frm, to)] = asked
+    assert frm == "2024-07-21"
+    assert to == "2024-07-30", (
+        "the fetch walked past the span's newest day toward the anchor -- "
+        "the whole offset paid to serve a ten-day window"
+    )

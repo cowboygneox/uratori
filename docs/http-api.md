@@ -282,7 +282,7 @@ Responses:
       "declaration": "bundle",
       "version": "3f6f37a01c22",
       "prose": "The courier tile.",
-      "source": "bundle shop_courier.card:\n    reading shop_courier.typical_ride over 9, 2\n    figure shop_courier.carrying",
+      "source": "bundle shop_courier.card:\n    typical = reading shop_courier.typical_ride over 9, 2\n    carrying = figure shop_courier.carrying",
       "members": ["shop_courier.typical_ride", "shop_courier.carrying"]
     }
   ],
@@ -535,9 +535,13 @@ anchor**, bucket 1 being the bucket the request is anchored in:
   non-overlapping offset buckets, each independently getting the reading's
   statistics, sample floor, band and resolved dates.
 - `?trailing=1-48h` / `?trailing=1-90m` -- a sub-day span, in hours or
-  minutes. Bare numbers are **days, always** -- never the source figure's
-  storage grain, which would let a regrade silently re-scale every
-  bookmarked URL -- so anything finer says so with the suffix. A sub-day
+  minutes (`d` is the explicit-days suffix, an alias of the bare form, the
+  way a bundle member may write `in days`). Bare numbers are **days,
+  always** -- never the source figure's storage grain, which would let a
+  regrade silently re-scale every bookmarked URL -- so anything finer says
+  so with the suffix. The same span twice in one request is a `422`: one
+  request serves each window once, exactly as a bundle's window list
+  refuses its duplicates. A sub-day
   span must slice whole stored buckets: hours over a figure stored by day
   (or minutes over quarter-hour storage) are a `422` naming the figure's
   grain, on this route and the by-name one alike -- refused whole rather
@@ -849,7 +853,7 @@ cannot know. Note the spelling -- the field is `frm`.
 
 | Field | Meaning |
 |---|---|
-| `span` | The bucket span asked for, canonically spelled: `"30"` (the last 30 buckets, bucket 1 being the anchor bucket), `"31-60"` (the 30 before them). What was *asked*, beside what was covered. |
+| `span` | The bucket span asked for, in the canonical spelling's span half: `"30"` (the last 30 buckets, bucket 1 being the anchor bucket), `"31-60"` (the 30 before them). The unit deliberately lives in `bucket`, not here -- read the pair; a client keying on `span` alone would conflate `48` days with `48` hours. |
 | `bucket` | What one bucket of the span is: `"day"`, `"hour"` or `"minute"`. Days unless the request said otherwise, always. |
 | `trailing` | The span as a plain trailing-days count, kept meaning what it always has: present exactly when the span *is* the last N days, `null` for an offset or sub-day span -- an offset bucket wearing a trailing-looking number is the lie this field refuses to tell. |
 | `frm`, `to` | The first (oldest) and last (newest) bucket labels the span resolved to -- ISO days for day buckets, local bucket labels (`2026-08-25T14:00`) for sub-day ones. |

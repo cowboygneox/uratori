@@ -59,8 +59,10 @@ def test_a_zero_bound_is_refused_toward_day_one() -> None:
         with pytest.raises(WindowError) as caught:
             as_window_spec(wrong)
         message = str(caught.value)
-        assert "1" in message and "anchor" in message, wrong
-        assert "31" in message or "0-" in message or "counts from 1" in message
+        assert "anchor" in message, wrong
+        assert "1-30, 31-60" in message, (
+            "the refusal must spell out the convention to write instead"
+        )
 
 
 def test_a_reversed_or_empty_span_is_refused() -> None:
@@ -96,4 +98,29 @@ def test_malformed_tokens_are_refused_never_coerced() -> None:
 
 def test_a_spec_passes_through_unchanged() -> None:
     spec = WindowSpec(first=2, last=5, unit="hour")
-    assert as_window_spec(spec) is spec
+    assert as_window_spec(spec) == spec
+
+
+def test_the_explicit_day_suffix_is_an_alias_of_the_bare_form() -> None:
+    """`30d` spells the default out, the way a bundle member may write
+    `in days` -- one question, one canonical token."""
+    assert as_window_spec("30d") == as_window_spec("30")
+    assert as_window_spec("1-30d") == as_window_spec("30")
+    assert window_token(as_window_spec("30d")) == "30"
+
+
+def test_a_one_bucket_offset_span_is_legal_and_keeps_both_bounds() -> None:
+    """`5-5` is one bucket, five back -- a real question, and its token keeps
+    both bounds so it cannot be mistaken for the trailing `5`."""
+    spec = as_window_spec("5-5")
+    assert spec == WindowSpec(first=5, last=5)
+    assert window_token(spec) == "5-5"
+
+
+def test_unicode_digits_are_not_windows() -> None:
+    r"""`\d` matches every Unicode digit class, and "٣٠" quietly becoming 30
+    would be a coercion -- a plausible window nobody spelled."""
+    fullwidth_twelve = "\uff11\uff12"  # fullwidth 12, spelled as escapes for the linter
+    for wrong in ("٣٠", fullwidth_twelve, "1-٣٠"):
+        with pytest.raises(WindowError):
+            as_window_spec(wrong)

@@ -1381,8 +1381,10 @@ its bundle, and an *address only* -- each member's answer keeps its own
 definition's label and doc, because nothing may let a bundle rename what a
 number is called. Two slots may name the same member when their window
 lists differ (this month beside last month is two questions about one
-reading); the same member under the same windows is refused as two names
-for one answer.
+reading); the same member over the same window list is refused as two
+names for one answer. The list, in its order -- window order is
+substantive, a screen may bind to positions -- so `over 30, 60` and
+`over 60, 30` are two differently-shaped answers and both may exist.
 
 - **`<slot> = reading <name> [over 7, 14, 30]`** -- the bucket spans to
   serve the reading over, unwritten meaning the serving default. A span is

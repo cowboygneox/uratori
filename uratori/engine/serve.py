@@ -51,11 +51,12 @@ from ..windows import (
     as_window_spec,
     refuse_series_in_window,
     refuse_unit_over_grain,
+    span_text,
+    window_token,
 )
 from .buckets import (
     SEPARATOR,
     bucket_span,
-    day_in,
     end_of_day_ms,
     measure_of,
     subject_of,
@@ -604,6 +605,21 @@ async def serve_reading(
     as a 422: the fix (write days, or regrade the figure) is the caller's.
     """
     specs = [as_window_spec(w) for w in windows]
+    seen_tokens: set[str] = set()
+    for spec in specs:
+        token = window_token(spec)
+        if token in seen_tokens:
+            # The bundle grammar's rule, applied at the request door: the
+            # same span twice is the same answer twice, and -- since every
+            # span is a walk over stored points -- a repeatable parameter
+            # with no duplicate check is a cost multiplier the reach
+            # ceiling cannot see. Canonical tokens, so `30` and `1-30`
+            # collide the way they hash.
+            raise WindowError(
+                f'the window list names "{token}" twice. One request serves each '
+                "window once."
+            )
+        seen_tokens.add(token)
     source = library.figure(plan.source or "")
     if source is None:
         raise ValueError(f"{plan.name} reads a figure that is not in the library")
@@ -625,7 +641,12 @@ async def serve_reading(
     resolved = [(spec, *bucket_span(at, zone, spec)) for spec in specs]
 
     frm = min(w_frm[:10] for _, w_frm, _ in resolved)
-    to = day_in(at, zone)
+    # The upper bound is the *newest resolved* bucket's day, not the anchor
+    # day: an offset span (`391-400`) ends far behind the anchor, and
+    # fetching up to the anchor anyway would walk the whole offset -- the
+    # very cost the reach ceiling exists to bound -- to serve a ten-day
+    # window.
+    to = max(w_to[:10] for _, _, w_to in resolved)
     # A sub-day label on the window's final day -- "2026-08-25T14:30" -- sorts
     # *after* the bare day "2026-08-25", so day-string bounds would silently
     # drop the current day from every sub-day window: a board reporting the
@@ -761,9 +782,8 @@ def _window(
         for key, value in stats.items()
         if value is not None
     }
-    span = str(spec.last) if spec.first == 1 else f"{spec.first}-{spec.last}"
     return Window(
-        span=span,
+        span=span_text(spec),
         bucket=spec.unit,
         # `trailing` keeps meaning exactly what it always has -- the last N
         # days -- and is absent for any span that is not that: an offset

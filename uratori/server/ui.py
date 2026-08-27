@@ -55,6 +55,7 @@ from ..lang.source import declaration_prose, declaration_source
 from ..results import Availability, BundleResult, Evidence, Ok, Result, Subject, Unavailable
 from ..schema import EFFORT_HOURS_SETTING, Schema
 from ..store.postgres import PostgresEngineStore
+from ..windows import WindowError, as_window_spec
 from . import db
 from .runtime import (
     State,
@@ -1259,21 +1260,27 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         tenant: str,
         name: str,
         request: Request,
-        trailing: Annotated[list[int] | None, Query()] = None,
+        trailing: Annotated[list[str] | None, Query()] = None,
     ) -> Result | BundleResult:
         """The same answer the API serves, reachable from the definition's own
         page -- refusal semantics identical to the authenticated route, so the
-        UI never shows a number the API would not."""
+        UI never shows a number the API would not. That identity is why the
+        window parameter takes the same span forms and the same 422s: an int
+        door here would refuse `31-60` with a validation error the API door
+        answers, and wear a reach-ceiling refusal as a 400."""
         s = _state(request)
         world, library = ready(s)
         facade = facade_for(s, world, library)
         try:
+            specs = [as_window_spec(token) for token in trailing] if trailing else None
             answer = await facade.answer(
                 tenant,
                 name,
                 await db.load_settings(s.pool, tenant),
-                trailing=trailing or DEFAULT_TRAILING,
+                trailing=specs or DEFAULT_TRAILING,
             )
+        except WindowError as refusal:
+            raise HTTPException(status_code=422, detail=str(refusal)) from refusal
         except ValueError as refusal:
             raise HTTPException(status_code=400, detail=str(refusal)) from refusal
         except NotImplementedError as gap:

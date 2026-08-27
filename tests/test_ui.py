@@ -475,6 +475,59 @@ async def test_results_and_evidence_are_readable_through_the_ui(pg_dsn: str) -> 
         assert missing.status_code == 404
 
 
+async def test_the_ui_results_route_speaks_the_same_window_spans_as_the_api(
+    pg_dsn: str,
+) -> None:
+    """The route's own claim is refusal semantics identical to the
+    authenticated door. An int-only parameter here would refuse `31-60`
+    with a framework validation error the API answers, and wear the reach
+    ceiling's refusal as a 400 -- the UI showing a number, or an error, the
+    API would not."""
+    windowed = COURIER_SOURCE + """
+group shop_order.delivered_by_day from (courier_id, delivered_at by day in tenant.timezone)
+
+measure shop_order.riding_seconds = delivered_at - picked_up_at
+
+# Every delivery's ride time, day by day.
+figure shop_courier.ride_times:
+    display "{shop_courier} rides"
+    depends:
+        done = shop_order.delivered_by_day:{shop_courier}
+    calculate:
+        list(shop_order.riding_seconds over done)
+
+# The typical ride, over a window.
+reading shop_courier.typical_ride(range):
+    display "{value}"
+    depends:
+        rides = shop_courier.ride_times in range
+    calculate:
+        mean(rides)
+"""
+    world = COURIER_WORLD.to_document()
+    world["bucket_settings"] = ["tenant.timezone"]
+    async with serve(pg_dsn) as http:
+        assert (await http.put("/schema", json=world)).status_code == 200
+        put = await http.put("/definitions", json={"source": windowed})
+        assert put.status_code == 200, put.text
+
+        spanned = await http.get(
+            "/ui/api/tenants/t1/results/shop_courier.typical_ride",
+            params={"trailing": "31-60"},
+        )
+        assert spanned.status_code == 200, spanned.text
+        [window] = spanned.json()["empty"]["windows"]
+        assert (window["span"], window["trailing"]) == ("31-60", None)
+
+        for wrong, fragment in (("0-30", "anchor"), ("1000000", "3660"), ("30x", "span")):
+            refused = await http.get(
+                "/ui/api/tenants/t1/results/shop_courier.typical_ride",
+                params={"trailing": wrong},
+            )
+            assert refused.status_code == 422, f"{wrong!r}: {refused.status_code}"
+            assert fragment in refused.text, refused.text
+
+
 # ------------------------------------------------------------- posture --
 
 

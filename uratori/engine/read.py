@@ -284,6 +284,11 @@ def _labels_between(frm: str, to: str, by: str) -> list[str]:
         end_moment = datetime.fromisoformat(to)
         while moment <= end_moment:
             out.append(f"{moment.date().isoformat()}T{moment.hour:02d}:{moment.minute:02d}")
+            if moment > datetime.max - timedelta(minutes=step):
+                # The calendar's own last labels: the step beyond them that
+                # the loop condition would catch overflows before the
+                # condition ever runs -- `_fill`'s guard, at the finer grain.
+                break
             moment += timedelta(minutes=step)
         return out
     day = date.fromisoformat(frm)
@@ -295,6 +300,13 @@ def _labels_between(frm: str, to: str, by: str) -> list[str]:
             step = steps[by]
             for minutes in range(0, 1440, step):
                 out.append(f"{day.isoformat()}T{minutes // 60:02d}:{minutes % 60:02d}")
+        if day == date.max:
+            # A range may legitimately end on the calendar's last day -- an
+            # anchored request at 9999-12-31 -- and the step beyond it
+            # overflows before the loop condition runs. `_fill` has carried
+            # this guard since the anchor landed; this loop needed it too,
+            # which is where the fixed traceback moved to.
+            break
         day += timedelta(days=1)
     return out
 

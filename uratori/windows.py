@@ -65,6 +65,14 @@ class WindowSpec:
     unit: WindowUnit = "day"
 
 
+def span_text(spec: WindowSpec) -> str:
+    """The span half of the canonical spelling, without the unit: `30`,
+    `31-60`. What travels as `Window.span` on the wire, beside `bucket`
+    carrying the unit -- one implementation with `window_token`, so the
+    hash's spelling and the wire's cannot disagree about a span."""
+    return str(spec.last) if spec.first == 1 else f"{spec.first}-{spec.last}"
+
+
 def window_token(spec: WindowSpec) -> str:
     """The canonical spelling: `30`, `31-60`, `48h`, `49-96h`.
 
@@ -72,8 +80,7 @@ def window_token(spec: WindowSpec) -> str:
     `over 1-30` and `over 30` are one question, and two spellings hashing
     differently would make two identical tiles differ by punctuation.
     """
-    span = str(spec.last) if spec.first == 1 else f"{spec.first}-{spec.last}"
-    return span + _UNIT_SUFFIX[spec.unit]
+    return span_text(spec) + _UNIT_SUFFIX[spec.unit]
 
 
 def reach_days(spec: WindowSpec) -> int:
@@ -82,7 +89,11 @@ def reach_days(spec: WindowSpec) -> int:
     return -(-minutes // 1440)
 
 
-_TOKEN = re.compile(r"(\d+)(?:-(\d+))?(h|m|d)?\Z")
+# ASCII digits only, deliberately: `\d` matches every Unicode digit class,
+# and "٣٠" quietly becoming 30 is a coercion -- a plausible window nobody
+# spelled. The `d` suffix is the explicit-days form, documented beside `h`
+# and `m`, mirroring the bundle grammar's `in days`.
+_TOKEN = re.compile(r"([0-9]+)(?:-([0-9]+))?(h|m|d)?\Z")
 
 _UNIT_OF_SUFFIX: dict[str, WindowUnit] = {"d": "day", "h": "hour", "m": "minute"}
 
@@ -159,7 +170,9 @@ def refuse_unit_over_grain(spec: WindowSpec, grain: str, figure: str) -> str | N
     if spec.unit == "day":
         return None
     grain_minutes = {"day": 1440, "minute": 1, "15 minutes": 15}.get(grain, 1440)
-    if _UNIT_MINUTES[spec.unit] % grain_minutes == 0 and _UNIT_MINUTES[spec.unit] >= grain_minutes:
+    # Divisibility alone decides: a grain that divides the unit is never
+    # coarser than it, so there is no separate ordering check to keep in step.
+    if _UNIT_MINUTES[spec.unit] % grain_minutes == 0:
         return None
     return (
         f"a window in {_UNIT_WORDS[spec.unit]} cannot slice {figure}, which is "
@@ -183,12 +196,12 @@ def refuse_series_in_window(spec: WindowSpec, series_by: str | None, reading: st
     series_minutes = {"15 minutes": 15, "hour": 60, "day": 1440}.get(series_by, 1440)
     if series_minutes <= _UNIT_MINUTES[spec.unit]:
         return None
+    named = "15-minute" if series_by == "15 minutes" else series_by
     return (
-        f"{reading} declares series(...) by {series_by}, and a {series_by} point "
+        f"{reading} declares series(...) by {series_by}, and a {named} point "
         f"does not fit inside a window of {_UNIT_WORDS[spec.unit]}: the point would "
-        "claim time the window does not cover. Ask for this span in "
-        f"{series_by if series_by != '15 minutes' else '15-minute'}-sized units or "
-        "coarser, or serve the reading over day spans."
+        f"claim time the window does not cover. Ask for this span in {named}-sized "
+        "units or coarser, or serve the reading over day spans."
     )
 
 
@@ -202,5 +215,6 @@ __all__ = [
     "reach_days",
     "refuse_series_in_window",
     "refuse_unit_over_grain",
+    "span_text",
     "window_token",
 ]

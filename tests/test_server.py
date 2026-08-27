@@ -1399,9 +1399,82 @@ async def test_offset_buckets_compose_with_the_anchor_over_http(server: Server) 
     assert (far["frm"], far["to"]) == ("2026-06-25", "2026-06-27")
     assert far["mean"] is None and far["days_covered"] == 0
 
-    # Adjacent specs cover adjacent, non-overlapping days: 4-6 ends exactly
-    # the day before 1-3 opens.
-    assert far["to"] == "2026-06-27" and near["frm"] == "2026-06-28"
+
+async def test_a_duplicate_span_in_one_request_is_a_422(server: Server) -> None:
+    """`?trailing=30&trailing=1-30` is the same window twice under two
+    spellings -- refused the way a bundle's window list refuses its
+    duplicates, and before any stored point is walked."""
+    await _teach_rides(server.http)
+    got = await server.http.get(
+        "/tenants/t1/results/shop_courier.typical_ride",
+        params={"trailing": ["30", "1-30"]},
+    )
+    assert got.status_code == 422, f"{got.status_code} {got.text}"
+    assert "twice" in got.text
+
+
+QUARTER_RIDES_SOURCE = (
+    RIDES_SOURCE
+    + """
+group shop_order.delivered_by_quarter from (courier_id, delivered_at by 15 minutes in tenant.timezone)
+
+# Every delivery's ride time, quarter-hour by quarter-hour.
+figure shop_courier.ride_quarters:
+    display "{shop_courier} ride quarters"
+    depends:
+        done = shop_order.delivered_by_quarter:{shop_courier}
+    calculate:
+        list(shop_order.riding_seconds over done)
+
+# The typical ride over recent hours.
+reading shop_courier.recent_ride(range):
+    display "{value}"
+    depends:
+        rides = shop_courier.ride_quarters in range
+    calculate:
+        mean(rides)
+"""
+)
+
+
+async def test_an_hour_span_serves_over_http_with_an_honest_wire_shape(
+    server: Server,
+) -> None:
+    """The sub-day half of the wire contract, end to end: `?trailing=1-48h`
+    anchored on 2026-06-30 covers that local day and the one before, hour
+    bucket by hour bucket -- r2 (local 2026-06-30) is in, r1 (local
+    2026-06-28) is out -- and the window says what it is: hour buckets,
+    label bounds, `trailing` null."""
+    world = COURIER_WORLD.to_document()
+    world["bucket_settings"] = ["tenant.timezone"]
+    world["defaults"] = {
+        **world["defaults"],
+        "tenant": {"hoursPerDay": 8, "timezone": RIDES_ZONE},
+    }
+    assert (await server.http.put("/schema", json=world)).status_code == 200
+    put = await server.http.put("/definitions", json={"source": QUARTER_RIDES_SOURCE})
+    assert put.status_code == 200, put.text
+    pushed = await server.http.post(
+        "/tenants/t1/facts",
+        json={"writes": {"shop_courier": COURIER, "shop_order": RIDES}},
+    )
+    assert pushed.status_code == 200, pushed.text
+
+    got = await server.http.get(
+        "/tenants/t1/results/shop_courier.recent_ride",
+        params={"at": "2026-06-30", "trailing": "1-48h"},
+    )
+    assert got.status_code == 200, got.text
+    [subject] = got.json()["subjects"]
+    [window] = subject["windows"]
+    assert (window["span"], window["bucket"]) == ("48", "hour")
+    assert window["trailing"] is None, "an hour span must not wear a trailing-days number"
+    assert window["frm"] == "2026-06-29T00:00"
+    assert window["to"] == "2026-06-30T23:00"
+    assert window["mean"] == 7200.0, (
+        "the last 48 hour buckets of the anchor day hold only the two-hour "
+        "ride; 5400 means the day-window arithmetic leaked in"
+    )
 
 
 async def test_a_sub_day_span_over_day_storage_is_refused_naming_the_grain(

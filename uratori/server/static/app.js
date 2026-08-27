@@ -675,7 +675,10 @@ async function answerSection(declaration) {
         el('tr', {}, el('th', {}, 'window'), el('th', {}, 'statistics'),
           el('th', {}, 'sample'), el('th', {}, 'coverage')),
         (subject.windows || []).map((window) => el('tr', {},
-          el('td', { class: 'mono' }, `${window.trailing}d`, ' ',
+          // The span with its bucket unit -- `30d`, `31-60d`, `1-48h` --
+          // never `trailing`, which is null for any span that is not a
+          // plain trailing-days count.
+          el('td', { class: 'mono' }, `${window.span}${{ day: 'd', hour: 'h', minute: 'm' }[window.bucket] || ''}`, ' ',
             el('span', { class: 'faint' }, `${window.frm} → ${window.to}`)),
           el('td', { class: 'mono' },
             Object.entries(window.display).map(([stat, text], i) =>

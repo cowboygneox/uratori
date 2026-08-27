@@ -85,6 +85,33 @@ reading team_person.recent_pace(range):
         m = team_person.merge_quarters in range
     calculate:
         median(m)
+
+# The daily shape of recent merging.
+reading team_person.merge_daily(range):
+    display "{team_person} daily"
+    depends:
+        m = team_person.merge_quarters in range
+    calculate:
+        sum(m)
+        series(m) by day
+
+group code_change.merged_by_minute from (authorAccountId through team_person.accounts.accountId, mergedAt by minute in tenant.timezone)
+
+# Merge times, minute by minute.
+figure team_person.merge_minutes:
+    display "{team_person} merge minutes"
+    depends:
+        merged = code_change.merged_by_minute:{team_person}
+    calculate:
+        list(code_change.open_seconds over merged)
+
+# The typical merge, by the minute.
+reading team_person.minute_pace(range):
+    display "{team_person} minute pace"
+    depends:
+        m = team_person.merge_minutes in range
+    calculate:
+        median(m)
 """
 
 CARD = """
@@ -870,14 +897,14 @@ def test_one_answer_under_two_names_is_still_refused() -> None:
         "bundle team_person.card:\n"
         "    a = reading team_person.to_merge over 1-30\n"
         "    b = reading team_person.to_merge over 30\n",
-        "twice",
+        "twice over the same windows",
     )
     refuses(
         "\n# A card echoing itself bare.\n"
         "bundle team_person.card:\n"
         "    a = reading team_person.to_merge\n"
         "    b = reading team_person.to_merge\n",
-        "twice",
+        "twice over the same windows",
     )
 
 
@@ -918,7 +945,7 @@ def test_a_duplicate_span_is_refused_across_spellings() -> None:
             "bundle team_person.card:\n"
             "    pace = reading team_person.to_merge over 30, 1-30\n"
         )
-    assert "twice" in caught.value.message
+    assert 'names "30" twice' in caught.value.message
 
 
 def test_an_hour_span_needs_sub_day_storage_and_says_so_at_compile_time() -> None:
@@ -1003,3 +1030,55 @@ async def test_two_slots_serve_one_reading_over_different_spans() -> None:
         "the prior span must hold yesterday's one-hour ride alone; 5400 "
         "means today's ride leaked across the offset"
     )
+
+
+def test_a_series_that_does_not_fit_the_span_is_a_compile_error_in_a_bundle() -> None:
+    """`merge_daily` declares series(...) by day; a tile serving it over
+    hour spans would ship day points claiming time the span does not cover.
+    Refused when the tile compiles -- the same words the request door uses
+    -- rather than compiling green and raising on every serve."""
+    refuses(
+        "\n# A day series inside hour buckets.\n"
+        "bundle team_person.card:\n"
+        "    daily = reading team_person.merge_daily over 1-48 in hours\n",
+        "does not fit",
+    )
+
+
+def test_a_minute_span_needs_minute_storage_and_compiles_over_it() -> None:
+    """`in minutes` is the finest unit: legal over minute storage, refused
+    over quarter-hour storage where a minute bucket would split a stored
+    one -- both decided when the tile compiles."""
+    lib = compile_ok(
+        "\n# The last ninety minutes.\n"
+        "bundle team_person.minute_card:\n"
+        "    fresh = reading team_person.minute_pace over 1-90 in minutes\n"
+    )
+    plan = lib.bundle("team_person.minute_card")
+    assert plan is not None
+    assert plan.members[0].windows == (WindowSpec(first=1, last=90, unit="minute"),)
+
+    refuses(
+        "\n# Minutes over quarter-hour storage.\n"
+        "bundle team_person.card:\n"
+        "    fresh = reading team_person.recent_pace over 1-90 in minutes\n",
+        "stored by 15 minutes",
+    )
+
+
+def test_a_members_window_list_never_moves_the_readings_own_hash() -> None:
+    """The exact invariant spans put at risk: a window is an argument, so a
+    member re-windowed ten ways cites the same reading version every time --
+    only the bundle's hash moves."""
+    wide = compile_ok(CARD)
+    narrow = compile_ok(CARD.replace("over 7, 14, 30", "over 31-60"))
+    reading_wide = wide.reading("team_person.to_merge")
+    reading_narrow = narrow.reading("team_person.to_merge")
+    assert reading_wide is not None and reading_narrow is not None
+    assert reading_wide.version == reading_narrow.version, (
+        "a member's window list leaked into the reading's version hash"
+    )
+    card_wide = wide.bundle("team_person.card")
+    card_narrow = narrow.bundle("team_person.card")
+    assert card_wide is not None and card_narrow is not None
+    assert card_wide.version != card_narrow.version, "the control moved nothing"

@@ -243,9 +243,13 @@ def end_of_day_ms(day: str, zone: str | None) -> float:
         # the unclamped value blew up later, in `day_in` and `_iso`, as a
         # traceback worn by a well-formed question. The clamp stays inside
         # the anchor's local day (UTC's 23:59:59.999 is still 9999-12-31
-        # everywhere west of UTC), so the windows end on the day asked
-        # about; only the provenance instant sits a few hours early, which
-        # is the honest trade against having no answer at all.
+        # everywhere west of UTC), so day windows end on the day asked
+        # about. What moves with the clamped instant, west of UTC on this
+        # one day, is the provenance `at` and the anchor *bucket* of a
+        # sub-day span -- the day's true final hour is literally
+        # unaddressable, and a span counted from the last representable
+        # bucket (the wire stating exactly which buckets it covered) is the
+        # honest trade against having no answer at all.
         last_utc = (
             datetime.combine(anchor, dt_time(), tzinfo=UTC).timestamp() * 1000.0
             + 86_400_000.0

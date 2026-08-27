@@ -108,9 +108,11 @@ class Window(BaseModel):
     """
 
     span: str
-    """The bucket span asked for, canonically spelled: `"30"` (the last 30
-    buckets, bucket 1 being the one the anchor falls in), `"31-60"` (the 30
-    before them). What was *asked*, beside what was covered -- an offset
+    """The bucket span asked for -- the canonical spelling's span half:
+    `"30"` (the last 30 buckets, bucket 1 being the one the anchor falls
+    in), `"31-60"` (the 30 before them). The unit deliberately lives in
+    `bucket`, not here: read the pair, since `span` alone conflates 48 days
+    with 48 hours. What was *asked*, beside what was covered -- an offset
     bucket wearing a label that reads like a trailing span is the failure
     mode this field exists to prevent."""
 
