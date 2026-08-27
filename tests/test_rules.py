@@ -967,22 +967,53 @@ async def test_a_failed_floor_withholds_the_grouped_series_with_everything_else(
 def test_an_anchor_resolves_to_its_days_last_moment_in_the_zone() -> None:
     """The instant an anchor date stands for is the final millisecond of that
     local day: one more and it is tomorrow, any less and part of the anchor
-    day sits outside its own window."""
-    at = end_of_day_ms("2026-06-30", "Pacific/Kiritimati")
-    assert day_in(at, "Pacific/Kiritimati") == "2026-06-30"
-    assert day_in(at + 1.0, "Pacific/Kiritimati") == "2026-07-01"
+    day sits outside its own window. The DST rows are the reason the anchor
+    is built from the next midnight rather than from a literal 23:59:59.999
+    -- Santiago and Beirut both fall back *at* midnight, giving the anchor
+    day a second 23:00-23:59 stretch, and the naive wall time names the
+    first of them: an hour of the anchor day left outside its own window."""
+    for zone, day, next_day in (
+        ("Pacific/Kiritimati", "2026-06-30", "2026-07-01"),
+        ("America/Santiago", "2026-04-04", "2026-04-05"),
+        ("Asia/Beirut", "2026-10-24", "2026-10-25"),
+    ):
+        at = end_of_day_ms(day, zone)
+        assert day_in(at, zone) == day, zone
+        assert day_in(at + 1.0, zone) == next_day, zone
 
 
-def test_a_window_crossing_spring_forward_still_opens_the_full_span_back() -> None:
-    """Los Angeles loses an hour on 2026-03-08, so the seven exact-millisecond
-    days before the 10th's last moment reach only 00:59 on the 4th -- pure
-    subtraction files the start on the 5th and the window quietly covers six
-    days while claiming seven. A window is counted in local *calendar* days,
-    and an anchored request always sits at a day's last millisecond, exactly
-    the hour this bites."""
+def test_a_window_crossing_fall_back_still_opens_the_full_span_back() -> None:
+    """Los Angeles gains an hour on 2026-11-01, so stepping exact days back
+    from that day's last moment crosses one midnight too few: 23:59:59.999
+    lands on 00:59:59.999 of the day *after* the intended start, and a
+    two-day window quietly serves one day while claiming two. A window is
+    counted in local calendar days, and an anchored request always sits at a
+    day's last millisecond -- exactly the hour this bites. (Spring-forward
+    is the harmless direction: stepping back over it moves the wall clock
+    further from midnight.)"""
     zone = "America/Los_Angeles"
-    at = end_of_day_ms("2026-03-10", zone)
-    assert day_range(at, zone, 7) == ("2026-03-04", "2026-03-10")
+    assert day_range(end_of_day_ms("2026-11-01", zone), zone, 2) == (
+        "2026-10-31",
+        "2026-11-01",
+    )
+    assert day_range(end_of_day_ms("2026-11-05", zone), zone, 7) == (
+        "2026-10-30",
+        "2026-11-05",
+    )
+
+
+def test_the_calendars_own_edges_answer_rather_than_overflow() -> None:
+    """Pydantic accepts 9999-12-31 and 0001-01-01 as calendar days, so the
+    engine has to answer about them: the far edge has no next midnight to
+    build the anchor from, and enough trailing days from the near edge walk
+    out of `date`'s range entirely. Both used to surface as a 500 -- an
+    OverflowError worn as a server fault for a well-formed question whose
+    honest answer is just an empty window."""
+    at = end_of_day_ms("9999-12-31", "Pacific/Kiritimati")
+    assert day_in(at, "Pacific/Kiritimati") == "9999-12-31"
+
+    early = end_of_day_ms("0001-01-05", "UTC")
+    assert day_range(early, "UTC", 30) == ("0001-01-01", "0001-01-05")
 
 
 async def test_an_anchor_day_ends_the_windows_in_the_readings_own_zone() -> None:
@@ -1022,6 +1053,94 @@ async def test_an_anchor_day_ends_the_windows_in_the_readings_own_zone() -> None
     assert window.mean == 3.0, "a day beyond the anchor leaked into the sample"
     assert window.days_covered == 2
     assert window.days_requested == 7
-    # 2025-08-24 ends at 23:59:59.999 in Los Angeles, which is 06:59:59.999
-    # UTC the next morning -- the instant, not the request's wall clock.
-    assert result.at.startswith("2025-08-25T06:59:59")
+    # The served `at` is the anchor day's last moment in Los Angeles --
+    # compared as an instant, not as a rendering, so a correct change of ISO
+    # spelling stays green and a wall-clock `at` fails.
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    served = datetime.fromisoformat(result.at).astimezone(ZoneInfo("America/Los_Angeles"))
+    assert served.date().isoformat() == "2025-08-24"
+    assert (served.hour, served.minute, served.second) == (23, 59, 59)
+
+
+async def test_a_declared_floor_and_band_apply_unchanged_under_an_anchor() -> None:
+    """The anchor decides which days are in the sample and *nothing* decides
+    differently because of it: `team_person.speed` requires three values, so
+    the anchor that catches two of the three stored days gets the floor's
+    refusal, the anchor one day later gets the mean and its band word, and
+    both answers cite the same version -- an anchor that moved the version
+    would be an argument leaking into the calculation's identity."""
+    store = MemoryEngineStore()
+    figure = READINGS.figure("team_person.per_day")
+    reading = READINGS.reading("team_person.speed")
+    assert figure is not None and reading is not None
+
+    tenant = "t1"
+    stamp = fingerprint(dict(DEFAULTS), list(figure.settings))
+    await store.set_pointer(
+        tenant, figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
+    )
+    await store.set_buckets(tenant, "work_issue.by_day", "w1", ["p1@2025-08-24"])
+    for subject, values in (
+        ("p1@2025-08-22", [86_400.0]),
+        ("p1@2025-08-23", [172_800.0]),
+        ("p1@2025-08-24", [259_200.0]),
+    ):
+        await store.save(tenant, figure.name, figure.version, subject, values, (), "P One")
+
+    short = await serve_reading(
+        store, READINGS, tenant, reading, DEFAULTS, [7], at_day="2025-08-23"
+    )
+    window = short.subjects[0].windows[0]
+    assert window.unmet, "two values against a floor of three should have fallen short"
+    assert window.mean is None
+    assert window.level == "unknown"
+
+    met = await serve_reading(
+        store, READINGS, tenant, reading, DEFAULTS, [7], at_day="2025-08-24"
+    )
+    window = met.subjects[0].windows[0]
+    assert window.unmet == []
+    assert window.mean == 172_800.0
+    # Two days under flow.leadTimeDays.good (seven), so the low band says ok.
+    assert window.level == "ok"
+
+    assert short.version == met.version, "an anchor moved a version hash"
+
+
+async def test_a_sub_day_reading_under_an_anchor_keeps_its_final_quarters() -> None:
+    """The anchored window's last day is a caller's day, not today, and the
+    sub-day fetch bounds have to stretch to its final label all the same: a
+    bucket at 23:45 of the anchor day belongs in, the first quarter of the
+    next day stays out, and the grouped series still spans the whole window
+    hour by hour."""
+    store = MemoryEngineStore()
+    figure = GRAINED.figure("team_person.quarter_volume")
+    reading = GRAINED.reading("team_person.quarter_throughput")
+    assert figure is not None and reading is not None
+
+    tenant = "t1"
+    stamp = fingerprint(dict(DEFAULTS), list(figure.settings))
+    await store.set_pointer(
+        tenant, figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
+    )
+    await store.set_buckets(tenant, "work_issue.by_quarter", "w1", ["p1@2025-08-24T23:45"])
+    for subject, value in (
+        ("p1@2025-08-24T23:45", 4.0),  # the final quarter of the anchor day
+        ("p1@2025-08-25T00:00", 9.0),  # the first quarter after it; must not leak
+        ("p1@2025-08-20T10:00", 3.0),  # mid-window
+    ):
+        await store.save(tenant, figure.name, figure.version, subject, value, (), "P One")
+
+    result = await serve_reading(
+        store, GRAINED, tenant, reading, DEFAULTS, [7], at_day="2025-08-24"
+    )
+
+    assert isinstance(result.state, Ok)
+    window = result.subjects[0].windows[0]
+    assert (window.frm, window.to) == ("2025-08-18", "2025-08-24")
+    assert window.total == 7.0, "a quarter at the anchored window's edge leaked or fell out"
+    assert window.series is not None and len(window.series) == 168
+    assert window.series[6 * 24 + 23] == 4.0  # 23:00 on the anchor day
+    assert window.series[2 * 24 + 10] == 3.0  # 10:00 on 2025-08-20

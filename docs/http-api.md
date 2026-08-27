@@ -531,11 +531,16 @@ served over, in days: `?trailing=30&trailing=7`. The default is 30, 14 and 7.
 `at` anchors those windows on a chosen day instead of today: an ISO date
 (`?at=2026-06-30&trailing=30` is "the 30 days ending June 30"), resolved by
 the server to that day's end in each reading's own zone. Absent, the anchor
-is now, exactly as before. Anything that is not a calendar day is a `422`.
-Any absolute range at day granularity is reachable this way: `at` is the end
-date and `trailing` the span. An anchor before a tenant's data is not an
-error -- the windows come back with `days_covered: 0` and their requirements
-unmet, the same absence answer an empty board serves.
+is now, exactly as before. Anything that is not a `YYYY-MM-DD` calendar day
+is a `422` -- including a bare epoch number, which is refused rather than
+guessed at as a timestamp. Any absolute range at day granularity is
+reachable this way: `at` is the end date and `trailing` the span. An anchor
+before a tenant's data is not an error: `subjects` is empty and the `empty`
+prototype's windows carry `days_covered: 0` with their requirements unmet,
+the same absence answer an empty board serves. On this bulk route the
+anchor reaches the window readings only -- a figure or projection is a
+point-in-time answer with no window to move, and each result's own `at`
+says when it was computed.
 
 Windows and their anchor are the things a client may choose, because both are
 presentation, not calculation -- a reading's statistics, minimums and band are
