@@ -4,7 +4,7 @@ name = "uratori"
 # release and this field is what an installed copy reports, and the two
 # disagreeing means `importlib.metadata.version` tells a host it is running
 # an engine it is not.
-version = "0.10.0"
+version = "0.11.0"
 description = "A definition engine: figures, readings and projections compiled from versioned definitions, computed incrementally over facts."
 readme = "README.md"
 # BUSL, not Apache or FSL: production use is granted for everything except the
