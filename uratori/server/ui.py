@@ -79,7 +79,7 @@ whatever lands beside these; two known names cannot."""
 
 
 DeclarationKind = Literal[
-    "fact", "group", "filter", "measure", "figure", "reading", "projection", "summary"
+    "fact", "group", "filter", "measure", "figure", "reading", "projection", "summary", "bundle"
 ]
 
 DependencyType = Literal[
@@ -1728,6 +1728,11 @@ def _named(library: Library | None) -> dict[str, tuple[DeclarationKind, str | No
         held[projection.name] = ("projection", projection.version)
     for summary in library.summaries:
         held[summary.name] = ("summary", summary.version)
+    # Bundles too: their hash exists precisely for the review surface, and a
+    # diff blind to them reported a recomposed or deleted tile as "everything
+    # unchanged" -- a review record that lies about what the save did.
+    for bundle in library.bundles:
+        held[bundle.name] = ("bundle", bundle.version)
     return held
 
 

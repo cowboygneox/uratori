@@ -1947,9 +1947,17 @@ class _Checker:
     # ------------------------------------------------------------- bundle --
 
     def _bundle(self, d: BundleDecl) -> None:
-        """A bundle names things; the checker's whole job here is making sure
-        each name is the thing its keyword claims, so a broken tile is a
-        build error and never a serve-time surprise."""
+        """A bundle names things; the checker's job here is making sure each
+        name is the thing its keyword claims, so a broken tile is a build
+        error rather than a serve-time surprise.
+
+        One deliberate exception: a bare live-reading member compiles, and a
+        tile naming one answers the same not-yet-servable refusal the
+        reading's own route gives. That mirrors the language's standing
+        position on live readings -- declared, checked, versioned, not yet
+        served -- and refusing the member here would mean re-teaching every
+        such tile on the day live serving lands, for a rule the reading
+        itself does not have."""
         self._claim(d.name, "bundle", d.line)
         self._fact_kind(d.name.split(".", 1)[0], f"bundle {d.name} is named under", d.line)
 

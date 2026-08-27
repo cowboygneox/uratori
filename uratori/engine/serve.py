@@ -1163,7 +1163,6 @@ async def answer_bundle(
     plan: BundlePlan,
     settings: Mapping[str, Any],
     default_trailing: Sequence[int],
-    at_day: str | None = None,
 ) -> BundleResult:
     """A bundle, whole: every member's ordinary answer, in declaration order,
     at one instant.
@@ -1176,12 +1175,15 @@ async def answer_bundle(
     - **One clock.** `at` is read once and handed to every member that takes
       an instant, extending the projection rule -- one instant reaches every
       row -- to the tile: a page beside a headline evaluated at two different
-      moments can disagree with itself. (An anchored reading member resolves
-      the caller's `at_day` in its own zone, exactly as it would alone.)
-    - **A shared projection evaluates once.** When the bundle names a
-      summary and the projection it is over, the rows are read once and both
-      members are served from them -- so the two cannot disagree, and the
-      tile does not pay twice for one population.
+      moments can disagree with itself. There is deliberately no anchor
+      parameter: an anchor moves only a reading's windows, and a tile whose
+      reading sat in June beside a page served as it stands would disagree
+      with itself under a wrapper claiming one clock -- the facade refuses
+      the request instead.
+    - **A shared projection is read and projected once.** When the bundle
+      names a summary and the projection it is over, the records are read
+      and the rows built once, and both members are served from them -- so
+      the two cannot disagree about the population.
     """
     from .project import summarise
 
@@ -1228,7 +1230,6 @@ async def answer_bundle(
                     settings,
                     list(member.windows) if member.windows is not None else list(default_trailing),
                     at_ms=at,
-                    at_day=at_day,
                 )
             )
         elif member.kind == "projection":

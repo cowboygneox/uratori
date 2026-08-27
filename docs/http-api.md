@@ -593,8 +593,11 @@ is behind a deploy" is a per-member fact the wrapper must not flatten. The
 members are evaluated at one instant; a reading member's windows come from
 the bundle's definition (`trailing` deliberately does not reach inside a
 bundle -- a tile whose windows the caller could move would be a different
-tile under the same hash), while `at` anchors its reading members exactly as
-it would each served alone. A summarise member arrives with `subjects` empty
+tile under the same hash), and `at` is refused outright (`400`): an anchor
+moves only a reading's windows, the other members can only be served as they
+stand, and an anchored tile would put June's reading beside today's page
+under a wrapper claiming one clock -- anchor the reading by its own name
+instead. A summarise member arrives with `subjects` empty
 and the population row in `summary` -- computed over ALL the projection's
 rows, never the page; only the row payload stays home. The wrapper's
 `version` is the bundle's content hash -- the review token for the committed

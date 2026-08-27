@@ -15,6 +15,7 @@ import pytest
 from uratori import (
     MemoryEngineStore,
     MemoryFactStore,
+    Ok,
     Result,
     Schema,
     Uratori,
@@ -232,15 +233,31 @@ def test_windows_on_a_figure_member_are_refused_at_parse() -> None:
 
 
 def test_a_window_must_be_a_whole_positive_number_of_days() -> None:
+    for wrong in ("0", "7.5"):
+        with pytest.raises(SyntaxError_) as caught:
+            compile_source(
+                BASE
+                + MEMBERS
+                + "\n# A card with a nonsense window.\n"
+                "bundle team_person.card:\n"
+                f"    reading team_person.to_merge over {wrong}\n"
+            )
+        assert "whole number of trailing days" in caught.value.message, wrong
+
+
+def test_a_duplicate_window_is_refused_as_the_typo_it_is() -> None:
+    """`over 7, 7` would serve the same window twice, and a screen binding
+    to window positions would show a duplicated column from a typo -- the
+    same shape of mistake a duplicate member is."""
     with pytest.raises(SyntaxError_) as caught:
         compile_source(
             BASE
             + MEMBERS
-            + "\n# A card with a nonsense window.\n"
+            + "\n# A card that stutters a window.\n"
             "bundle team_person.card:\n"
-            "    reading team_person.to_merge over 0\n"
+            "    reading team_person.to_merge over 7, 7\n"
         )
-    assert "whole number of trailing days" in caught.value.message
+    assert "twice" in caught.value.message
 
 
 def test_a_day_keyed_figure_member_is_refused_toward_a_reading() -> None:
@@ -326,6 +343,24 @@ def test_prose_does_not_move_a_bundles_version_and_members_do() -> None:
     ).bundle("team_person.card")
     assert shorter is not None
     assert shorter.version != base.version
+
+    longer = compile_ok(
+        CARD.replace(
+            "    figure team_person.wip\n",
+            "    figure team_person.wip\n    reading team_person.pending_reviews\n",
+        )
+    ).bundle("team_person.card")
+    assert longer is not None
+    assert longer.version != base.version
+
+    renamed = compile_ok(CARD.replace("team_person.card", "team_person.deck")).bundle(
+        "team_person.deck"
+    )
+    assert renamed is not None
+    assert renamed.version != base.version, (
+        "a renamed tile is a different tile; two identically-composed bundles "
+        "must still be told apart by hash"
+    )
 
 
 def test_a_members_own_change_moves_the_member_not_the_bundle() -> None:
@@ -427,7 +462,7 @@ summarise shop_order.book over shop_order.board:
 
 # The courier tile.
 bundle shop_courier.card:
-    reading shop_courier.typical_ride over 9, 2
+    reading shop_courier.typical_ride over 9, 1
     figure shop_courier.carrying
     projection shop_order.board
     summarise shop_order.book
@@ -466,8 +501,15 @@ def _feed(facts: CountingFacts) -> None:
             f"o{n}",
             {"ref": f"A-{n}", "courier_id": "c1", "status": "riding"},
         )
-    # Two delivered rides on known UTC days: one hour on 2026-06-28, two
-    # hours on 2026-06-30.
+    # Two delivered rides on known UTC days relative to now -- a bundle is
+    # served at the moment of asking, so the fixture's days must trail it: a
+    # one-hour ride yesterday, a two-hour ride today.
+    from datetime import UTC, datetime, timedelta
+
+    def iso(at: datetime) -> str:
+        return at.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    now = datetime.now(tz=UTC)
     facts.put(
         "t1",
         "shop_order",
@@ -476,8 +518,8 @@ def _feed(facts: CountingFacts) -> None:
             "ref": "R-1",
             "courier_id": "c1",
             "status": "delivered",
-            "picked_up_at": "2026-06-28T09:00:00Z",
-            "delivered_at": "2026-06-28T10:00:00Z",
+            "picked_up_at": iso(now - timedelta(hours=25)),
+            "delivered_at": iso(now - timedelta(hours=24)),
         },
     )
     facts.put(
@@ -488,8 +530,8 @@ def _feed(facts: CountingFacts) -> None:
             "ref": "R-2",
             "courier_id": "c1",
             "status": "delivered",
-            "picked_up_at": "2026-06-30T09:00:00Z",
-            "delivered_at": "2026-06-30T11:00:00Z",
+            "picked_up_at": iso(now - timedelta(hours=2)),
+            "delivered_at": iso(now),
         },
     )
 
@@ -499,7 +541,7 @@ async def test_a_bundle_serves_its_members_in_declaration_order_each_with_its_ow
     _feed(facts)
     await engine.run("t1", full=True)
 
-    answer = await engine.answer("t1", "shop_courier.card", at="2026-06-30")
+    answer = await engine.answer("t1", "shop_courier.card")
     assert isinstance(answer, BundleResult)
     library = compile_against(SERVE_SOURCE, SERVE_WORLD)
     card = library.bundle("shop_courier.card")
@@ -527,22 +569,64 @@ async def test_a_bundle_serves_its_members_in_declaration_order_each_with_its_ow
 
 
 async def test_the_bundles_windows_reach_the_reading() -> None:
-    """`over 9, 2` is the member's argument, and each window must cover its
-    own days: nine trailing days hold both rides, two hold only the later
-    one -- any other pair of means says the windows never made it through."""
+    """`over 9, 1` is the member's argument, and each window must cover its
+    own days: nine trailing days hold both rides, one holds only today's --
+    any other pair of means says the windows never made it through."""
     engine, facts = _engine()
     _feed(facts)
     await engine.run("t1", full=True)
 
-    answer = await engine.answer("t1", "shop_courier.card", at="2026-06-30")
+    answer = await engine.answer("t1", "shop_courier.card")
     assert isinstance(answer, BundleResult)
     reading = answer.results[0]
     [subject] = reading.subjects
     assert subject.windows is not None
     wide, narrow = subject.windows
-    assert (wide.trailing, narrow.trailing) == (9, 2)
-    assert wide.mean == 5400.0, "nine days should cover the 1h and 2h rides"
-    assert narrow.mean == 7200.0, "two days should cover only the 2h ride"
+    assert (wide.trailing, narrow.trailing) == (9, 1)
+    assert wide.mean == 5400.0, "nine days should cover yesterday's 1h and today's 2h ride"
+    assert narrow.mean == 7200.0, "one day should cover only today's 2h ride"
+
+
+async def test_an_anchored_bundle_is_refused_because_one_instant_is_the_claim() -> None:
+    """`at` anchors a reading's windows on a past day, and a bundle's other
+    members -- stored figures, live pages -- can only be served as they
+    stand. An anchored tile would put June's reading beside August's page
+    under a wrapper claiming one clock, so the request is refused with
+    directions rather than served misreporting itself."""
+    engine, facts = _engine()
+    _feed(facts)
+    await engine.run("t1", full=True)
+
+    with pytest.raises(ValueError, match="one instant"):
+        await engine.answer("t1", "shop_courier.card", at="2026-06-30")
+
+
+async def test_members_keep_their_own_states_and_reasons() -> None:
+    """A board with riding orders and no deliveries: the count is a real
+    answer and the ride reading has nothing collected. The wrapper must not
+    flatten that -- one member ok beside one saying why it is not is the
+    whole point of per-member states."""
+    engine, facts = _engine()
+    facts.put("t1", "shop_courier", "c1", {"name": "Aki"})
+    for n in range(3):
+        facts.put(
+            "t1",
+            "shop_order",
+            f"o{n}",
+            {"ref": f"A-{n}", "courier_id": "c1", "status": "riding"},
+        )
+    await engine.run("t1", full=True)
+
+    answer = await engine.answer("t1", "shop_courier.card")
+    assert isinstance(answer, BundleResult)
+    by_name = {r.name: r for r in answer.results}
+    carrying = by_name["shop_courier.carrying"]
+    riding = by_name["shop_courier.typical_ride"]
+    assert carrying.state.ok is True, carrying.state
+    assert carrying.subjects[0].value == 3.0
+    assert riding.state.ok is False, "no delivery has ever been bucketed"
+    assert not isinstance(riding.state, Ok)
+    assert riding.state.because == "nothing-collected"
 
 
 async def test_a_summary_member_travels_without_rows_and_still_counts_them_all() -> None:

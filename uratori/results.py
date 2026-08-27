@@ -401,9 +401,11 @@ class BundleResult(BaseModel):
     version: str
     at: str
     """When the server evaluated the bundle -- the one instant handed to
-    every member that takes one, so a tile cannot disagree with itself. An
-    anchored reading member resolves the caller's anchor in its own zone,
-    exactly as it would served alone, and says so on its own `at`."""
+    every member that takes one, so a tile cannot disagree with itself. The
+    `at` anchor is refused for a bundle outright: it moves only a reading's
+    windows, and the other members can only be served as they stand, so an
+    anchored tile would disagree with itself under a wrapper claiming one
+    clock."""
 
     label: str
     doc: str

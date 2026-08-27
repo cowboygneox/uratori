@@ -1737,6 +1737,16 @@ class _Parser:
                         "trailing days, at least one.",
                         line,
                     )
+                if int(raw) in out:
+                    # The same shape of mistake as a duplicate member: the
+                    # window would serve twice, and a screen binding to
+                    # window positions would show a duplicated column from a
+                    # typo.
+                    raise self._error(
+                        f"the window list names {int(raw)} twice. One request serves "
+                        "each window once.",
+                        line,
+                    )
                 out.append(int(raw))
                 if self._at_op(","):
                     self._next()

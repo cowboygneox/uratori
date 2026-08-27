@@ -1337,9 +1337,7 @@ async def test_a_bundle_is_one_request_on_the_results_surface(server: Server) ->
     plain Result by `kind`, so a typed client branches on a field."""
     await _teach_bundle(server.http)
 
-    got = await server.http.get(
-        "/tenants/t1/results/shop_courier.card", params={"at": "2026-06-30"}
-    )
+    got = await server.http.get("/tenants/t1/results/shop_courier.card")
     assert got.status_code == 200, got.text
     body = got.json()
     assert body["kind"] == "bundle"
@@ -1363,7 +1361,7 @@ async def test_a_bundle_is_one_request_on_the_results_surface(server: Server) ->
     reading, figure, projection, summary = body["results"]
     # The member arguments made it through HTTP: the bundle's own windows,
     # not the route's defaults.
-    assert [w["trailing"] for w in reading["subjects"][0]["windows"]] == [9, 2]
+    assert [w["trailing"] for w in reading["subjects"][0]["windows"]] == [9, 1]
     assert figure["subjects"][0]["value"] == 5.0
     # The summary member travels without rows and still counts them all;
     # the projection member keeps its own page.
@@ -1395,7 +1393,7 @@ async def test_the_described_library_lists_the_bundle_and_its_members_in_order(
         "shop_order.book",
     ]
     assert bundle["prose"] == "The courier tile."
-    assert "reading shop_courier.typical_ride over 9, 2" in bundle["source"]
+    assert "reading shop_courier.typical_ride over 9, 1" in bundle["source"]
 
 
 async def test_bundle_evidence_over_http_says_where_the_evidence_lives(
@@ -1407,3 +1405,45 @@ async def test_bundle_evidence_over_http_says_where_the_evidence_lives(
     )
     assert got.status_code == 404
     assert "member" in got.json()["detail"]
+
+
+async def test_an_anchored_bundle_is_a_400_with_directions(server: Server) -> None:
+    """`at` moves a reading's windows; a bundle's other members can only be
+    served as they stand, so an anchored tile would misreport its own clock.
+    Refused in the engine's words rather than served lying."""
+    await _teach_bundle(server.http)
+    got = await server.http.get(
+        "/tenants/t1/results/shop_courier.card", params={"at": "2026-06-30"}
+    )
+    assert got.status_code == 400, got.text
+    assert "one instant" in got.json()["detail"]
+
+
+async def test_a_bundle_over_a_live_reading_is_a_501_like_the_reading_itself(
+    server: Server,
+) -> None:
+    """The tile refuses whole rather than serving itself one member short --
+    the same 501 the live reading's own route answers, through the same
+    mapping."""
+    from .test_bundle import SERVE_SOURCE, SERVE_WORLD
+
+    live = SERVE_SOURCE + (
+        "\nmeasure shop_order.waiting_seconds = now - picked_up_at\n"
+        "\n# Orders waiting right now.\n"
+        "reading shop_courier.waiting():\n"
+        '    display "{value}"\n'
+        "    depends:\n"
+        "        waiting = shop_order.waiting_seconds over (shop_order.carried_by:{shop_courier} & shop_order.open)\n"
+        "    calculate:\n"
+        "        count(waiting)\n"
+        "\n# A tile over the live queue.\n"
+        "bundle shop_courier.live_card:\n"
+        "    reading shop_courier.waiting\n"
+    )
+    assert (await server.http.put("/schema", json=SERVE_WORLD.to_document())).status_code == 200
+    put = await server.http.put("/definitions", json={"source": live})
+    assert put.status_code == 200, put.text
+
+    got = await server.http.get("/tenants/t1/results/shop_courier.live_card")
+    assert got.status_code == 501, got.text
+    assert "live" in got.json()["detail"]

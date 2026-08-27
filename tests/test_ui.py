@@ -3364,3 +3364,41 @@ async def test_about_a_record_nobody_stored_is_a_404(pg_dsn: str) -> None:
             "the refusal names the key -- and distinguishes 'no such record' "
             "from a route that does not exist"
         )
+
+
+# ----------------------------------------------------------------- bundles --
+
+BUNDLED_SOURCE = COURIER_SOURCE + '''
+# The courier's tile.
+bundle shop_courier.card:
+    figure shop_courier.carrying
+    figure shop_courier.load_band
+'''
+
+
+async def test_the_editor_diff_sees_a_recomposed_or_deleted_bundle(pg_dsn: str) -> None:
+    """The bundle's hash exists for exactly one purpose -- a changed tile is
+    a moved hash on the review surface -- so the editor's diff must see it.
+    Blind, a reordered tile (which changes the positions a screen binds to)
+    and a deleted one both reported "everything unchanged", which is a review
+    record that lies about what the save did."""
+    async with serve(pg_dsn) as http:
+        await http.put("/schema", json=COURIER_WORLD.to_document())
+        put = await http.put("/definitions", json={"source": BUNDLED_SOURCE})
+        assert put.status_code == 200, put.text
+
+        reordered = BUNDLED_SOURCE.replace(
+            "    figure shop_courier.carrying\n    figure shop_courier.load_band\n",
+            "    figure shop_courier.load_band\n    figure shop_courier.carrying\n",
+        )
+        out = (await http.post("/ui/api/check", json={"source": reordered})).json()
+        assert out["ok"] is True, out
+        changes = {d["name"]: (d["kind"], d["change"]) for d in out["declarations"]}
+        assert changes["shop_courier.card"] == ("bundle", "changed"), changes
+        assert changes["shop_courier.carrying"] == ("figure", "unchanged")
+
+        out = (await http.post("/ui/api/check", json={"source": COURIER_SOURCE})).json()
+        changes = {d["name"]: (d["kind"], d["change"]) for d in out["declarations"]}
+        assert changes["shop_courier.card"] == ("bundle", "removed"), (
+            "a deleted tile must be on the review record of what the save loses"
+        )

@@ -1372,7 +1372,11 @@ alone) an optional window list:
   reading may carry the list; a live one is named bare, mirroring the
   language's rule that the argument list and the source form encode liveness
   twice, loudly -- written `over 7` a live member would accept a window,
-  ignore it, and answer today under a heading saying seven days.
+  ignore it, and answer today under a heading saying seven days. A duplicate
+  window is refused as the typo it is. (Honesty note: a bare live member
+  compiles, and until live readings are servable a tile naming one answers
+  the same not-yet refusal the reading's own route gives -- whole, never one
+  member short.)
 - **`figure <name>`** -- its current value per subject. The same two shapes
   the bulk results surface declines to push are refused here at compile
   time: a **time-keyed** figure member would drag every stored bucket of

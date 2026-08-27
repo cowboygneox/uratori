@@ -449,9 +449,11 @@ class Uratori:
         windows come from the bundle's own definition (or the serving default
         when unwritten) -- `trailing` deliberately does not reach inside a
         bundle, because a tile whose windows the caller could move would be a
-        different tile under the same hash. `at` does reach in: it is an
-        anchor, not a definition change, exactly as it is for a reading
-        served alone."""
+        different tile under the same hash. `at` is refused for a bundle:
+        an anchor moves only a reading's windows, and the other members --
+        stored figures, live pages -- can only be served as they stand, so an
+        anchored tile would put June's reading beside today's page under a
+        wrapper claiming one clock. Anchor the reading by its own name."""
         document = self._schema.settings_for(settings)
         lib = self._library
 
@@ -495,6 +497,14 @@ class Uratori:
 
         bundle = lib.bundle(name)
         if bundle is not None:
+            if at is not None:
+                raise ValueError(
+                    f"{name} is a bundle, and a bundle is served at one instant -- now. "
+                    "An anchor moves only a reading's windows; the other members can "
+                    "only be served as they stand, so an anchored tile would disagree "
+                    "with itself under a wrapper claiming one clock. Anchor the reading "
+                    "member by its own name instead."
+                )
             return await answer_bundle(
                 self._store,
                 self._facts,
@@ -503,7 +513,6 @@ class Uratori:
                 bundle,
                 document,
                 default_trailing=DEFAULT_TRAILING,
-                at_day=at,
             )
 
         return None
