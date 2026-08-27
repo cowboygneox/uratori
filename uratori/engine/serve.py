@@ -35,7 +35,7 @@ from ..results import (
 )
 from ..schema import Schema
 from ..store import EngineStore, FactSource, StoredValue
-from .buckets import SEPARATOR, day_range, measure_of, subject_of, tail_of
+from .buckets import SEPARATOR, day_range, end_of_day_ms, measure_of, subject_of, tail_of
 from .engine import (  # the same hashes the pass records, shared deliberately
     _index_version,
     _versions_if_legacy_current,
@@ -550,20 +550,33 @@ async def serve_reading(
     settings: Mapping[str, Any],
     trailing: Sequence[int],
     at_ms: float | None = None,
+    at_day: str | None = None,
 ) -> Result:
     """One request serves several windows from a single fetch.
 
     Anchored on the **widest** window's start. Anchoring on the narrowest
     silently turns the month into a fortnight and reports a plausible mean for
     it, which is the shape of every bug this codebase has spent a day on.
+
+    `at_day` is a caller's anchor date: the windows become the trailing spans
+    ending on that day instead of today. It is an *argument*, never part of
+    the version -- it moves which stored days take part and touches nothing
+    about the calculation (statistic, floor, band and unit serve unchanged),
+    and the anchor it resolved to travels back on the result's `at` and each
+    window's bounds as provenance. Resolved here rather than by the caller,
+    because "the end of that day" only means something in the reading's own
+    zone, and only this function knows it.
     """
-    at = at_ms if at_ms is not None else now_ms()
     source = library.figure(plan.source or "")
     if source is None:
         raise ValueError(f"{plan.name} reads a figure that is not in the library")
 
     state = await availability(store, library, tenant, source, settings)
     zone = _zone_of(library, source, settings)
+    if at_day is not None:
+        at = end_of_day_ms(at_day, zone)
+    else:
+        at = at_ms if at_ms is not None else now_ms()
     grain = source.grain
     series_by = next((s.by for s in plan.calculate if s.fn == "series"), None)
     widest = max(trailing)

@@ -18,6 +18,8 @@ import pytest
 from uratori.engine.buckets import (
     buckets_of,
     day_in,
+    day_range,
+    end_of_day_ms,
     label_in,
     measure_of,
     part_of,
@@ -960,3 +962,66 @@ async def test_a_failed_floor_withholds_the_grouped_series_with_everything_else(
     assert window.mean is None
     assert window.series is None
     assert window.series_by is None, "a grain travelled beside a series that did not"
+
+
+def test_an_anchor_resolves_to_its_days_last_moment_in_the_zone() -> None:
+    """The instant an anchor date stands for is the final millisecond of that
+    local day: one more and it is tomorrow, any less and part of the anchor
+    day sits outside its own window."""
+    at = end_of_day_ms("2026-06-30", "Pacific/Kiritimati")
+    assert day_in(at, "Pacific/Kiritimati") == "2026-06-30"
+    assert day_in(at + 1.0, "Pacific/Kiritimati") == "2026-07-01"
+
+
+def test_a_window_crossing_spring_forward_still_opens_the_full_span_back() -> None:
+    """Los Angeles loses an hour on 2026-03-08, so the seven exact-millisecond
+    days before the 10th's last moment reach only 00:59 on the 4th -- pure
+    subtraction files the start on the 5th and the window quietly covers six
+    days while claiming seven. A window is counted in local *calendar* days,
+    and an anchored request always sits at a day's last millisecond, exactly
+    the hour this bites."""
+    zone = "America/Los_Angeles"
+    at = end_of_day_ms("2026-03-10", zone)
+    assert day_range(at, zone, 7) == ("2026-03-04", "2026-03-10")
+
+
+async def test_an_anchor_day_ends_the_windows_in_the_readings_own_zone() -> None:
+    """`at_day` is an argument: it moves which stored days take part and
+    touches nothing else. The windows must end on the anchor day *in the
+    tenant's calendar*, a day stored after the anchor must not leak in, and
+    the served `at` must be the anchor day's last moment rather than the wall
+    clock -- otherwise the response claims a historical answer was computed
+    now, and the provenance line from figure to screen breaks exactly where
+    the feature exists to preserve it."""
+    store = MemoryEngineStore()
+    figure = READINGS.figure("team_person.per_day")
+    reading = READINGS.reading("team_person.pace")
+    assert figure is not None and reading is not None
+
+    tenant = "t1"
+    stamp = fingerprint(dict(DEFAULTS), list(figure.settings))
+    await store.set_pointer(
+        tenant, figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
+    )
+    await store.set_buckets(tenant, "work_issue.by_day", "w1", ["p1@2025-08-24"])
+    for subject, values in (
+        ("p1@2025-08-18", [2.0]),  # the first day inside a 7-day window
+        ("p1@2025-08-24", [4.0]),  # the anchor day itself
+        ("p1@2025-08-25", [64.0]),  # the day after the anchor; must not leak in
+        ("p1@2025-08-17", [128.0]),  # the day before the window opens
+    ):
+        await store.save(tenant, figure.name, figure.version, subject, values, (), "P One")
+
+    result = await serve_reading(
+        store, READINGS, tenant, reading, DEFAULTS, [7], at_day="2025-08-24"
+    )
+
+    assert isinstance(result.state, Ok)
+    window = result.subjects[0].windows[0]
+    assert (window.frm, window.to) == ("2025-08-18", "2025-08-24")
+    assert window.mean == 3.0, "a day beyond the anchor leaked into the sample"
+    assert window.days_covered == 2
+    assert window.days_requested == 7
+    # 2025-08-24 ends at 23:59:59.999 in Los Angeles, which is 06:59:59.999
+    # UTC the next morning -- the instant, not the request's wall clock.
+    assert result.at.startswith("2025-08-25T06:59:59")
