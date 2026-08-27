@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
+from ..windows import WindowSpec
+
 # ----------------------------------------------------------------- fact --
 
 FactFieldType: TypeAlias = Literal["text", "number", "flag", "moment"]
@@ -1320,8 +1322,8 @@ class SummariseDecl:
 
 @dataclass(frozen=True)
 class BundleMember:
-    """One line of a bundle: a declaration's kind, its name, and (for a
-    windowed reading) the windows to serve it over.
+    """One line of a bundle: a slot binding, a declaration's kind and name,
+    and (for a windowed reading) the windows to serve it over.
 
     Names plus arguments and nothing else, by design. There is no `depends`,
     no `calculate`, no cross-member arithmetic: a bundle defines no
@@ -1331,15 +1333,23 @@ class BundleMember:
     server's job inside the reading's own response.
     """
 
+    slot: str
+    """`latency = reading ...` -- the address a client reads this member at,
+    required on every member so a screen couples to the tile's layout rather
+    than to definition names. An address, never a display label: the
+    member's answer keeps its own definition's label and doc, and nothing
+    lets a bundle rename what a number is called."""
+
     kind: Literal["figure", "reading", "projection", "summarise"]
     name: str
-    windows: tuple[int, ...] | None = None
-    """`over 7, 14, 30` -- which trailing windows the reading serves. Only a
-    windowed reading may carry one, mirroring the language's rule that the
-    argument list and the source form encode liveness twice, loudly: a live
-    member is named bare the way a live reading declares `()`. Absent on a
-    windowed reading, the serving default decides -- the same default an
-    unqualified request to the results surface gets."""
+    windows: tuple[WindowSpec, ...] | None = None
+    """`over 7, 14, 30` or `over 1-30, 31-60` (`in hours` for a sub-day
+    span) -- which bucket spans the reading serves. Only a *windowed*
+    reading may carry one, mirroring the language's rule that the argument
+    list and the source form encode liveness twice, loudly: a live member is
+    named bare the way a live reading declares `()`. Absent on a windowed
+    reading, the serving default decides -- the same default an unqualified
+    request to the results surface gets."""
 
     line: int = 0
 

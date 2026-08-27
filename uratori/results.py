@@ -98,14 +98,33 @@ Availability = Annotated[Ok | Unavailable, Field(discriminator="ok")]
 
 
 class Window(BaseModel):
-    """One trailing window of a reading, resolved to actual days by the server.
+    """One window of a reading: a span of stored buckets, resolved by the server.
 
-    `trailing` is the question and `frm`/`to` is the answer, and both travel:
-    "the last 30 days" depends on when the tenant's midnight was, which a client
-    cannot know.
+    `span` and `bucket` are the question and `frm`/`to` are the answer, and
+    both travel: "buckets 31-60" depends on when the tenant's midnight was,
+    which a client cannot know. The bounds are the first (oldest) and last
+    (newest) bucket labels the span resolved to -- ISO days for day buckets,
+    local bucket labels (`2026-08-25T14:00`) for sub-day ones.
     """
 
-    trailing: int
+    span: str
+    """The bucket span asked for, canonically spelled: `"30"` (the last 30
+    buckets, bucket 1 being the one the anchor falls in), `"31-60"` (the 30
+    before them). What was *asked*, beside what was covered -- an offset
+    bucket wearing a label that reads like a trailing span is the failure
+    mode this field exists to prevent."""
+
+    bucket: Literal["day", "hour", "minute"] = "day"
+    """What one bucket of the span is. Days unless the request said
+    otherwise, always -- never the source figure's storage grain, which would
+    let a regrade silently re-scale every bookmarked span."""
+
+    trailing: int | None = None
+    """The span as a plain trailing-days count, kept for what it has always
+    meant: present exactly when the span *is* the last N days (`span: "30"`,
+    day buckets), `null` for an offset or sub-day span rather than a number
+    that would read as one."""
+
     frm: str
     to: str
     zone: str | None = None
@@ -376,9 +395,23 @@ class Result(BaseModel):
     stays home."""
 
 
+class BundleMemberResult(BaseModel):
+    """One member's answer under its slot address.
+
+    `slot` is the name the bundle's definition binds this member to --
+    `latency = reading ...` -- so a client addresses `card.latency` and the
+    tile's layout is decoupled from definition names. An address and nothing
+    more: `result` keeps its own definition's `label` and `doc`, because
+    nothing may let a bundle rename what a number is called.
+    """
+
+    slot: str
+    result: Result
+
+
 class BundleResult(BaseModel):
-    """A bundle's answer: its members' ordinary `Result`s, in declaration
-    order, from one request.
+    """A bundle's answer: its members' ordinary `Result`s, each under its
+    slot address, in declaration order, from one request.
 
     A wrapper and nothing more. The bundle defines no calculation, so there
     is no `state`, no `unit` and no `subjects` here -- each member carries its
@@ -409,7 +442,7 @@ class BundleResult(BaseModel):
 
     label: str
     doc: str
-    results: list[Result]
-    """The members' answers, in the bundle's declaration order -- request
-    order is substantive, and a screen binds to positions the definition
-    wrote."""
+    results: list[BundleMemberResult]
+    """The members' answers, each under its slot, in the bundle's
+    declaration order -- order is substantive too, and a screen may bind to
+    either: the position the definition wrote, or the slot it named."""

@@ -3371,8 +3371,8 @@ async def test_about_a_record_nobody_stored_is_a_404(pg_dsn: str) -> None:
 BUNDLED_SOURCE = COURIER_SOURCE + '''
 # The courier's tile.
 bundle shop_courier.card:
-    figure shop_courier.carrying
-    figure shop_courier.load_band
+    carrying = figure shop_courier.carrying
+    band = figure shop_courier.load_band
 '''
 
 
@@ -3388,8 +3388,8 @@ async def test_the_editor_diff_sees_a_recomposed_or_deleted_bundle(pg_dsn: str) 
         assert put.status_code == 200, put.text
 
         reordered = BUNDLED_SOURCE.replace(
-            "    figure shop_courier.carrying\n    figure shop_courier.load_band\n",
-            "    figure shop_courier.load_band\n    figure shop_courier.carrying\n",
+            "    carrying = figure shop_courier.carrying\n    band = figure shop_courier.load_band\n",
+            "    band = figure shop_courier.load_band\n    carrying = figure shop_courier.carrying\n",
         )
         out = (await http.post("/ui/api/check", json={"source": reordered})).json()
         assert out["ok"] is True, out

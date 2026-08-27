@@ -183,9 +183,10 @@ they are plumbing, not numbers a reader meets.
   facts move. `carrying` counts each courier's open orders; `load_band` is a
   figure built *on* a figure (the `combine` block), banding the count against
   a settings dial.
-- **Readings** summarise a time-keyed figure over trailing windows -- "orders
-  delivered over the last 30 days" is a reading over a per-day deliveries
-  figure.
+- **Readings** summarise a time-keyed figure over windows -- spans of
+  stored buckets counted back from the anchor: "orders delivered over the
+  last 30 days" (`30`), or the thirty before them (`31-60`), each span
+  independently statisticked, floored and banded.
 - **Projections** assemble live rows at the instant they are asked -- a
   worklist, with per-row values, sentences and a server-decided order.
 - **Summaries** (`summarise ... over ...`) put a projection's population into
@@ -193,8 +194,9 @@ they are plumbing, not numbers a reader meets.
   second route that could count them differently.
 - **Bundles** name definitions whose answers travel together in one request
   -- a precalculated dashboard tile. A bundle defines no calculation: its
-  members are names plus arguments, its response is their ordinary answers
-  in declaration order, and its hash exists only for review -- it appears in
+  members are slot-addressed names plus arguments, its response is their
+  ordinary answers under those slots in declaration order, and its hash
+  exists only for review -- it appears in
   no storage key and no number's citation.
 
 Compilation is a real checker, not a parser with opinions kept to itself. A

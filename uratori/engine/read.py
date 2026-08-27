@@ -184,6 +184,7 @@ def sample_from_buckets(
     frm: str,
     to: str,
     by: str | None,
+    series_to: str | None = None,
 ) -> Sample:
     """Turn sub-day bucket values into a sample, with the series grouped to `by`.
 
@@ -200,6 +201,13 @@ def sample_from_buckets(
 
     Labels are local time, so a group is a label prefix: the calendar was
     decided when the bucket was written.
+
+    `series_to` is the last series label of a **sub-day-unit window**: such a
+    window's `to` names its newest bucket at the window's own unit (an hour),
+    while the series may be grouped finer (quarter-hours), so the series must
+    run through the end of that bucket rather than stopping at its first
+    label. Absent, the series ends at `to` -- the day-window behaviour,
+    unchanged.
     """
     values: list[float] = []
     listed: dict[str, list[float]] = {}
@@ -223,7 +231,7 @@ def sample_from_buckets(
 
     points: list[tuple[str, float | None]] = []
     if by is not None:
-        for label in _labels_between(frm, to, by):
+        for label in _labels_between(frm, series_to if series_to is not None else to, by):
             if label in listed:
                 points.append((label, statistics.fmean(listed[label])))
             elif label in counted:
@@ -258,11 +266,26 @@ def _labels_between(frm: str, to: str, by: str) -> list[str]:
     fall-back day's repeated labels merged at write time, and the
     spring-forward day's missing hour simply stays a run of holes -- which is
     true, since those wall-clock minutes never happened.
+
+    Sub-day *bounds* -- a bucket-span window in hours or minutes -- step
+    through the same label space from the first label to the last, rather
+    than expanding to whole days: the window's series covers exactly the
+    window's buckets. A `by day` grain never meets sub-day bounds, because a
+    day point does not fit inside a sub-day window and the request is
+    refused before sampling.
     """
-    from datetime import date, timedelta
+    from datetime import date, datetime, timedelta
 
     steps = {"hour": 60, "15 minutes": 15, "minute": 1}
     out: list[str] = []
+    if "T" in frm:
+        step = steps[by]
+        moment = datetime.fromisoformat(frm)
+        end_moment = datetime.fromisoformat(to)
+        while moment <= end_moment:
+            out.append(f"{moment.date().isoformat()}T{moment.hour:02d}:{moment.minute:02d}")
+            moment += timedelta(minutes=step)
+        return out
     day = date.fromisoformat(frm)
     end = date.fromisoformat(to)
     while day <= end:
@@ -277,10 +300,11 @@ def _labels_between(frm: str, to: str, by: str) -> list[str]:
 
 
 def _days_between(frm: str, to: str) -> int:
+    """Calendar days the bounds touch, whether they are days or labels."""
     from datetime import date
 
-    start = date.fromisoformat(frm)
-    end = date.fromisoformat(to)
+    start = date.fromisoformat(frm[:10])
+    end = date.fromisoformat(to[:10])
     return (end - start).days + 1
 
 

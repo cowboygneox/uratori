@@ -525,13 +525,40 @@ cards, and shipping every stored person-day on the bulk surface would spend
 every pass on history nobody is watching), then every window reading, then
 every projection, evaluated live at this instant.
 
-`trailing` is a repeatable query parameter selecting the windows readings are
-served over, in days: `?trailing=30&trailing=7`. The default is 30, 14 and 7.
+`trailing` is a repeatable query parameter selecting the windows readings
+are served over. Each value is a **span of buckets counted back from the
+anchor**, bucket 1 being the bucket the request is anchored in:
+
+- `?trailing=30` -- the last 30 days, exactly as when this parameter was a
+  bare integer. The default is 30, 14 and 7.
+- `?trailing=1-30&trailing=31-60` -- this month beside last month: exact,
+  non-overlapping offset buckets, each independently getting the reading's
+  statistics, sample floor, band and resolved dates.
+- `?trailing=1-48h` / `?trailing=1-90m` -- a sub-day span, in hours or
+  minutes. Bare numbers are **days, always** -- never the source figure's
+  storage grain, which would let a regrade silently re-scale every
+  bookmarked URL -- so anything finer says so with the suffix. A sub-day
+  span must slice whole stored buckets: hours over a figure stored by day
+  (or minutes over quarter-hour storage) are a `422` naming the figure's
+  grain, on this route and the by-name one alike -- refused whole rather
+  than served with that reading quietly absent. A span whose series grain
+  does not fit inside it (a `by day` sparkline in an hour window) is the
+  same `422`.
+
+A malformed span (`0-30`, `60-31`, `7.5`, junk) is a `422`, never coerced --
+and a bound of `0` is refused with the convention spelled out, because
+`0-30, 31-60` reads natural and would silently make the first bucket 31
+days wide. Spans may reach at most 3660 days back (ten years of daily
+buckets): every bucket is a stored point the server may walk per subject,
+and a board wanting a decade of history is a definition conversation, not a
+request parameter.
 
 `at` anchors those windows on a chosen day instead of today: an ISO date
 (`?at=2026-06-30&trailing=30` is "the 30 days ending June 30"), resolved by
-the server to that day's end in each reading's own zone. Absent, the anchor
-is now, exactly as before. Anything that is not a `YYYY-MM-DD` calendar day
+the server to that day's end in each reading's own zone -- offset buckets
+compose with it (`?at=2026-06-30&trailing=31-60` counts days-ago from June
+30), and a sub-day span anchors on the day's final bucket. Absent, the
+anchor is now, exactly as before. Anything that is not a `YYYY-MM-DD` calendar day
 is a `422` -- including a bare epoch number, which is refused rather than
 guessed at as a timestamp. Any absolute range at day granularity is
 reachable this way: `at` is the end date and `trailing` the span. An anchor
@@ -544,8 +571,8 @@ says when it was computed.
 
 Windows and their anchor are the things a client may choose, because both are
 presentation, not calculation -- a reading's statistics, minimums and band are
-hashed into its version, and `trailing` and `at` only move which stored days
-take part. The anchor travels back on the answer as provenance: the result's
+hashed into its version, and `trailing` and `at` only move which stored
+buckets take part. The anchor travels back on the answer as provenance: the result's
 `at` is the instant the anchor resolved to, and each window's `frm`/`to` are
 the days it actually covered.
 
@@ -582,14 +609,22 @@ this route serves -- a wrapper, discriminated from a plain `Result` by
   "at": "2026-06-30T23:59:59+00:00",
   "label": "Card",
   "doc": "The courier tile.",
-  "results": [ …the members' ordinary Result objects, in declaration order… ]
+  "results": [
+    { "slot": "typical",  "result": { …an ordinary reading Result… } },
+    { "slot": "carrying", "result": { …an ordinary figure Result… } }
+  ]
 }
 ```
 
-Each entry in `results` is exactly what requesting that member by name would
-return, own `version`, `state` and provenance included -- there is no
-bundle-only member shape, and there is no bundle-level `state`: "one number
-is behind a deploy" is a per-member fact the wrapper must not flatten. The
+Each entry in `results` carries the member's **slot** -- the address the
+bundle's definition binds it to (`typical = reading …`), so a client reads
+`card.typical` and the tile's layout is decoupled from definition names --
+beside the member's ordinary `Result`, which is exactly what requesting it
+by name would return, own `version`, `state`, `label` and provenance
+included. The slot is an address, never a display label: nothing lets a
+bundle rename what a number is called. There is no bundle-level `state`:
+"one number is behind a deploy" is a per-member fact the wrapper must not
+flatten. The
 members are evaluated at one instant; a reading member's windows come from
 the bundle's definition (`trailing` deliberately does not reach inside a
 bundle -- a tile whose windows the caller could move would be a different
@@ -800,29 +835,31 @@ join.
 | `name` | Rendered by the server. For a stored figure this is the name **frozen when the value was written** -- a person renamed next week must not rewrite the history of what they moved. For a live answer (a projection) it is the current one, since there is no history to contradict. |
 | `value` | The magnitude: number, band word, or `null`. It exists for anything *positional* -- a bar's width, a marker's offset. `null` where the underlying value is a collection: a day's measurements arrive as rendered text in `display`, never as a numeric list, because a numeric list is something a client could reduce over and this API's claim is that there is nothing to reduce. |
 | `display` | `value`, rendered by the server. Both travel because they answer different questions -- the number is positional, the text is what a reader sees. Rendering is not the client's job because rendering a duration or an effort is a division against a dial the client does not have, and a client that had the dial would be one step from banding against a threshold. |
-| `windows` | For a reading: the trailing windows, below. Otherwise `null`. |
+| `windows` | For a reading: the served windows (bucket spans), below. Otherwise `null`. |
 | `row` | For a projection: the assembled row, below. Otherwise `null`. |
 | `level` | The band word, from the definition's own thresholds evaluated against the tenant's live dials. See "band words", below. |
 | `dimension` | The other half of a pair when the figure is split across something (or time-keyed) -- present so two rows about one subject are told apart by a field rather than by a reader noticing. |
 
 ### `Window` (readings)
 
-One trailing window, resolved to actual days by the server. `trailing` is the
-question and `frm`/`to` is the answer, and both travel: "the last 30 days"
-depends on when the tenant's midnight was, which a client cannot know. Note
-the spelling -- the field is `frm`.
+One window: a span of stored buckets, resolved by the server. `span` and
+`bucket` are the question and `frm`/`to` are the answer, and both travel:
+"buckets 31-60" depends on when the tenant's midnight was, which a client
+cannot know. Note the spelling -- the field is `frm`.
 
 | Field | Meaning |
 |---|---|
-| `trailing` | The window asked for, in days. |
-| `frm`, `to` | The actual ISO dates it resolved to. |
+| `span` | The bucket span asked for, canonically spelled: `"30"` (the last 30 buckets, bucket 1 being the anchor bucket), `"31-60"` (the 30 before them). What was *asked*, beside what was covered. |
+| `bucket` | What one bucket of the span is: `"day"`, `"hour"` or `"minute"`. Days unless the request said otherwise, always. |
+| `trailing` | The span as a plain trailing-days count, kept meaning what it always has: present exactly when the span *is* the last N days, `null` for an offset or sub-day span -- an offset bucket wearing a trailing-looking number is the lie this field refuses to tell. |
+| `frm`, `to` | The first (oldest) and last (newest) bucket labels the span resolved to -- ISO days for day buckets, local bucket labels (`2026-08-25T14:00`) for sub-day ones. |
 | `zone` | The calendar it resolved in. |
 | `mean`, `median`, `worst`, `total`, `count` | The statistics the reading declares; each is a number or `null`. A definition's `sum` arrives on the wire as `total` -- the rename happens here, nowhere else. |
 | `series` | Per-point values, when the definition asked for them -- the one non-scalar statistic, and it exists so a sparkline is a definition's answer rather than the client slicing a range and computing ten means. |
 | `series_by` | What one series point spans -- `"15 minutes"`, `"hour"` or `"day"` -- when the definition grouped a sub-day figure. Absent (`null`) for a day-keyed source, where a point has always been a day. |
 | `display` | Each statistic above, rendered, keyed by statistic name. Rendered on the server because rendering a duration is a division, and a division is a calculation. |
 | `sample` | How many values took part. For a count figure this is *days that contributed*, not records -- a different number of similar magnitude, which is why it is named rather than left to be inferred. |
-| `days_covered`, `days_requested` | How much of the window actually holds data, against what was asked. |
+| `days_covered`, `days_requested` | How many calendar days of the window hold data, against how many it touches -- a claim about days whatever the bucket unit. |
 | `level` | The window's band word. |
 | `unmet` | Which declared requirement fell short, in words -- so a suppressed mean is a dash with a stated reason rather than an undifferentiated one. |
 

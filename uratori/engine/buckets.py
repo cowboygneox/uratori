@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from ..lang.ast import ByAge, ByComposite, ByField, ByPredicate, ByPresence, IndexField
 from ..lang.plan import CompiledIndex, CompiledMeasure
+from ..windows import WindowSpec
 
 SEPARATOR = "@"
 """What joins the parts of a composite key.
@@ -236,7 +237,21 @@ def end_of_day_ms(day: str, zone: str | None) -> float:
         # beyond `datetime`'s range and the very overflow this branch exists
         # to answer comes back during rendering.
         midnight = datetime.combine(anchor, dt_time(), tzinfo=tz)
-        return midnight.timestamp() * 1000.0 + 86_400_000.0 - 1.0
+        # Clamped at the calendar's own last representable instant: west of
+        # UTC, 9999-12-31's final local millisecond lands in the year 10000
+        # by UTC's clock, which `datetime.fromtimestamp` cannot carry -- so
+        # the unclamped value blew up later, in `day_in` and `_iso`, as a
+        # traceback worn by a well-formed question. The clamp stays inside
+        # the anchor's local day (UTC's 23:59:59.999 is still 9999-12-31
+        # everywhere west of UTC), so the windows end on the day asked
+        # about; only the provenance instant sits a few hours early, which
+        # is the honest trade against having no answer at all.
+        last_utc = (
+            datetime.combine(anchor, dt_time(), tzinfo=UTC).timestamp() * 1000.0
+            + 86_400_000.0
+            - 1.0
+        )
+        return min(midnight.timestamp() * 1000.0 + 86_400_000.0 - 1.0, last_utc)
     next_midnight = datetime.combine(anchor + timedelta(days=1), dt_time(), tzinfo=tz)
     return next_midnight.timestamp() * 1000.0 - 1.0
 
@@ -267,6 +282,57 @@ def day_range(at_ms: float, zone: str | None, days: int) -> tuple[str, str]:
     end_date = date.fromisoformat(end)
     back = min(days - 1, (end_date - date.min).days)
     return (end_date - timedelta(days=back)).isoformat(), end
+
+
+def bucket_span(at_ms: float, zone: str | None, spec: WindowSpec) -> tuple[str, str]:
+    """A span of buckets resolved to its first (oldest) and last (newest)
+    stored labels, counted back from the anchor in the tenant's calendar.
+
+    Bucket 1 is the bucket the anchor instant falls in -- for days, the
+    anchor day, exactly as `day_range` has always counted, so `1-N` in days
+    is `day_range(at, zone, N)` by construction and the two cannot drift.
+
+    Sub-day buckets step back through **label space**: local wall-clock
+    arithmetic on the bucket label, ignoring transitions, because that is
+    the calendar the store's labels live in -- every local day carries the
+    same label set whatever the clocks did (`_labels_between`'s rule). The
+    fall-back hour's two passes already merged into one label at write
+    time, and the spring-forward hour's labels name buckets that hold
+    nothing; counting them as positions keeps "48 hour-buckets" meaning the
+    same wall-clock stretch on every day of the year.
+
+    Both edges clamp at the calendar's own beginning rather than raising,
+    for `day_range`'s reason: "the span opens where the calendar begins" is
+    an honest answer where an OverflowError is a 500.
+    """
+    if spec.unit == "day":
+        end_date = date.fromisoformat(day_in(at_ms, zone))
+        newest = end_date - timedelta(days=min(spec.first - 1, (end_date - date.min).days))
+        oldest = newest - timedelta(days=min(spec.last - spec.first, (newest - date.min).days))
+        return oldest.isoformat(), newest.isoformat()
+
+    moment = datetime.fromtimestamp(at_ms / 1000.0, tz=UTC)
+    if zone is not None:
+        moment = moment.astimezone(_zone(zone))
+    step = 60 if spec.unit == "hour" else 1
+    anchor_bucket = moment.replace(
+        minute=moment.minute - moment.minute % step if step != 60 else 0,
+        second=0,
+        microsecond=0,
+        tzinfo=None,
+    )
+    floor = datetime.min
+    newest_dt = anchor_bucket - min(
+        timedelta(minutes=step * (spec.first - 1)), anchor_bucket - floor
+    )
+    oldest_dt = newest_dt - min(
+        timedelta(minutes=step * (spec.last - spec.first)), newest_dt - floor
+    )
+
+    def _label(dt: datetime) -> str:
+        return f"{dt.date().isoformat()}T{dt.hour:02d}:{dt.minute:02d}"
+
+    return _label(oldest_dt), _label(newest_dt)
 
 
 # ------------------------------------------------------------ bucketing --

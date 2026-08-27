@@ -43,6 +43,7 @@ from ..lang.plan import CompiledFactField, Library
 from ..results import BundleResult, Evidence, Result
 from ..store.postgres import PostgresFactStore
 from ..verify import FactError
+from ..windows import WindowError, WindowSpec, as_window_spec
 from . import db
 from . import ui as builtin_ui
 from .contract import (
@@ -427,6 +428,23 @@ def create_app(
     # things a client may choose, because both only move which stored days
     # take part; the calculation itself is hashed into the version and no
     # query parameter reaches it.
+    def windows_of(trailing: list[str] | None) -> list[WindowSpec] | None:
+        """The window parameter, validated or refused as a 422.
+
+        Each value is a bucket span: `30` (the last 30 days, unchanged from
+        when this parameter was an integer), `31-60` (the 30 before them),
+        or with a unit suffix `1-48h` / `1-90m`. Malformed specs are 422s,
+        never coerced -- a coerced window is a plausible population nobody
+        asked for. The unit-versus-grain check happens deeper, where the
+        reading's source is known, and surfaces as the same 422.
+        """
+        if trailing is None:
+            return None
+        try:
+            return [as_window_spec(token) for token in trailing]
+        except WindowError as refusal:
+            raise HTTPException(status_code=422, detail=str(refusal)) from refusal
+
     def anchor_of(at: str | None) -> str | None:
         """The anchor, validated as a bare calendar day or refused as a 422.
 
@@ -456,19 +474,27 @@ def create_app(
     async def get_results(
         tenant: str,
         s: S,
-        trailing: Annotated[list[int] | None, Query()] = None,
+        trailing: Annotated[list[str] | None, Query()] = None,
         at: Annotated[str | None, Query()] = None,
     ) -> list[Result]:
         world, library = ready(s)
         facade = facade_for(s, world, library)
-        return list(
-            await facade.results(
-                tenant,
-                await db.load_settings(s.pool, tenant),
-                trailing=trailing or DEFAULT_TRAILING,
-                at=anchor_of(at),
+        try:
+            return list(
+                await facade.results(
+                    tenant,
+                    await db.load_settings(s.pool, tenant),
+                    trailing=windows_of(trailing) or DEFAULT_TRAILING,
+                    at=anchor_of(at),
+                )
             )
-        )
+        except WindowError as refusal:
+            # A span whose unit cannot slice a served reading's storage --
+            # only discoverable here, where the library is. Refused whole
+            # rather than serving the list with that reading quietly absent:
+            # a response silently shorter than the library is a narrowed
+            # population wearing a clean status code.
+            raise HTTPException(status_code=422, detail=str(refusal)) from refusal
 
     # A bundle answers here too, as a `BundleResult` -- the wrapper carrying
     # its members' ordinary Results in declaration order. `kind` is the
@@ -484,7 +510,7 @@ def create_app(
         tenant: str,
         name: str,
         s: S,
-        trailing: Annotated[list[int] | None, Query()] = None,
+        trailing: Annotated[list[str] | None, Query()] = None,
         at: Annotated[str | None, Query()] = None,
     ) -> Result | BundleResult:
         world, library = ready(s)
@@ -494,9 +520,14 @@ def create_app(
                 tenant,
                 name,
                 await db.load_settings(s.pool, tenant),
-                trailing=trailing or DEFAULT_TRAILING,
+                trailing=windows_of(trailing) or DEFAULT_TRAILING,
                 at=anchor_of(at),
             )
+        except WindowError as refusal:
+            # Before the ValueError arm, deliberately: a WindowError is a
+            # ValueError, and a window the caller can fix is a 422 where a
+            # 400 says the engine refused the request in its own terms.
+            raise HTTPException(status_code=422, detail=str(refusal)) from refusal
         except ValueError as refusal:
             raise HTTPException(status_code=400, detail=str(refusal)) from refusal
         except NotImplementedError as gap:

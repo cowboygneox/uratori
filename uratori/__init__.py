@@ -21,6 +21,7 @@ from .lang.lex import DefinitionError, SyntaxError_
 from .lang.plan import Library, Value
 from .results import (
     Availability,
+    BundleMemberResult,
     BundleResult,
     Flag,
     Level,
@@ -44,14 +45,17 @@ from .store import (
     StoredValue,
 )
 from .verify import FactError, verify_writes
+from .windows import MAX_REACH_DAYS, WindowError, WindowSpec
 
 __all__ = [
     "DEFAULT_TRAILING",
     "EFFORT_HOURS_SETTING",
+    "MAX_REACH_DAYS",
     "SEPARATOR",
     "SHOWN_KEEP",
     "Availability",
     "BucketChange",
+    "BundleMemberResult",
     "BundleResult",
     "Change",
     "CheckError",
@@ -82,6 +86,8 @@ __all__ = [
     "Uratori",
     "Value",
     "Window",
+    "WindowError",
+    "WindowSpec",
     "compile_source",
     "verify_writes",
 ]

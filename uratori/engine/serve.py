@@ -30,6 +30,7 @@ from ..lang.plan import (
 )
 from ..lang.settings import fingerprint as settings_fingerprint
 from ..results import (
+    BundleMemberResult,
     BundleResult,
     Evidence,
     EvidenceMember,
@@ -44,7 +45,22 @@ from ..results import (
 )
 from ..schema import Schema
 from ..store import EngineStore, FactSource, StoredValue
-from .buckets import SEPARATOR, day_range, end_of_day_ms, measure_of, subject_of, tail_of
+from ..windows import (
+    WindowError,
+    WindowSpec,
+    as_window_spec,
+    refuse_series_in_window,
+    refuse_unit_over_grain,
+)
+from .buckets import (
+    SEPARATOR,
+    bucket_span,
+    day_in,
+    end_of_day_ms,
+    measure_of,
+    subject_of,
+    tail_of,
+)
 from .engine import (  # the same hashes the pass records, shared deliberately
     _index_version,
     _versions_if_legacy_current,
@@ -557,25 +573,37 @@ async def serve_reading(
     tenant: str,
     plan: ReadingPlan,
     settings: Mapping[str, Any],
-    trailing: Sequence[int],
+    windows: Sequence[int | str | WindowSpec],
     at_ms: float | None = None,
     at_day: str | None = None,
 ) -> Result:
     """One request serves several windows from a single fetch.
 
-    Anchored on the **widest** window's start. Anchoring on the narrowest
-    silently turns the month into a fortnight and reports a plausible mean for
-    it, which is the shape of every bug this codebase has spent a day on.
+    A window is a **span of buckets** counted back from the anchor -- the
+    trailing `30`, or the offset `31-60`, days unless the spec says finer --
+    and it is an *argument*: it narrows which stored buckets take part and
+    may never change the calculation. Every declared rule applies per span
+    unchanged: the floor withholds a thin span's statistics with the reasons
+    named, the band bands each span, the series returns each span's own
+    points.
 
-    `at_day` is a caller's anchor date: the windows become the trailing spans
-    ending on that day instead of today. It is an *argument*, never part of
-    the version -- it moves which stored days take part and touches nothing
-    about the calculation (statistic, floor, band and unit serve unchanged),
-    and the anchor it resolved to travels back on the result's `at` and each
-    window's bounds as provenance. Resolved here rather than by the caller,
-    because "the end of that day" only means something in the reading's own
-    zone, and only this function knows it.
+    The fetch is anchored on the **oldest** span's start. Anchoring on the
+    newest silently turns the month into a fortnight and reports a plausible
+    mean for it, which is the shape of every bug this codebase has spent a
+    day on.
+
+    `at_day` is a caller's anchor date: bucket 1 becomes the bucket ending
+    that local day instead of now. It is an *argument*, never part of the
+    version -- and the anchor it resolved to travels back on the result's
+    `at` and each window's bounds as provenance. Resolved here rather than
+    by the caller, because "the end of that day" only means something in the
+    reading's own zone, and only this function knows it.
+
+    A spec whose unit cannot slice the source's storage -- hours over a
+    figure stored by day -- raises `WindowError`, which the HTTP door wears
+    as a 422: the fix (write days, or regrade the figure) is the caller's.
     """
+    specs = [as_window_spec(w) for w in windows]
     source = library.figure(plan.source or "")
     if source is None:
         raise ValueError(f"{plan.name} reads a figure that is not in the library")
@@ -588,8 +616,16 @@ async def serve_reading(
         at = at_ms if at_ms is not None else now_ms()
     grain = source.grain
     series_by = next((s.by for s in plan.calculate if s.fn == "series"), None)
-    widest = max(trailing)
-    frm, to = day_range(at, zone, widest)
+    for spec in specs:
+        refusal = refuse_unit_over_grain(spec, grain or "day", source.name)
+        if refusal is None:
+            refusal = refuse_series_in_window(spec, series_by, plan.name)
+        if refusal is not None:
+            raise WindowError(refusal)
+    resolved = [(spec, *bucket_span(at, zone, spec)) for spec in specs]
+
+    frm = min(w_frm[:10] for _, w_frm, _ in resolved)
+    to = day_in(at, zone)
     # A sub-day label on the window's final day -- "2026-08-25T14:30" -- sorts
     # *after* the bare day "2026-08-25", so day-string bounds would silently
     # drop the current day from every sub-day window: a board reporting the
@@ -597,10 +633,32 @@ async def serve_reading(
     # largest label a day can carry at any grain.
     fetch_frm, fetch_to = (frm, to) if grain == "day" else (frm + "T00:00", to + "T23:59")
 
-    def _sample(inside: list[tuple[str, Value]], w_frm: str, w_to: str) -> Sample:
+    def _at_unit(label: str, spec: WindowSpec) -> str:
+        """A stored label, truncated to the span's own bucket width, so a
+        quarter-hour bucket lands in the hour that contains it."""
+        if spec.unit == "hour":
+            return label[:13] + ":00"
+        return label
+
+    def _series_to(w_to: str, spec: WindowSpec) -> str | None:
+        """The last series label inside a sub-day span's newest bucket: the
+        span's `to` names the bucket at the span's unit, and a series grouped
+        finer must run through the bucket's end, not stop at its first label."""
+        if spec.unit == "day" or series_by is None:
+            return None
+        from datetime import datetime, timedelta
+
+        unit_minutes = 60 if spec.unit == "hour" else 1
+        by_minutes = {"15 minutes": 15, "hour": 60}.get(series_by, unit_minutes)
+        moment = datetime.fromisoformat(w_to) + timedelta(minutes=unit_minutes - by_minutes)
+        return f"{moment.date().isoformat()}T{moment.hour:02d}:{moment.minute:02d}"
+
+    def _sample(inside: list[tuple[str, Value]], w_frm: str, w_to: str, spec: WindowSpec) -> Sample:
         if grain == "day":
             return sample_from_days(inside, w_frm, w_to)  # type: ignore[arg-type]
-        return sample_from_buckets(inside, w_frm, w_to, series_by)  # type: ignore[arg-type]
+        return sample_from_buckets(
+            inside, w_frm, w_to, series_by, series_to=_series_to(w_to, spec)  # type: ignore[arg-type]
+        )
 
     subjects: list[Subject] = []
     if isinstance(state, Ok):
@@ -616,22 +674,25 @@ async def serve_reading(
             names.setdefault(base, stored.label)
 
         for base, days in sorted(by_subject.items()):
-            windows: list[Window] = []
-            for span in trailing:
-                w_frm, w_to = day_range(at, zone, span)
-                # The day prefix of a label is its local day whatever the
-                # grain, so one comparison serves both key shapes.
-                inside = [(d, v) for d, v in days if w_frm <= d[:10] <= w_to]
-                sample = _sample(inside, w_frm, w_to)
-                windows.append(
-                    _window(plan, sample, span, w_frm, w_to, zone, settings, series_by)
+            served: list[Window] = []
+            for spec, w_frm, w_to in resolved:
+                # For day buckets the day prefix of a label is its local day
+                # whatever the grain, so one comparison serves both key
+                # shapes; a sub-day span compares at its own bucket width.
+                if spec.unit == "day":
+                    inside = [(d, v) for d, v in days if w_frm <= d[:10] <= w_to]
+                else:
+                    inside = [(d, v) for d, v in days if w_frm <= _at_unit(d, spec) <= w_to]
+                sample = _sample(inside, w_frm, w_to, spec)
+                served.append(
+                    _window(plan, sample, spec, w_frm, w_to, zone, settings, series_by)
                 )
             subjects.append(
                 Subject(
                     id=base,
                     name=names.get(base, base),
-                    windows=windows,
-                    level=windows[0].level if windows else "unknown",
+                    windows=served,
+                    level=served[0].level if served else "unknown",
                 )
             )
 
@@ -641,14 +702,15 @@ async def serve_reading(
         windows=[
             _window(
                 plan,
-                _sample([], *day_range(at, zone, span)),
-                span,
-                *day_range(at, zone, span),
+                _sample([], w_frm, w_to, spec),
+                spec,
+                w_frm,
+                w_to,
                 zone,
                 settings,
                 series_by,
             )
-            for span in trailing
+            for spec, w_frm, w_to in resolved
         ],
     )
 
@@ -671,7 +733,7 @@ async def serve_reading(
 def _window(
     plan: ReadingPlan,
     sample: Sample,
-    trailing: int,
+    spec: WindowSpec,
     frm: str,
     to: str,
     zone: str | None,
@@ -699,8 +761,15 @@ def _window(
         for key, value in stats.items()
         if value is not None
     }
+    span = str(spec.last) if spec.first == 1 else f"{spec.first}-{spec.last}"
     return Window(
-        trailing=trailing,
+        span=span,
+        bucket=spec.unit,
+        # `trailing` keeps meaning exactly what it always has -- the last N
+        # days -- and is absent for any span that is not that: an offset
+        # bucket wearing a trailing-looking number is the lie this field
+        # must not tell.
+        trailing=spec.last if spec.unit == "day" and spec.first == 1 else None,
         frm=frm,
         to=to,
         zone=zone,
@@ -1203,14 +1272,24 @@ async def answer_bundle(
             evaluated[name] = held
         return held
 
-    results: list[Result] = []
+    results: list[BundleMemberResult] = []
+
+    def slotted(slot: str, result: Result) -> BundleMemberResult:
+        # The slot travels beside the member's ordinary Result, never inside
+        # it: the answer keeps its own definition's label and doc, because
+        # nothing may let a bundle rename what a number is called.
+        return BundleMemberResult(slot=slot, result=result)
+
     for member in plan.members:
         if member.kind == "figure":
             figure = library.figure(member.name)
             if figure is None:  # pragma: no cover - the checker refuses this
                 raise ValueError(f"{plan.name} names a figure that is not compiled")
             results.append(
-                await serve_figure(store, library, tenant, figure, settings, at_ms=at)
+                slotted(
+                    member.slot,
+                    await serve_figure(store, library, tenant, figure, settings, at_ms=at),
+                )
             )
         elif member.kind == "reading":
             reading = library.reading(member.name)
@@ -1222,14 +1301,19 @@ async def answer_bundle(
                 # a response quietly shorter than its definition.
                 raise NotImplementedError("live readings are not servable yet")
             results.append(
-                await serve_reading(
-                    store,
-                    library,
-                    tenant,
-                    reading,
-                    settings,
-                    list(member.windows) if member.windows is not None else list(default_trailing),
-                    at_ms=at,
+                slotted(
+                    member.slot,
+                    await serve_reading(
+                        store,
+                        library,
+                        tenant,
+                        reading,
+                        settings,
+                        list(member.windows)
+                        if member.windows is not None
+                        else list(default_trailing),
+                        at_ms=at,
+                    ),
                 )
             )
         elif member.kind == "projection":
@@ -1238,7 +1322,10 @@ async def answer_bundle(
                 raise ValueError(f"{plan.name} names a projection that is not compiled")
             rows, state = await rows_of(member.name)
             results.append(
-                _compose_projection(library, projection, rows, state, settings, at)
+                slotted(
+                    member.slot,
+                    _compose_projection(library, projection, rows, state, settings, at),
+                )
             )
         else:  # summary
             summary_plan = library.summary(member.name)
@@ -1250,7 +1337,12 @@ async def answer_bundle(
                 if isinstance(state, Ok)
                 else None
             )
-            results.append(serve_summary(summary_plan, summary, settings, at, state))
+            results.append(
+                slotted(
+                    member.slot,
+                    serve_summary(summary_plan, summary, settings, at, state),
+                )
+            )
 
     return BundleResult(
         name=plan.name,

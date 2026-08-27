@@ -1159,12 +1159,12 @@ RIDES = {
 }
 
 
-async def _teach_rides(http: httpx.AsyncClient) -> None:
+async def _teach_rides(http: httpx.AsyncClient, zone: str = RIDES_ZONE) -> None:
     world = COURIER_WORLD.to_document()
     world["bucket_settings"] = ["tenant.timezone"]
     world["defaults"] = {
         **world["defaults"],
-        "tenant": {"hoursPerDay": 8, "timezone": RIDES_ZONE},
+        "tenant": {"hoursPerDay": 8, "timezone": zone},
     }
     assert (await http.put("/schema", json=world)).status_code == 200
     put = await http.put("/definitions", json={"source": RIDES_SOURCE})
@@ -1305,6 +1305,122 @@ async def test_an_anchor_at_the_calendars_edge_is_an_answer_not_a_500(server: Se
         assert window["days_covered"] == 0
 
 
+async def test_the_calendars_far_edge_answers_west_of_utc_too(server: Server) -> None:
+    """9999-12-31's last local millisecond in a zone west of UTC lands in the
+    year 10000 by UTC's clock, which `datetime` cannot carry -- so the anchor
+    used to leak as a traceback-worded 400 on the by-name route and an
+    unhandled 500 on the bulk route. The Kiritimati fixture (east of UTC)
+    never sees this, which is exactly why the zone is the test."""
+    await _teach_rides(server.http, zone="America/New_York")
+
+    got = await server.http.get(
+        "/tenants/t1/results/shop_courier.typical_ride",
+        params={"at": "9999-12-31", "trailing": 30},
+    )
+    assert got.status_code == 200, f"{got.status_code} {got.text}"
+    [window] = got.json()["empty"]["windows"]
+    assert window["to"] == "9999-12-31"
+    assert window["days_covered"] == 0
+
+    listed = await server.http.get(
+        "/tenants/t1/results", params={"at": "9999-12-31", "trailing": 30}
+    )
+    assert listed.status_code == 200, f"{listed.status_code} {listed.text}"
+
+
+async def test_a_span_past_the_reach_ceiling_is_refused_on_both_routes(server: Server) -> None:
+    """`?trailing=1000000` used to walk ~739k stored day points per subject
+    before answering an empty window -- a request parameter must not be able
+    to buy that walk. The refusal is a 422 that states the ceiling and why,
+    on the by-name route and the bulk route alike."""
+    await _teach_rides(server.http)
+
+    for params in (
+        {"trailing": "1000000"},
+        {"trailing": "999991-1000000"},
+        {"trailing": f"{3660 * 24 + 1}h"},
+    ):
+        got = await server.http.get(
+            "/tenants/t1/results/shop_courier.typical_ride", params=params
+        )
+        assert got.status_code == 422, f"{params}: {got.status_code} {got.text}"
+        assert "3660" in got.text, got.text
+
+        listed = await server.http.get("/tenants/t1/results", params=params)
+        assert listed.status_code == 422, f"{params}: {listed.status_code}"
+
+    # The boundary itself still answers.
+    got = await server.http.get(
+        "/tenants/t1/results/shop_courier.typical_ride", params={"trailing": "3660"}
+    )
+    assert got.status_code == 200, got.text
+
+
+async def test_a_malformed_window_token_is_a_422_never_a_coercion(server: Server) -> None:
+    await _teach_rides(server.http)
+    for wrong in ("0", "0-30", "60-31", "7.5", "30x", "1-2-3", "-30", "30-"):
+        got = await server.http.get(
+            "/tenants/t1/results/shop_courier.typical_ride", params={"trailing": wrong}
+        )
+        assert got.status_code == 422, f"{wrong!r}: {got.status_code} {got.text}"
+    zero = await server.http.get(
+        "/tenants/t1/results/shop_courier.typical_ride", params={"trailing": "0-30"}
+    )
+    assert "anchor" in zero.text, "the 0-bound refusal must teach that day 1 is the anchor day"
+
+
+async def test_offset_buckets_compose_with_the_anchor_over_http(server: Server) -> None:
+    """`?trailing=1-3&trailing=4-6&at=2026-06-30`: two exact three-day
+    buckets counted back from the anchor day. r2 (local 2026-06-30) sits in
+    bucket 1-3 alone; r1 (local 2026-06-28) with it; nothing in 4-6 -- and
+    each window's wire shape must say what was asked (`span`, `bucket`) and
+    what was covered (`frm`/`to`), with `trailing` honest: null for the
+    offset bucket rather than a number that reads like a trailing span."""
+    await _teach_rides(server.http)
+
+    got = await server.http.get(
+        "/tenants/t1/results/shop_courier.typical_ride",
+        params={"at": "2026-06-30", "trailing": ["1-3", "4-6"]},
+    )
+    assert got.status_code == 200, got.text
+    [subject] = got.json()["subjects"]
+    near, far = subject["windows"]
+
+    assert (near["span"], near["bucket"]) == ("3", "day")
+    assert near["trailing"] == 3, "1-3 IS the trailing three days, and may say so"
+    assert (near["frm"], near["to"]) == ("2026-06-28", "2026-06-30")
+    assert near["mean"] == 5400.0, "both rides sit inside the last three local days"
+
+    assert (far["span"], far["bucket"]) == ("4-6", "day")
+    assert far["trailing"] is None, (
+        "an offset bucket wearing a trailing-looking number is the failure "
+        "mode this shape exists to prevent"
+    )
+    assert (far["frm"], far["to"]) == ("2026-06-25", "2026-06-27")
+    assert far["mean"] is None and far["days_covered"] == 0
+
+    # Adjacent specs cover adjacent, non-overlapping days: 4-6 ends exactly
+    # the day before 1-3 opens.
+    assert far["to"] == "2026-06-27" and near["frm"] == "2026-06-28"
+
+
+async def test_a_sub_day_span_over_day_storage_is_refused_naming_the_grain(
+    server: Server,
+) -> None:
+    """An hour bucket over a figure stored by day has nothing to slice; the
+    422 names the figure's storage so the fix -- write days, or regrade --
+    is in the caller's hands. Never silent rounding to days."""
+    await _teach_rides(server.http)
+    got = await server.http.get(
+        "/tenants/t1/results/shop_courier.typical_ride", params={"trailing": "1-48h"}
+    )
+    assert got.status_code == 422, f"{got.status_code} {got.text}"
+    assert "stored by day" in got.text, got.text
+
+    listed = await server.http.get("/tenants/t1/results", params={"trailing": "1-48h"})
+    assert listed.status_code == 422, f"{listed.status_code} {listed.text}"
+
+
 # ---------------------------------------------------------------- bundles --
 
 
@@ -1352,13 +1468,13 @@ async def test_a_bundle_is_one_request_on_the_results_surface(server: Server) ->
     assert card is not None
     assert body["version"] == card.version
 
-    assert [(r["kind"], r["name"]) for r in body["results"]] == [
-        ("reading", "shop_courier.typical_ride"),
-        ("figure", "shop_courier.carrying"),
-        ("projection", "shop_order.board"),
-        ("summary", "shop_order.book"),
+    assert [(m["slot"], m["result"]["kind"], m["result"]["name"]) for m in body["results"]] == [
+        ("typical", "reading", "shop_courier.typical_ride"),
+        ("carrying", "figure", "shop_courier.carrying"),
+        ("board", "projection", "shop_order.board"),
+        ("book", "summary", "shop_order.book"),
     ]
-    reading, figure, projection, summary = body["results"]
+    reading, figure, projection, summary = (m["result"] for m in body["results"])
     # The member arguments made it through HTTP: the bundle's own windows,
     # not the route's defaults.
     assert [w["trailing"] for w in reading["subjects"][0]["windows"]] == [9, 1]
@@ -1438,7 +1554,7 @@ async def test_a_bundle_over_a_live_reading_is_a_501_like_the_reading_itself(
         "        count(waiting)\n"
         "\n# A tile over the live queue.\n"
         "bundle shop_courier.live_card:\n"
-        "    reading shop_courier.waiting\n"
+        "    waiting = reading shop_courier.waiting\n"
     )
     assert (await server.http.put("/schema", json=SERVE_WORLD.to_document())).status_code == 200
     put = await server.http.put("/definitions", json={"source": live})

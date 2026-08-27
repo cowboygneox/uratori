@@ -788,6 +788,32 @@ reading team_person.quarter_pace(range):
     calculate:
         mean(m)
         series(m) by hour
+
+# d
+reading team_person.quarter_typical(range):
+    display "x"
+    depends:
+        m = team_person.quarter_lead in range
+    calculate:
+        median(m)
+
+# d
+reading team_person.quarter_daily(range):
+    display "x"
+    depends:
+        m = team_person.quarter_volume in range
+    calculate:
+        sum(m)
+        series(m) by day
+
+# d
+reading team_person.quarter_fine(range):
+    display "x"
+    depends:
+        m = team_person.quarter_volume in range
+    calculate:
+        sum(m)
+        series(m) by 15 minutes
 """
 )
 
@@ -1144,3 +1170,313 @@ async def test_a_sub_day_reading_under_an_anchor_keeps_its_final_quarters() -> N
     assert window.series is not None and len(window.series) == 168
     assert window.series[6 * 24 + 23] == 4.0  # 23:00 on the anchor day
     assert window.series[2 * 24 + 10] == 3.0  # 10:00 on 2025-08-20
+
+
+# ------------------------------------------------------------ bucket spans --
+#
+# A window is a span of stored buckets counted back from the anchor: `31-60`
+# is the thirty days before the trailing thirty, `1-4h` the last four hours.
+# The spec is an argument -- it narrows which stored buckets take part and
+# may never change the calculation -- so every declared rule (floor, band,
+# series) applies per span unchanged.
+
+
+async def _day_reading_store(figure, days):  # type: ignore[no-untyped-def]
+    store = MemoryEngineStore()
+    stamp = fingerprint(dict(DEFAULTS), list(figure.settings))
+    await store.set_pointer(
+        "t1", figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
+    )
+    await store.set_buckets("t1", "work_issue.by_day", "w1", ["p1@2025-08-24"])
+    for subject, values in days:
+        await store.save("t1", figure.name, figure.version, subject, values, (), "P One")
+    return store
+
+
+async def _quarter_store(figure, buckets):  # type: ignore[no-untyped-def]
+    store = MemoryEngineStore()
+    stamp = fingerprint(dict(DEFAULTS), list(figure.settings))
+    await store.set_pointer(
+        "t1", figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
+    )
+    await store.set_buckets("t1", "work_issue.by_quarter", "w1", ["p1@2025-08-24T04:45"])
+    for subject, value in buckets:
+        await store.save("t1", figure.name, figure.version, subject, value, (), "P One")
+    return store
+
+
+async def test_offset_buckets_partition_the_days_with_no_overlap_and_no_gap() -> None:
+    """`1-3, 4-6` anchored on 2025-08-24: the near bucket is the 22nd-24th
+    and the far one the 19th-21st. The boundary days are the test -- a value
+    on the 21st belongs to the far bucket alone and one on the 22nd to the
+    near bucket alone, so an off-by-one at either edge double-counts a day
+    or loses one."""
+    figure = READINGS.figure("team_person.per_day")
+    reading = READINGS.reading("team_person.pace")
+    assert figure is not None and reading is not None
+    store = await _day_reading_store(
+        figure,
+        (
+            ("p1@2025-08-24", [10.0]),  # anchor day: near bucket
+            ("p1@2025-08-22", [20.0]),  # near bucket's oldest day
+            ("p1@2025-08-21", [40.0]),  # far bucket's newest day
+            ("p1@2025-08-19", [80.0]),  # far bucket's oldest day
+            ("p1@2025-08-18", [160.0]),  # beyond both; must appear nowhere
+        ),
+    )
+
+    result = await serve_reading(
+        store, READINGS, "t1", reading, DEFAULTS, ["1-3", "4-6"], at_day="2025-08-24"
+    )
+    near, far = result.subjects[0].windows
+    assert (near.frm, near.to) == ("2025-08-22", "2025-08-24")
+    assert (far.frm, far.to) == ("2025-08-19", "2025-08-21")
+    assert near.mean == 15.0, "the near bucket must hold the 22nd and the 24th alone"
+    assert far.mean == 60.0, "the far bucket must hold the 19th and the 21st alone"
+    assert (near.span, near.bucket, near.trailing) == ("3", "day", 3)
+    assert (far.span, far.bucket, far.trailing) == ("4-6", "day", None)
+    assert far.days_requested == 3
+
+
+async def test_a_bare_number_and_its_explicit_span_are_one_window() -> None:
+    """`3` and `1-3` are two spellings of one question and must serve
+    byte-identically -- canonical spelling included, so a client cannot see
+    two shapes for one answer."""
+    figure = READINGS.figure("team_person.per_day")
+    reading = READINGS.reading("team_person.pace")
+    assert figure is not None and reading is not None
+    store = await _day_reading_store(
+        figure, (("p1@2025-08-24", [10.0]), ("p1@2025-08-22", [20.0]))
+    )
+    result = await serve_reading(
+        store, READINGS, "t1", reading, DEFAULTS, [3, "1-3"], at_day="2025-08-24"
+    )
+    bare, explicit = result.subjects[0].windows
+    assert bare == explicit
+    assert bare.span == "3" and bare.trailing == 3
+
+
+async def test_the_floor_and_band_hold_per_bucket_not_per_request() -> None:
+    """`team_person.speed` requires three values. The near bucket holds
+    three, the far bucket one: the near one answers with its band word and
+    the far one withholds every statistic together, names the shortfall, and
+    bands unknown. One bucket's wealth must not lend the other its floor."""
+    figure = READINGS.figure("team_person.per_day")
+    reading = READINGS.reading("team_person.speed")
+    assert figure is not None and reading is not None
+    store = await _day_reading_store(
+        figure,
+        (
+            ("p1@2025-08-24", [86_400.0]),
+            ("p1@2025-08-23", [172_800.0]),
+            ("p1@2025-08-22", [259_200.0]),
+            ("p1@2025-08-20", [86_400.0]),  # the far bucket's only value
+        ),
+    )
+    result = await serve_reading(
+        store, READINGS, "t1", reading, DEFAULTS, ["1-3", "4-6"], at_day="2025-08-24"
+    )
+    near, far = result.subjects[0].windows
+    assert near.unmet == [] and near.mean == 172_800.0 and near.level == "ok"
+    assert far.unmet == ["needs at least 3 values; there is 1"]
+    assert far.mean is None and far.worst is None
+    assert far.level == "unknown"
+
+
+async def test_an_hour_span_slices_hours_not_whole_days() -> None:
+    """The driving case: a median over the last four hours of a quarter-hour
+    figure. A value from one hour ago is in; a value from the same local day
+    but before the span's oldest hour must be out -- a day window cannot make
+    that cut, which is what the unit exists for."""
+    figure = GRAINED.figure("team_person.quarter_lead")
+    reading = GRAINED.reading("team_person.quarter_typical")
+    assert figure is not None and reading is not None
+    store = await _quarter_store(
+        figure,
+        (
+            ("p1@2025-08-24T04:45", [100.0]),  # one hour ago: inside
+            ("p1@2025-08-24T02:00", [300.0]),  # the span's oldest hour: inside
+            ("p1@2025-08-24T01:45", [900.0]),  # same local day, older: OUT
+            ("p1@2025-08-23T06:15", [700.0]),  # yesterday: OUT
+        ),
+    )
+    at = 1_756_036_800_000.0  # 2025-08-24T12:00Z, 05:00 in Los Angeles
+    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, ["1-4h"], at_ms=at)
+    [window] = result.subjects[0].windows
+    assert (window.frm, window.to) == ("2025-08-24T02:00", "2025-08-24T05:00")
+    assert (window.span, window.bucket) == ("4", "hour")
+    assert window.trailing is None, "an hour span is not a count of trailing days"
+    assert window.median == 200.0, (
+        "the median must run over the two in-span values alone; 300 or more "
+        "means a same-day value leaked in through day arithmetic"
+    )
+    assert window.days_requested == 1 and window.days_covered == 1
+
+
+async def test_bare_numbers_stay_days_whatever_the_grain() -> None:
+    """The re-scale trap, pinned: over a quarter-hour figure a bare `2` is
+    two *days*, never two grain units. Were bare numbers denominated in the
+    figure's grain, regrading a figure would silently re-scale every
+    bookmarked URL and bundle -- this test is what would catch that design
+    arriving. The 01:00 bucket sits 28 hours before the anchor: outside two
+    of any sub-day unit anyone might denominate in, inside two days."""
+    figure = GRAINED.figure("team_person.quarter_volume")
+    reading = GRAINED.reading("team_person.quarter_throughput")
+    assert figure is not None and reading is not None
+    store = await _quarter_store(
+        figure,
+        (
+            ("p1@2025-08-24T04:45", 2.0),  # today
+            ("p1@2025-08-23T01:00", 3.0),  # yesterday, 28h before the anchor
+            ("p1@2025-08-22T23:45", 5.0),  # two local days back: OUT of `2`
+        ),
+    )
+    at = 1_756_036_800_000.0  # 05:00 in Los Angeles
+    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, [2], at_ms=at)
+    [window] = result.subjects[0].windows
+    assert (window.frm, window.to) == ("2025-08-23", "2025-08-24")
+    assert (window.span, window.bucket, window.trailing) == ("2", "day", 2)
+    assert window.total == 5.0, "a bare 2 must cover two whole local days"
+
+
+async def test_a_sub_day_span_over_day_storage_is_refused_naming_the_grain() -> None:
+    """Hour buckets over a day-keyed figure have nothing to slice; the
+    refusal names the storage so the fix is in the caller's hands. Silent
+    rounding to days would serve a plausible window nobody asked for."""
+    from uratori.windows import WindowError
+
+    figure = READINGS.figure("team_person.per_day")
+    reading = READINGS.reading("team_person.pace")
+    assert figure is not None and reading is not None
+    store = await _day_reading_store(figure, ())
+    with pytest.raises(WindowError, match="stored by day"):
+        await serve_reading(
+            store, READINGS, "t1", reading, DEFAULTS, ["1-48h"], at_day="2025-08-24"
+        )
+    with pytest.raises(WindowError, match="stored by 15 minutes"):
+        # Minutes cannot slice quarter-hour storage either: a minute bucket
+        # would split a stored bucket.
+        quarter = GRAINED.reading("team_person.quarter_typical")
+        assert quarter is not None
+        await serve_reading(
+            MemoryEngineStore(), GRAINED, "t1", quarter, DEFAULTS, ["1-90m"]
+        )
+
+
+async def test_a_day_series_does_not_fit_inside_an_hour_span() -> None:
+    """`quarter_daily` declares series(...) by day; served over `1-4h` the
+    day point would claim twenty hours the span does not cover. Refused with
+    the reason, never served partially covered."""
+    from uratori.windows import WindowError
+
+    reading = GRAINED.reading("team_person.quarter_daily")
+    assert reading is not None
+    with pytest.raises(WindowError, match="does not fit"):
+        await serve_reading(MemoryEngineStore(), GRAINED, "t1", reading, DEFAULTS, ["1-4h"])
+
+
+async def test_an_hour_spans_series_covers_exactly_its_buckets() -> None:
+    """Series points inside a sub-day span run from the span's oldest bucket
+    through the end of its newest -- four hourly points for `1-4h`, sixteen
+    quarter-hour points for the same span under a finer series grain -- and
+    a bucket outside the span must not appear as a point."""
+    figure = GRAINED.figure("team_person.quarter_volume")
+    throughput = GRAINED.reading("team_person.quarter_throughput")
+    fine = GRAINED.reading("team_person.quarter_fine")
+    assert figure is not None and throughput is not None and fine is not None
+    store = await _quarter_store(
+        figure,
+        (
+            ("p1@2025-08-24T04:45", 2.0),
+            ("p1@2025-08-24T02:15", 3.0),
+            ("p1@2025-08-24T01:45", 9.0),  # outside the span
+        ),
+    )
+    at = 1_756_036_800_000.0  # 05:00 in Los Angeles
+
+    result = await serve_reading(store, GRAINED, "t1", throughput, DEFAULTS, ["1-4h"], at_ms=at)
+    [window] = result.subjects[0].windows
+    assert window.series == [3.0, None, 2.0, None], (
+        "hours 02,03,04,05 of the anchor day: 02:15 in the first point, "
+        "04:45 in the third, the anchor hour empty -- and 01:45 nowhere"
+    )
+    assert window.total == 5.0
+
+    finer = await serve_reading(store, GRAINED, "t1", fine, DEFAULTS, ["1-4h"], at_ms=at)
+    [window] = finer.subjects[0].windows
+    assert window.series is not None
+    assert len(window.series) == 16, (
+        "a quarter-hour series over four hour buckets is sixteen points, "
+        "through the END of the newest bucket -- not stopping at its label"
+    )
+    assert window.series[1] == 3.0  # 02:15
+    assert window.series[11] == 2.0  # 04:45
+
+
+def test_an_hour_span_counts_labels_across_fall_back_not_elapsed_hours() -> None:
+    """Stored labels live in wall-clock space and the fall-back hour's two
+    passes merged at write time, so a span steps back through labels: three
+    hour buckets ending at 01:00 on the fall-back day are 01:00, 00:00 and
+    23:00 -- whatever the elapsed time says."""
+    from uratori.engine.buckets import bucket_span
+    from uratori.windows import WindowSpec
+
+    zone = "America/Los_Angeles"
+    # 2025-11-02T09:30Z is 01:30 PST, the second pass through 01:00 local.
+    at = 1_762_075_800_000.0
+    assert label_in(at, zone, "15 minutes") == "2025-11-02T01:30"
+    assert bucket_span(at, zone, WindowSpec(first=1, last=3, unit="hour")) == (
+        "2025-11-01T23:00",
+        "2025-11-02T01:00",
+    )
+
+
+def test_a_span_clamps_at_the_calendars_edge_rather_than_overflowing() -> None:
+    from uratori.engine.buckets import bucket_span
+    from uratori.windows import WindowSpec
+
+    frm, to = bucket_span(
+        end_of_day_ms("0001-01-03", "UTC"), "UTC", WindowSpec(first=2, last=10, unit="day")
+    )
+    assert (frm, to) == ("0001-01-01", "0001-01-02")
+    frm, to = bucket_span(
+        end_of_day_ms("0001-01-01", "UTC"), "UTC", WindowSpec(first=1, last=5, unit="hour")
+    )
+    assert to == "0001-01-01T23:00"
+
+
+def test_the_far_calendar_edge_answers_west_of_utc() -> None:
+    """9999-12-31's last local millisecond in New York lands in year 10000
+    by UTC's clock; the anchor must clamp to something `datetime` can carry
+    while still filing under the anchor's own local day."""
+    zone = "America/New_York"
+    at = end_of_day_ms("9999-12-31", zone)
+    assert day_in(at, zone) == "9999-12-31"
+    from datetime import UTC, datetime
+
+    datetime.fromtimestamp(at / 1000.0, tz=UTC)  # must not raise
+
+
+async def test_a_sub_day_span_under_a_day_anchor_ends_in_the_anchor_days_last_bucket() -> None:
+    """The anchor generalises: `?at=` resolves to the day's final moment, so
+    bucket 1 of an hour span is the anchor day's 23:00 bucket -- the last
+    four hours OF THAT DAY, not of whenever the request ran. A quarter from
+    the next local day must stay out."""
+    figure = GRAINED.figure("team_person.quarter_lead")
+    reading = GRAINED.reading("team_person.quarter_typical")
+    assert figure is not None and reading is not None
+    store = await _quarter_store(
+        figure,
+        (
+            ("p1@2025-08-24T23:45", [100.0]),  # the anchor day's final quarter: in
+            ("p1@2025-08-24T20:00", [300.0]),  # the span's oldest hour: in
+            ("p1@2025-08-24T19:45", [900.0]),  # an hour too early: out
+            ("p1@2025-08-25T00:00", [700.0]),  # the next local day: out
+        ),
+    )
+    result = await serve_reading(
+        store, GRAINED, "t1", reading, DEFAULTS, ["1-4h"], at_day="2025-08-24"
+    )
+    [window] = result.subjects[0].windows
+    assert (window.frm, window.to) == ("2025-08-24T20:00", "2025-08-24T23:00")
+    assert window.median == 200.0

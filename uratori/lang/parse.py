@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Literal
 
+from ..windows import WindowError, WindowSpec, WindowUnit, make_window_spec, window_token
 from .ast import (
     AbsenceTest,
     Arith,
@@ -1685,12 +1686,46 @@ class _Parser:
         return BundleDecl(name=name, doc="", members=tuple(members), line=line)
 
     def _bundle_member(self) -> BundleMember:
-        """One member: a declaration keyword, a name, and (for a reading) an
-        optional window list. Names plus arguments and nothing else -- a
-        member line that could carry a calculation would be a second place
-        for a number to be defined, which is what a bundle exists not to be.
+        """One member: a slot binding, a declaration keyword, a name, and
+        (for a reading) an optional window list. Names plus arguments and
+        nothing else -- a member line that could carry a calculation would be
+        a second place for a number to be defined, which is what a bundle
+        exists not to be.
         """
         line = self._peek().line
+        slot = self._name('a slot name, e.g. "latency = reading team_person.to_merge"')
+        if not self._at_op("="):
+            # The pre-binding grammar started the line with the keyword, so a
+            # bare `figure team_person.wip` lands here -- taught forward with
+            # the new form spelled out rather than refused as a bare
+            # "expected =".
+            if slot == "bundle":
+                raise self._error(
+                    "a bundle may not name another bundle. Composition stays flat -- "
+                    "one level of bundles over the declarations that compute -- so "
+                    "there is no nesting to walk and no cycle to refuse.",
+                    line,
+                )
+            if slot in ("figure", "reading", "projection", "summarise"):
+                raise self._error(
+                    f'every member binds a slot: write "<slot> = {slot} <name>". The '
+                    "slot is the address a client reads this member at, so a screen "
+                    "couples to the tile's layout rather than to definition names.",
+                    line,
+                )
+            raise self._error(
+                f'expected "=" after the slot name "{slot}": a member is '
+                '"<slot> = <keyword> <name>".',
+                line,
+            )
+        if "." in slot:
+            raise self._error(
+                f'"{slot}" is not a slot name. A slot is a bare word the client '
+                "addresses -- the definition name comes after the keyword.",
+                line,
+            )
+        self._punct("=")
+
         word = self._peek().value
         if word == "bundle":
             raise self._error(
@@ -1716,7 +1751,7 @@ class _Parser:
         )
         name = self._name(f"a {word} name")
 
-        windows: tuple[int, ...] | None = None
+        windows: tuple[WindowSpec, ...] | None = None
         if self._at_word("over"):
             if word != "reading":
                 raise self._error(
@@ -1727,35 +1762,77 @@ class _Parser:
                     line,
                 )
             self._next()
-            out: list[int] = []
-            while True:
-                tok = self._expect("number", "a number of trailing days")
-                raw = float(tok.value)
-                if not raw.is_integer() or raw < 1:
-                    raise self._error(
-                        f'"{tok.value}" is not a window. A window is a whole number of '
-                        "trailing days, at least one.",
-                        line,
-                    )
-                if int(raw) in out:
-                    # The same shape of mistake as a duplicate member: the
-                    # window would serve twice, and a screen binding to
-                    # window positions would show a duplicated column from a
-                    # typo.
-                    raise self._error(
-                        f"the window list names {int(raw)} twice. One request serves "
-                        "each window once.",
-                        line,
-                    )
-                out.append(int(raw))
-                if self._at_op(","):
-                    self._next()
-                    continue
-                break
-            windows = tuple(out)
+            windows = self._window_specs(line)
 
         self._end_of_line()
-        return BundleMember(kind=member_kind, name=name, windows=windows, line=line)
+        return BundleMember(slot=slot, kind=member_kind, name=name, windows=windows, line=line)
+
+    def _window_specs(self, line: int) -> tuple[WindowSpec, ...]:
+        """`over 7, 14, 30` / `over 1-30, 31-60` / `over 1-48 in hours`.
+
+        Each entry is a span of buckets counted back from the anchor; the
+        optional `in <unit>` clause follows the list and denominates every
+        span in it -- modelled on `band ... in <unit>`, and for the same
+        reason: bare numbers are *days*, always, never the source figure's
+        grain, because a regrade must not silently re-scale a tile."""
+        bounds: list[tuple[int, int]] = []
+        while True:
+            first = self._window_bound(line)
+            last = first
+            if self._at_op("-"):
+                self._next()
+                last = self._window_bound(line)
+                bounds.append((first, last))
+            else:
+                bounds.append((1, first))
+            if self._at_op(","):
+                self._next()
+                continue
+            break
+
+        unit: WindowUnit = "day"
+        if self._at_word("in"):
+            self._next()
+            worded = self._name('a bucket unit: "minutes", "hours" or "days"')
+            units: dict[str, WindowUnit] = {"minutes": "minute", "hours": "hour", "days": "day"}
+            if worded not in units:
+                raise self._error(
+                    f'"{worded}" is not a bucket unit. Spans are written in "minutes", '
+                    '"hours" or "days" -- days when unwritten, always.',
+                    line,
+                )
+            unit = units[worded]
+
+        out: list[WindowSpec] = []
+        for first, last in bounds:
+            try:
+                spec = make_window_spec(first, last, unit)
+            except WindowError as refusal:
+                raise self._error(str(refusal), line) from refusal
+            if spec in out:
+                # The same shape of mistake as a duplicate member: the window
+                # would serve twice, and a screen binding to window positions
+                # would show a duplicated column from a typo. Compared as
+                # canonical specs, so `over 30, 1-30` is caught as the same
+                # question twice.
+                raise self._error(
+                    f'the window list names "{window_token(spec)}" twice. One request '
+                    "serves each window once.",
+                    line,
+                )
+            out.append(spec)
+        return tuple(out)
+
+    def _window_bound(self, line: int) -> int:
+        tok = self._expect("number", 'a bucket span, e.g. "30" or "31-60"')
+        raw = float(tok.value)
+        if not raw.is_integer():
+            raise self._error(
+                f'"{tok.value}" is not a span bound. A span is whole buckets, counted '
+                "back from the anchor.",
+                line,
+            )
+        return int(raw)
 
     # ------------------------------------------------------------ shared --
 

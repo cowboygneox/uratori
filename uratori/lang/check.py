@@ -19,6 +19,12 @@ from __future__ import annotations
 from typing import Literal, NoReturn, assert_never
 
 from ..schema import Schema
+from ..windows import (
+    WindowSpec,
+    refuse_series_in_window,
+    refuse_unit_over_grain,
+    window_token,
+)
 from .ast import (
     Arith,
     BucketAll,
@@ -1961,17 +1967,31 @@ class _Checker:
         self._claim(d.name, "bundle", d.line)
         self._fact_kind(d.name.split(".", 1)[0], f"bundle {d.name} is named under", d.line)
 
-        seen: set[str] = set()
+        slots: set[str] = set()
+        served: set[tuple[str, str, tuple[WindowSpec, ...] | None]] = set()
         members: list[BundleMemberPlan] = []
         for m in d.members:
-            if m.name in seen:
+            if m.slot in slots:
                 raise CheckError(
-                    f"bundle {d.name} names {m.name} twice. One request serves each "
-                    "member once; a second entry would be a second copy of the same "
-                    "answer, and which one a screen bound to would be arbitrary.",
+                    f'bundle {d.name} binds "{m.slot}" twice. A slot is the address a '
+                    "client reads one member at, and two members under one address "
+                    "would make which one it gets arbitrary.",
                     m.line,
                 )
-            seen.add(m.name)
+            slots.add(m.slot)
+            # Two slots over one member are welcome when their window lists
+            # differ -- two spans of one reading are two questions. The same
+            # member under the same windows is refused: two names for one
+            # answer, the duplication the pre-binding grammar refused whole.
+            question = (m.kind, m.name, m.windows)
+            if question in served:
+                raise CheckError(
+                    f"bundle {d.name} names {m.name} twice over the same windows. Two "
+                    "slots would be two names for one answer; if the second slot wants "
+                    "a different question, give it a different window list.",
+                    m.line,
+                )
+            served.add(question)
             members.append(self._bundle_member(d, m))
 
         plan = BundlePlan(name=d.name, doc=d.doc, members=tuple(members))
@@ -2005,7 +2025,7 @@ class _Checker:
                     "of it.",
                     m.line,
                 )
-            return BundleMemberPlan(kind="figure", name=m.name)
+            return BundleMemberPlan(slot=m.slot, kind="figure", name=m.name)
 
         if m.kind == "reading":
             reading = _find(self.readings, m.name)
@@ -2020,17 +2040,37 @@ class _Checker:
                     "liveness twice, loudly.",
                     m.line,
                 )
-            return BundleMemberPlan(kind="reading", name=m.name, windows=m.windows)
+            if m.windows is not None and reading.source is not None:
+                # The same two refusals the serving path makes at request
+                # time, made here at compile time where the member's window
+                # list is written down: a span whose unit cannot slice the
+                # source's storage, and a series point that does not fit
+                # inside the span. One shared implementation, so the tile's
+                # build error and the route's 422 speak the same words.
+                source = _find(self.figures, reading.source)
+                grain = (source.grain if source is not None else None) or "day"
+                series_by = next(
+                    (s.by for s in reading.calculate if s.fn == "series"), None
+                )
+                for spec in m.windows:
+                    refusal = refuse_unit_over_grain(spec, grain, reading.source)
+                    if refusal is None:
+                        refusal = refuse_series_in_window(spec, series_by, m.name)
+                    if refusal is not None:
+                        raise CheckError(f"bundle {d.name}: {refusal}", m.line)
+            return BundleMemberPlan(
+                slot=m.slot, kind="reading", name=m.name, windows=m.windows
+            )
 
         if m.kind == "projection":
             if _find(self.projections, m.name) is None:
                 self._not_a_member(d, m, "projection")
-            return BundleMemberPlan(kind="projection", name=m.name)
+            return BundleMemberPlan(slot=m.slot, kind="projection", name=m.name)
 
         if m.kind == "summarise":
             if _find(self.summaries, m.name) is None:
                 self._not_a_member(d, m, "summary")
-            return BundleMemberPlan(kind="summary", name=m.name)
+            return BundleMemberPlan(slot=m.slot, kind="summary", name=m.name)
 
         assert_never(m.kind)
 
@@ -2589,17 +2629,24 @@ def _cond_hash(c: Condition | None) -> object:
 def _bundle_hash(plan: BundlePlan) -> object:
     """The member list, in written order, and nothing else.
 
-    Windows ride as a third element only when declared, the same
+    Slots are in: clients couple to them as addresses, so a renamed slot is
+    a changed tile on the review surface (and still in no storage key and no
+    citation -- the hash's one purpose is the committed artifact's diff).
+    Windows ride as a fourth element only when declared, the same
     absent-unless-declared shape a statistic's grain hashes with, so a bare
-    member and one written before windows existed cannot differ. Prose is out
-    like everywhere else; member *versions* are out deliberately -- each
-    member's answer carries its own version, so a member moving underneath is
-    that member's moved hash on the artifact, not a second copy of it here.
+    member and one written before windows existed cannot differ -- and each
+    window hashes as its canonical token, so `over 30`, `over 1-30` and
+    `over 30 in days` are one question with one hash. Prose is out like
+    everywhere else; member *versions* are out deliberately -- each member's
+    answer carries its own version, so a member moving underneath is that
+    member's moved hash on the artifact, not a second copy of it here.
     """
     return {
         "name": plan.name,
         "members": [
-            [m.kind, m.name] if m.windows is None else [m.kind, m.name, list(m.windows)]
+            [m.slot, m.kind, m.name]
+            if m.windows is None
+            else [m.slot, m.kind, m.name, [window_token(w) for w in m.windows]]
             for m in plan.members
         ],
     }

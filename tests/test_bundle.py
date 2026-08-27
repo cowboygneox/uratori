@@ -25,6 +25,7 @@ from uratori.lang.check import CheckError
 from uratori.lang.lex import SyntaxError_
 from uratori.results import BundleResult
 from uratori.store.base import FactRow
+from uratori.windows import WindowSpec
 
 from .test_lang import BASE
 from .world import compile_source
@@ -66,15 +67,33 @@ projection work_issue.item:
 # The backlog, in one row.
 summarise work_issue.backlog over work_issue.item:
     count items
+
+group code_change.merged_by_quarter from (authorAccountId through team_person.accounts.accountId, mergedAt by 15 minutes in tenant.timezone)
+
+# Time to merge, quarter by quarter.
+figure team_person.merge_quarters:
+    display "{team_person} merge quarters"
+    depends:
+        merged = code_change.merged_by_quarter:{team_person}
+    calculate:
+        list(code_change.open_seconds over merged)
+
+# The typical recent merge.
+reading team_person.recent_pace(range):
+    display "{team_person} recent"
+    depends:
+        m = team_person.merge_quarters in range
+    calculate:
+        median(m)
 """
 
 CARD = """
 # Everything the person card shows.
 bundle team_person.card:
-    reading team_person.to_merge over 7, 14, 30
-    figure team_person.wip
-    projection work_issue.item
-    summarise work_issue.backlog
+    merge_pace = reading team_person.to_merge over 7, 14, 30
+    wip = figure team_person.wip
+    items = projection work_issue.item
+    backlog = summarise work_issue.backlog
 """
 
 
@@ -102,13 +121,17 @@ def test_a_bundle_compiles_and_keeps_its_members_in_declaration_order() -> None:
     plan = lib.bundle("team_person.card")
     assert plan is not None
     assert plan.doc == "Everything the person card shows."
-    assert [(m.kind, m.name) for m in plan.members] == [
-        ("reading", "team_person.to_merge"),
-        ("figure", "team_person.wip"),
-        ("projection", "work_issue.item"),
-        ("summary", "work_issue.backlog"),
+    assert [(m.slot, m.kind, m.name) for m in plan.members] == [
+        ("merge_pace", "reading", "team_person.to_merge"),
+        ("wip", "figure", "team_person.wip"),
+        ("items", "projection", "work_issue.item"),
+        ("backlog", "summary", "work_issue.backlog"),
     ]
-    assert plan.members[0].windows == (7, 14, 30)
+    assert plan.members[0].windows == (
+        WindowSpec(first=1, last=7),
+        WindowSpec(first=1, last=14),
+        WindowSpec(first=1, last=30),
+    )
     assert plan.members[1].windows is None
     assert plan.version
 
@@ -119,7 +142,7 @@ def test_a_windowed_reading_member_may_leave_its_windows_unwritten() -> None:
     lib = compile_ok(
         "\n# A card with the default windows.\n"
         "bundle team_person.plain:\n"
-        "    reading team_person.to_merge\n"
+        "    pace = reading team_person.to_merge\n"
     )
     plan = lib.bundle("team_person.plain")
     assert plan is not None
@@ -131,7 +154,7 @@ def test_a_live_reading_member_is_named_bare() -> None:
     lib = compile_ok(
         "\n# The queue, right now.\n"
         "bundle team_person.queue:\n"
-        "    reading team_person.pending_reviews\n"
+        "    queue = reading team_person.pending_reviews\n"
     )
     assert lib.bundle("team_person.queue") is not None
 
@@ -143,7 +166,7 @@ def test_a_bundle_requires_an_explanation() -> None:
     """A bundle is served to a reader by name, so like every rendered kind it
     is refused without the `#` prose above it."""
     with pytest.raises(SyntaxError_) as caught:
-        compile_source(BASE + MEMBERS + "\nbundle team_person.bare:\n    figure team_person.wip\n")
+        compile_source(BASE + MEMBERS + "\nbundle team_person.bare:\n    wip = figure team_person.wip\n")
     assert "has no explanation" in caught.value.message
 
 
@@ -151,7 +174,7 @@ def test_a_member_that_resolves_to_nothing_is_refused() -> None:
     refuses(
         "\n# A card over a typo.\n"
         "bundle team_person.card:\n"
-        "    figure team_person.wpi\n",
+        "    wip = figure team_person.wpi\n",
         'there is no figure called "team_person.wpi"',
     )
 
@@ -163,7 +186,7 @@ def test_a_member_written_under_the_wrong_keyword_is_refused_by_what_it_is() -> 
     refuses(
         "\n# A card mislabelling a projection.\n"
         "bundle team_person.card:\n"
-        "    figure work_issue.item\n",
+        "    items = figure work_issue.item\n",
         "names work_issue.item as a figure",
         "it is a projection",
     )
@@ -178,7 +201,7 @@ def test_a_bundle_may_not_name_another_bundle_by_keyword() -> None:
             + CARD
             + "\n# A card of cards.\n"
             "bundle team_person.mega:\n"
-            "    bundle team_person.card\n"
+            "    card = bundle team_person.card\n"
         )
     assert "may not name another bundle" in caught.value.message
 
@@ -189,7 +212,7 @@ def test_a_bundle_may_not_name_another_bundle_under_a_member_keyword_either() ->
     refuses(
         CARD + "\n# A card of cards, wearing a figure keyword.\n"
         "bundle team_person.mega:\n"
-        "    figure team_person.card\n",
+        "    card = figure team_person.card\n",
         "which is a bundle",
         "flat",
     )
@@ -199,8 +222,8 @@ def test_a_duplicate_member_is_refused() -> None:
     refuses(
         "\n# A card that stutters.\n"
         "bundle team_person.card:\n"
-        "    figure team_person.wip\n"
-        "    figure team_person.wip\n",
+        "    a = figure team_person.wip\n"
+        "    b = figure team_person.wip\n",
         "names team_person.wip twice",
     )
 
@@ -212,7 +235,7 @@ def test_windows_on_a_live_reading_are_refused() -> None:
     refuses(
         "\n# A card windowing the un-windowed.\n"
         "bundle team_person.card:\n"
-        "    reading team_person.pending_reviews over 7\n",
+        "    queue = reading team_person.pending_reviews over 7\n",
         "measures records as they stand",
         "nothing stored to window",
     )
@@ -227,22 +250,50 @@ def test_windows_on_a_figure_member_are_refused_at_parse() -> None:
             + MEMBERS
             + "\n# A card windowing a figure.\n"
             "bundle team_person.card:\n"
-            "    figure team_person.wip over 7\n"
+            "    wip = figure team_person.wip over 7\n"
         )
     assert "only a reading member takes a window list" in caught.value.message
 
 
-def test_a_window_must_be_a_whole_positive_number_of_days() -> None:
-    for wrong in ("0", "7.5"):
-        with pytest.raises(SyntaxError_) as caught:
-            compile_source(
-                BASE
-                + MEMBERS
-                + "\n# A card with a nonsense window.\n"
-                "bundle team_person.card:\n"
-                f"    reading team_person.to_merge over {wrong}\n"
-            )
-        assert "whole number of trailing days" in caught.value.message, wrong
+def test_a_window_must_be_whole_buckets_counted_from_one() -> None:
+    """`0` is the instinctive spelling of "from now", and honouring it would
+    make `0-30, 31-60` a silent 31-day first bucket -- so the refusal teaches
+    the convention: bucket 1 is the anchor bucket, day 1 the anchor day."""
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(
+            BASE
+            + MEMBERS
+            + "\n# A card with a zero window.\n"
+            "bundle team_person.card:\n"
+            "    pace = reading team_person.to_merge over 0-30, 31-60\n"
+        )
+    assert "anchor" in caught.value.message
+    assert "1-30, 31-60" in caught.value.message
+
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(
+            BASE
+            + MEMBERS
+            + "\n# A card with a fractional window.\n"
+            "bundle team_person.card:\n"
+            "    pace = reading team_person.to_merge over 7.5\n"
+        )
+    assert "whole" in caught.value.message
+
+
+def test_a_reversed_span_and_a_span_past_the_ceiling_are_refused() -> None:
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(
+            BASE + MEMBERS + "\n# d\nbundle team_person.card:\n"
+            "    pace = reading team_person.to_merge over 60-31\n"
+        )
+    assert "31-60" in caught.value.message
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(
+            BASE + MEMBERS + "\n# d\nbundle team_person.card:\n"
+            "    pace = reading team_person.to_merge over 1000000\n"
+        )
+    assert "3660" in caught.value.message
 
 
 def test_a_duplicate_window_is_refused_as_the_typo_it_is() -> None:
@@ -255,7 +306,7 @@ def test_a_duplicate_window_is_refused_as_the_typo_it_is() -> None:
             + MEMBERS
             + "\n# A card that stutters a window.\n"
             "bundle team_person.card:\n"
-            "    reading team_person.to_merge over 7, 7\n"
+            "    pace = reading team_person.to_merge over 7, 7\n"
         )
     assert "twice" in caught.value.message
 
@@ -267,7 +318,7 @@ def test_a_day_keyed_figure_member_is_refused_toward_a_reading() -> None:
     refuses(
         "\n# A card dragging history along.\n"
         "bundle team_person.card:\n"
-        "    figure team_person.time_to_merge\n",
+        "    history = figure team_person.time_to_merge\n",
         "time-keyed",
         "reading",
     )
@@ -277,7 +328,7 @@ def test_a_dimensioned_figure_member_is_refused_toward_the_rollup() -> None:
     refuses(
         "\n# A card serving raw pairs.\n"
         "bundle team_person.card:\n"
-        "    figure team_person.open_by_source\n",
+        "    split = figure team_person.open_by_source\n",
         "split across data_connection",
         "rollup",
     )
@@ -287,7 +338,7 @@ def test_a_bundle_shares_the_one_namespace() -> None:
     refuses(
         "\n# A bundle stealing a figure's name.\n"
         "bundle team_person.wip:\n"
-        "    figure team_person.wip\n",
+        "    wip = figure team_person.wip\n",
         "team_person.wip is already a figure",
     )
 
@@ -296,7 +347,7 @@ def test_a_bundle_needs_a_fact_kind_prefix() -> None:
     refuses(
         "\n# A bundle about nothing the schema knows.\n"
         "bundle shop_thing.card:\n"
-        "    figure team_person.wip\n",
+        "    wip = figure team_person.wip\n",
         "not a fact kind",
     )
 
@@ -320,10 +371,10 @@ def test_prose_does_not_move_a_bundles_version_and_members_do() -> None:
     reordered = compile_ok(
         "\n# Everything the person card shows.\n"
         "bundle team_person.card:\n"
-        "    figure team_person.wip\n"
-        "    reading team_person.to_merge over 7, 14, 30\n"
-        "    projection work_issue.item\n"
-        "    summarise work_issue.backlog\n"
+        "    wip = figure team_person.wip\n"
+        "    merge_pace = reading team_person.to_merge over 7, 14, 30\n"
+        "    items = projection work_issue.item\n"
+        "    backlog = summarise work_issue.backlog\n"
     ).bundle("team_person.card")
     assert reordered is not None
     assert reordered.version != base.version
@@ -337,17 +388,17 @@ def test_prose_does_not_move_a_bundles_version_and_members_do() -> None:
     shorter = compile_ok(
         "\n# Everything the person card shows.\n"
         "bundle team_person.card:\n"
-        "    reading team_person.to_merge over 7, 14, 30\n"
-        "    figure team_person.wip\n"
-        "    projection work_issue.item\n"
+        "    merge_pace = reading team_person.to_merge over 7, 14, 30\n"
+        "    wip = figure team_person.wip\n"
+        "    items = projection work_issue.item\n"
     ).bundle("team_person.card")
     assert shorter is not None
     assert shorter.version != base.version
 
     longer = compile_ok(
         CARD.replace(
-            "    figure team_person.wip\n",
-            "    figure team_person.wip\n    reading team_person.pending_reviews\n",
+            "    wip = figure team_person.wip\n",
+            "    wip = figure team_person.wip\n    queue = reading team_person.pending_reviews\n",
         )
     ).bundle("team_person.card")
     assert longer is not None
@@ -462,10 +513,10 @@ summarise shop_order.book over shop_order.board:
 
 # The courier tile.
 bundle shop_courier.card:
-    reading shop_courier.typical_ride over 9, 1
-    figure shop_courier.carrying
-    projection shop_order.board
-    summarise shop_order.book
+    typical = reading shop_courier.typical_ride over 9, 1
+    carrying = figure shop_courier.carrying
+    board = projection shop_order.board
+    book = summarise shop_order.book
 """
 
 
@@ -549,11 +600,11 @@ async def test_a_bundle_serves_its_members_in_declaration_order_each_with_its_ow
     assert answer.name == "shop_courier.card"
     assert answer.version == card.version
 
-    assert [(r.kind, r.name) for r in answer.results] == [
-        ("reading", "shop_courier.typical_ride"),
-        ("figure", "shop_courier.carrying"),
-        ("projection", "shop_order.board"),
-        ("summary", "shop_order.book"),
+    assert [(m.slot, m.result.kind, m.result.name) for m in answer.results] == [
+        ("typical", "reading", "shop_courier.typical_ride"),
+        ("carrying", "figure", "shop_courier.carrying"),
+        ("board", "projection", "shop_order.board"),
+        ("book", "summary", "shop_order.book"),
     ]
     reading_plan = library.reading("shop_courier.typical_ride")
     figure_plan = library.figure("shop_courier.carrying")
@@ -561,7 +612,7 @@ async def test_a_bundle_serves_its_members_in_declaration_order_each_with_its_ow
     projection_plan = library.projection("shop_order.board")
     assert reading_plan is not None and figure_plan is not None
     assert summary_plan is not None and projection_plan is not None
-    versions = {r.name: r.version for r in answer.results}
+    versions = {m.result.name: m.result.version for m in answer.results}
     assert versions["shop_courier.typical_ride"] == reading_plan.version
     assert versions["shop_courier.carrying"] == figure_plan.version
     assert versions["shop_order.board"] == projection_plan.version
@@ -578,7 +629,7 @@ async def test_the_bundles_windows_reach_the_reading() -> None:
 
     answer = await engine.answer("t1", "shop_courier.card")
     assert isinstance(answer, BundleResult)
-    reading = answer.results[0]
+    reading = answer.results[0].result
     [subject] = reading.subjects
     assert subject.windows is not None
     wide, narrow = subject.windows
@@ -619,7 +670,7 @@ async def test_members_keep_their_own_states_and_reasons() -> None:
 
     answer = await engine.answer("t1", "shop_courier.card")
     assert isinstance(answer, BundleResult)
-    by_name = {r.name: r for r in answer.results}
+    by_name = {m.result.name: m.result for m in answer.results}
     carrying = by_name["shop_courier.carrying"]
     riding = by_name["shop_courier.typical_ride"]
     assert carrying.state.ok is True, carrying.state
@@ -640,8 +691,8 @@ async def test_a_summary_member_travels_without_rows_and_still_counts_them_all()
 
     answer = await engine.answer("t1", "shop_courier.card")
     assert isinstance(answer, BundleResult)
-    projection = answer.results[2]
-    summary = answer.results[3]
+    projection = answer.results[2].result
+    summary = answer.results[3].result
 
     assert summary.kind == "summary"
     assert summary.subjects == [], "a summary member carries no rows"
@@ -681,7 +732,7 @@ async def test_every_member_of_an_unanchored_bundle_shares_one_instant() -> None
 
     answer = await engine.answer("t1", "shop_courier.card")
     assert isinstance(answer, BundleResult)
-    instants = {r.at for r in answer.results} | {answer.at}
+    instants = {m.result.at for m in answer.results} | {answer.at}
     assert len(instants) == 1
 
 
@@ -694,8 +745,10 @@ async def test_an_unrun_bundle_serves_absences_not_zeroes() -> None:
     answer = await engine.answer("t1", "shop_courier.card")
     assert isinstance(answer, BundleResult)
     for member in answer.results:
-        assert member.state.ok is False, f"{member.name} served ok over nothing"
-    summary = answer.results[3]
+        assert member.result.state.ok is False, (
+            f"{member.result.name} served ok over nothing"
+        )
+    summary = answer.results[3].result
     assert summary.summary is None, "a withheld summary is absent, never zero"
 
 
@@ -714,7 +767,7 @@ async def test_a_bundle_naming_a_live_reading_raises_like_the_reading_itself_wou
         "        count(waiting)\n"
         "\n# A tile over the live queue.\n"
         "bundle shop_courier.live_card:\n"
-        "    reading shop_courier.waiting\n"
+        "    waiting = reading shop_courier.waiting\n"
     )
     library = compile_against(source, SERVE_WORLD)
     facts = MemoryFactStore()
@@ -736,7 +789,7 @@ async def test_a_bundle_member_result_is_the_same_shape_the_members_own_route_se
     assert isinstance(answer, BundleResult)
     alone = await engine.answer("t1", "shop_courier.carrying")
     assert isinstance(alone, Result)
-    member = answer.results[1]
+    member = answer.results[1].result
     assert [(s.id, s.value) for s in member.subjects] == [
         (s.id, s.value) for s in alone.subjects
     ]
@@ -751,3 +804,202 @@ async def test_bundle_evidence_is_a_forwarding_address() -> None:
     await engine.run("t1", full=True)
     with pytest.raises(LookupError, match="member"):
         await engine.evidence("t1", "shop_courier.card", "c1")
+
+
+# ------------------------------------------------------ slots and spans --
+
+
+def test_every_member_binds_a_slot_and_the_refusal_teaches_the_form() -> None:
+    """Bindings are required: the slot is the address a client reads a
+    member at, decoupling the tile's layout from definition names. The old
+    bare-keyword line must be refused with the new form spelled out, so a
+    migration is a compile error with directions rather than a hunt."""
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(
+            BASE + MEMBERS + "\n# A card in the old grammar.\n"
+            "bundle team_person.card:\n"
+            "    figure team_person.wip\n"
+        )
+    assert "slot" in caught.value.message
+    assert "= figure" in caught.value.message
+
+
+def test_a_dotted_slot_is_refused_as_not_an_address() -> None:
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(
+            BASE + MEMBERS + "\n# A card with a definition name for a slot.\n"
+            "bundle team_person.card:\n"
+            "    team_person.wip = figure team_person.wip\n"
+        )
+    assert "bare" in caught.value.message
+
+
+def test_a_slot_bound_twice_is_refused() -> None:
+    refuses(
+        "\n# A card with two members at one address.\n"
+        "bundle team_person.card:\n"
+        "    thing = figure team_person.wip\n"
+        "    thing = reading team_person.to_merge\n",
+        'binds "thing" twice',
+    )
+
+
+def test_two_slots_may_window_one_reading_differently() -> None:
+    """The whole point of slot addresses: `recent` and `prior` are two
+    questions about one reading, told apart by their window lists -- legal
+    now, where the pre-binding grammar refused any duplicate name."""
+    lib = compile_ok(
+        "\n# This month beside last month.\n"
+        "bundle team_person.compare:\n"
+        "    recent = reading team_person.to_merge over 1-30\n"
+        "    prior = reading team_person.to_merge over 31-60\n"
+    )
+    plan = lib.bundle("team_person.compare")
+    assert plan is not None
+    assert [(m.slot, m.windows) for m in plan.members] == [
+        ("recent", (WindowSpec(first=1, last=30),)),
+        ("prior", (WindowSpec(first=31, last=60),)),
+    ]
+
+
+def test_one_answer_under_two_names_is_still_refused() -> None:
+    """Identical member and identical windows under two slots is two names
+    for one answer -- the duplication the old refusal existed for, kept."""
+    refuses(
+        "\n# A card echoing itself.\n"
+        "bundle team_person.card:\n"
+        "    a = reading team_person.to_merge over 1-30\n"
+        "    b = reading team_person.to_merge over 30\n",
+        "twice",
+    )
+    refuses(
+        "\n# A card echoing itself bare.\n"
+        "bundle team_person.card:\n"
+        "    a = reading team_person.to_merge\n"
+        "    b = reading team_person.to_merge\n",
+        "twice",
+    )
+
+
+def test_slot_names_are_structural_and_move_the_hash() -> None:
+    """Clients couple to slot addresses, so a renamed slot is a changed tile
+    on the review surface -- while remaining in no storage key and no
+    citation, like the rest of the bundle hash."""
+    base = compile_ok(CARD).bundle("team_person.card")
+    renamed = compile_ok(CARD.replace("wip = figure", "load = figure")).bundle(
+        "team_person.card"
+    )
+    assert base is not None and renamed is not None
+    assert base.version != renamed.version
+
+
+def test_span_spellings_that_ask_one_question_hash_identically() -> None:
+    """`over 30`, `over 1-30` and `over 30 in days` are one window; a hash
+    that told them apart would move a tile's version under a rewording."""
+    spellings = ["over 7, 14, 30", "over 1-7, 1-14, 1-30", "over 7, 14, 30 in days"]
+    versions = {
+        compile_ok(CARD.replace("over 7, 14, 30", spelling))
+        .bundle("team_person.card")
+        .version  # type: ignore[union-attr]
+        for spelling in spellings
+    }
+    assert len(versions) == 1
+
+    respanned = compile_ok(CARD.replace("over 7, 14, 30", "over 7, 8-14, 30"))
+    moved = respanned.bundle("team_person.card")
+    assert moved is not None
+    assert moved.version not in versions, "a genuinely different span must move the hash"
+
+
+def test_a_duplicate_span_is_refused_across_spellings() -> None:
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(
+            BASE + MEMBERS + "\n# A card that stutters a span.\n"
+            "bundle team_person.card:\n"
+            "    pace = reading team_person.to_merge over 30, 1-30\n"
+        )
+    assert "twice" in caught.value.message
+
+
+def test_an_hour_span_needs_sub_day_storage_and_says_so_at_compile_time() -> None:
+    """The member's window list is checked against the reading's source
+    grain when the tile compiles: hours over the quarter-hour figure pass,
+    hours over the day-keyed one are refused naming the storage -- the same
+    words the HTTP door uses at request time."""
+    lib = compile_ok(
+        "\n# The last two days, hour by hour.\n"
+        "bundle team_person.pace_card:\n"
+        "    fresh = reading team_person.recent_pace over 1-48 in hours\n"
+    )
+    plan = lib.bundle("team_person.pace_card")
+    assert plan is not None
+    assert plan.members[0].windows == (WindowSpec(first=1, last=48, unit="hour"),)
+
+    refuses(
+        "\n# Hours over day storage.\n"
+        "bundle team_person.card:\n"
+        "    pace = reading team_person.to_merge over 1-48 in hours\n",
+        "stored by day",
+    )
+
+
+def test_an_unknown_window_unit_is_refused() -> None:
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(
+            BASE + MEMBERS + "\n# A card in fortnights.\n"
+            "bundle team_person.card:\n"
+            "    pace = reading team_person.to_merge over 2 in weeks\n"
+        )
+    assert "minutes" in caught.value.message and "hours" in caught.value.message
+
+
+async def test_slots_travel_on_the_wire_and_rename_nothing() -> None:
+    """The slot is the address beside each member's answer; the answer
+    itself keeps its own definition's label and doc -- nothing lets a bundle
+    rename what a number is called."""
+    engine, facts = _engine()
+    _feed(facts)
+    await engine.run("t1", full=True)
+
+    answer = await engine.answer("t1", "shop_courier.card")
+    assert isinstance(answer, BundleResult)
+    assert [m.slot for m in answer.results] == ["typical", "carrying", "board", "book"]
+
+    alone = await engine.answer("t1", "shop_courier.carrying")
+    assert isinstance(alone, Result)
+    carrying = answer.results[1]
+    assert carrying.result.label == alone.label
+    assert carrying.result.doc == alone.doc
+    assert carrying.slot != carrying.result.label
+
+
+async def test_two_slots_serve_one_reading_over_different_spans() -> None:
+    """`typical` over 9, 1 beside `prior` over 2-9: the offset span must
+    exclude today's ride and cover yesterday's -- and its wire shape must
+    say `span: "2-9"` with `trailing` absent, never a number that reads
+    like a trailing count."""
+    source = SERVE_SOURCE.replace(
+        "    typical = reading shop_courier.typical_ride over 9, 1\n",
+        "    typical = reading shop_courier.typical_ride over 9, 1\n"
+        "    prior = reading shop_courier.typical_ride over 2-9\n",
+    )
+    library = compile_against(source, SERVE_WORLD)
+    facts = CountingFacts()
+    engine = Uratori(
+        schema=SERVE_WORLD, library=library, store=MemoryEngineStore(), facts=facts
+    )
+    _feed(facts)
+    await engine.run("t1", full=True)
+
+    answer = await engine.answer("t1", "shop_courier.card")
+    assert isinstance(answer, BundleResult)
+    prior = answer.results[1]
+    assert prior.slot == "prior"
+    [subject] = prior.result.subjects
+    assert subject.windows is not None
+    [window] = subject.windows
+    assert (window.span, window.bucket, window.trailing) == ("2-9", "day", None)
+    assert window.mean == 3600.0, (
+        "the prior span must hold yesterday's one-hour ride alone; 5400 "
+        "means today's ride leaked across the offset"
+    )

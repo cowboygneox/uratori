@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
+from ..windows import WindowSpec
 from .ast import (
     Band,
     CalcExpr,
@@ -225,14 +226,19 @@ class SummarisePlan:
 
 @dataclass(frozen=True)
 class BundleMemberPlan:
-    """One member of a compiled bundle: a kind, a name, and (for a windowed
-    reading) the windows to serve it over. `kind` speaks the plan vocabulary
-    -- a `summarise` declaration compiles to a `summary` member, matching the
-    `Result.kind` its answer travels under."""
+    """One member of a compiled bundle: its slot address, a kind, a name,
+    and (for a windowed reading) the bucket spans to serve it over. `kind`
+    speaks the plan vocabulary -- a `summarise` declaration compiles to a
+    `summary` member, matching the `Result.kind` its answer travels under.
 
+    `slot` is the address a client reads this member at -- structural, so it
+    is hashed into the bundle's version, and an address only: the member's
+    answer keeps its own definition's label and doc."""
+
+    slot: str
     kind: Literal["figure", "reading", "projection", "summary"]
     name: str
-    windows: tuple[int, ...] | None = None
+    windows: tuple[WindowSpec, ...] | None = None
 
 
 @dataclass(frozen=True)

@@ -50,6 +50,7 @@ from .results import BundleResult, Evidence, Result
 from .schema import Schema
 from .store import EngineStore, FactSource, Pointer
 from .verify import verify_writes
+from .windows import WindowSpec
 
 log = logging.getLogger("uratori")
 
@@ -199,7 +200,7 @@ class Uratori:
         written: Mapping[str, Sequence[str]] | None = None,
         deleted: Mapping[str, Sequence[str]] | None = None,
         full: bool = False,
-        trailing: Sequence[int] = DEFAULT_TRAILING,
+        trailing: Sequence[int | str | WindowSpec] = DEFAULT_TRAILING,
     ) -> RunReport:
         """A pass, its re-served answers, and delivery, in that order.
 
@@ -348,7 +349,7 @@ class Uratori:
         settings: Mapping[str, Any] | None = None,
         *,
         touched: set[str] | None = None,
-        trailing: Sequence[int] = DEFAULT_TRAILING,
+        trailing: Sequence[int | str | WindowSpec] = DEFAULT_TRAILING,
         at: str | None = None,
     ) -> tuple[Result, ...]:
         """The current answers: touched figures and their readings, or all of
@@ -385,7 +386,7 @@ class Uratori:
         *,
         touched: set[str] | None = None,
         projections: set[str] | None = None,
-        trailing: Sequence[int] = DEFAULT_TRAILING,
+        trailing: Sequence[int | str | WindowSpec] = DEFAULT_TRAILING,
         at: str | None = None,
     ) -> tuple[Result, ...]:
         document = self._schema.settings_for(settings)
@@ -434,7 +435,7 @@ class Uratori:
         name: str,
         settings: Mapping[str, Any] | None = None,
         *,
-        trailing: Sequence[int] = DEFAULT_TRAILING,
+        trailing: Sequence[int | str | WindowSpec] = DEFAULT_TRAILING,
         at: str | None = None,
     ) -> Result | BundleResult | None:
         """One definition's current answer, by name. None when nothing is

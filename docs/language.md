@@ -846,11 +846,18 @@ membership at read time using values instead of ids.
 
 The rule that keeps a reading a definition rather than a function: **an
 argument may narrow the population and may never change the calculation.**
-`range` -- the only argument a reading can take -- picks which stored days
-take part; the statistics, the minimum sample and the band decide what the
-number *means*, so they are written here and hashed here. The engine resolves
-the range to actual dates against the tenant's calendar and reports them on
-the answer, so "the last 30 days" is never the client's guess.
+`range` -- the only argument a reading can take -- picks which stored
+buckets take part; the statistics, the minimum sample and the band decide
+what the number *means*, so they are written here and hashed here. At
+serving time a range is a **span of buckets** counted back from the anchor
+(`30` for the trailing thirty days, `31-60` for the thirty before them,
+`1-48h` for the last forty-eight hours of a sub-day figure -- see the HTTP
+API's window parameter and a bundle member's `over` list), and the engine
+resolves each span to the concrete buckets it covered against the tenant's
+calendar and reports them on the answer, so "the last 30 days" is never the
+client's guess. Every declared rule applies per span unchanged: the floor
+withholds a thin span's statistics, the band bands each span, the series
+returns each span's own points.
 
 The source figure must share the reading's scope, be time-keyed, and store a
 number -- an effort figure is refused (the reading path renders count or
@@ -1341,10 +1348,10 @@ means moves every count that reads it.
 ```
 # Everything the person card shows.
 bundle team_person.card:
-    reading team_person.to_merge over 7, 14, 30
-    figure team_person.wip
-    projection work_issue.item
-    summarise work_issue.backlog
+    merge_pace = reading team_person.to_merge over 7, 14, 30
+    wip        = figure team_person.wip
+    items      = projection work_issue.item
+    backlog    = summarise work_issue.backlog
 ```
 
 The composition stratum. The eight declarations above answer *how is this
@@ -1364,28 +1371,48 @@ own definition and hash.
 
 ### The members
 
-Each line is a declaration keyword, a name, and (for a windowed reading
-alone) an optional window list:
+Each line binds a **slot** -- the address a client reads that member at --
+to a declaration keyword, a name, and (for a windowed reading alone) an
+optional window list. The binding is required on every member: a client
+addresses `card.merge_pace`, so the tile's layout is decoupled from
+definition names and a renamed reading is a one-line change to the tile
+rather than a change to every screen. A slot is a bare word, unique within
+its bundle, and an *address only* -- each member's answer keeps its own
+definition's label and doc, because nothing may let a bundle rename what a
+number is called. Two slots may name the same member when their window
+lists differ (this month beside last month is two questions about one
+reading); the same member under the same windows is refused as two names
+for one answer.
 
-- **`reading <name> [over 7, 14, 30]`** -- the trailing windows to serve the
-  reading over, unwritten meaning the serving default. Only a *windowed*
-  reading may carry the list; a live one is named bare, mirroring the
-  language's rule that the argument list and the source form encode liveness
-  twice, loudly -- written `over 7` a live member would accept a window,
-  ignore it, and answer today under a heading saying seven days. A duplicate
-  window is refused as the typo it is. (Honesty note: a bare live member
-  compiles, and until live readings are servable a tile naming one answers
-  the same not-yet refusal the reading's own route gives -- whole, never one
-  member short.)
-- **`figure <name>`** -- its current value per subject. The same two shapes
+- **`<slot> = reading <name> [over 7, 14, 30]`** -- the bucket spans to
+  serve the reading over, unwritten meaning the serving default. A span is
+  counted back from the anchor, bucket 1 being the bucket the request is
+  anchored in: `over 30` is the trailing thirty days and `over 1-30, 31-60`
+  is this month beside last month, exact and non-overlapping. Spans are
+  **days unless written otherwise** -- `over 1-48 in hours` (or `in
+  minutes`) for a sub-day span, refused at compile time when the unit
+  cannot slice the source figure's storage grain, or when the reading's
+  declared series grain does not fit inside the span. Bare numbers are
+  deliberately *not* denominated in the source's grain: regrading a figure
+  from days to quarter-hours must not silently re-scale every tile by 96x.
+  Only a *windowed* reading may carry the list; a live one is named bare,
+  mirroring the language's rule that the argument list and the source form
+  encode liveness twice, loudly -- written `over 7` a live member would
+  accept a window, ignore it, and answer today under a heading saying seven
+  days. A duplicate span is refused as the typo it is -- compared
+  canonically, so `over 30, 1-30` is the same question twice. (Honesty
+  note: a bare live member compiles, and until live readings are servable a
+  tile naming one answers the same not-yet refusal the reading's own route
+  gives -- whole, never one member short.)
+- **`<slot> = figure <name>`** -- its current value per subject. The same two shapes
   the bulk results surface declines to push are refused here at compile
   time: a **time-keyed** figure member would drag every stored bucket of
   every subject along on every request (declare a reading over it and name
   that), and a figure **split across** a dimension serves pairs, not
   subjects (name the rollup that adds its parts up).
-- **`projection <name>`** -- the page: rows, with the projection's own sort
+- **`<slot> = projection <name>`** -- the page: rows, with the projection's own sort
   and limit, and its summary attached as always.
-- **`summarise <name>`** -- **the population row alone, without the
+- **`<slot> = summarise <name>`** -- **the population row alone, without the
   projection's rows.** This is the serving capability the bundle adds: the
   row payload stays home, but the summary is still computed over ALL the
   projection's rows, never the page -- a summary of a page is a wrong number
@@ -1397,8 +1424,10 @@ alone) an optional window list:
 Every member must resolve to an existing declaration of its keyword's kind --
 a name that is really something else is refused by what it actually is,
 because `figure work_issue.item` compiling as "whatever that is" would make
-what travels a surprise. Duplicate members are refused (one request serves
-each member once). And **a bundle may not name another bundle**: composition
+what travels a surprise. A slot bound twice is refused, and so is the same
+member under the same windows -- two names for one answer -- while two slots
+over one reading with different spans are two questions and welcome. And
+**a bundle may not name another bundle**: composition
 stays flat -- one level of bundles over the declarations that compute -- so
 there is no nesting to walk and no cycle to refuse.
 
@@ -1415,8 +1444,12 @@ surface -- but the hash exists for that surface *only*: it appears in **no
 storage key and no number's citation**. Nothing on screen ever cites the
 bundle; every number inside cites its own member's `name@version`.
 
-What is hashed is the member list -- kinds, names and window arguments, in
-written order. Prose stays out, like everywhere else. Member *versions* stay
+What is hashed is the member list -- slots, kinds, names and window
+arguments, in written order (slots are structural: clients couple to them
+as addresses, so a renamed slot is a changed tile; window arguments hash as
+canonical spans, so `over 30`, `over 1-30` and `over 30 in days` are one
+question with one hash). Prose stays out, like everywhere else. Member
+*versions* stay
 out too, deliberately -- the same asymmetry a windowed reading has with its
 source figure: a member redefined underneath shows as that member's own moved
 hash, on the artifact and on the wire, while the tile's composition -- which
