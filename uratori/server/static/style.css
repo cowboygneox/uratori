@@ -778,3 +778,7 @@ tr.expansion li .trace { margin-left: auto; }
      line of source appears; the editor explains itself by being one. */
   .ed-title .tb-doc { display: none; }
 }
+
+/* Folded rows on a record page: a by-day figure's dozens of cells wait
+   behind their count, so the sections below stay reachable. */
+.ledger tr.folded { display: none; }

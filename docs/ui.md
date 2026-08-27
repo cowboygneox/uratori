@@ -28,6 +28,17 @@ product's end users; a host builds its own screens against the
   but nobody has pushed appears at zero, because "nothing collected" is a
   finding. Records page by key, search over key and record text, and each row
   expands to the whole stored JSON.
+- **A record's page walks both directions.** Downward: the stored document,
+  where every grouping filed it, what every measure reads off it. Upward,
+  which is where a verification usually starts: every figure scoped to the
+  record's kind answers with this record's rows (day and dimension cells
+  included, each with its evidence one click away); every leaf figure that
+  counts records of this kind says whether a stored value cites this one --
+  "did not count it" is stated, not inferred -- with each citing row linking
+  on to *its* record's page; and every projection of the kind shows this
+  record's row exactly as the page serves it, or says why it is not on it.
+  Long row sets cap and say so; an unavailable figure answers with its state
+  rather than an empty table.
 - **Activity.** One entry per engine pass, newest first, cause before
   effect: what arrived (written/deleted counts, the kinds covered, whether it
   was a full rebuild) and then the movements it caused, each one

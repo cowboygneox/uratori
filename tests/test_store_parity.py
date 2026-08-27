@@ -362,3 +362,62 @@ async def test_a_stale_write_loses_to_a_newer_stored_record(pg_pool: Any) -> Non
     # No stamp on the write: nothing to compare, so it lands.
     moved = await facts.upsert(tenant, "shop_order", {"o1": {"status": "returned"}})
     assert moved == ["o1"]
+
+
+async def test_values_citing_finds_exact_members_and_only_them(
+    store: tuple[EngineStore, str],
+) -> None:
+    """The reverse citation: which stored values counted this record. The
+    match is exact membership -- a key that is a prefix or substring of
+    another record's key must not match, because the record page lists what
+    this claims and a loose match would print citations that cite somebody
+    else's record."""
+    s, tenant = store
+    await s.save(tenant, "fig", "v1", "c1", 2.0, ["o1", "o12"], "Aki")
+    await s.save(tenant, "fig", "v1", "c2", 1.0, ["o12"], "Ren")
+    await s.save(tenant, "fig", "v1", "c3", 0.0, [], "Mo")
+    await s.save(tenant, "other", "v9", "c8", 4.0, ["o1"], "Kim")
+    # Another era's citation is not this era's: the version is in the key.
+    await s.save(tenant, "fig", "v2", "c9", 1.0, ["o1"], "old")
+
+    wanted = {"fig": "v1", "other": "v9", "quiet": "v1"}
+    found = await s.values_citing(tenant, "o1", wanted, limit=10)
+    assert set(found) == {"fig", "other"}, (
+        "grouped by figure; a figure with no citing rows is absent, and the "
+        "v2 row is invisible -- an old era's citation cites nothing current"
+    )
+    assert [v.subject for v in found["fig"]] == ["c1"], (
+        "o1 is a prefix of o12; matching by containment-as-text would add c2"
+    )
+    both = await s.values_citing(tenant, "o12", wanted, limit=10)
+    assert [v.subject for v in both["fig"]] == ["c1", "c2"], (
+        "subject order, like every other values read -- consumers render in it"
+    )
+    assert both["fig"][0].members == ("o1", "o12"), (
+        "the whole stored row comes back: the page shows the value and its label"
+    )
+    capped = await s.values_citing(tenant, "o12", wanted, limit=1)
+    assert [v.subject for v in capped["fig"]] == ["c1"], (
+        "the cap is per figure; the first rows in subject order are the page"
+    )
+
+
+async def test_values_under_treats_the_prefix_as_text_not_a_pattern(
+    store: tuple[EngineStore, str],
+) -> None:
+    """Record keys carry underscores routinely -- the NFL's own game ids do --
+    and `_` is a LIKE wildcard. An unescaped prefix would put another
+    subject's day rows onto the first subject's record page, which is a wrong
+    number on the one surface whose claim is traceability."""
+    s, tenant = store
+    await s.save(tenant, "fig", "v1", "a_b@2026-01-01", 1.0, [], "one")
+    await s.save(tenant, "fig", "v1", "axb@2026-01-01", 2.0, [], "two")
+    await s.save(tenant, "fig", "v1", "p%q@2026-01-01", 3.0, [], "three")
+    await s.save(tenant, "fig", "v1", "pXq@2026-01-01", 4.0, [], "four")
+
+    assert [v.subject for v in await s.values_under(tenant, "fig", "v1", "a_b@")] == [
+        "a_b@2026-01-01"
+    ]
+    assert [v.subject for v in await s.values_under(tenant, "fig", "v1", "p%q@")] == [
+        "p%q@2026-01-01"
+    ]

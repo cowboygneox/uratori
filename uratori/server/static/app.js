@@ -801,9 +801,15 @@ function moverLinks(kind) {
 }
 
 async function recordView(kind, key) {
-  const answer = await get(
-    `tenants/${encodeURIComponent(tenant())}/facts/${encodeURIComponent(kind)}`
-    + `/${encodeURIComponent(key)}`);
+  // Two requests, together: the stored half (the document, the filings, the
+  // measurements) and the derived half (figures, citations, pages). The
+  // second evaluates projections, so it prices differently — but the page
+  // is one story and waits for both rather than reflowing under the reader.
+  const path = `${encodeURIComponent(kind)}/${encodeURIComponent(key)}`;
+  const [answer, aboutAnswer] = await Promise.all([
+    get(`tenants/${encodeURIComponent(tenant())}/facts/${path}`),
+    get(`tenants/${encodeURIComponent(tenant())}/about/${path}`),
+  ]);
   if (!answer.ok) return [problem(answer, 'Could not read this record:')];
   const record = answer.body;
   const link = record.url ? safeUrl(record.url) : null;
@@ -882,6 +888,143 @@ async function recordView(kind, key) {
         }, entry.measure)),
         el('td', { class: 'mono num' },
           entry.display ?? el('span', { class: 'faint' }, '— no measurement'))))));
+  }
+
+  // The upward half: what the library made of this record. Three verdicts,
+  // each stated when empty — a section silently missing would read as
+  // "nothing derives from this", which is a claim only the server may make.
+  parts.push(el('h2', {}, 'Computed for this record — tenant ',
+    el('span', { class: 'verbatim' }, tenant() || '?')));
+  if (!aboutAnswer.ok) {
+    parts.push(problem(aboutAnswer, 'Could not read the derived values:'));
+  } else if (!aboutAnswer.body.figures.length) {
+    parts.push(el('p', { class: 'faint' },
+      'No figure is scoped to ', el('span', { class: 'mono' }, kind),
+      ', so nothing is computed per record of this kind.'));
+  } else {
+    const banded = aboutAnswer.body.figures.some((f) => f.result.banded);
+    parts.push(el('table', { class: 'ledger' },
+      el('tr', {}, el('th', {}, 'figure'), el('th', { class: 'num' }, 'value'),
+        banded ? el('th', {}, 'band') : null, el('th', {})),
+      aboutAnswer.body.figures.map((entry) => {
+        const figure = entry.result;
+        const cite = el('a', { class: 'mono', href: defHash(figure.name) }, figure.name);
+        if (!figure.state.ok) {
+          return el('tr', {}, el('td', {}, cite),
+            el('td', { colspan: banded ? '3' : '2', class: 'dim' },
+              `not available: ${figure.state.because} — ${figure.state.detail || ''}`));
+        }
+        if (!figure.subjects.length) {
+          // Available and no row: the pass's roster did not include this
+          // record — computed for others, not (yet) for this one.
+          return el('tr', {}, el('td', {}, cite),
+            el('td', { colspan: banded ? '3' : '2', class: 'faint' },
+              'no stored value for this record'));
+        }
+        const rows = figure.subjects.map((subject, i) => {
+          const row = el('tr', {},
+            el('td', {}, i ? el('span', { class: 'faint mono' }, '〃') : cite,
+              subject.dimension
+                ? el('span', { class: 'dim' }, ` × ${subject.dimension}`) : null),
+            el('td', { class: 'mono num' }, subject.display ?? '—'),
+            banded ? el('td', { class: 'mono dim' },
+              figure.banded ? subject.level : '') : null,
+            el('td', {}, el('button', {
+              onclick: () => evidenceRow(row, figure.name, subject.id),
+            }, 'evidence')));
+          return row;
+        });
+        if (entry.more) {
+          rows.push(el('tr', {}, el('td', { colspan: banded ? '4' : '3', class: 'faint' },
+            `… the first ${figure.subjects.length} rows — `,
+            el('a', { href: defHash(figure.name) }, 'the figure page'),
+            ' has the rest')));
+        }
+        // A by-day figure holds dozens of cells per subject; folded, so the
+        // single-value figures below it stay on screen. Folded, not paged:
+        // the rows are already here, and the count on the button is the
+        // honest size of what a click reveals.
+        if (rows.length > 7) {
+          const folded = rows.splice(6);
+          folded.forEach((row) => row.classList.add('folded'));
+          const toggle = el('tr', {}, el('td', { colspan: banded ? '4' : '3' },
+            el('button', {
+              onclick: () => { folded.forEach((row) => row.classList.remove('folded'));
+                               toggle.remove(); },
+            }, `show all ${figure.subjects.length} rows`)));
+          rows.push(toggle, ...folded);
+        }
+        return rows;
+      })));
+  }
+
+  parts.push(el('h2', {}, 'Counted into — tenant ',
+    el('span', { class: 'verbatim' }, tenant() || '?')));
+  if (!aboutAnswer.ok) {
+    parts.push(el('p', { class: 'faint' }, 'Unavailable (see above).'));
+  } else if (!aboutAnswer.body.cited.length) {
+    parts.push(el('p', { class: 'faint' },
+      'No figure counts ', el('span', { class: 'mono' }, kind), ' records.'));
+  } else {
+    const counted = aboutAnswer.body.cited.filter((c) => c.rows.length || !c.state.ok);
+    const idle = aboutAnswer.body.cited.filter((c) => !c.rows.length && c.state.ok);
+    if (counted.length) {
+      parts.push(el('table', { class: 'ledger' },
+        el('tr', {}, el('th', {}, 'figure'), el('th', {}, 'whose row'),
+          el('th', { class: 'num' }, 'value')),
+        counted.map((entry) => {
+          const cite = el('a', { class: 'mono', href: defHash(entry.figure) }, entry.figure);
+          if (!entry.state.ok) {
+            return el('tr', {}, el('td', {}, cite),
+              el('td', { colspan: '2', class: 'dim' },
+                `not available: ${entry.state.because} — ${entry.state.detail || ''}`));
+          }
+          const rows = entry.rows.map((row, i) => el('tr', {},
+            el('td', {}, i ? el('span', { class: 'faint mono' }, '〃') : cite),
+            // The subject links to its own record page: the trace keeps
+            // walking up — a play to its team, the team to its figures.
+            el('td', {}, el('a', { href: recordHash(entry.scope, row.subject) }, row.name),
+              ' ', el('span', { class: 'faint mono' }, row.subject),
+              row.dimension
+                ? el('span', { class: 'dim' }, ` × ${row.dimension}`) : null),
+            el('td', { class: 'mono num' }, row.display ?? '—')));
+          if (entry.more) {
+            rows.push(el('tr', {}, el('td', { colspan: '3', class: 'faint' },
+              '… and more citations than this page shows')));
+          }
+          return rows;
+        })));
+    }
+    if (idle.length) {
+      // The stated rejections, folded to a line: "this figure did not count
+      // it" is a verdict, and per-figure empty tables would bury the ones
+      // that did.
+      parts.push(el('p', { class: 'faint' }, 'Did not count it: ',
+        idle.map((entry, i) => [i ? ', ' : null,
+          el('a', { class: 'mono', href: defHash(entry.figure) }, entry.figure)])));
+    }
+  }
+
+  if (aboutAnswer.ok && aboutAnswer.body.pages.length) {
+    parts.push(el('h2', {}, 'On the pages — tenant ',
+      el('span', { class: 'verbatim' }, tenant() || '?')));
+    for (const page of aboutAnswer.body.pages) {
+      parts.push(el('h2', { class: 'subject' },
+        el('a', { class: 'mono', href: defHash(page.projection) }, page.projection)));
+      if (!page.state.ok) {
+        parts.push(unavailable(page.state));
+      } else if (!page.present) {
+        parts.push(el('p', { class: 'faint' }, page.note ?? 'Not on this page.'));
+      } else {
+        parts.push(el('div', { class: 'kv' },
+          el('dl', { class: 'kv' },
+            Object.entries(page.row.row.display).map(([column, text]) =>
+              el('div', { class: 'pair' }, el('dt', {}, column), el('dd', {}, text)))),
+          page.row.row.flags.map((flag) =>
+            el('div', { class: flag.severity === 'attention' ? 'dim' : 'faint' },
+              `⚑ ${flag.label} — ${flag.detail}`))));
+      }
+    }
   }
 
   parts.push(el('h2', {}, 'Can move'),

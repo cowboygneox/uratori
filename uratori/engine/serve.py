@@ -154,13 +154,30 @@ async def serve_figure(
     plan: FigurePlan,
     settings: Mapping[str, Any],
     at_ms: float | None = None,
+    subject: str | None = None,
 ) -> Result:
+    """One figure's current answer; with `subject`, only that subject's rows.
+
+    The narrowing is a fetch scope, not a second serving path: availability,
+    rendering, banding and ordering are the identical code either way, so a
+    record page showing one courier's rows cannot disagree with the figure's
+    own page showing everyone's. A narrowed answer covers the exact subject
+    row and the rows filed under `subject@...` -- the day and dimension cells
+    a grained or split figure keeps for one subject.
+    """
     at = at_ms if at_ms is not None else now_ms()
     state = await availability(store, library, tenant, plan, settings)
     subjects: list[Subject] = []
 
     if isinstance(state, Ok):
-        for stored in await store.values(tenant, plan.name, plan.version):
+        if subject is None:
+            rows = await store.values(tenant, plan.name, plan.version)
+        else:
+            exact = await store.value(tenant, plan.name, plan.version, subject)
+            rows = ([exact] if exact is not None else []) + await store.values_under(
+                tenant, plan.name, plan.version, f"{subject}{SEPARATOR}"
+            )
+        for stored in rows:
             tail = (
                 stored.subject.split(SEPARATOR, 1)[1] if SEPARATOR in stored.subject else None
             )

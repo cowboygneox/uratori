@@ -364,6 +364,12 @@ class PostgresEngineStore:
     async def values_under(
         self, tenant: str, name: str, version: str, prefix: str
     ) -> list[StoredValue]:
+        # The prefix is text, not a pattern: record keys carry `_` routinely
+        # (the NFL's game ids do), and unescaped it is a LIKE wildcard that
+        # would sweep another subject's rows into this one's answer.
+        escaped = (
+            prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
         rows = await self._pool.fetch(
             "select subject_id, value, members, subject_label from figure_value "
             "where tenant_id = $1 and name = $2 and version = $3 and subject_id like $4 "
@@ -371,9 +377,39 @@ class PostgresEngineStore:
             tenant,
             name,
             version,
-            f"{prefix}%",
+            f"{escaped}%",
         )
         return [_stored(r) for r in rows]
+
+    async def values_citing(
+        self, tenant: str, member: str, versions: Mapping[str, str], *, limit: int
+    ) -> dict[str, list[StoredValue]]:
+        # jsonb containment is exact element membership -- the semantics the
+        # protocol demands -- and it is what the GIN index on `members`
+        # serves. Deliberately WITHOUT name/version in the WHERE: given those,
+        # the planner walks the figure's primary-key range and pays to detoast
+        # every citation array it holds (a count over a million records
+        # carries tens of thousands of keys per row), which measured in whole
+        # seconds per figure. Tenant-plus-containment leaves the citation
+        # index as the only path, one probe for every figure at once, and the
+        # handful of rows that cite one record are filtered to the wanted
+        # versions here.
+        rows = await self._pool.fetch(
+            "select name, version, subject_id, value, members, subject_label "
+            "from figure_value "
+            "where tenant_id = $1 and members @> $2::jsonb "
+            "order by name, subject_id",
+            tenant,
+            json.dumps([member]),
+        )
+        out: dict[str, list[StoredValue]] = {}
+        for row in rows:
+            if versions.get(row["name"]) != row["version"]:
+                continue
+            group = out.setdefault(row["name"], [])
+            if len(group) < limit:
+                group.append(_stored(row))
+        return out
 
     async def values_in_range(
         self, tenant: str, name: str, version: str, frm: str, to: str
@@ -695,6 +731,13 @@ create table if not exists figure_value (
   computed_at   timestamptz not null default now(),
   primary key (tenant_id, name, version, subject_id)
 );
+
+-- The reverse citation: "which values counted this record" is a containment
+-- probe over `members`, and without this it is a scan of every value a
+-- figure has stored. jsonb_path_ops because containment is the only
+-- operator that page asks.
+create index if not exists figure_value_members_idx
+  on figure_value using gin (members jsonb_path_ops);
 """
 """The DDL, as one script.
 

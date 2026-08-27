@@ -22,6 +22,7 @@ investigation tool rather than a status page:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -2738,3 +2739,298 @@ async def test_the_editor_pass_pays_deferred_debt_in_full(pg_dsn: str) -> None:
             await connection.execute(f"drop schema {name} cascade")
         finally:
             await connection.close()
+
+
+# ---------------------------------------------------------------- about --
+
+
+ABOUT_WORLD = dataclasses.replace(
+    COURIER_WORLD,
+    bucket_settings=("tenant.timezone",),
+    defaults={
+        "tenant": {"hoursPerDay": 8, "timezone": "UTC"},
+        "limits": {"carrying": {"over": 3}},
+    },
+)
+"""The courier world plus the one dial a day group needs. A schema of its
+own so the shared COURIER_WORLD keeps meaning what every other test says."""
+
+ABOUT_SOURCE = COURIER_SOURCE + """
+# One row per courier-day, so a courier's record page carries day rows whose
+# `dimension` is the day -- the shape the NFL demo's by-day figures have.
+group shop_order.by_courier_day from (courier_id, placed by day in tenant.timezone)
+
+# How many orders this courier took on, day by day.
+figure shop_courier.daily:
+    display "{value} orders"
+    depends:
+        slice = shop_order.by_courier_day:{shop_courier}
+    calculate:
+        count(slice)
+
+# The open orders, listed: the page a record's row appears on.
+projection shop_order.board:
+    from shop_order.open
+
+    field:
+        key = ref as text
+"""
+
+
+async def _teach_about(http: httpx.AsyncClient) -> None:
+    put = await http.put("/schema", json=ABOUT_WORLD.to_document())
+    assert put.status_code == 200, put.text
+    put = await http.put("/definitions", json={"source": ABOUT_SOURCE})
+    assert put.status_code == 200, put.text
+
+
+def _placed_orders(n: int) -> dict[str, dict[str, Any]]:
+    """n riding orders for c1, each placed on its own day, so the day-grained
+    figure holds n rows for the one courier."""
+    from datetime import date, timedelta
+
+    start = date(2026, 1, 1)
+    return {
+        f"o{i}": {
+            "ref": f"A-{i}",
+            "courier_id": "c1",
+            "status": "riding",
+            "placed": f"{start + timedelta(days=i)}T10:00:00Z",
+        }
+        for i in range(n)
+    }
+
+
+async def _about(
+    http: httpx.AsyncClient, kind: str, key: str, tenant: str = "t1"
+) -> dict[str, Any]:
+    got = await http.get(f"/ui/api/tenants/{tenant}/about/{kind}/{key}")
+    assert got.status_code == 200, got.text
+    return got.json()
+
+
+async def test_a_record_serves_the_figures_scoped_to_its_kind(pg_dsn: str) -> None:
+    """The drill Sean asked for by name: start from the record, read what the
+    library computes *for* it. Every figure scoped to the record's kind
+    answers -- the exact subject row, plus the day rows a grained figure files
+    under `subject@day` -- rendered exactly as the figure's own page would
+    render them, because a second rendering would be a second calculation
+    system."""
+    async with serve(pg_dsn) as http:
+        await _teach_about(http)
+        push = await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_courier": COURIER,
+                    "shop_order": _placed_orders(3),
+                }
+            },
+        )
+        assert push.status_code == 200, push.text
+
+        about = await _about(http, "shop_courier", "c1")
+        by_name = {f["result"]["name"]: f for f in about["figures"]}
+        assert set(by_name) == {
+            "shop_courier.carrying",
+            "shop_courier.load_band",
+            "shop_courier.daily",
+        }, "every figure scoped to shop_courier, and nothing scoped elsewhere"
+
+        carrying = by_name["shop_courier.carrying"]["result"]
+        assert carrying["state"]["ok"] is True
+        assert [s["id"] for s in carrying["subjects"]] == ["c1"]
+        assert carrying["subjects"][0]["display"] == "3", (
+            "rendered by the same format_value the figure page uses -- the "
+            "unit rendering, not the display template"
+        )
+
+        band = by_name["shop_courier.load_band"]["result"]
+        assert [s["value"] for s in band["subjects"]] == ["over"], (
+            "three orders meets the schema's default limit of three"
+        )
+
+        daily = by_name["shop_courier.daily"]["result"]
+        assert [s["dimension"] for s in daily["subjects"]] == [
+            "2026-01-01",
+            "2026-01-02",
+            "2026-01-03",
+        ], "the grained figure's rows carry their day, in day order"
+        assert all(s["display"] == "1" for s in daily["subjects"])
+        assert by_name["shop_courier.daily"]["more"] is False
+
+        # The other direction of the same claim: a kind no figure is scoped
+        # to serves an empty section, not somebody else's figures.
+        order_about = await _about(http, "shop_order", "o1")
+        assert order_about["figures"] == []
+
+
+async def test_a_record_lists_the_values_that_counted_it(pg_dsn: str) -> None:
+    """The other half of the trace: which stored values cite this record.
+    Every leaf figure whose members are keys of this kind reports -- the
+    citing subject, its label, and the value as rendered now -- and 'this
+    figure did not count it' is stated by an entry with no rows rather than
+    left to inference. A rollup never appears: its members are stored cells,
+    and its parts' own citations already name the records."""
+    async with serve(pg_dsn) as http:
+        await _teach_about(http)
+        orders = _placed_orders(3)
+        orders["o9"] = {
+            "ref": "A-9",
+            "courier_id": "c1",
+            "status": "delivered",
+            "placed": "2026-02-01T10:00:00Z",
+        }
+        push = await http.post(
+            "/tenants/t1/facts",
+            json={"writes": {"shop_courier": COURIER, "shop_order": orders}},
+        )
+        assert push.status_code == 200, push.text
+
+        about = await _about(http, "shop_order", "o1")
+        cited = {c["figure"]: c for c in about["cited"]}
+        assert set(cited) == {"shop_courier.carrying", "shop_courier.daily"}, (
+            "the two leaf figures counting shop_order records -- and not the "
+            "rollup, whose members are cells"
+        )
+
+        carrying = cited["shop_courier.carrying"]
+        assert carrying["scope"] == "shop_courier", "the link target's kind"
+        assert carrying["state"]["ok"] is True
+        assert [(r["subject"], r["name"]) for r in carrying["rows"]] == [("c1", "Aki")]
+        assert carrying["rows"][0]["display"] == "3", (
+            "the citing value as the figure page renders it"
+        )
+
+        daily = cited["shop_courier.daily"]
+        assert [(r["subject"], r["dimension"]) for r in daily["rows"]] == [
+            ("c1", "2026-01-02")
+        ], "the citing value is the day cell, and the row says which day"
+
+        # The delivered order: not open, so carrying never counted it -- an
+        # entry with no rows says so. The day figure has no filter and did.
+        about = await _about(http, "shop_order", "o9")
+        cited = {c["figure"]: c for c in about["cited"]}
+        assert cited["shop_courier.carrying"]["rows"] == []
+        assert [r["dimension"] for r in cited["shop_courier.daily"]["rows"]] == ["2026-02-01"]
+
+
+async def test_the_about_page_is_honest_when_values_are_behind_the_deploy(
+    pg_dsn: str,
+) -> None:
+    """A definition moved and no pass has run: both directions must answer
+    with the state, never with rows from the old era and not with a silent
+    empty section -- a blank that means 'not computed yet' printed the same
+    way as 'computed, and nothing found' is the absence-as-zero mistake."""
+    async with serve(pg_dsn) as http:
+        await _teach_about(http)
+        push = await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {"shop_courier": COURIER, "shop_order": _placed_orders(3)}
+            },
+        )
+        assert push.status_code == 200, push.text
+
+        moved = ABOUT_SOURCE.replace('status != "delivered"', 'status == "riding"')
+        put = await http.put("/definitions", json={"source": moved})
+        assert put.status_code == 200, put.text
+
+        about = await _about(http, "shop_courier", "c1")
+        by_name = {f["result"]["name"]: f for f in about["figures"]}
+        carrying = by_name["shop_courier.carrying"]["result"]
+        assert carrying["state"]["ok"] is False
+        assert carrying["state"]["because"] == "behind-deploy"
+        assert carrying["subjects"] == []
+
+        about = await _about(http, "shop_order", "o1")
+        cited = {c["figure"]: c for c in about["cited"]}
+        assert cited["shop_courier.carrying"]["state"]["because"] == "behind-deploy"
+        assert cited["shop_courier.carrying"]["rows"] == []
+
+
+async def test_a_records_projection_row_travels_on_its_about_page(
+    pg_dsn: str,
+) -> None:
+    """Projections of the record's kind answer with this record's row as the
+    page would show it -- and a record the page does not hold answers
+    `present: false` with the reason spelled out, because 'not on the page'
+    is a verdict the definition reached, not a gap."""
+    async with serve(pg_dsn) as http:
+        await _teach_about(http)
+        orders = _placed_orders(2)
+        orders["o9"] = {
+            "ref": "A-9",
+            "courier_id": "c1",
+            "status": "delivered",
+            "placed": "2026-02-01T10:00:00Z",
+        }
+        push = await http.post(
+            "/tenants/t1/facts",
+            json={"writes": {"shop_courier": COURIER, "shop_order": orders}},
+        )
+        assert push.status_code == 200, push.text
+
+        about = await _about(http, "shop_order", "o1")
+        assert [p["projection"] for p in about["pages"]] == ["shop_order.board"]
+        page = about["pages"][0]
+        assert page["state"]["ok"] is True
+        assert page["present"] is True
+        assert page["row"]["row"]["display"]["key"] == "A-1", (
+            "the row exactly as the projection page serves it"
+        )
+
+        about = await _about(http, "shop_order", "o9")
+        page = about["pages"][0]
+        assert page["present"] is False
+        assert page["row"] is None
+        assert page["note"], "the absence carries its reason as a sentence"
+
+        # A kind no projection is of: an empty section, not an invented page.
+        about = await _about(http, "shop_courier", "c1")
+        assert about["pages"] == []
+
+
+async def test_about_rows_are_capped_and_say_so(pg_dsn: str) -> None:
+    """A subject with hundreds of day rows must not make its record page a
+    dump: the section caps and says it did, and the figure page keeps the
+    rest. A silent cap would read as 'this is everything', which on this
+    surface is a lie about the evidence."""
+    from uratori.server.ui import ABOUT_ROWS
+
+    async with serve(pg_dsn) as http:
+        await _teach_about(http)
+        push = await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_courier": COURIER,
+                    "shop_order": _placed_orders(ABOUT_ROWS + 5),
+                }
+            },
+        )
+        assert push.status_code == 200, push.text
+
+        about = await _about(http, "shop_courier", "c1")
+        by_name = {f["result"]["name"]: f for f in about["figures"]}
+        daily = by_name["shop_courier.daily"]
+        assert len(daily["result"]["subjects"]) == ABOUT_ROWS
+        assert daily["more"] is True
+        assert by_name["shop_courier.carrying"]["more"] is False
+
+        # The citations cap the same way: o0 is cited once per figure, so the
+        # flag stays down there -- the cap is per section entry, not global.
+        about = await _about(http, "shop_order", "o0")
+        cited = {c["figure"]: c for c in about["cited"]}
+        assert cited["shop_courier.daily"]["more"] is False
+
+
+async def test_about_a_record_nobody_stored_is_a_404(pg_dsn: str) -> None:
+    async with serve(pg_dsn) as http:
+        await _teach_about(http)
+        got = await http.get("/ui/api/tenants/t1/about/shop_order/ghost")
+        assert got.status_code == 404
+        assert "ghost" in got.json()["detail"], (
+            "the refusal names the key -- and distinguishes 'no such record' "
+            "from a route that does not exist"
+        )

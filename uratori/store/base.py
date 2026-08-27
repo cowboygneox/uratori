@@ -185,6 +185,25 @@ class EngineStore(Protocol):
         self, tenant: str, name: str, version: str, prefix: str
     ) -> list[StoredValue]: ...
 
+    async def values_citing(
+        self, tenant: str, member: str, versions: Mapping[str, str], *, limit: int
+    ) -> dict[str, list[StoredValue]]:
+        """The reverse citation: stored values whose `members` include this
+        record key, grouped by figure name, each group in subject order.
+
+        Exact membership -- never prefix or substring, because the caller
+        prints these as "this record was counted into", and a loose match
+        would attribute somebody else's citation. `versions` names the
+        figures asked about and the one version that counts for each; rows
+        of any other figure or era are not citations of anything current.
+        One call covers every figure deliberately: the record is the needle
+        and the citation index finds it once, where a per-figure query would
+        walk each figure's whole value set past the planner. `limit` caps
+        each group -- the first rows in subject order, so a caller asking for
+        cap+1 learns which groups truncated. A figure with no citing rows is
+        absent, not an empty list."""
+        ...
+
     async def values_in_range(
         self, tenant: str, name: str, version: str, frm: str, to: str
     ) -> list[StoredValue]:

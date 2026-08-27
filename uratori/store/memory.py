@@ -205,6 +205,23 @@ class MemoryEngineStore:
             if v.subject.startswith(prefix)
         ]
 
+    async def values_citing(
+        self, tenant: str, member: str, versions: Mapping[str, str], *, limit: int
+    ) -> dict[str, list[StoredValue]]:
+        # Exact membership, per the protocol: `in` over the tuple, never a
+        # text match. `values` already returns subject order, so slicing the
+        # front IS the page the Postgres cap serves.
+        out: dict[str, list[StoredValue]] = {}
+        for name, version in versions.items():
+            found = [
+                v
+                for v in await self.values(tenant, name, version)
+                if member in v.members
+            ]
+            if found:
+                out[name] = found[:limit]
+        return out
+
     async def values_in_range(
         self, tenant: str, name: str, version: str, frm: str, to: str
     ) -> list[StoredValue]:

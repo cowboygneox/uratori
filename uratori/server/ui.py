@@ -43,15 +43,18 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
 
-from ..engine.buckets import measure_of
+from ..engine.buckets import SEPARATOR, measure_of, subject_of
 from ..engine.project import format_value
+from ..engine.serve import _cited_kind, _label_of, serve_figure
+from ..engine.serve import availability as figure_availability
 from ..facade import DEFAULT_TRAILING
 from ..lang.ast import ByAge, ByComposite, ByField, FigureUnit, IndexBy, IndexField
 from ..lang.lex import DefinitionError, lex
 from ..lang.plan import CompiledFactField, CompiledIndex, CompiledMeasure, Library
 from ..lang.source import declaration_prose, declaration_source
-from ..results import Availability, Evidence, Ok, Result, Unavailable
+from ..results import Availability, Evidence, Ok, Result, Subject, Unavailable
 from ..schema import EFFORT_HOURS_SETTING, Schema
+from ..store.postgres import PostgresEngineStore
 from . import db
 from .runtime import (
     State,
@@ -451,6 +454,79 @@ class RecordOut(BaseModel):
     measured: list[RecordMeasureOut]
 
 
+ABOUT_ROWS = 60
+"""Per-entry row cap on the about payload. A courier with years of day rows
+must not make the record page a dump -- the entry says it truncated (`more`)
+and the figure's own page holds the rest. Capped per entry rather than over
+the payload, so one prolific figure cannot push another off the page."""
+
+
+class AboutFigureOut(BaseModel):
+    """One figure scoped to the record's kind, narrowed to this record.
+
+    The engine's own `Result` -- state, unit, rendered rows -- because the
+    record page must show exactly what the figure's page would, and a second
+    rendering path is a second calculation system waiting to disagree."""
+
+    result: Result
+    more: bool
+
+
+class CitedRowOut(BaseModel):
+    """One stored value that counted this record: whose row it is (`subject`,
+    for the link back to that record's page), the label frozen when it was
+    written, the day or dimension cell when the figure has one, and the value
+    as rendered now."""
+
+    id: str
+    subject: str
+    name: str
+    dimension: str | None
+    display: str | None
+
+
+class CitedFigureOut(BaseModel):
+    """One leaf figure whose members are keys of this record's kind. An entry
+    with no rows is a stated verdict -- "this figure did not count it" -- not
+    an omission, which is why every matching figure appears."""
+
+    figure: str
+    label: str
+    scope: str
+    """The fact kind the figure's subjects are ids of -- where a row's
+    `subject` links to."""
+
+    state: Availability
+    rows: list[CitedRowOut]
+    more: bool
+
+
+class AboutPageOut(BaseModel):
+    """This record's row on one projection of its kind, exactly as the page
+    serves it. `present: false` under an Ok state is a verdict the definition
+    reached (from-set, omit gate, sort and limit), and `note` says so."""
+
+    projection: str
+    label: str
+    state: Availability
+    present: bool
+    row: Subject | None
+    note: str | None
+
+
+class AboutOut(BaseModel):
+    """What the library makes OF this record, upward: the values computed for
+    it (figures scoped to its kind), the values that counted it (the reverse
+    citation), and its rows on the pages of its kind. The record route serves
+    the downward half -- the stored document, the filings, the measurements."""
+
+    kind: str
+    key: str
+    figures: list[AboutFigureOut]
+    cited: list[CitedFigureOut]
+    pages: list[AboutPageOut]
+
+
 def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
     ui = APIRouter()
 
@@ -803,6 +879,133 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             filed_state=filed_state,
             measured=measured,
         )
+
+    @ui.get(
+        "/ui/api/tenants/{tenant}/about/{kind}/{key:path}",
+        response_model=AboutOut,
+        include_in_schema=False,
+    )
+    async def about(tenant: str, kind: str, key: str, request: Request) -> AboutOut:
+        """Everything the library derives from this record, walking up: the
+        record route answers "what is stored and where was it filed", this
+        one answers "what numbers did it become". Split from the record route
+        because this half prices differently -- it serves figures and
+        evaluates projections -- and the page fetches the two in parallel."""
+        s = _state(request)
+        if s.world is None:
+            raise HTTPException(status_code=409, detail="No schema has been declared yet")
+        row = await db.fact_record(s.pool, tenant, kind, key)
+        if row is None:
+            raise HTTPException(
+                status_code=404, detail=f"Nothing is stored for {key} under {kind}"
+            )
+        library = s.world.library
+        if library is None:
+            # Records are browsable before definitions exist; there is nothing
+            # scoped to anything yet, and empty sections say exactly that.
+            return AboutOut(kind=kind, key=key, figures=[], cited=[], pages=[])
+
+        store = PostgresEngineStore(s.pool)
+        raw = await db.load_settings(s.pool, tenant)
+        document = taught_schema(s.world).settings_for(raw)
+
+        figures: list[AboutFigureOut] = []
+        for plan in library.figures:
+            if plan.scope != kind:
+                continue
+            result = await serve_figure(
+                store, library, tenant, plan, document, subject=key
+            )
+            more = len(result.subjects) > ABOUT_ROWS
+            if more:
+                result = result.model_copy(
+                    update={"subjects": result.subjects[:ABOUT_ROWS]}
+                )
+            figures.append(AboutFigureOut(result=result, more=more))
+
+        # Leaf figures only, by construction: a rollup's members are stored
+        # cells, so `_cited_kind` answers None for it -- its parts' own
+        # citations already name the records underneath. One store call for
+        # all of them: the citation index is probed once with the record key.
+        cited_plans = [
+            plan for plan in library.figures if _cited_kind(plan, library) == kind
+        ]
+        citing = (
+            await store.values_citing(
+                tenant,
+                key,
+                {plan.name: plan.version for plan in cited_plans},
+                limit=ABOUT_ROWS + 1,
+            )
+            if cited_plans
+            else {}
+        )
+        cited: list[CitedFigureOut] = []
+        for plan in cited_plans:
+            state = await figure_availability(store, library, tenant, plan, document)
+            rows: list[CitedRowOut] = []
+            more = False
+            if isinstance(state, Ok):
+                found = citing.get(plan.name, [])
+                more = len(found) > ABOUT_ROWS
+                for stored in found[:ABOUT_ROWS]:
+                    tail = (
+                        stored.subject.split(SEPARATOR, 1)[1]
+                        if SEPARATOR in stored.subject
+                        else None
+                    )
+                    rows.append(
+                        CitedRowOut(
+                            id=stored.subject,
+                            subject=subject_of(stored.subject),
+                            name=stored.label,
+                            dimension=tail,
+                            display=format_value(stored.value, plan.unit, document),
+                        )
+                    )
+            cited.append(
+                CitedFigureOut(
+                    figure=plan.name,
+                    label=_label_of(plan.name),
+                    scope=plan.scope,
+                    state=state,
+                    rows=rows,
+                    more=more,
+                )
+            )
+
+        pages: list[AboutPageOut] = []
+        facade = facade_for(s, s.world, library)
+        for project in library.projections:
+            if project.kind != kind:
+                continue
+            # The projection evaluated whole, then this record's row picked
+            # out -- never the formulas re-run over one record, because the
+            # from-set, the omit gate, the sort and the limit are part of
+            # what the page says, and a bespoke single-row path would show a
+            # row the real page refused.
+            answer = await facade.answer(tenant, project.name, raw)
+            if answer is None:  # pragma: no cover - the plan came from the library
+                continue
+            match = next((sub for sub in answer.subjects if sub.id == key), None)
+            note = None
+            if isinstance(answer.state, Ok) and match is None:
+                note = (
+                    "Not on this page. Its from-set, omit gate, sort and limit "
+                    "decide the rows, and they did not take this record."
+                )
+            pages.append(
+                AboutPageOut(
+                    projection=project.name,
+                    label=_label_of(project.name),
+                    state=answer.state,
+                    present=match is not None,
+                    row=match,
+                    note=note,
+                )
+            )
+
+        return AboutOut(kind=kind, key=key, figures=figures, cited=cited, pages=pages)
 
     # ---------------------------------------------------------- membership --
 
