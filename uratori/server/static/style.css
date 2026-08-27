@@ -547,6 +547,14 @@ tr.expansion li {
   gap: 0.15rem 0.5rem;
 }
 tr.expansion li .trace { margin-left: auto; }
+/* A part's own citation, opened in place: a full-width annex inside the
+   flex line, wearing the same accent rule so the depth of the walk stays
+   visible as nested rules rather than as guesswork. */
+tr.expansion li > .expansion {
+  flex-basis: 100%;
+  border-left: 2px solid var(--accent);
+  padding-left: 0.85rem;
+}
 
 /* ------------------------------------------------------------- motion --- */
 

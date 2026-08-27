@@ -35,7 +35,7 @@ from ..results import (
 )
 from ..schema import Schema
 from ..store import EngineStore, FactSource, StoredValue
-from .buckets import SEPARATOR, day_range, end_of_day_ms, subject_of
+from .buckets import SEPARATOR, day_range, end_of_day_ms, measure_of, subject_of, tail_of
 from .engine import (  # the same hashes the pass records, shared deliberately
     _index_version,
     _versions_if_legacy_current,
@@ -346,6 +346,11 @@ async def serve_evidence(
                             if part is not None and below is not None
                             else None
                         ),
+                        # The cell, split off the storage key the same way the
+                        # serving path splits it: labels are frozen per subject,
+                        # so without this every season cell of one team reads
+                        # identically and the panel cannot be walked.
+                        dimension=tail_of(key),
                     )
                 )
         return Evidence(
@@ -376,18 +381,48 @@ async def serve_evidence(
         }
         name_field = schema.name_fields.get(kind)
         url_field = schema.url_fields.get(kind)
+        # A sum's or an extreme's amount is its members *as a measure read
+        # them*, and a bare roster of records does not lead to it -- "1.5h,
+        # citing these two issues" says nothing about what either contributed.
+        # Each held record is measured here through the same `measure_of` the
+        # pass uses (the same call shape too: a stored figure never carries a
+        # clock measure, exactly because the pass reads with no instant), so
+        # this is the one implementation, not a second one. Live rather than
+        # copied, which is the `Parts` decision at the record grain: a record
+        # corrected since the pass visibly disagrees with the stored total,
+        # and that disagreement is true. A `list` figure keeps its stored
+        # positional values -- they *are* the measurements the value is made
+        # of -- and a count measures nothing, so nothing is invented.
+        read_through = _measure_read(plan.calculate) if note is None else None
+        # Never live for a row that stores its measurements: a `list` row's
+        # values are the addends, and when they misalign with the members the
+        # note above withholds them -- a live re-read would quietly repair
+        # exactly the row the note says cannot be paired. Keyed to the
+        # *stored* shape, the same predicate the note reads, so the two can
+        # never disagree -- gating on the plan's shape instead would let a
+        # legacy list row under a sum-shaped plan serve the note and the
+        # repaired pairings in one payload.
+        live = (
+            library.measures.get(read_through)
+            if read_through is not None and not isinstance(stored.value, list)
+            else None
+        )
         members = []
         for position, key in enumerate(stored.members):
             value = held.get(key)
             title = _field_of(value, name_field)
             url = _field_of(value, url_field)
+            shown = measurement(position)
+            if shown is None and live is not None and value is not None:
+                got = measure_of(live, value, None)
+                shown = format_value(got, plan.unit, settings) if got is not None else None
             members.append(
                 EvidenceMember(
                     key=key,
                     title=title,
                     url=url,
                     held=value is not None,
-                    display=measurement(position),
+                    display=shown,
                 )
             )
         return Evidence(
@@ -399,6 +434,7 @@ async def serve_evidence(
             note=note,
             members=members,
             kind=kind,
+            measure=read_through,
         )
 
     # The members span more than one fact kind (a ladder over sets of two
@@ -450,6 +486,23 @@ def _citing_spaces(plan: FigurePlan, library: Library) -> set[str]:
     for name in names:
         _spaces_of(plan.sets.get(name), plan.sets, library, spaces, seen)
     return spaces
+
+
+def _measure_read(calc: Any) -> str | None:
+    """The measure a figure's amount reads its members through, or None.
+
+    Named on the evidence payload so a panel can say which definition turns
+    the records into the value. A count reads none -- its records *are* the
+    amount -- and the ladder/arithmetic shapes read their operands' stored
+    rows, which the parts branch already names per row.
+    """
+    if isinstance(calc, ListOf):
+        return calc.measure
+    if isinstance(calc, LangSum) and calc.measure is not None:
+        return calc.measure
+    if isinstance(calc, Extreme):
+        return calc.measure
+    return None
 
 
 def _cited_kind(plan: FigurePlan, library: Library) -> str | None:

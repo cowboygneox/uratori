@@ -346,6 +346,27 @@ async def test_a_new_fact_shows_its_cascade_in_the_activity_log(pg_dsn: str) -> 
         datetime.fromisoformat(newest["at"])  # a real moment, not just truthy text
 
 
+async def test_a_deferred_batch_is_listed_rather_than_breaking_the_log(pg_dsn: str) -> None:
+    """A bulk import lands its batches with `defer`, and each landing is a
+    pass that happened, recorded under its own trigger. The response model
+    once admitted only "facts" and "run", so a single deferred batch 500'd
+    the whole activity page -- the log of everything, taken down by exactly
+    the door big imports come through."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        landed = await http.post(
+            "/tenants/t1/facts",
+            json={"writes": {"shop_courier": COURIER}, "defer": True},
+        )
+        assert landed.status_code == 200, landed.text
+
+        # quiet=1 because a deferred landing computes nothing by design.
+        page = await http.get("/ui/api/tenants/t1/activity?quiet=1")
+        assert page.status_code == 200, page.text
+        triggers = [run["trigger"] for run in page.json()["runs"]]
+        assert "facts-deferred" in triggers
+
+
 async def test_a_run_that_moved_nothing_is_quiet_but_not_erased(pg_dsn: str) -> None:
     async with serve(pg_dsn) as http:
         await _teach(http)

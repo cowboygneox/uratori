@@ -38,6 +38,7 @@ group work_issue.assigned from assignee_account_id through team_person.accounts.
 measure code_change.open_seconds = merged_at - created_at
 measure work_issue.estimate = estimate_seconds in effort
 measure work_issue.rework = rework_seconds in effort
+measure work_issue.delivered_on = moment completed_at
 
 # Every merge's duration, kept whole for the readings over it.
 figure team_person.time_to_merge:
@@ -97,6 +98,14 @@ figure team_person.rework_share:
         planned = team_person.planned_effort
     calculate:
         redone / planned
+
+# When this person last delivered anything.
+figure team_person.last_delivery:
+    display "{team_person} last delivered"
+    depends:
+        mine = work_issue.assigned:{team_person}
+    calculate:
+        latest(work_issue.delivered_on over mine)
 
 # Merges of this person's that were approved.
 figure team_person.approved_merges:
@@ -175,6 +184,9 @@ async def test_each_member_carries_its_record_and_its_own_measurement() -> None:
     assert [m.display for m in evidence.members] == ["1.0h", "2.0h"]
     assert all(m.held for m in evidence.members)
     assert evidence.parts is False
+    # The definition the numbers came through, named so the panel can say how
+    # the rows lead to the amount rather than leaving the reader to guess.
+    assert evidence.measure == "code_change.open_seconds"
     # The control for the misalignment note below: a healthy row carries none.
     assert evidence.note is None
 
@@ -223,21 +235,232 @@ async def test_a_count_figures_members_have_no_measurement_of_their_own() -> Non
         "team_person.delivered_issues",
         LIB.figure("team_person.delivered_issues").version,  # type: ignore[union-attr]
         "p1@2026-08-20",
-        2,
-        ("i1", "i2"),
+        3,
+        ("i1", "i2", "i@3"),
         "Aki",
     )
     facts.put(TENANT, "work_issue", "i1", {"title": "Ship the drawer", "url": "https://jira/1"})
     facts.put(TENANT, "work_issue", "i2", {"title": "Name the rule"})
+    facts.put(TENANT, "work_issue", "i@3", {"title": "The awkward key"})
 
     evidence = await _evidence(store, facts, "team_person.delivered_issues", "p1@2026-08-20")
 
     assert evidence.kind == "work_issue"
-    assert evidence.display == "2"
-    assert [m.title for m in evidence.members] == ["Ship the drawer", "Name the rule"]
-    assert [m.display for m in evidence.members] == [None, None]
+    assert evidence.display == "3"
+    assert [m.title for m in evidence.members] == [
+        "Ship the drawer",
+        "Name the rule",
+        "The awkward key",
+    ]
+    assert [m.display for m in evidence.members] == [None, None, None]
+    # No measure was read, so none is named -- the panel must not imply one.
+    assert evidence.measure is None
+    # A raw fact key may contain the separator without it meaning anything;
+    # only a part's storage key is split into a dimension, never a record's.
+    assert [m.dimension for m in evidence.members] == [None, None, None]
     # A record with no url gets none -- not a link to nowhere.
-    assert [m.url for m in evidence.members] == ["https://jira/1", None]
+    assert [m.url for m in evidence.members] == ["https://jira/1", None, None]
+
+
+async def test_a_sums_members_each_carry_the_measurement_the_calculation_read() -> None:
+    """A sum's evidence used to be a bare roster: "1.5h, citing these two
+    issues" with nothing saying what either contributed, so the rows did not
+    lead to the amount -- the exact complaint this page exists to answer. Each
+    held record is measured through the same `measure_of` the pass uses, in
+    the figure's own unit, and the measure is named so the panel can say which
+    definition the numbers came through."""
+    store, facts = MemoryEngineStore(), MemoryFactStore()
+    await store.set_buckets(TENANT, "work_issue.assigned", "i1", ["p1"])
+    await _ready(store, "team_person.rework_effort")
+    await store.save(
+        TENANT,
+        "team_person.rework_effort",
+        LIB.figure("team_person.rework_effort").version,  # type: ignore[union-attr]
+        "p1",
+        5400.0,
+        ("i1", "i2"),
+        "Aki",
+    )
+    facts.put(TENANT, "work_issue", "i1", {"title": "Redo the drawer", "rework_seconds": 3600})
+    facts.put(TENANT, "work_issue", "i2", {"title": "Rename the rule", "rework_seconds": 1800})
+
+    evidence = await _evidence(store, facts, "team_person.rework_effort", "p1")
+
+    assert evidence.display == "1.5h"
+    assert evidence.measure == "work_issue.rework"
+    assert [m.display for m in evidence.members] == ["1.0h", "0.5h"]
+    assert all(m.held for m in evidence.members)
+
+
+async def test_a_member_a_sums_measure_cannot_read_shows_no_number() -> None:
+    """The pass skips an unreadable record rather than counting it as nought,
+    and the evidence must say the same thing the same way: the record listed,
+    no number beside it. A gone record shows none either -- there is nothing
+    to measure -- and stays listed and marked, not dropped."""
+    store, facts = MemoryEngineStore(), MemoryFactStore()
+    await store.set_buckets(TENANT, "work_issue.assigned", "i1", ["p1"])
+    await _ready(store, "team_person.rework_effort")
+    await store.save(
+        TENANT,
+        "team_person.rework_effort",
+        LIB.figure("team_person.rework_effort").version,  # type: ignore[union-attr]
+        "p1",
+        3600.0,
+        ("i1", "i2", "i3"),
+        "Aki",
+    )
+    facts.put(TENANT, "work_issue", "i1", {"title": "Redo the drawer", "rework_seconds": 3600})
+    facts.put(TENANT, "work_issue", "i2", {"title": "Never sized"})
+
+    evidence = await _evidence(store, facts, "team_person.rework_effort", "p1")
+
+    assert [m.display for m in evidence.members] == ["1.0h", None, None]
+    assert [m.held for m in evidence.members] == [True, True, False]
+
+
+async def test_a_sums_measurements_are_live_addresses_not_copies() -> None:
+    """The same decision `Parts` documents for rollups, taken at the record
+    grain: a record corrected after the pass shows its current measurement
+    beside the total the pass stored, and the two visibly disagreeing is true
+    -- the alternative is a panel that agrees with a number that has stopped
+    being right, which is exactly the check this page exists to enable.
+
+    Served twice around the correction, because one serve after the edit
+    cannot tell "read live" from "read once at some point": the display must
+    move with the record while the stored total stands still."""
+    store, facts = MemoryEngineStore(), MemoryFactStore()
+    await store.set_buckets(TENANT, "work_issue.assigned", "i1", ["p1"])
+    await _ready(store, "team_person.rework_effort")
+    await store.save(
+        TENANT,
+        "team_person.rework_effort",
+        LIB.figure("team_person.rework_effort").version,  # type: ignore[union-attr]
+        "p1",
+        3600.0,
+        ("i1",),
+        "Aki",
+    )
+    facts.put(TENANT, "work_issue", "i1", {"title": "Redo the drawer", "rework_seconds": 3600})
+
+    before = await _evidence(store, facts, "team_person.rework_effort", "p1")
+    assert before.members[0].display == "1.0h", "in agreement while the record stands"
+
+    facts.put(TENANT, "work_issue", "i1", {"title": "Redo the drawer", "rework_seconds": 7200})
+    after = await _evidence(store, facts, "team_person.rework_effort", "p1")
+
+    assert after.display == "1.0h", "the stored total, as the pass computed it"
+    (member,) = after.members
+    assert member.display == "2.0h", "the record as it measures now"
+
+
+async def test_a_list_rows_measurements_stay_the_stored_addends() -> None:
+    """The opposite decision from the sum's, on purpose: a `list` row's stored
+    values *are* the value -- the addends the reader was shown -- so a record
+    corrected since the pass keeps its stored number here rather than being
+    re-read. Re-reading would change the very list the row claims to cite."""
+    store, facts = MemoryEngineStore(), MemoryFactStore()
+    await store.set_buckets(TENANT, "code_change.merged_by_day", "c1", ["p1@2026-08-20"])
+    await _ready(store, "team_person.time_to_merge")
+    await store.save(
+        TENANT,
+        "team_person.time_to_merge",
+        LIB.figure("team_person.time_to_merge").version,  # type: ignore[union-attr]
+        "p1@2026-08-20",
+        [3600.0],
+        ("c1",),
+        "Aki",
+    )
+    # The record now measures five hours, not the stored one.
+    facts.put(
+        TENANT,
+        "code_change",
+        "c1",
+        {
+            "title": "Fix the parser",
+            "created_at": "2026-08-20T09:00:00Z",
+            "merged_at": "2026-08-20T14:00:00Z",
+        },
+    )
+
+    evidence = await _evidence(store, facts, "team_person.time_to_merge", "p1@2026-08-20")
+
+    (member,) = evidence.members
+    assert member.display == "1.0h", "the stored addend, not a live re-read"
+
+
+async def test_a_null_inside_a_stored_list_is_not_repaired_by_a_live_read() -> None:
+    """An aligned legacy row may carry a null where an addend should be. The
+    gap stays a gap: the row's claim is "these are the stored measurements",
+    and a live number slotted into the hole would be one value on the panel
+    that no pass computed, indistinguishable from its stored neighbours."""
+    store, facts = MemoryEngineStore(), MemoryFactStore()
+    await store.set_buckets(TENANT, "code_change.merged_by_day", "c1", ["p1@2026-08-20"])
+    await _ready(store, "team_person.time_to_merge")
+    await store.save(
+        TENANT,
+        "team_person.time_to_merge",
+        LIB.figure("team_person.time_to_merge").version,  # type: ignore[union-attr]
+        "p1@2026-08-20",
+        [3600.0, None],
+        ("c1", "c2"),
+        "Aki",
+    )
+    # Both records measurable, so a live read *would* have a number to offer.
+    for key in ("c1", "c2"):
+        facts.put(
+            TENANT,
+            "code_change",
+            key,
+            {
+                "title": f"Change {key}",
+                "created_at": "2026-08-20T09:00:00Z",
+                "merged_at": "2026-08-20T11:00:00Z",
+            },
+        )
+
+    evidence = await _evidence(store, facts, "team_person.time_to_merge", "p1@2026-08-20")
+
+    assert evidence.note is None, "aligned, so nothing is withheld"
+    assert [m.display for m in evidence.members] == ["1.0h", None]
+
+
+async def test_an_extremes_members_each_carry_the_instant_that_competed() -> None:
+    """"Last delivered 2026-08-20" cites every record in the running, and
+    without each one's instant the winner is invisible -- 469 rows and no way
+    to see which one set the value. Each instant renders through the figure's
+    own unit, so the member column and the value above it read on the same
+    calendar."""
+    from uratori.engine.buckets import parse_instant
+
+    store, facts = MemoryEngineStore(), MemoryFactStore()
+    await store.set_buckets(TENANT, "work_issue.assigned", "i1", ["p1"])
+    await _ready(store, "team_person.last_delivery")
+    latest = parse_instant("2026-08-20T09:30:00Z")
+    assert latest is not None
+    await store.save(
+        TENANT,
+        "team_person.last_delivery",
+        LIB.figure("team_person.last_delivery").version,  # type: ignore[union-attr]
+        "p1",
+        float(latest),
+        ("i1", "i2", "i3"),
+        "Aki",
+    )
+    facts.put(
+        TENANT, "work_issue", "i1", {"title": "The early one", "completed_at": "2026-08-01T12:00:00Z"}
+    )
+    facts.put(
+        TENANT, "work_issue", "i2", {"title": "The winner", "completed_at": "2026-08-20T09:30:00Z"}
+    )
+    # An instant the measure cannot read: `latest` skips it and stores it in
+    # the citation, so it must list with no instant -- never as 1970.
+    facts.put(TENANT, "work_issue", "i3", {"title": "Never dated"})
+
+    evidence = await _evidence(store, facts, "team_person.last_delivery", "p1")
+
+    assert evidence.display == "2026-08-20"
+    assert evidence.measure == "work_issue.delivered_on"
+    assert [m.display for m in evidence.members] == ["2026-08-01", "2026-08-20", None]
 
 
 async def test_a_rollup_cites_its_parts_not_the_records_underneath_them() -> None:
@@ -273,16 +496,23 @@ async def test_a_rollup_cites_its_parts_not_the_records_underneath_them() -> Non
     assert evidence.parts is True
     assert evidence.source == "team_person.open_mrs_by_source"
     assert evidence.kind is None
+    # Parts name their own figure per row; a top-level `measure` here would
+    # present a figure as if it were the measure the rows were read through.
+    assert evidence.measure is None
     counted, gone = evidence.members
     assert counted.key == "p1@conn-a"
     assert counted.figure == "team_person.open_mrs_by_source"
     assert counted.title == "Aki in conn-a"
     assert counted.display == "2"
     assert counted.held is True
+    # The cell, split off the key server-side: part titles are frozen subject
+    # labels, so without this every cell of one subject reads identically.
+    assert counted.dimension == "conn-a"
     assert gone.key == "p1@conn-b"
     assert gone.figure == "team_person.open_mrs_by_source"
     assert gone.held is False
     assert gone.display is None
+    assert gone.dimension == "conn-b"
 
 
 async def test_a_calculation_over_several_figures_cites_every_operand() -> None:
@@ -314,13 +544,17 @@ async def test_a_calculation_over_several_figures_cites_every_operand() -> None:
 
     assert evidence.parts is True
     # Several sources: no single figure to name up top, so none is -- each row
-    # names its own instead.
+    # names its own instead. And no measure either: nothing here was read
+    # through one.
     assert evidence.source is None
+    assert evidence.measure is None
     assert evidence.display == "25.0%"
     numerator, denominator = evidence.members
     assert numerator.key == "p1"
     assert numerator.figure == "team_person.rework_effort"
     assert numerator.held is True
+    # The control for the dimension split: an undimensioned part has none.
+    assert numerator.dimension is None
     # Rendered in the *source's* unit: an hour of rework, not "360000.0%".
     assert numerator.display == "1.0h"
     assert denominator.figure == "team_person.planned_effort"
@@ -360,7 +594,12 @@ async def test_a_row_whose_values_and_members_disagree_serves_no_pairings() -> N
     that breaks it -- written by some earlier era of the engine -- must not be
     papered over by pairing what aligns: that prints the right numbers under
     the wrong records, which is worse than printing none. The records still
-    list; the measurements are withheld."""
+    list; the measurements are withheld.
+
+    The records deliberately carry real, measurable timestamps: with bare
+    titles a live re-read returns None anyway and the withholding cannot be
+    told from the live path quietly repairing the row -- which is exactly the
+    mutation this fixture must catch."""
     store, facts = MemoryEngineStore(), MemoryFactStore()
     await store.set_buckets(TENANT, "code_change.merged_by_day", "c1", ["p1@2026-08-20"])
     await _ready(store, "team_person.time_to_merge")
@@ -373,8 +612,26 @@ async def test_a_row_whose_values_and_members_disagree_serves_no_pairings() -> N
         ("c1", "c2"),
         "Aki",
     )
-    facts.put(TENANT, "code_change", "c1", {"title": "Fix the parser"})
-    facts.put(TENANT, "code_change", "c2", {"title": "Widen the lexer"})
+    facts.put(
+        TENANT,
+        "code_change",
+        "c1",
+        {
+            "title": "Fix the parser",
+            "created_at": "2026-08-20T09:00:00Z",
+            "merged_at": "2026-08-20T10:00:00Z",
+        },
+    )
+    facts.put(
+        TENANT,
+        "code_change",
+        "c2",
+        {
+            "title": "Widen the lexer",
+            "created_at": "2026-08-20T09:00:00Z",
+            "merged_at": "2026-08-20T11:00:00Z",
+        },
+    )
 
     evidence = await _evidence(store, facts, "team_person.time_to_merge", "p1@2026-08-20")
 
@@ -384,6 +641,9 @@ async def test_a_row_whose_values_and_members_disagree_serves_no_pairings() -> N
     # the reason must reach the reader rather than stop in a server comment.
     assert evidence.note is not None
     assert "disagree" in evidence.note
+    # Naming how the rows were measured above rows deliberately carrying no
+    # measurements would be a contradiction, so the measure is withheld too.
+    assert evidence.measure is None
 
 
 async def test_the_titles_come_from_the_kind_the_calculation_counts() -> None:

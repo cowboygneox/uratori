@@ -305,7 +305,12 @@ class FactPageOut(BaseModel):
 class RunOutLog(BaseModel):
     id: int
     at: str
-    trigger: Literal["facts", "run"]
+    trigger: Literal["facts", "facts-deferred", "run"]
+    """Which door the pass came through -- the same three words `engine_run.
+    cause` documents. All three, because this model validates history: a
+    trigger it does not admit 500s the whole log, and the one that was
+    missing ("facts-deferred") is exactly the door bulk imports come
+    through."""
     full: bool
     written: int
     deleted: int
