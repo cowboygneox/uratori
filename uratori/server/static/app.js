@@ -897,6 +897,10 @@ async function recordView(kind, key) {
     el('span', { class: 'verbatim' }, tenant() || '?')));
   if (!aboutAnswer.ok) {
     parts.push(problem(aboutAnswer, 'Could not read the derived values:'));
+  } else if (!aboutAnswer.body.state.ok) {
+    // No library at all: saying "no figure is scoped to this kind" here
+    // would be a verdict about definitions that do not exist.
+    parts.push(unavailable(aboutAnswer.body.state));
   } else if (!aboutAnswer.body.figures.length) {
     parts.push(el('p', { class: 'faint' },
       'No figure is scoped to ', el('span', { class: 'mono' }, kind),
@@ -934,12 +938,6 @@ async function recordView(kind, key) {
             }, 'evidence')));
           return row;
         });
-        if (entry.more) {
-          rows.push(el('tr', {}, el('td', { colspan: banded ? '4' : '3', class: 'faint' },
-            `… the first ${figure.subjects.length} rows — `,
-            el('a', { href: defHash(figure.name) }, 'the figure page'),
-            ' has the rest')));
-        }
         // A by-day figure holds dozens of cells per subject; folded, so the
         // single-value figures below it stay on screen. Folded, not paged:
         // the rows are already here, and the count on the button is the
@@ -954,6 +952,15 @@ async function recordView(kind, key) {
             }, `show all ${figure.subjects.length} rows`)));
           rows.push(toggle, ...folded);
         }
+        // After the fold, so the cap is stated on the collapsed view too —
+        // a capped set whose disclosure hides behind its own fold reads as
+        // complete, which is the lie this row exists to prevent.
+        if (entry.more) {
+          rows.push(el('tr', {}, el('td', { colspan: banded ? '4' : '3', class: 'faint' },
+            `… the latest ${figure.subjects.length} rows — `,
+            el('a', { href: defHash(figure.name) }, 'the figure page'),
+            ' has the earlier ones')));
+        }
         return rows;
       })));
   }
@@ -962,6 +969,8 @@ async function recordView(kind, key) {
     el('span', { class: 'verbatim' }, tenant() || '?')));
   if (!aboutAnswer.ok) {
     parts.push(el('p', { class: 'faint' }, 'Unavailable (see above).'));
+  } else if (!aboutAnswer.body.state.ok) {
+    parts.push(unavailable(aboutAnswer.body.state));
   } else if (!aboutAnswer.body.cited.length) {
     parts.push(el('p', { class: 'faint' },
       'No figure counts ', el('span', { class: 'mono' }, kind), ' records.'));
@@ -1005,9 +1014,18 @@ async function recordView(kind, key) {
     }
   }
 
-  if (aboutAnswer.ok && aboutAnswer.body.pages.length) {
-    parts.push(el('h2', {}, 'On the pages — tenant ',
-      el('span', { class: 'verbatim' }, tenant() || '?')));
+  parts.push(el('h2', {}, 'On the pages — tenant ',
+    el('span', { class: 'verbatim' }, tenant() || '?')));
+  if (!aboutAnswer.ok) {
+    parts.push(el('p', { class: 'faint' }, 'Unavailable (see above).'));
+  } else if (!aboutAnswer.body.state.ok) {
+    parts.push(unavailable(aboutAnswer.body.state));
+  } else if (!aboutAnswer.body.pages.length) {
+    // Stated, like every other empty section: a heading that vanished
+    // would read as "nothing derives from this", a server-only claim.
+    parts.push(el('p', { class: 'faint' },
+      'No projection is of ', el('span', { class: 'mono' }, kind), ' records.'));
+  } else {
     for (const page of aboutAnswer.body.pages) {
       parts.push(el('h2', { class: 'subject' },
         el('a', { class: 'mono', href: defHash(page.projection) }, page.projection)));

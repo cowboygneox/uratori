@@ -5,11 +5,20 @@ optional dependency (`uratori[postgres]`), and a host on another store must not
 pay an import error for a driver it never chose.
 """
 
-from .base import BucketChange, EngineStore, FactRow, FactSource, Pointer, StoredValue
+from .base import (
+    BucketChange,
+    CitingValue,
+    EngineStore,
+    FactRow,
+    FactSource,
+    Pointer,
+    StoredValue,
+)
 from .memory import MemoryEngineStore, MemoryFactStore
 
 __all__ = [
     "BucketChange",
+    "CitingValue",
     "EngineStore",
     "FactRow",
     "FactSource",

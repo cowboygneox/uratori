@@ -2774,6 +2774,34 @@ projection shop_order.board:
 
     field:
         key = ref as text
+
+# Which couriers look alive at all.
+filter shop_courier.active where name is set
+
+# A courier's traffic weighted by the roster size -- deliberately reads TWO
+# id spaces (orders and couriers), so its citations span kinds and its
+# `_cited_kind` is None. The about page must still list it on both kinds'
+# records: it counted them.
+figure shop_courier.weighted:
+    display "{value}"
+    unit count
+    depends:
+        mine = shop_order.carried_by:{shop_courier} & shop_order.open
+        roster = shop_courier.active
+    calculate:
+        count(mine) + count(roster)
+
+# The single loudest order: a page with a sort and a limit, so "in the
+# from-set" and "on the page" come apart -- the shape that catches a
+# bespoke single-record evaluation, which would show a row the real page
+# refused.
+projection shop_order.spotlight:
+    from shop_order.open
+    sort by key descending
+    limit 1
+
+    field:
+        key = ref as text
 """
 
 
@@ -2804,9 +2832,17 @@ def _placed_orders(n: int) -> dict[str, dict[str, Any]]:
 async def _about(
     http: httpx.AsyncClient, kind: str, key: str, tenant: str = "t1"
 ) -> dict[str, Any]:
-    got = await http.get(f"/ui/api/tenants/{tenant}/about/{kind}/{key}")
+    from urllib.parse import quote
+
+    got = await http.get(
+        f"/ui/api/tenants/{tenant}/about/{kind}/{quote(key, safe='')}"
+    )
     assert got.status_code == 200, got.text
     return got.json()
+
+
+def pages_of(about: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {p["projection"]: p for p in about["pages"]}
 
 
 async def test_a_record_serves_the_figures_scoped_to_its_kind(pg_dsn: str) -> None:
@@ -2835,6 +2871,7 @@ async def test_a_record_serves_the_figures_scoped_to_its_kind(pg_dsn: str) -> No
             "shop_courier.carrying",
             "shop_courier.load_band",
             "shop_courier.daily",
+            "shop_courier.weighted",
         }, "every figure scoped to shop_courier, and nothing scoped elsewhere"
 
         carrying = by_name["shop_courier.carrying"]["result"]
@@ -2858,6 +2895,25 @@ async def test_a_record_serves_the_figures_scoped_to_its_kind(pg_dsn: str) -> No
         ], "the grained figure's rows carry their day, in day order"
         assert all(s["display"] == "1" for s in daily["subjects"])
         assert by_name["shop_courier.daily"]["more"] is False
+
+        # "Exactly as the figure's own page would render them" is a claim
+        # about equality, not about this fixture: the about entry must BE the
+        # figure page's rows for this subject, field for field, so any second
+        # rendering path dies here even on shapes no fixture anticipated.
+        full = await http.get("/ui/api/tenants/t1/results/shop_courier.daily")
+        assert full.status_code == 200, full.text
+        mine = [
+            s for s in full.json()["subjects"] if s["id"].split("@", 1)[0] == "c1"
+        ]
+        assert daily["subjects"] == mine
+
+        # The rollup stays off the citation list even on the page where its
+        # stored members -- literally ["c1"], a courier key -- would match:
+        # its parts' own citations already name what it was built from. The
+        # two-id-space figure stays ON it, because it counted this courier.
+        cited = {c["figure"]: c for c in about["cited"]}
+        assert set(cited) == {"shop_courier.weighted"}
+        assert [r["subject"] for r in cited["shop_courier.weighted"]["rows"]] == ["c1"]
 
         # The other direction of the same claim: a kind no figure is scoped
         # to serves an empty section, not somebody else's figures.
@@ -2889,10 +2945,18 @@ async def test_a_record_lists_the_values_that_counted_it(pg_dsn: str) -> None:
 
         about = await _about(http, "shop_order", "o1")
         cited = {c["figure"]: c for c in about["cited"]}
-        assert set(cited) == {"shop_courier.carrying", "shop_courier.daily"}, (
-            "the two leaf figures counting shop_order records -- and not the "
-            "rollup, whose members are cells"
+        assert set(cited) == {
+            "shop_courier.carrying",
+            "shop_courier.daily",
+            "shop_courier.weighted",
+        }, (
+            "every leaf figure that counts shop_order records -- the "
+            "two-id-space one included, because it counted this order too -- "
+            "and not the rollup, whose members are cells"
         )
+        assert [r["subject"] for r in cited["shop_courier.weighted"]["rows"]] == [
+            "c1"
+        ], "the mixed figure's citation is real: c1's value counted o1"
 
         carrying = cited["shop_courier.carrying"]
         assert carrying["scope"] == "shop_courier", "the link target's kind"
@@ -2942,6 +3006,11 @@ async def test_the_about_page_is_honest_when_values_are_behind_the_deploy(
         assert carrying["state"]["ok"] is False
         assert carrying["state"]["because"] == "behind-deploy"
         assert carrying["subjects"] == []
+        daily = by_name["shop_courier.daily"]["result"]
+        assert daily["state"]["ok"] is True and len(daily["subjects"]) == 3, (
+            "the moved filter is not in daily's plan; one stale figure must "
+            "not blank its untouched neighbours in the same payload"
+        )
 
         about = await _about(http, "shop_order", "o1")
         cited = {c["figure"]: c for c in about["cited"]}
@@ -2972,16 +3041,31 @@ async def test_a_records_projection_row_travels_on_its_about_page(
         assert push.status_code == 200, push.text
 
         about = await _about(http, "shop_order", "o1")
-        assert [p["projection"] for p in about["pages"]] == ["shop_order.board"]
-        page = about["pages"][0]
+        pages = {p["projection"]: p for p in about["pages"]}
+        assert set(pages) == {"shop_order.board", "shop_order.spotlight"}
+        page = pages["shop_order.board"]
         assert page["state"]["ok"] is True
         assert page["present"] is True
         assert page["row"]["row"]["display"]["key"] == "A-1", (
             "the row exactly as the projection page serves it"
         )
+        assert pages["shop_order.spotlight"]["present"] is True, (
+            "A-1 sorts to the top of the descending one-row page"
+        )
+
+        # The from-set holds o0; the sort and the limit keep it off the page.
+        # Only a whole-page evaluation can know that -- a bespoke single-row
+        # path would re-run the formulas, find o0 open, and print a row the
+        # real page refused.
+        about = await _about(http, "shop_order", "o0")
+        assert pages_of(about)["shop_order.board"]["present"] is True
+        spot = pages_of(about)["shop_order.spotlight"]
+        assert spot["present"] is False
+        assert spot["row"] is None
+        assert spot["note"], "the absence carries its reason as a sentence"
 
         about = await _about(http, "shop_order", "o9")
-        page = about["pages"][0]
+        page = pages_of(about)["shop_order.board"]
         assert page["present"] is False
         assert page["row"] is None
         assert page["note"], "the absence carries its reason as a sentence"
@@ -3018,6 +3102,14 @@ async def test_about_rows_are_capped_and_say_so(pg_dsn: str) -> None:
         assert daily["more"] is True
         assert by_name["shop_courier.carrying"]["more"] is False
 
+        # WHICH rows survive is part of the requirement: the latest, because
+        # this page exists to verify what a number says now, and a cap that
+        # kept the first sixty days of 1999 would show nothing current.
+        days = [s["dimension"] for s in daily["result"]["subjects"]]
+        assert days[0] == "2026-01-06" and days[-1] == "2026-03-06", (
+            "65 days pushed, the newest 60 kept, still in day order"
+        )
+
         # The citations cap the same way: o0 is cited once per figure, so the
         # flag stays down there -- the cap is per section entry, not global.
         about = await _about(http, "shop_order", "o0")
@@ -3025,7 +3117,224 @@ async def test_about_rows_are_capped_and_say_so(pg_dsn: str) -> None:
         assert cited["shop_courier.daily"]["more"] is False
 
 
+async def test_a_row_set_exactly_at_the_cap_is_whole_not_truncated(
+    pg_dsn: str,
+) -> None:
+    """The boundary: exactly the cap's worth of rows is a complete answer,
+    and `more` must say so -- "we truncated" printed over a complete list is
+    the same lie as a silent cap, in the other direction."""
+    from uratori.server.ui import ABOUT_ROWS
+
+    async with serve(pg_dsn) as http:
+        await _teach_about(http)
+        push = await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_courier": COURIER,
+                    "shop_order": _placed_orders(ABOUT_ROWS),
+                }
+            },
+        )
+        assert push.status_code == 200, push.text
+        about = await _about(http, "shop_courier", "c1")
+        by_name = {f["result"]["name"]: f for f in about["figures"]}
+        daily = by_name["shop_courier.daily"]
+        assert len(daily["result"]["subjects"]) == ABOUT_ROWS
+        assert daily["more"] is False
+
+
+async def test_the_cited_side_caps_per_figure_and_says_so(pg_dsn: str) -> None:
+    """A record cited by more values than the page holds: the entry caps at
+    the page size and raises `more` -- and the cap is per figure, so one
+    prolific citer cannot make the page print "did not count it" about a
+    figure that did. The weighted figure cites every courier from every
+    courier's row, which is exactly the fan-out that overflows."""
+    from uratori.server.ui import ABOUT_ROWS
+
+    async with serve(pg_dsn) as http:
+        await _teach_about(http)
+        couriers = {f"c{i}": {"name": f"Courier {i}"} for i in range(ABOUT_ROWS + 5)}
+        push = await http.post(
+            "/tenants/t1/facts",
+            json={"writes": {"shop_courier": couriers, "shop_order": _placed_orders(1)}},
+        )
+        assert push.status_code == 200, push.text
+
+        about = await _about(http, "shop_courier", "c1")
+        cited = {c["figure"]: c for c in about["cited"]}
+        weighted = cited["shop_courier.weighted"]
+        assert len(weighted["rows"]) == ABOUT_ROWS
+        assert weighted["more"] is True
+
+
+async def test_a_figure_taught_after_the_pass_is_never_computed_not_blank(
+    pg_dsn: str,
+) -> None:
+    """The everyday absence: a figure added to the source after the last
+    pass has no pointer at all. Both directions must answer never-computed
+    -- an empty entry here would read "computed, and nothing found", which
+    is the absence-as-zero mistake on the page built to prevent it."""
+    async with serve(pg_dsn) as http:
+        await _teach_about(http)
+        push = await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {"shop_courier": COURIER, "shop_order": _placed_orders(2)}
+            },
+        )
+        assert push.status_code == 200, push.text
+
+        grown = ABOUT_SOURCE + """
+# The same count, taught after the pass.
+figure shop_courier.echo:
+    display "{value}"
+    depends:
+        mine = shop_order.carried_by:{shop_courier} & shop_order.open
+    calculate:
+        count(mine)
+"""
+        put = await http.put("/definitions", json={"source": grown})
+        assert put.status_code == 200, put.text
+
+        about = await _about(http, "shop_courier", "c1")
+        by_name = {f["result"]["name"]: f for f in about["figures"]}
+        echo = by_name["shop_courier.echo"]["result"]
+        assert echo["state"]["ok"] is False
+        assert echo["state"]["because"] == "never-computed"
+        assert echo["subjects"] == []
+
+        about = await _about(http, "shop_order", "o1")
+        cited = {c["figure"]: c for c in about["cited"]}
+        assert cited["shop_courier.echo"]["state"]["because"] == "never-computed"
+        assert cited["shop_courier.echo"]["rows"] == []
+
+
+async def test_an_awkward_key_walks_the_about_route_end_to_end(
+    pg_dsn: str,
+) -> None:
+    """Record keys carry underscores and percent signs in the wild (the
+    NFL's game ids are full of `_`), and both are LIKE wildcards. This pins
+    the whole path -- URL decoding, the store's escaping, the day-row prefix
+    probe -- because an unescaped `_` would put c-x-1's day rows on c_1's
+    page, a wrong number on the verification surface itself."""
+    async with serve(pg_dsn) as http:
+        await _teach_about(http)
+        push = await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_courier": {
+                        "c_1": {"name": "Underscore"},
+                        "cx1": {"name": "Wildcard bait"},
+                        "c%1": {"name": "Percent"},
+                    },
+                    "shop_order": {
+                        "o1": {
+                            "ref": "A-1",
+                            "courier_id": "c_1",
+                            "status": "riding",
+                            "placed": "2026-01-01T10:00:00Z",
+                        },
+                        "o2": {
+                            "ref": "A-2",
+                            "courier_id": "cx1",
+                            "status": "riding",
+                            "placed": "2026-02-01T10:00:00Z",
+                        },
+                        "o3": {
+                            "ref": "A-3",
+                            "courier_id": "c%1",
+                            "status": "riding",
+                            "placed": "2026-03-01T10:00:00Z",
+                        },
+                    },
+                }
+            },
+        )
+        assert push.status_code == 200, push.text
+
+        about = await _about(http, "shop_courier", "c_1")
+        by_name = {f["result"]["name"]: f for f in about["figures"]}
+        assert [s["dimension"] for s in by_name["shop_courier.daily"]["result"]["subjects"]] == [
+            "2026-01-01"
+        ], "c_1's page holds c_1's day and not cx1's -- `_` is text, not a wildcard"
+
+        about = await _about(http, "shop_courier", "c%1")
+        by_name = {f["result"]["name"]: f for f in about["figures"]}
+        assert [s["dimension"] for s in by_name["shop_courier.daily"]["result"]["subjects"]] == [
+            "2026-03-01"
+        ]
+
+
+async def test_about_with_no_library_states_the_absence(pg_dsn: str) -> None:
+    """The boot-refused world: records stored, library None (an upgrade
+    across a language change). The record stays browsable, and the about
+    payload must say WHY its sections are empty -- "no figure is scoped to
+    this kind" would be a verdict about definitions that do not exist."""
+    name = f"uratori_ui_{os.urandom(4).hex()}"
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await connection.execute(f"create schema {name}")
+    finally:
+        await connection.close()
+    try:
+        first = create_app(dsn=pg_dsn, pg_schema=name, token=None, version="test")
+        async with first.router.lifespan_context(first):
+            transport = httpx.ASGITransport(app=first)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://uratori"
+            ) as http:
+                await _teach_about(http)
+                push = await http.post(
+                    "/tenants/t1/facts", json={"writes": {"shop_courier": COURIER}}
+                )
+                assert push.status_code == 200, push.text
+
+        connection = await asyncpg.connect(pg_dsn)
+        try:
+            await connection.execute(
+                f"update {name}.engine_world set source = 'this is not a definition'"
+            )
+        finally:
+            await connection.close()
+
+        second = create_app(dsn=pg_dsn, pg_schema=name, token=None, version="test")
+        async with second.router.lifespan_context(second):
+            transport = httpx.ASGITransport(app=second)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://uratori"
+            ) as http:
+                about = await _about(http, "shop_courier", "c1")
+                assert about["state"]["ok"] is False
+                assert about["state"]["because"] == "never-computed"
+                assert (
+                    about["figures"] == []
+                    and about["cited"] == []
+                    and about["pages"] == []
+                )
+    finally:
+        connection = await asyncpg.connect(pg_dsn)
+        try:
+            await connection.execute(f"drop schema {name} cascade")
+        finally:
+            await connection.close()
+
+
+async def test_about_without_a_schema_is_a_409(pg_dsn: str) -> None:
+    """No schema means no world to ask about -- the same refusal the record
+    route gives, so the two halves of one page cannot disagree about whether
+    the deployment exists yet."""
+    async with serve(pg_dsn) as http:
+        got = await http.get("/ui/api/tenants/t1/about/shop_courier/c1")
+        assert got.status_code == 409
+
+
 async def test_about_a_record_nobody_stored_is_a_404(pg_dsn: str) -> None:
+    """An empty about page for a key nobody stored would read "this record
+    exists and the library derives nothing" -- the absence-as-zero mistake
+    at the route level. The refusal, like the record route's, names the
+    key."""
     async with serve(pg_dsn) as http:
         await _teach_about(http)
         got = await http.get("/ui/api/tenants/t1/about/shop_order/ghost")

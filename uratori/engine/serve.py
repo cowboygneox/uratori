@@ -427,16 +427,16 @@ def _field_of(value: Mapping[str, Any] | None, field: str | None) -> str | None:
     return text if isinstance(text, str) and text else None
 
 
-def _cited_kind(plan: FigurePlan, library: Library) -> str | None:
-    """The one fact kind a figure's members are keys of, or None.
+def _citing_spaces(plan: FigurePlan, library: Library) -> set[str]:
+    """Every fact kind this figure's stored members may be keys of.
 
     Reads the set the calculation names (every record-set shape carries one)
     and resolves it to the id spaces of the indexes underneath, following
     references. The ladder and arithmetic shapes name no set, so their
-    members are the union of everything in `depends` -- those resolve only
-    when every set agrees on one id space, which is exactly when a lookup is
-    honest.
-    """
+    members are the union of everything in `depends` -- which may span two
+    id spaces, and a record of EITHER kind can then appear in the citation.
+    A rollup has no sets at all and answers empty: its members are stored
+    cells, not records."""
     calc = plan.calculate
     if isinstance(calc, (Count, ListOf, Extreme)) or (
         isinstance(calc, LangSum) and calc.measure is not None
@@ -449,6 +449,17 @@ def _cited_kind(plan: FigurePlan, library: Library) -> str | None:
     seen: set[str] = set()
     for name in names:
         _spaces_of(plan.sets.get(name), plan.sets, library, spaces, seen)
+    return spaces
+
+
+def _cited_kind(plan: FigurePlan, library: Library) -> str | None:
+    """The one fact kind a figure's members are keys of, or None.
+
+    The evidence panel's question, not the record page's: joining titles is
+    only honest when every member lives in one table, which is exactly when
+    the spaces reduce to one.
+    """
+    spaces = _citing_spaces(plan, library)
     return spaces.pop() if len(spaces) == 1 else None
 
 

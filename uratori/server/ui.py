@@ -45,7 +45,7 @@ from pydantic import BaseModel
 
 from ..engine.buckets import SEPARATOR, measure_of, subject_of
 from ..engine.project import format_value
-from ..engine.serve import _cited_kind, _label_of, serve_figure
+from ..engine.serve import _citing_spaces, _label_of, serve_figure
 from ..engine.serve import availability as figure_availability
 from ..facade import DEFAULT_TRAILING
 from ..lang.ast import ByAge, ByComposite, ByField, FigureUnit, IndexBy, IndexField
@@ -522,6 +522,12 @@ class AboutOut(BaseModel):
 
     kind: str
     key: str
+    state: Availability
+    """Whether there was a library to derive anything with. Not Ok means the
+    sections below are empty because nothing is loaded -- a truth the page
+    must print instead of "no figure is scoped to this kind", which is a
+    verdict about definitions that do not exist."""
+
     figures: list[AboutFigureOut]
     cited: list[CitedFigureOut]
     pages: list[AboutPageOut]
@@ -901,111 +907,145 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             )
         library = s.world.library
         if library is None:
-            # Records are browsable before definitions exist; there is nothing
-            # scoped to anything yet, and empty sections say exactly that.
-            return AboutOut(kind=kind, key=key, figures=[], cited=[], pages=[])
+            # Records are browsable before definitions exist; the sections
+            # are empty because nothing is loaded, and the state says so --
+            # the client must not turn this into "no figure is scoped here".
+            return AboutOut(
+                kind=kind,
+                key=key,
+                state=Unavailable(
+                    because="never-computed",
+                    detail="no definitions are loaded, so nothing is derived from any record",
+                ),
+                figures=[],
+                cited=[],
+                pages=[],
+            )
 
         store = PostgresEngineStore(s.pool)
         raw = await db.load_settings(s.pool, tenant)
         document = taught_schema(s.world).settings_for(raw)
 
-        figures: list[AboutFigureOut] = []
-        for plan in library.figures:
-            if plan.scope != kind:
-                continue
-            result = await serve_figure(
-                store, library, tenant, plan, document, subject=key
-            )
-            more = len(result.subjects) > ABOUT_ROWS
-            if more:
-                result = result.model_copy(
-                    update={"subjects": result.subjects[:ABOUT_ROWS]}
+        # One guard over all three sections, the same sentence the record
+        # route serves: a fixable dial gap (an effort figure with no
+        # hoursPerDay dial) must be the 409 that names the dial, never a
+        # 500 that takes the whole upward half of the page with it.
+        try:
+            figures: list[AboutFigureOut] = []
+            for plan in library.figures:
+                if plan.scope != kind:
+                    continue
+                result = await serve_figure(
+                    store, library, tenant, plan, document, subject=key
                 )
-            figures.append(AboutFigureOut(result=result, more=more))
-
-        # Leaf figures only, by construction: a rollup's members are stored
-        # cells, so `_cited_kind` answers None for it -- its parts' own
-        # citations already name the records underneath. One store call for
-        # all of them: the citation index is probed once with the record key.
-        cited_plans = [
-            plan for plan in library.figures if _cited_kind(plan, library) == kind
-        ]
-        citing = (
-            await store.values_citing(
-                tenant,
-                key,
-                {plan.name: plan.version for plan in cited_plans},
-                limit=ABOUT_ROWS + 1,
-            )
-            if cited_plans
-            else {}
-        )
-        cited: list[CitedFigureOut] = []
-        for plan in cited_plans:
-            state = await figure_availability(store, library, tenant, plan, document)
-            rows: list[CitedRowOut] = []
-            more = False
-            if isinstance(state, Ok):
-                found = citing.get(plan.name, [])
-                more = len(found) > ABOUT_ROWS
-                for stored in found[:ABOUT_ROWS]:
-                    tail = (
-                        stored.subject.split(SEPARATOR, 1)[1]
-                        if SEPARATOR in stored.subject
-                        else None
+                more = len(result.subjects) > ABOUT_ROWS
+                if more:
+                    # The LATEST rows survive the cap, still in the page's own
+                    # ascending order: this page verifies what a number says
+                    # now, and keeping the head would show the first sixty
+                    # days of the oldest season and nothing current.
+                    result = result.model_copy(
+                        update={"subjects": result.subjects[-ABOUT_ROWS:]}
                     )
-                    rows.append(
-                        CitedRowOut(
-                            id=stored.subject,
-                            subject=subject_of(stored.subject),
-                            name=stored.label,
-                            dimension=tail,
-                            display=format_value(stored.value, plan.unit, document),
+                figures.append(AboutFigureOut(result=result, more=more))
+
+            # Every figure whose stored members MAY be keys of this kind --
+            # the spaces, not the single-kind reduction the evidence panel
+            # uses, because an arithmetic over two id spaces stores the union
+            # as its citation and dropping it here would omit a figure that
+            # counted the record. Rollups answer an empty space set: their
+            # members are stored cells, and their parts' own citations
+            # already name the records underneath. One store call for all of
+            # them: the citation index is probed once with the record key.
+            cited_plans = [
+                plan
+                for plan in library.figures
+                if kind in _citing_spaces(plan, library)
+            ]
+            citing = (
+                await store.values_citing(
+                    tenant,
+                    key,
+                    {plan.name: plan.version for plan in cited_plans},
+                    limit=ABOUT_ROWS + 1,
+                )
+                if cited_plans
+                else {}
+            )
+            cited: list[CitedFigureOut] = []
+            for plan in cited_plans:
+                state = await figure_availability(store, library, tenant, plan, document)
+                rows: list[CitedRowOut] = []
+                more = False
+                if isinstance(state, Ok):
+                    found = citing.get(plan.name, [])
+                    more = len(found) > ABOUT_ROWS
+                    for stored in found[:ABOUT_ROWS]:
+                        tail = (
+                            stored.subject.split(SEPARATOR, 1)[1]
+                            if SEPARATOR in stored.subject
+                            else None
                         )
+                        rows.append(
+                            CitedRowOut(
+                                id=stored.subject,
+                                subject=subject_of(stored.subject),
+                                name=stored.label,
+                                dimension=tail,
+                                display=format_value(stored.value, plan.unit, document),
+                            )
+                        )
+                cited.append(
+                    CitedFigureOut(
+                        figure=plan.name,
+                        label=_label_of(plan.name),
+                        scope=plan.scope,
+                        state=state,
+                        rows=rows,
+                        more=more,
                     )
-            cited.append(
-                CitedFigureOut(
-                    figure=plan.name,
-                    label=_label_of(plan.name),
-                    scope=plan.scope,
-                    state=state,
-                    rows=rows,
-                    more=more,
                 )
-            )
 
-        pages: list[AboutPageOut] = []
-        facade = facade_for(s, s.world, library)
-        for project in library.projections:
-            if project.kind != kind:
-                continue
-            # The projection evaluated whole, then this record's row picked
-            # out -- never the formulas re-run over one record, because the
-            # from-set, the omit gate, the sort and the limit are part of
-            # what the page says, and a bespoke single-row path would show a
-            # row the real page refused.
-            answer = await facade.answer(tenant, project.name, raw)
-            if answer is None:  # pragma: no cover - the plan came from the library
-                continue
-            match = next((sub for sub in answer.subjects if sub.id == key), None)
-            note = None
-            if isinstance(answer.state, Ok) and match is None:
-                note = (
-                    "Not on this page. Its from-set, omit gate, sort and limit "
-                    "decide the rows, and they did not take this record."
+            pages: list[AboutPageOut] = []
+            facade = facade_for(s, s.world, library)
+            for project in library.projections:
+                if project.kind != kind:
+                    continue
+                # The projection evaluated whole, then this record's row picked
+                # out -- never the formulas re-run over one record, because the
+                # from-set, the omit gate, the sort and the limit are part of
+                # what the page says, and a bespoke single-row path would show a
+                # row the real page refused.
+                answer = await facade.answer(tenant, project.name, raw)
+                if answer is None:  # pragma: no cover - the plan came from the library
+                    continue
+                match = next((sub for sub in answer.subjects if sub.id == key), None)
+                note = None
+                if isinstance(answer.state, Ok) and match is None:
+                    note = (
+                        "Not on this page. Its from-set, omit gate, sort and limit "
+                        "decide the rows, and they did not take this record."
+                    )
+                pages.append(
+                    AboutPageOut(
+                        projection=project.name,
+                        label=_label_of(project.name),
+                        state=answer.state,
+                        present=match is not None,
+                        row=match,
+                        note=note,
+                    )
                 )
-            pages.append(
-                AboutPageOut(
-                    projection=project.name,
-                    label=_label_of(project.name),
-                    state=answer.state,
-                    present=match is not None,
-                    row=match,
-                    note=note,
-                )
-            )
 
-        return AboutOut(kind=kind, key=key, figures=figures, cited=cited, pages=pages)
+
+        except KeyError as gap:
+            raise HTTPException(
+                status_code=409, detail=gap.args[0] if gap.args else str(gap)
+            ) from gap
+
+        return AboutOut(
+            kind=kind, key=key, state=Ok(), figures=figures, cited=cited, pages=pages
+        )
 
     # ---------------------------------------------------------- membership --
 

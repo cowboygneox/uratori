@@ -65,6 +65,20 @@ class StoredValue:
 
 
 @dataclass(frozen=True)
+class CitingValue:
+    """A stored value seen from one of its members: whose row it is, what it
+    says, under which label. Deliberately WITHOUT the members tuple -- the
+    citation arrays are exactly the payload the reverse lookup exists to
+    avoid dragging back (a count over a million records carries tens of
+    thousands of keys per row), and the caller already knows the one member
+    it asked about."""
+
+    subject: str
+    value: Value
+    label: str
+
+
+@dataclass(frozen=True)
 class BucketChange:
     """What moving a record did to one index. The diff *is* the invalidation
     signal, which is why `set_buckets` returns it rather than writing silently."""
@@ -187,9 +201,11 @@ class EngineStore(Protocol):
 
     async def values_citing(
         self, tenant: str, member: str, versions: Mapping[str, str], *, limit: int
-    ) -> dict[str, list[StoredValue]]:
+    ) -> dict[str, list[CitingValue]]:
         """The reverse citation: stored values whose `members` include this
-        record key, grouped by figure name, each group in subject order.
+        record key, grouped by figure name, each group in codepoint subject
+        order -- stated because the cap makes ordering load-bearing, and the
+        database's collation and Python's are not the same sort.
 
         Exact membership -- never prefix or substring, because the caller
         prints these as "this record was counted into", and a loose match

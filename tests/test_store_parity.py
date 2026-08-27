@@ -375,6 +375,7 @@ async def test_values_citing_finds_exact_members_and_only_them(
     s, tenant = store
     await s.save(tenant, "fig", "v1", "c1", 2.0, ["o1", "o12"], "Aki")
     await s.save(tenant, "fig", "v1", "c2", 1.0, ["o12"], "Ren")
+    await s.save(tenant, "other", "v9", "c2b", 5.0, ["o12"], "Kai")
     await s.save(tenant, "fig", "v1", "c3", 0.0, [], "Mo")
     await s.save(tenant, "other", "v9", "c8", 4.0, ["o1"], "Kim")
     # Another era's citation is not this era's: the version is in the key.
@@ -389,16 +390,39 @@ async def test_values_citing_finds_exact_members_and_only_them(
     assert [v.subject for v in found["fig"]] == ["c1"], (
         "o1 is a prefix of o12; matching by containment-as-text would add c2"
     )
+    assert (found["fig"][0].value, found["fig"][0].label) == (2.0, "Aki"), (
+        "the value and its frozen label travel: the page renders both. The "
+        "members deliberately do not -- the citation arrays are exactly the "
+        "payload this query exists to avoid dragging back"
+    )
     both = await s.values_citing(tenant, "o12", wanted, limit=10)
     assert [v.subject for v in both["fig"]] == ["c1", "c2"], (
         "subject order, like every other values read -- consumers render in it"
     )
-    assert both["fig"][0].members == ("o1", "o12"), (
-        "the whole stored row comes back: the page shows the value and its label"
-    )
     capped = await s.values_citing(tenant, "o12", wanted, limit=1)
     assert [v.subject for v in capped["fig"]] == ["c1"], (
-        "the cap is per figure; the first rows in subject order are the page"
+        "the cap is per figure, never a global budget: a prolific citer in "
+        "one figure must not truncate another figure's group to nothing"
+    )
+    assert [v.subject for v in capped["other"]] == ["c2b"], (
+        "the other group still answers at limit=1"
+    )
+
+
+async def test_values_citing_orders_by_codepoint_in_both_stores(
+    store: tuple[EngineStore, str],
+) -> None:
+    """The per-group cap makes ordering load-bearing: which rows survive is
+    part of the answer. Postgres's default collation ignores punctuation at
+    the primary level (`a_1` before `aX1` under en_US, after it by
+    codepoint), so a store that sorted under its own collation would keep a
+    different row than the in-memory store at the same limit."""
+    s, tenant = store
+    await s.save(tenant, "fig", "v1", "a_1", 1.0, ["m"], "under")
+    await s.save(tenant, "fig", "v1", "aX1", 2.0, ["m"], "upper")
+    capped = await s.values_citing(tenant, "m", {"fig": "v1"}, limit=1)
+    assert [v.subject for v in capped["fig"]] == ["aX1"], (
+        "codepoint order: X (0x58) sorts before _ (0x5F) in both stores"
     )
 
 
@@ -420,4 +444,12 @@ async def test_values_under_treats_the_prefix_as_text_not_a_pattern(
     ]
     assert [v.subject for v in await s.values_under(tenant, "fig", "v1", "p%q@")] == [
         "p%q@2026-01-01"
+    ]
+
+    # The classic escaping mistake is handling % and _ but not the escape
+    # character itself: then "a\\b@" reads as an escaped b and matches ab@.
+    await s.save(tenant, "fig", "v1", "a\\b@2026-01-01", 5.0, [], "five")
+    await s.save(tenant, "fig", "v1", "ab@2026-01-01", 6.0, [], "six")
+    assert [v.subject for v in await s.values_under(tenant, "fig", "v1", "a\\b@")] == [
+        "a\\b@2026-01-01"
     ]

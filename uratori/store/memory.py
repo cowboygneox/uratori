@@ -19,7 +19,7 @@ from typing import Any
 
 from ..engine.buckets import SEPARATOR
 from ..lang.plan import Value
-from .base import BucketChange, FactRow, Pointer, StoredValue
+from .base import BucketChange, CitingValue, FactRow, Pointer, StoredValue
 
 
 class MemoryFactStore:
@@ -207,17 +207,20 @@ class MemoryEngineStore:
 
     async def values_citing(
         self, tenant: str, member: str, versions: Mapping[str, str], *, limit: int
-    ) -> dict[str, list[StoredValue]]:
+    ) -> dict[str, list[CitingValue]]:
         # Exact membership, per the protocol: `in` over the tuple, never a
-        # text match. `values` already returns subject order, so slicing the
-        # front IS the page the Postgres cap serves.
-        out: dict[str, list[StoredValue]] = {}
+        # text match. Sorted by codepoint explicitly, like the Postgres half
+        # -- the cap decides which rows survive, so the order is contract.
+        out: dict[str, list[CitingValue]] = {}
         for name, version in versions.items():
-            found = [
-                v
-                for v in await self.values(tenant, name, version)
-                if member in v.members
-            ]
+            found = sorted(
+                (
+                    CitingValue(subject=v.subject, value=v.value, label=v.label)
+                    for v in await self.values(tenant, name, version)
+                    if member in v.members
+                ),
+                key=lambda v: v.subject,
+            )
             if found:
                 out[name] = found[:limit]
         return out

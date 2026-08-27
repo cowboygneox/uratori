@@ -21,7 +21,7 @@ from typing import Any
 import asyncpg
 
 from ..lang.plan import Value
-from .base import BucketChange, FactRow, Pointer, StoredValue
+from .base import BucketChange, CitingValue, FactRow, Pointer, StoredValue
 
 
 class PostgresEngineStore:
@@ -383,7 +383,7 @@ class PostgresEngineStore:
 
     async def values_citing(
         self, tenant: str, member: str, versions: Mapping[str, str], *, limit: int
-    ) -> dict[str, list[StoredValue]]:
+    ) -> dict[str, list[CitingValue]]:
         # jsonb containment is exact element membership -- the semantics the
         # protocol demands -- and it is what the GIN index on `members`
         # serves. Deliberately WITHOUT name/version in the WHERE: given those,
@@ -391,25 +391,35 @@ class PostgresEngineStore:
         # every citation array it holds (a count over a million records
         # carries tens of thousands of keys per row), which measured in whole
         # seconds per figure. Tenant-plus-containment leaves the citation
-        # index as the only path, one probe for every figure at once, and the
-        # handful of rows that cite one record are filtered to the wanted
-        # versions here.
+        # index as the only path, one probe for every figure at once. And
+        # `members` itself is not selected: the matched rows carry the same
+        # enormous arrays, and dragging them back would spend at fetch time
+        # what the index saved at scan time. The handful of rows citing one
+        # record are filtered, sorted by codepoint (Python's sort, to match
+        # the in-memory store -- the database's collation is a different
+        # order, and the cap makes order part of the answer) and capped here.
         rows = await self._pool.fetch(
-            "select name, version, subject_id, value, members, subject_label "
+            "select name, version, subject_id, value, subject_label "
             "from figure_value "
-            "where tenant_id = $1 and members @> $2::jsonb "
-            "order by name, subject_id",
+            "where tenant_id = $1 and members @> $2::jsonb",
             tenant,
             json.dumps([member]),
         )
-        out: dict[str, list[StoredValue]] = {}
+        grouped: dict[str, list[CitingValue]] = {}
         for row in rows:
             if versions.get(row["name"]) != row["version"]:
                 continue
-            group = out.setdefault(row["name"], [])
-            if len(group) < limit:
-                group.append(_stored(row))
-        return out
+            grouped.setdefault(row["name"], []).append(
+                CitingValue(
+                    subject=row["subject_id"],
+                    value=json.loads(row["value"]),
+                    label=row["subject_label"],
+                )
+            )
+        return {
+            name: sorted(group, key=lambda v: v.subject)[:limit]
+            for name, group in grouped.items()
+        }
 
     async def values_in_range(
         self, tenant: str, name: str, version: str, frm: str, to: str
@@ -735,7 +745,11 @@ create table if not exists figure_value (
 -- The reverse citation: "which values counted this record" is a containment
 -- probe over `members`, and without this it is a scan of every value a
 -- figure has stored. jsonb_path_ops because containment is the only
--- operator that page asks.
+-- operator that page asks. On an upgrade this builds at first boot, inside
+-- the schema transaction -- a deliberate one-time cost (seconds on a
+-- million-row table); a host that cannot afford the pause can pre-create
+-- it CONCURRENTLY from its own migrations, and `if not exists` makes this
+-- statement the no-op it should then be.
 create index if not exists figure_value_members_idx
   on figure_value using gin (members jsonb_path_ops);
 """
