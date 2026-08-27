@@ -343,9 +343,16 @@ class Uratori:
         *,
         touched: set[str] | None = None,
         trailing: Sequence[int] = DEFAULT_TRAILING,
+        at: str | None = None,
     ) -> tuple[Result, ...]:
         """The current answers: touched figures and their readings, or all of
         them when `touched` is None (a client's first paint).
+
+        `at` (an ISO date) anchors every window reading on that day's end in
+        its own zone instead of on now -- an argument like `trailing`, moving
+        which stored days take part and nothing else. Figures and projections
+        ignore it: they are point-in-time answers with no window to move, and
+        each result's own `at` says when it was computed.
 
         Every projection serves, every time, from here: a projection stores
         nothing and is evaluated at the instant it is asked, so its rows move
@@ -358,7 +365,7 @@ class Uratori:
         ranking).
         """
         return await self._serve(
-            tenant, settings, touched=touched, projections=None, trailing=trailing
+            tenant, settings, touched=touched, projections=None, trailing=trailing, at=at
         )
 
     async def _serve(
@@ -369,6 +376,7 @@ class Uratori:
         touched: set[str] | None = None,
         projections: set[str] | None = None,
         trailing: Sequence[int] = DEFAULT_TRAILING,
+        at: str | None = None,
     ) -> tuple[Result, ...]:
         document = self._schema.settings_for(settings)
         lib = self._library
@@ -395,7 +403,7 @@ class Uratori:
                 continue
             out.append(
                 await serve_reading(
-                    self._store, lib, tenant, reading, document, list(trailing)
+                    self._store, lib, tenant, reading, document, list(trailing), at_day=at
                 )
             )
 
@@ -417,10 +425,14 @@ class Uratori:
         settings: Mapping[str, Any] | None = None,
         *,
         trailing: Sequence[int] = DEFAULT_TRAILING,
+        at: str | None = None,
     ) -> Result | None:
         """One definition's current answer, by name. None when nothing is
         called that; a live reading raises, because "no such definition" and
-        "not built yet" send a caller to different fixes."""
+        "not built yet" send a caller to different fixes.
+
+        `at` anchors a window reading's spans on that ISO date's end instead
+        of on now; everything else serves as it always did and ignores it."""
         document = self._schema.settings_for(settings)
         lib = self._library
 
@@ -439,7 +451,7 @@ class Uratori:
             if reading.mode == "live":
                 raise NotImplementedError("live readings are not servable yet")
             return await serve_reading(
-                self._store, lib, tenant, reading, document, list(trailing)
+                self._store, lib, tenant, reading, document, list(trailing), at_day=at
             )
 
         projection = lib.projection(name)

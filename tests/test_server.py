@@ -11,7 +11,9 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import asyncpg
 import httpx
@@ -1094,3 +1096,182 @@ async def test_the_described_library_names_the_fields_a_declaration_reads(
     carried = {d["name"]: d for d in body["indexes"]}["shop_order.carried_by"]
     assert carried["fields"] == ["courier_id"]
     assert carried["through"] == []
+
+
+# ---------------------------------------------------------------- anchors --
+
+RIDES_SOURCE = (
+    COURIER_SOURCE
+    + """
+group shop_order.delivered_by_day from (courier_id, delivered_at by day in tenant.timezone)
+
+measure shop_order.riding_seconds = delivered_at - picked_up_at
+
+# Every delivery's ride time, day by day.
+figure shop_courier.ride_times:
+    display "{shop_courier} rides"
+    depends:
+        done = shop_order.delivered_by_day:{shop_courier}
+    calculate:
+        list(shop_order.riding_seconds over done)
+
+# The typical ride, over a window.
+reading shop_courier.typical_ride(range):
+    display "{value}"
+    depends:
+        rides = shop_courier.ride_times in range
+    calculate:
+        mean(rides)
+"""
+)
+
+# Kiritimati is UTC+14 with no DST: the local calendar furthest from UTC's, so
+# an anchor resolved against UTC instead of the tenant's zone misfiles a whole
+# day of rides -- the sharpest data these tests can hold the server to.
+RIDES_ZONE = "Pacific/Kiritimati"
+
+RIDES = {
+    # Local day 2026-06-28: a one-hour ride.
+    "r1": {
+        "ref": "R-1",
+        "courier_id": "c1",
+        "status": "delivered",
+        "picked_up_at": "2026-06-27T19:00:00Z",
+        "delivered_at": "2026-06-27T20:00:00Z",
+    },
+    # Local day 2026-06-30: a two-hour ride.
+    "r2": {
+        "ref": "R-2",
+        "courier_id": "c1",
+        "status": "delivered",
+        "picked_up_at": "2026-06-29T18:00:00Z",
+        "delivered_at": "2026-06-29T20:00:00Z",
+    },
+    # Delivered on 2026-06-30 *UTC*, but the tenant's 2026-07-01: past an
+    # anchor of 2026-06-30, so it belongs in no anchored window below.
+    "r3": {
+        "ref": "R-3",
+        "courier_id": "c1",
+        "status": "delivered",
+        "picked_up_at": "2026-06-30T09:00:00Z",
+        "delivered_at": "2026-06-30T12:00:00Z",
+    },
+}
+
+
+async def _teach_rides(http: httpx.AsyncClient) -> None:
+    world = COURIER_WORLD.to_document()
+    world["bucket_settings"] = ["tenant.timezone"]
+    world["defaults"] = {
+        **world["defaults"],
+        "tenant": {"hoursPerDay": 8, "timezone": RIDES_ZONE},
+    }
+    assert (await http.put("/schema", json=world)).status_code == 200
+    put = await http.put("/definitions", json={"source": RIDES_SOURCE})
+    assert put.status_code == 200, put.text
+    pushed = await http.post(
+        "/tenants/t1/facts",
+        json={"writes": {"shop_courier": COURIER, "shop_order": RIDES}},
+    )
+    assert pushed.status_code == 200, pushed.text
+
+
+async def test_an_anchored_reading_ends_its_windows_on_the_anchor_day(server: Server) -> None:
+    """`?at=` is an argument, not a definition change: it moves which stored
+    days a window covers and touches nothing else -- statistic, floor, band
+    and version all serve unchanged. The windows must end on the anchor day
+    in the *tenant's* calendar, and the ride the tenant filed under the next
+    local day (r3, delivered 2026-06-30 by UTC's clock) must stay out."""
+    await _teach_rides(server.http)
+
+    got = await server.http.get(
+        "/tenants/t1/results/shop_courier.typical_ride",
+        params={"at": "2026-06-30", "trailing": [7, 3]},
+    )
+    assert got.status_code == 200, got.text
+    result = got.json()
+    assert result["state"]["ok"] is True
+
+    [subject] = result["subjects"]
+    week, short = subject["windows"]
+    assert (week["trailing"], week["frm"], week["to"]) == (7, "2026-06-24", "2026-06-30")
+    assert (short["trailing"], short["frm"], short["to"]) == (3, "2026-06-28", "2026-06-30")
+    for window in (week, short):
+        assert window["mean"] == 5400.0, (
+            "the mean should cover exactly the one-hour and two-hour rides; "
+            "anything else means a day leaked across the anchor or fell out "
+            "of the window"
+        )
+        assert window["days_covered"] == 2
+    assert week["days_requested"] == 7 and short["days_requested"] == 3
+
+    # The anchor travels on the answer as provenance: the served instant is
+    # the anchor day's last moment in the tenant's calendar, not the wall
+    # clock of whenever the request happened to run.
+    served = datetime.fromisoformat(result["at"]).astimezone(ZoneInfo(RIDES_ZONE))
+    assert served.date().isoformat() == "2026-06-30"
+    assert (served.hour, served.minute, served.second) == (23, 59, 59)
+
+    # The bulk route accepts the same anchor -- the first paint of a board
+    # deliberately looking at June must not mix June readings with July ones.
+    listed = await server.http.get(
+        "/tenants/t1/results", params={"at": "2026-06-30", "trailing": 3}
+    )
+    assert listed.status_code == 200
+    entry = next(r for r in listed.json() if r["name"] == "shop_courier.typical_ride")
+    assert entry["subjects"][0]["windows"][0]["to"] == "2026-06-30"
+    assert entry["subjects"][0]["windows"][0]["mean"] == 5400.0
+
+
+async def test_an_unanchored_reading_still_ends_today(server: Server) -> None:
+    """The control: `at` absent means now, exactly as before the anchor
+    existed. The June rides sit outside a window ending today, so the honest
+    unanchored answer is the absence machinery -- no subjects, a floor that
+    names what fell short -- rather than June's mean served as current."""
+    await _teach_rides(server.http)
+
+    got = await server.http.get(
+        "/tenants/t1/results/shop_courier.typical_ride", params={"trailing": 7}
+    )
+    assert got.status_code == 200, got.text
+    result = got.json()
+    assert result["state"]["ok"] is True
+
+    today = datetime.now(tz=ZoneInfo(RIDES_ZONE)).date().isoformat()
+    assert result["subjects"] == []
+    [window] = result["empty"]["windows"]
+    assert window["to"] == today
+    assert window["mean"] is None
+    assert window["days_covered"] == 0
+
+
+async def test_an_anchor_before_any_data_is_an_absence_not_a_zero(server: Server) -> None:
+    """A window anchored before anything was stored yields the same absence
+    answer an empty board does: no subjects, statistics withheld with the
+    floor named. Zeroes here would be numbers nobody measured."""
+    await _teach_rides(server.http)
+
+    got = await server.http.get(
+        "/tenants/t1/results/shop_courier.typical_ride",
+        params={"at": "2020-01-01", "trailing": 7},
+    )
+    assert got.status_code == 200, got.text
+    result = got.json()
+    assert result["state"]["ok"] is True
+    assert result["subjects"] == []
+    [window] = result["empty"]["windows"]
+    assert (window["frm"], window["to"]) == ("2019-12-26", "2020-01-01")
+    assert window["mean"] is None
+    assert window["days_covered"] == 0
+    assert window["unmet"] == ["needs at least 1 value; there are 0"]
+
+
+async def test_an_anchor_that_is_not_a_date_is_refused(server: Server) -> None:
+    """"June 30th" and "2026-6-30" are requests the server cannot resolve to
+    a calendar day; guessing one silently would serve a window nobody asked
+    for. 422, the same refusal every other malformed input gets."""
+    await _teach_rides(server.http)
+    got = await server.http.get(
+        "/tenants/t1/results/shop_courier.typical_ride", params={"at": "June 30th"}
+    )
+    assert got.status_code == 422, got.text

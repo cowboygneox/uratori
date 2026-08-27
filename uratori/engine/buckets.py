@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from datetime import time as dt_time
 from functools import lru_cache
 from typing import Any, assert_never
 from zoneinfo import ZoneInfo
@@ -208,6 +209,28 @@ def label_in(epoch_ms: float, zone: str | None, grain: str) -> str:
     return f"{moment.date().isoformat()}T{moment.hour:02d}:{moment.minute - moment.minute % step:02d}"
 
 
+def end_of_day_ms(day: str, zone: str | None) -> float:
+    """The last millisecond of a calendar day in the tenant's zone.
+
+    This is what an anchor date resolves to: a caller asking for "the window
+    ending 2026-06-30" means the whole of that local day, so the anchoring
+    instant is its final moment. The day's *start* would file under the right
+    day too, but it would travel on the response as an `at` claiming the
+    answer predates almost all of the data it covers -- provenance that reads
+    backwards.
+
+    Built from the next local midnight rather than 23:59:59.999 directly:
+    even when a transition swallows that midnight, `fold=0` maps the missing
+    wall time to the transition instant itself -- the first real instant of
+    the next day -- so one millisecond earlier is the anchor day's true last
+    moment whatever the clocks did.
+    """
+    anchor = date.fromisoformat(day)
+    tz = _zone(zone) if zone is not None else UTC
+    next_midnight = datetime.combine(anchor + timedelta(days=1), dt_time(), tzinfo=tz)
+    return next_midnight.timestamp() * 1000.0 - 1.0
+
+
 def day_range(at_ms: float, zone: str | None, days: int) -> tuple[str, str]:
     """The trailing window ending today, in the tenant's calendar.
 
@@ -215,10 +238,17 @@ def day_range(at_ms: float, zone: str | None, days: int) -> tuple[str, str]:
     ahead of UTC the current local day sorts after a UTC anchor, so the window
     would drop it and the board would report a team that has merged nothing all
     morning. One function computes both ends, so they cannot disagree.
+
+    The start is calendar arithmetic on the end day, not millisecond
+    subtraction from the instant: a spring-forward inside the window makes one
+    of its days 23 hours long, so exact-day subtraction from an instant within
+    an hour of midnight lands on the wrong side of it and the window quietly
+    opens a day late -- and an anchored request sits at a day's last
+    millisecond, which is exactly the exposed hour.
     """
     end = day_in(at_ms, zone)
-    start_ms = at_ms - (days - 1) * 86_400_000
-    return day_in(start_ms, zone), end
+    start = date.fromisoformat(end) - timedelta(days=days - 1)
+    return start.isoformat(), end
 
 
 # ------------------------------------------------------------ bucketing --

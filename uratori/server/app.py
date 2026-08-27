@@ -30,6 +30,7 @@ import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import date
 from typing import Annotated, Literal, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -419,11 +420,19 @@ def create_app(
 
     # ------------------------------------------------------------ results --
 
+    # `at` anchors window readings on a chosen day instead of today: an ISO
+    # date, resolved by the engine to that day's end in each reading's own
+    # zone. An argument like `trailing` -- windows and their anchor are the
+    # things a client may choose, because both only move which stored days
+    # take part; the calculation itself is hashed into the version and no
+    # query parameter reaches it. FastAPI's `date` parsing is the validation:
+    # anything that is not a calendar day is a 422 before the engine sees it.
     @app.get("/tenants/{tenant}/results", response_model=list[Result], dependencies=[auth])
     async def get_results(
         tenant: str,
         s: S,
         trailing: Annotated[list[int] | None, Query()] = None,
+        at: Annotated[date | None, Query()] = None,
     ) -> list[Result]:
         world, library = ready(s)
         facade = facade_for(s, world, library)
@@ -432,6 +441,7 @@ def create_app(
                 tenant,
                 await db.load_settings(s.pool, tenant),
                 trailing=trailing or DEFAULT_TRAILING,
+                at=at.isoformat() if at is not None else None,
             )
         )
 
@@ -441,6 +451,7 @@ def create_app(
         name: str,
         s: S,
         trailing: Annotated[list[int] | None, Query()] = None,
+        at: Annotated[date | None, Query()] = None,
     ) -> Result:
         world, library = ready(s)
         facade = facade_for(s, world, library)
@@ -450,6 +461,7 @@ def create_app(
                 name,
                 await db.load_settings(s.pool, tenant),
                 trailing=trailing or DEFAULT_TRAILING,
+                at=at.isoformat() if at is not None else None,
             )
         except ValueError as refusal:
             raise HTTPException(status_code=400, detail=str(refusal)) from refusal

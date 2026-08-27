@@ -515,10 +515,22 @@ every projection, evaluated live at this instant.
 
 `trailing` is a repeatable query parameter selecting the windows readings are
 served over, in days: `?trailing=30&trailing=7`. The default is 30, 14 and 7.
-Windows are the one thing a client may choose, because which windows exist is
+
+`at` anchors those windows on a chosen day instead of today: an ISO date
+(`?at=2026-06-30&trailing=30` is "the 30 days ending June 30"), resolved by
+the server to that day's end in each reading's own zone. Absent, the anchor
+is now, exactly as before. Anything that is not a calendar day is a `422`.
+Any absolute range at day granularity is reachable this way: `at` is the end
+date and `trailing` the span. An anchor before a tenant's data is not an
+error -- the windows come back with `days_covered: 0` and their requirements
+unmet, the same absence answer an empty board serves.
+
+Windows and their anchor are the things a client may choose, because both are
 presentation, not calculation -- a reading's statistics, minimums and band are
-hashed into its version, and a window only narrows which stored days take
-part.
+hashed into its version, and `trailing` and `at` only move which stored days
+take part. The anchor travels back on the answer as provenance: the result's
+`at` is the instant the anchor resolved to, and each window's `frm`/`to` are
+the days it actually covered.
 
 There is no `404` for an unheard-of tenant, and that is not an oversight: a
 tenant is a data partition, not a resource, and the honest answer about one
@@ -527,7 +539,8 @@ with nothing stored is a full list of `Result`s whose `state` says
 
 ### `GET /tenants/{tenant}/results/{name}`
 
-One definition's current answer, by name, with the same `trailing` parameter:
+One definition's current answer, by name, with the same `trailing` and `at`
+parameters:
 
 ```bash
 curl -s "$BASE/tenants/t1/results/shop_courier.carrying" -H "$AUTH"
@@ -661,7 +674,7 @@ Top level:
 | `kind` | `"figure"`, `"reading"`, `"projection"` or `"summary"`. What varies between them is what sits inside `subjects`, not the envelope around it. |
 | `name` | The definition's name. |
 | `version` | The content hash of the definition that produced this answer. **The citation**: it is one of the hashes `PUT /definitions` returned, so any number on any screen traces to reviewed text. |
-| `at` | When the server evaluated the response, ISO 8601. One instant for the whole response, by construction -- a per-row clock produces a list whose oldest entry disagrees with itself. |
+| `at` | The instant the answer is *about*, ISO 8601: evaluation time, or -- for a reading served with `?at=` -- the requested anchor day's last moment in the reading's zone. One instant for the whole result, by construction -- a per-row clock produces a list whose oldest entry disagrees with itself. |
 | `zone` | The tenant's calendar timezone, when the definition is anchored to one, so a screen can say *when* rather than printing an instant verbatim. A client cannot work this out: it knows its own timezone, and the board belongs to a team that may not share it. |
 | `unit` | What the values *are* -- see below. |
 | `label` | A heading, rendered by the server. |
