@@ -727,34 +727,84 @@ async function evidenceRow(row, figure, subject) {
   if (!answer.ok) {
     holder.append(problem(answer, 'No evidence:'));
   } else {
-    const evidence = answer.body;
-    // Through el(), not bare append(): append() stringifies a null child
-    // into the visible word "null", el() skips it.
-    holder.append(el('div', {}, el('p', { class: 'dim' },
-      evidence.members.length
-        ? `This value cites ${evidence.members.length} ${evidence.parts ? 'parts' : 'records'}:`
-        : 'This value cites nothing.'),
-      evidence.note ? el('p', { class: 'faint' }, evidence.note) : null,
-      el('ul', {}, evidence.members.map((member) => {
-        const link = member.url ? safeUrl(member.url) : null;
-        return el('li', { class: 'mono' },
-          member.figure ? el('span', { class: 'faint' }, `${member.figure} · `) : null,
-          link
-            ? el('a', { href: link, target: '_blank', rel: 'noreferrer' },
-                member.title || member.key)
-            : (member.title || member.key),
-          member.display ? el('span', { class: 'dim' }, ` — ${member.display}`) : null,
-          member.held ? null : el('span', { class: 'faint' }, ' (no longer held)'),
-          // The citation's last rung: when the members are records of one
-          // kind, each held one links to the record itself, so a value can
-          // be walked to the stored fact without leaving the trace.
-          evidence.kind && member.held
-            ? [' ', el('a', { class: 'trace', href: recordHash(evidence.kind, member.key) },
-                'record →')]
-            : null);
-      }))));
+    holder.append(evidencePanel(answer.body));
   }
   row.after(expansion);
+}
+
+function evidencePanel(evidence) {
+  // The part drill fetches evidence for figures no surrounding table has
+  // availability-gated, so the gate lives here: without it a never-computed
+  // or dial-moved part renders "This value cites nothing." -- the confident
+  // claim the state field exists to prevent.
+  if (!evidence.state.ok) return unavailable(evidence.state);
+  // Through el(), not bare append(): append() stringifies a null child
+  // into the visible word "null", el() skips it.
+  return el('div', {}, el('p', { class: 'dim' },
+    evidence.members.length
+      ? [`This value cites ${evidence.members.length} ${evidence.parts ? 'parts' : 'records'}`,
+         // The definition the numbers travel through, named on the panel:
+         // "these records, measured as this definition says" is what makes
+         // the rows lead to the amount rather than merely sit under it.
+         // "measured as", tense-neutral on purpose: a list row's numbers are
+         // the stored addends, a sum's or an extreme's are read live.
+         evidence.measure
+           ? [', each measured as ', el('a', {
+               class: 'mono', href: `#/definitions/${encodeURIComponent(evidence.measure)}`,
+             }, evidence.measure), ':']
+           : ':']
+      : 'This value cites nothing.'),
+    evidence.note ? el('p', { class: 'faint' }, evidence.note) : null,
+    el('ul', {}, evidence.members.map((member) => {
+      const link = member.url ? safeUrl(member.url) : null;
+      const item = el('li', { class: 'mono' },
+        member.figure
+          ? [el('a', { class: 'faint', href: `#/definitions/${encodeURIComponent(member.figure)}` },
+              member.figure), el('span', { class: 'faint' }, ' · ')]
+          : null,
+        link
+          ? el('a', { href: link, target: '_blank', rel: 'noreferrer' },
+              member.title || member.key)
+          : (member.title || member.key),
+        // The cell a part is for, or twenty-seven season rows of one team
+        // all read as the same frozen label.
+        member.dimension ? el('span', { class: 'dim' }, ` × ${member.dimension}`) : null,
+        member.display ? el('span', { class: 'dim' }, ` — ${member.display}`) : null,
+        member.held ? null : el('span', { class: 'faint' }, ' (no longer held)'),
+        // The citation's last rung: when the members are records of one
+        // kind, each held one links to the record itself, so a value can
+        // be walked to the stored fact without leaving the trace.
+        evidence.kind && member.held
+          ? [' ', el('a', { class: 'trace', href: recordHash(evidence.kind, member.key) },
+              'record →')]
+          : null,
+        // A part is a stored value of its own, so the walk continues: its
+        // citation opens in place, and the trace runs figure by figure down
+        // to the records without leaving the page.
+        member.figure && member.held
+          ? [' ', el('button', { onclick: () => partDrill(item, member) }, 'evidence')]
+          : null);
+      return item;
+    })));
+}
+
+async function partDrill(item, member) {
+  const open = item.querySelector(':scope > .expansion');
+  if (open) { open.remove(); return; } // second click folds it back up
+  // Two fast clicks would both pass the check above before either fetch
+  // lands, stacking two panels the toggle then removes one at a time.
+  if (item.dataset.drilling) return;
+  item.dataset.drilling = '1';
+  try {
+    const answer = await get(
+      `tenants/${encodeURIComponent(tenant())}/evidence/${encodeURIComponent(member.figure)}`
+      + `?subject=${encodeURIComponent(member.key)}`);
+    const nested = el('div', { class: 'expansion' },
+      answer.ok ? evidencePanel(answer.body) : problem(answer, 'No evidence:'));
+    item.append(nested);
+  } finally {
+    delete item.dataset.drilling;
+  }
 }
 
 // --------------------------------------------------------------- facts --
@@ -1202,7 +1252,11 @@ async function activityView() {
 
   // An enum-to-English map with a verbatim fallback: a future cause must
   // surface as itself, never be mislabelled as one of today's two.
-  const TRIGGERS = { facts: 'facts arrived', run: 'manual run' };
+  const TRIGGERS = {
+    facts: 'facts arrived',
+    'facts-deferred': 'batch landed, pass deferred',
+    run: 'manual run',
+  };
 
     // A table, not stacked flex rows: the whole point of the log is
     // comparing movements, and comparison needs the befores under each

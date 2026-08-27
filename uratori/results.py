@@ -233,10 +233,14 @@ class Subject(BaseModel):
 class EvidenceMember(BaseModel):
     """One thing a stored value cites: a record, or (for a rollup) a part.
 
-    `display` is this member's own measurement, rendered by the server. Only a
-    `list` figure has one per record; a count deliberately serves none, because
-    a "1" beside each record would be a number nothing computed, printed on the
-    page whose claim is that every number was.
+    `display` is this member's own measurement, rendered by the server. A
+    `list` figure serves its stored values positionally; a sum or an extreme
+    serves each held record as its measure reads it now -- live, like a
+    rollup's parts, so a record corrected after the pass visibly disagrees
+    with the total instead of agreeing with a number that has stopped being
+    right. A count deliberately serves none, because a "1" beside each record
+    would be a number nothing computed, printed on the page whose claim is
+    that every number was.
 
     `held` is a separate claim from `title is None`, and `False` means one
     thing: the store was asked for this member and does not have it -- deleted
@@ -257,6 +261,13 @@ class EvidenceMember(BaseModel):
     held: bool = True
     display: str | None = None
     figure: str | None = None
+
+    dimension: str | None = None
+    """A part's day or dimension cell, split off its storage key server-side.
+    Only for parts: their titles are frozen subject labels, so twenty-seven
+    season cells all read "Seattle Seahawks" with nothing telling them apart.
+    A record's key is never split -- a raw fact key may contain the separator
+    without it meaning anything."""
 
 
 class Evidence(BaseModel):
@@ -297,6 +308,15 @@ class Evidence(BaseModel):
     parts: bool = False
     source: str | None = None
     kind: str | None = None
+
+    measure: str | None = None
+    """The measure the member displays were read through, when there is one --
+    the definition that turns these records into the amount above them. Named
+    so the panel can say how the rows lead to the value rather than leaving a
+    reader to guess. Absent for a count, whose records are the amount; absent
+    for parts, whose rows each name their own figure; and withheld whenever
+    `note` withholds the measurements, because naming how rows were measured
+    above rows deliberately carrying no measurements is a contradiction."""
 
 
 class Result(BaseModel):

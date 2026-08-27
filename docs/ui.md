@@ -23,7 +23,13 @@ product's end users; a host builds its own screens against the
   members, a measure each record's rendered measurement -- and drills to the
   record pages themselves. For servable kinds the page also asks for the
   current answer, and a figure's rows carry an *evidence* button -- the
-  stored citation, joined back to the records.
+  stored citation, joined back to the records, and made to *lead to the
+  amount*: the panel names the measure the value reads its members through,
+  a sum's or an extreme's rows each show that record as the measure reads it
+  now (live, like a rollup's parts -- a record corrected since the pass
+  visibly disagrees with the stored total, which is true), and a part row
+  opens its own citation in place, so the walk runs figure by figure down to
+  the records without leaving the page.
 - **Facts.** Per kind, what the server holds -- a kind the schema declares
   but nobody has pushed appears at zero, because "nothing collected" is a
   finding. Records page by key, search over key and record text, and each row
