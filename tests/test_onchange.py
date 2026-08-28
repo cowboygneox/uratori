@@ -1188,7 +1188,7 @@ async def test_a_carried_bucket_cites_the_change_it_carried_from() -> None:
     anchor's evidence instead, which is what makes the number walkable back
     to the change, its instant and its author.
     """
-    engine, store, library, _ = await _carried()
+    engine, _, _, _ = await _carried()
 
     july = await engine.evidence("t1", "site.target_month", "s1@2026-07")
     assert [m.key for m in july.members] == ["c2"], (
@@ -1209,7 +1209,7 @@ async def test_a_carried_bucket_cites_the_change_it_carried_from() -> None:
 async def test_the_carried_row_is_headed_by_the_subjects_name() -> None:
     """A carried bucket is a row on a board like any other, and a row headed
     by a raw id reads as broken data rather than as a carried value."""
-    engine, store, library, _ = await _carried()
+    _, store, library, _ = await _carried()
     plan = library.figure("site.target_month")
     rows = {r.subject: r.label for r in await store.values("t1", plan.name, plan.version)}
     assert rows["s1@2026-07"] == "Northgate"
@@ -1738,3 +1738,439 @@ async def test_a_bucket_statistic_is_the_median_of_that_buckets_records() -> Non
         f"expected the median of the bucket's own records, got {rows['s1@2026-03']}"
     )
     assert "s1@2026-04" not in rows, "a month with no jobs invented a statistic"
+
+
+async def test_a_warm_edit_under_a_derived_sequenced_figure_completes() -> None:
+    """Correcting a change, with a figure reading the carried one at
+    `:{bucket}` above it.
+
+    A part that moves makes its totals stale, and the engine propagates that
+    by subject -- stripping `@bucket` on the way, which is right for a
+    roster-keyed total and wrong for a sequenced one. The sequenced reader
+    was then asked for the bare site, found every coordinate row under it,
+    and aborted the whole pass rather than pick one. The figure is left half
+    written, nothing is pushed, and the movement is never reported at all
+    because the retry finds the edit already landed.
+    """
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(DELTA_FIGURE)
+    engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
+    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    for key, when, value, who, _ in CHANGES:
+        facts.put(
+            "t1",
+            "setting_change",
+            key,
+            {
+                "site_id": "s1",
+                "setting": "target_minutes",
+                "value": value,
+                "set_at": when,
+                "set_by": who,
+            },
+        )
+    facts.put(
+        "t1",
+        "job",
+        "j7",
+        {
+            "site_id": "s1",
+            "cost": 1.0,
+            "started_at": "2026-07-04T09:00:00Z",
+            "finished_at": "2026-07-04T09:40:00Z",
+        },
+    )
+    await engine.run("t1", full=True, at_ms=AT)
+
+    facts.put(
+        "t1",
+        "setting_change",
+        "c2",
+        {
+            "site_id": "s1",
+            "setting": "target_minutes",
+            "value": 1200.0,
+            "set_at": "2026-06-03T09:00:00Z",
+            "set_by": "Bo",
+        },
+    )
+    # The pass must complete rather than raise.
+    await engine.run("t1", written={"setting_change": ["c2"]}, at_ms=AT)
+
+    gap = library.figure("site.gap_month")
+    rows = {r.subject: r.value for r in await store.values("t1", gap.name, gap.version)}
+    assert rows.get("s1@2026-07") == 2400.0 - 1200.0, (
+        "the derived figure did not follow the corrected target"
+    )
+
+
+async def test_one_subject_reaching_too_far_back_does_not_lose_the_others() -> None:
+    """The ceiling is a fact about one site's data, not about the figure.
+
+    Let out of the materialiser, it discarded every row the loop had already
+    written for the subjects before it: they stayed on the board, appeared in
+    no change stream, and the next pass found them equal and said nothing
+    either -- so they were never announced at all, and the run reported
+    carrying nothing while the figure demonstrably had.
+    """
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    daily = '''
+group setting_change.by_day from (site_id, set_at by day in tenant.timezone)
+
+# A target carried day by day.
+figure site.target_day bucketed:
+    display "{site} daily target"
+    unit duration
+
+    depends:
+        sets = setting_change.by_day:{site} & setting_change.target
+
+    calculate:
+        latest(setting_change.value over sets) carried forward
+'''
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(daily)
+    engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
+    for site in ("s1", "s2"):
+        facts.put("t1", "site", site, {"name": site.upper()})
+    # s1 sorts first and is ordinary; s2 reaches back past the ceiling.
+    facts.put(
+        "t1",
+        "setting_change",
+        "recent",
+        {
+            "site_id": "s1",
+            "setting": "target_minutes",
+            "value": 1800.0,
+            "set_at": "2026-08-20T09:00:00Z",
+            "set_by": "Aki",
+        },
+    )
+    facts.put(
+        "t1",
+        "setting_change",
+        "ancient",
+        {
+            "site_id": "s2",
+            "setting": "target_minutes",
+            "value": 1500.0,
+            "set_at": "1998-01-04T09:00:00Z",
+            "set_by": "Bo",
+        },
+    )
+    outcome = await engine.execute("t1", full=True, at_ms=AT)
+
+    plan = library.figure("site.target_day")
+    stored = {r.subject for r in await store.values("t1", plan.name, plan.version)}
+    carried_rows = {s for s in stored if s.startswith("s1@") and s != "s1@2026-08-20"}
+    assert carried_rows, "the ordinary site was not carried at all"
+
+    announced = {
+        c.subject for c in outcome.changes if c.figure == "site.target_day"
+    }
+    assert carried_rows <= announced, (
+        "rows reached the board and no change stream: "
+        f"{sorted(carried_rows - announced)}"
+    )
+    assert outcome.carried == ("site.target_day",), (
+        "the run reported carrying nothing while the figure demonstrably had"
+    )
+
+
+# ---------------------------- what the mutation audit found unprotected --
+
+
+async def test_a_bucket_nobody_could_measure_is_absent_rather_than_nought() -> None:
+    """A month whose only job the measure cannot read answers **nothing**.
+
+    The mistake this refuses: treating "no sample" as a sample of nought, so
+    a month reports a median job length of zero -- a confident claim that
+    everything that month was instantaneous, and one every band would colour
+    comfortable.
+
+    Distinct from the case the median test covers. A month with no records at
+    all has no bucket key, so no row is written and the empty branch is never
+    reached; only a bucket that exists and whose members are every one
+    unmeasurable gets there.
+    """
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(MEDIAN)
+    engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
+    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    # Finished, so it buckets by month -- but never started, so the length
+    # measure has nothing to subtract from.
+    facts.put(
+        "t1",
+        "job",
+        "j1",
+        {"site_id": "s1", "cost": 1.0, "finished_at": "2026-03-04T09:40:00Z"},
+    )
+    await engine.run("t1", full=True, at_ms=AT)
+
+    plan = library.figure("site.actual_month")
+    rows = {r.subject: r.value for r in await store.values("t1", plan.name, plan.version)}
+    assert "s1@2026-03" in rows, (
+        "the bucket was never written at all, so its absence proves nothing "
+        "about the empty-sample branch"
+    )
+    assert rows["s1@2026-03"] is None, (
+        f"a month nobody could measure reported {rows['s1@2026-03']} rather than "
+        "an absence"
+    )
+
+
+async def test_a_bucket_statistic_cites_only_the_records_it_could_measure() -> None:
+    """The evidence is the sample, not the bucket.
+
+    Citing every record in the month shows a reader tracing "why 20 minutes
+    in March?" a job that contributed nothing -- and invites them to check
+    the arithmetic against a population the number was never taken over.
+    """
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(MEDIAN)
+    engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
+    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    facts.put(
+        "t1",
+        "job",
+        "j1",
+        {"site_id": "s1", "cost": 1.0, "finished_at": "2026-03-04T09:40:00Z"},
+    )
+    facts.put(
+        "t1",
+        "job",
+        "j2",
+        {
+            "site_id": "s1",
+            "cost": 1.0,
+            "started_at": "2026-03-05T09:00:00Z",
+            "finished_at": "2026-03-05T09:20:00Z",
+        },
+    )
+    await engine.run("t1", full=True, at_ms=AT)
+
+    evidence = await engine.evidence("t1", "site.actual_month", "s1@2026-03")
+    assert [m.key for m in evidence.members] == ["j2"], (
+        "the citation named a job the statistic never measured"
+    )
+
+
+async def test_a_departed_subject_stops_gaining_buckets() -> None:
+    """A carry extends the subjects that still exist, and no others.
+
+    Taking the bases straight off the index would keep writing a new bucket
+    every pass for a site nobody can open: a grouping goes on holding a
+    departed site's months for as long as the records naming it survive, so
+    the figure would grow for ever with no subject behind it.
+
+    Deliberately a *partial* pass -- the removal sweep is gated behind
+    `deleted`, so on an ordinary sync it never runs and the population gate
+    is the only thing standing between those rows and another month.
+    """
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    early = 1_774_353_600_000.0  # 2026-03-24
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(CARRIED)
+    engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
+    for site in ("s1", "s2"):
+        facts.put("t1", "site", site, {"name": site.upper()})
+        facts.put(
+            "t1",
+            "setting_change",
+            f"c-{site}",
+            {
+                "site_id": site,
+                "setting": "target_minutes",
+                "value": 1800.0,
+                "set_at": "2026-02-10T09:00:00Z",
+                "set_by": "Aki",
+            },
+        )
+    await engine.run("t1", full=True, at_ms=early)
+
+    facts.drop("t1", "site", "s2")
+    await engine.run("t1", at_ms=AT)
+
+    plan = library.figure("site.target_month")
+    rows = {r.subject for r in await store.values("t1", plan.name, plan.version)}
+    assert "s1@2026-08" in rows, "the site that is still here did not reach the present month"
+    assert "s2@2026-08" not in rows, (
+        f"a site with no record of its own gained five more months: {sorted(rows)}"
+    )
+
+
+async def test_the_carry_extends_along_the_groups_own_calendar() -> None:
+    """Whose midnight decides where the sequence stops.
+
+    Extending along UTC while the group bucketed in the tenant's zone agrees
+    for most of a month -- which is why it would survive every other test
+    here -- and then on the evening of the 31st writes next month: a bucket
+    no window will ask for, holding a confident value for a month that has
+    not begun.
+
+    The instant is chosen so the two calendars disagree: 2026-09-01T02:00Z is
+    still 21:00 on 2026-08-31 in Chicago.
+    """
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(CARRIED)
+    engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
+    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    facts.put(
+        "t1",
+        "setting_change",
+        "c1",
+        {
+            "site_id": "s1",
+            "setting": "target_minutes",
+            "value": 1800.0,
+            "set_at": "2026-06-10T09:00:00Z",
+            "set_by": "Aki",
+        },
+    )
+    await engine.run(
+        "t1",
+        settings={"tenant": {"timezone": "America/Chicago"}},
+        full=True,
+        at_ms=1_788_228_000_000.0,  # 2026-09-01T02:00Z -- 2026-08-31 in Chicago
+    )
+
+    plan = library.figure("site.target_month")
+    rows = {r.subject: r.value for r in await store.values("t1", plan.name, plan.version)}
+    assert rows.get("s1@2026-08") == 1800.0, (
+        "the present month in the tenant's own calendar is missing"
+    )
+    assert "s1@2026-09" not in rows, (
+        f"a month that has not begun where the buckets were written: {sorted(rows)}"
+    )
+
+
+def test_a_record_with_no_readable_stamp_does_not_win_earliest() -> None:
+    """An unreadable ordering instant means the record takes no part.
+
+    Sorted to nought instead of skipped, it would win every `earliest` for
+    ever -- nought is a real instant, 1970 -- and the bucket would report a
+    value chosen by a missing field rather than by when anything happened.
+
+    Evaluated directly, because the whole point is a member the readers
+    cannot answer for, which no well-formed fixture produces.
+    """
+    from uratori.engine.evaluate import Readers, _eval
+    from uratori.lang.ast import FieldPick
+    from uratori.lang.plan import FigurePlan
+
+    pick = FieldPick(
+        which="earliest",
+        kind="setting_change",
+        field="value",
+        set="sets",
+        ordered_by="set_at",
+    )
+    plan = FigurePlan(
+        name="site.target_month",
+        scope="site",
+        doc="",
+        display="",
+        unit="duration",
+        calculate=pick,
+    )
+    stamps: dict[str, float | None] = {"c1": 1.0, "c2": None}
+    values = {"c1": 1800.0, "c2": 25.0}
+    readers = Readers(
+        buckets=lambda index, subject: frozenset(),
+        measures=lambda measure, member: None,
+        moments=lambda measure, member: None,
+        parts=lambda source, subject: None,  # type: ignore[arg-type,return-value]
+        settings=lambda path: 0.0,
+        fields=lambda kind, path, member: values.get(member),
+        instants=lambda kind, path, member: stamps.get(member),
+    )
+
+    answer = _eval(pick, plan, "s1@2026-02", {"sets": frozenset({"c1", "c2"})}, readers)
+    assert answer == 1800.0, (
+        f"the record with no readable stamp was treated as the earliest, answering {answer}"
+    )
+
+
+def test_a_field_read_outside_a_sequence_is_refused_by_the_rule_that_names_it() -> None:
+    """`latest(<kind>.<field> over ...)` needs a bucket to be the latest *in*.
+
+    Over a figure with one value per subject, "the latest" means the latest
+    of everything ever collected -- so the number moves as records age with
+    nothing having happened. The author must be told about the missing
+    sequence, not about a missing ordering field, which is a consequence of
+    it.
+    """
+    refuses(
+        '''
+# The target in force at this site.
+figure site.target_now:
+    display "{site} target"
+    unit duration
+
+    depends:
+        sets = setting_change.at_site:{site} & setting_change.target
+
+    calculate:
+        latest(setting_change.value over sets)
+''',
+        "no sequence of buckets",
+    )
+
+
+def test_a_field_read_across_a_list_is_refused_rather_than_taking_the_first() -> None:
+    """One record holding several of a field has no "the latest" among them.
+
+    Resolved anyway, the figure reports a number picked by JSON ordering,
+    cites the record it came from as though that settled it, and carries it
+    forward across every month after -- a fabrication about the wrong
+    element, with a full audit trail behind it.
+    """
+    world = '''
+# A place where work happens.
+fact site:
+    name name
+    name as text
+
+# One change, with the revisions it went through.
+fact setting_change:
+    site_id as text
+    setting as text
+    value as number
+    set_at as moment
+    set_by as text
+    many revision:
+        amount as number
+
+filter setting_change.target where setting == "target_minutes"
+group setting_change.by_month from (site_id, set_at by month in tenant.timezone)
+
+# The revised target each month.
+figure site.revised bucketed:
+    display "{site} revised"
+    unit duration
+
+    depends:
+        sets = setting_change.by_month:{site} & setting_change.target
+
+    calculate:
+        latest(setting_change.revision.amount over sets) carried forward
+'''
+    with pytest.raises(CheckError) as caught:
+        compile_source(world, ONCHANGE)
+    assert "crosses a list" in caught.value.message, caught.value.message

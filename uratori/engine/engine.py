@@ -271,15 +271,12 @@ class Engine:
                     zone=_zone_of(lib, plan, settings),
                     trigger="pass",
                 )
-            except CarryReachExceeded as refused:
-                # One figure's first change being older than the reach ceiling
-                # is a fact about that tenant's data, and it must not take the
-                # whole pass down with it. Raised, it aborted every unrelated
-                # figure in the library, wrote no run log, pushed nothing --
-                # and did so identically on every pass after, with no recovery
-                # short of editing the definition or deleting the record.
-                # Logged and skipped: the figure stops extending and says so,
-                # and everything else still runs.
+            except CarryReachExceeded as refused:  # pragma: no cover - belt
+                # `materialise` contains a reach refusal to the subject that
+                # caused it, so this is the belt: whatever gets past that must
+                # still not take every unrelated figure in the library down,
+                # write no run report and push nothing -- identically on every
+                # pass after, with no recovery short of editing the definition.
                 log.warning("%s: %s", plan.name, refused)
                 continue
             if rows:
@@ -570,9 +567,22 @@ class Engine:
                 # A part that moved makes its totals stale. Keyed off the
                 # *movement* rather than the attempt, so an unchanged recompute
                 # propagates nothing.
+                #
+                # **In the reader's own subject space, not the writer's.** A
+                # roster-keyed total is one value per subject, so a moved
+                # coordinate makes the total for its *base* stale. A
+                # sequenced reader is one value per coordinate, and handing
+                # it the base asks it for a subject it does not have --
+                # `evaluate` then finds every coordinate row under that base
+                # and aborts rather than pick one, taking the whole pass with
+                # it. Both shapes existed before carried figures; only a
+                # sequenced figure reading another sequenced figure reaches
+                # the second, which `:{bucket}` is what made writable.
                 for other in self._library.figures:
-                    if plan.name in other.reads:
-                        pending.setdefault(subject_of(subject), set()).add(other.name)
+                    if plan.name not in other.reads:
+                        continue
+                    reader_subject = subject if other.grain is not None else subject_of(subject)
+                    pending.setdefault(reader_subject, set()).add(other.name)
         return changes
 
     async def _recompute_one(

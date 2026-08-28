@@ -362,7 +362,19 @@ async def materialise(
 
             return resolve_span(_at, zone, WindowSpec(first=1, last=n), rule)
 
-        sequence = sequence_to_present(anchors[0].label, labels_back, cap=cap)
+        try:
+            sequence = sequence_to_present(anchors[0].label, labels_back, cap=cap)
+        except CarryReachExceeded as refused:
+            # **Contained to the subject that caused it.** The ceiling is a
+            # fact about one subject's data -- one site whose first change is
+            # dated 1998 -- and the loop has already written rows for the
+            # subjects before it. Letting it out of `materialise` threw those
+            # away: they stayed on the board, reported in no change stream,
+            # and the next pass found them equal and said nothing either, so
+            # they were never announced at all.
+            log.warning("%s, subject %s: %s", plan.name, base, refused)
+            continue
+
         wanted = carried_rows(anchors, sequence)
 
         # **Rows before the first anchor are retired.** Nothing else
