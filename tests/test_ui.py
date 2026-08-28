@@ -3462,14 +3462,27 @@ async def test_the_world_payload_lists_a_bundle_with_its_slots(pg_dsn: str) -> N
     it: its review hash, its prose, its source as written, and -- because a
     slot is the address a client binds to -- the slot-to-member table in
     declaration order, window arguments included. A catalogue blind to
-    bundles would leave the one composed surface unverifiable from the UI."""
+    bundles would leave the one composed surface unverifiable from the UI.
+
+    The second bundle exists to pin two payload properties the first cannot:
+    `over 1-9` must travel as the canonical `9` (the same spelling the hash
+    eats -- an echo of the source number would drift from the artifact the
+    moment somebody wrote a span non-canonically), and one member bound to
+    two slots is ONE `rests_on` edge beside TWO slot rows, because the edges
+    are the trace and the slots are the composition."""
     from .test_bundle import SERVE_SOURCE, SERVE_WORLD
 
+    spanned = SERVE_SOURCE + (
+        "\n# The same reading twice, spans spelled the long way round.\n"
+        "bundle shop_courier.spans:\n"
+        "    recent = reading shop_courier.typical_ride over 1-9\n"
+        "    prior = reading shop_courier.typical_ride over 31-60\n"
+    )
     async with serve(pg_dsn) as http:
         assert (
             await http.put("/schema", json=SERVE_WORLD.to_document())
         ).status_code == 200
-        put = await http.put("/definitions", json={"source": SERVE_SOURCE})
+        put = await http.put("/definitions", json={"source": spanned})
         assert put.status_code == 200, put.text
 
         world = (await http.get("/ui/api/world")).json()
@@ -3477,13 +3490,13 @@ async def test_the_world_payload_lists_a_bundle_with_its_slots(pg_dsn: str) -> N
         assert "shop_courier.card" in by_name, sorted(by_name)
         card = by_name["shop_courier.card"]
 
-        local = compile_source(SERVE_SOURCE, SERVE_WORLD)
+        local = compile_source(spanned, SERVE_WORLD)
         plan = local.bundle("shop_courier.card")
         assert plan is not None
         assert card["kind"] == "bundle"
         assert card["version"] == plan.version, (
-            "the hash served is the one the committed artifact carries -- the "
-            "review surface breaks if the two drift"
+            "the hash served is the one the compiler produces -- the review "
+            "surface breaks if the payload's drifts from it"
         )
         assert card["doc"] == "The courier tile."
         assert "typical = reading shop_courier.typical_ride" in card["source"]
@@ -3507,10 +3520,22 @@ async def test_the_world_payload_lists_a_bundle_with_its_slots(pg_dsn: str) -> N
             ("projection", "shop_order.board"),
             ("summary", "shop_order.book"),
         }
-        moved = {(d["type"], d["name"]) for d in card["moved_by"]}
-        assert ("fact", "shop_order") in moved
-        assert ("fact", "shop_courier") in moved
-        assert ("setting", "tenant.timezone") in moved
+        assert {(d["type"], d["name"]) for d in card["moved_by"]} == {
+            ("fact", "shop_order"),
+            ("fact", "shop_courier"),
+            ("setting", "tenant.timezone"),
+        }, "the closure must reach every leaf, and only leaves"
+
+        spans = by_name["shop_courier.spans"]
+        assert [
+            (s["slot"], s["name"], s["windows"]) for s in spans["slots"]
+        ] == [
+            ("recent", "shop_courier.typical_ride", ["9"]),
+            ("prior", "shop_courier.typical_ride", ["31-60"]),
+        ], "1-9 travels as the canonical 9, exactly as the hash spells it"
+        assert [(d["type"], d["name"]) for d in spans["rests_on"]] == [
+            ("reading", "shop_courier.typical_ride")
+        ], "one member on two slots is one edge -- the slots carry the pair"
 
 
 async def test_a_bundle_answers_through_the_ui_route_with_each_members_own_provenance(
@@ -3612,6 +3637,35 @@ async def test_a_bundle_answers_through_the_ui_route_with_each_members_own_prove
             "R-2",
         ], "the projection member keeps its own sort and limit"
 
+        # The trace out of the tile: a member's rows fetch their evidence
+        # under the MEMBER's name -- the address the page must build -- and
+        # the tile's own name is refused, because a bundle computes nothing
+        # and cites nothing. The page that asked under the wrong name would
+        # wear this 404 on every evidence click.
+        [counted] = by_slot["carrying"]["subjects"]
+        cited = await http.get(
+            "/ui/api/tenants/t1/evidence/shop_courier.carrying",
+            params={"subject": counted["id"]},
+        )
+        assert cited.status_code == 200, cited.text
+        assert {m["key"] for m in cited.json()["members"]} == {"r3"}
+        refused = await http.get(
+            "/ui/api/tenants/t1/evidence/shop_courier.card",
+            params={"subject": counted["id"]},
+        )
+        assert refused.status_code == 404
+        assert "bundle" in refused.json()["detail"]
+
+        # A tenant nobody has pushed facts for: every member arrives in its
+        # own not-ok state, through the same route and the same response
+        # union -- per-member absence is a fact the wrapper must not flatten,
+        # and this is the serialisation path that carries it.
+        bare = await http.get("/ui/api/tenants/t9/results/shop_courier.card")
+        assert bare.status_code == 200, bare.text
+        fresh = {m["slot"]: m["result"] for m in bare.json()["results"]}
+        assert fresh["carrying"]["state"]["ok"] is False
+        assert fresh["carrying"]["state"]["because"]
+
 
 async def test_a_bundle_on_the_wrong_route_gets_a_forwarding_address(
     pg_dsn: str,
@@ -3627,3 +3681,8 @@ async def test_a_bundle_on_the_wrong_route_gets_a_forwarding_address(
         assert refused.status_code == 404
         assert "bundle" in refused.json()["detail"], refused.text
         assert "results" in refused.json()["detail"]
+
+        measured = await http.get("/ui/api/tenants/t1/measured/shop_courier.card")
+        assert measured.status_code == 404
+        assert "bundle" in measured.json()["detail"], measured.text
+        assert "results" in measured.json()["detail"]

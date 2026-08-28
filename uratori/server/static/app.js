@@ -432,13 +432,20 @@ async function declarationPane(name, params) {
             el('span', { class: `badge ${slot.kind}` }, slot.kind), ' ',
             el('a', { class: 'mono', href: `#/definitions/${encodeURIComponent(slot.name)}` },
               slot.name)),
-          // null windows mean the serving default decides — an absence to
-          // state, not an empty cell that reads as "no windows".
+          // null windows on a windowed reading mean the serving default
+          // decides — an absence to state, not an empty cell that reads as
+          // "no windows". A LIVE reading is the other case: the compiler
+          // refuses windows on one, so "serving default" there would promise
+          // a dial that does not exist.
           el('td', { class: 'mono' },
             slot.windows
               ? slot.windows.join(', ')
               : el('span', { class: 'faint' },
-                  slot.kind === 'reading' ? 'serving default' : '—'))))));
+                  slot.kind === 'reading'
+                    ? ((byName.get(slot.name) || {}).mode === 'live'
+                        ? 'live — takes none'
+                        : 'serving default')
+                    : '—'))))));
   } else {
     const structural = declaration.rests_on.filter(
       (edge) => edge.type !== 'fact' && edge.type !== 'setting');
@@ -662,10 +669,15 @@ async function answerSection(declaration) {
   if (!answer.ok) return problem(answer, 'The engine declined to answer:');
   const result = answer.body;
   if (result.kind === 'bundle') return el('div', {}, bundleBlocks(result));
+  // The trailer only under an answer: "answered … under version …" is the
+  // citation sentence reserved for a computed number, and printing it under
+  // a not-available notice would stamp an absence as answered.
   return el('div', {}, resultBlocks(result),
-    el('p', { class: 'faint' },
-      'answered ', el('span', { class: 'mono' }, result.at),
-      ' under version ', el('span', { class: 'mono' }, result.version)));
+    result.state.ok
+      ? el('p', { class: 'faint' },
+          'answered ', el('span', { class: 'mono' }, result.at),
+          ' under version ', el('span', { class: 'mono' }, result.version))
+      : null);
 }
 
 // A bundle's answer: each member's ordinary Result under its slot name,
@@ -725,7 +737,24 @@ function resultBlocks(result) {
         result.kind === 'summary' ? null : el('h2', {}, 'Summary'),
         el('dl', { class: 'kv' },
           Object.entries(result.summary.display).map(([column, text]) =>
-            el('div', { class: 'pair' }, el('dt', {}, column), el('dd', {}, text)))));
+            el('div', { class: 'pair' }, el('dt', {}, column), el('dd', {}, text)))),
+        // The sentences the population row earned. The subject rows above
+        // render theirs; dropping these made the flagged finding — often the
+        // only thing distinguishing a healthy summary from a broken one —
+        // silently invisible.
+        result.summary.flags.map((flag) =>
+          el('div', { class: flag.severity === 'attention' ? 'dim' : 'faint' },
+            `⚑ ${flag.label} — ${flag.detail}`)),
+        // On a projection, this row is computed by the summarise DECLARED
+        // over it — a different definition with a version of its own, which
+        // this payload does not carry. Said out loud, because the citation
+        // beside these rows is the projection's and must not be read as
+        // covering a number it did not compute.
+        result.kind === 'summary'
+          ? null
+          : el('p', { class: 'faint' },
+              'Computed by the summarise declared over this page — its number ',
+              'cites that definition, not this projection.'));
     }
     if (!result.subjects.length && !result.summary) {
       blocks.push(el('p', { class: 'faint' }, 'Computed, and there are no rows.'));
@@ -766,8 +795,14 @@ function resultBlocks(result) {
       // a server-rendered name that must appear verbatim.
       blocks.push(el('h2', { class: 'subject' }, subject.name));
       blocks.push(el('table', {},
+        // The band column under the same gate the figure table uses: only a
+        // definition that declares a band gets one, and a banded reading
+        // with no verdict column read as permanently grey data. The word is
+        // the window's whole verdict — it is never a tint on the statistics
+        // beside it, because the band judges only the statistic it names.
         el('tr', {}, el('th', {}, 'window'), el('th', {}, 'statistics'),
-          el('th', {}, 'sample'), el('th', {}, 'coverage')),
+          el('th', {}, 'sample'), el('th', {}, 'coverage'),
+          result.banded ? el('th', {}, 'band') : null),
         (subject.windows || []).map((window) => el('tr', {},
           // The span with its bucket unit -- `30d`, `31-60d`, `1-48h` --
           // never `trailing`, which is null for any span that is not a
@@ -781,7 +816,8 @@ function resultBlocks(result) {
               ? el('div', { class: 'faint' }, window.unmet.join('; '))
               : null),
           el('td', { class: 'mono' }, String(window.sample)),
-          el('td', { class: 'mono dim' }, `${window.days_covered}/${window.days_requested}d`)))));
+          el('td', { class: 'mono dim' }, `${window.days_covered}/${window.days_requested}d`),
+          result.banded ? el('td', { class: 'mono dim' }, window.level) : null))));
     }
   }
   return blocks;
@@ -1398,7 +1434,7 @@ async function activityView() {
 // rather than served because they are compile-time constants of the engine
 // build this page shipped inside -- the world-dependent lists (kinds, fields,
 // dials, declared names) DO arrive from the server, on /ui/api/source.
-const FIG_DECLS = ['fact', 'group', 'filter', 'measure', 'figure', 'reading', 'projection', 'summarise'];
+const FIG_DECLS = ['fact', 'group', 'filter', 'measure', 'figure', 'reading', 'projection', 'summarise', 'bundle'];
 const FIG_SECTIONS = {
   fact: ['name', 'url', 'one', 'many'],
   figure: ['display', 'unit', 'depends', 'combine', 'calculate', 'band'],

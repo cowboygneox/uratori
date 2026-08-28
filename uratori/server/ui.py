@@ -1479,7 +1479,8 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
     """Every declaration, each with the edges to walk it back to the facts.
 
     Emitted in kind order (indexes, measures, figures, readings, projections,
-    summaries) and library order within a kind, which is source order -- the
+    summaries, bundles) and library order within a kind, which is source
+    order -- the
     page groups them itself, but a stable order keeps the payload diffable.
     """
     out: list[DeclarationOut] = []
