@@ -460,7 +460,13 @@ known/unknown, not required/optional.
 | `rebuilt` | Figure names rebuilt from scratch this pass (a moved dial, a redeploy, a deletion, `full`). A figure recomputed to the value it already held writes nothing and appears nowhere; `rebuilt` is how a rebuild and a no-op stay distinguishable from outside. |
 | `covered` | The fact kinds this pass actually read, sorted. A webhook covers almost nothing and a reconcile covers everything, and the difference says which values were *confirmed* unchanged rather than merely not checked. |
 | `shown` | A **ranked sample** of the movements, capped at 40, for an activity log. See below. |
-| `results` | The re-served `Result` for everything the pass moved -- plus, on any pass through the facts door or one that ran `full` (an empty batch counts: the door is the sync moment, not the batch's contents, and a standing import debt upgrades a run to `full`), every projection, because the clock is one of a projection's inputs and the sync is when that contract pays out. A definition-only pass (`POST /tenants/{t}/runs` after a deploy or a settings save) re-serves exactly what the change reached: the moved figures, and the projections whose answer can differ -- a rebuilt grouping they filter through, a moved figure they read, their own text (or a summary's over them) having changed, or a dial they render under having turned. A change that reaches none of that serves nothing. The same objects `GET /tenants/{t}/results` returns and the websocket pushes; there is no run-only shape to drift. (One spelling difference: HTTP responses write absent fields as `null`, the socket omits them -- treat both as absent.) |
+| `results` | The re-served answers for everything the pass moved -- plus, on any pass through the facts door or one that ran `full` (an empty batch counts: the door is the sync moment, not the batch's contents, and a standing import debt upgrades a run to `full`), every projection, because the clock is one of a projection's inputs and the sync is when that contract pays out. A definition-only pass (`POST /tenants/{t}/runs` after a deploy or a settings save) re-serves exactly what the change reached: the moved figures, the figures and readings a moved dial re-words or re-renders (a band threshold, the effort dial), and the projections whose answer can differ -- a rebuilt grouping they filter through, a moved figure they read, their own text (or a summary's over them) having changed, or a dial they render under having turned. Every **bundle** any of those members sits in re-serves whole, at its declared windows, as a `BundleResult` in the same list -- branch on `kind`. A change that reaches none of that serves nothing. The same objects `GET /tenants/{t}/results` returns and the websocket pushes; there is no run-only shape to drift. (One spelling difference: HTTP responses write absent fields as `null`, the socket omits them -- treat both as absent.) Empty when the request said `"serve": false`. |
+| `moved` | Every definition name whose served answer this pass may have changed -- exactly what `results` re-serves, bundles included, as names instead of payloads, computed without evaluating anything. For the host that owns its own delivery (per-client subscriptions): send `"serve": false`, intersect `moved` with what your clients actually watch, and fetch exactly those by name at each watcher's own arguments. Carried on every response, not only lean ones, so a caller can cross-check. |
+
+`"serve": false` in the request body (facts and runs alike) skips evaluating
+and shipping `results`; `moved` still reports. The server's own websocket
+subscribers are unaffected -- their delivery is the server's job, not the
+HTTP caller's.
 
 A **deferred** post answers the same shape with only `written` and `deleted`
 populated -- `changed` 0, everything else empty -- because nothing recomputed,
@@ -501,10 +507,13 @@ A pass with no new facts:
 curl -s -X POST "$BASE/tenants/t1/runs" -H "$AUTH" -H 'Content-Type: application/json' -d '{}'
 ```
 
-The body is `{"full": bool}`, default `false`. Use it to pick up a settings
-change (the response's `rebuilt` will name the figures that read the moved
-dial), to recompute after loading a changed definition, or -- with
-`{"full": true}` -- to rebuild everything a tenant has from the facts stored.
+The body is `{"full": bool, "serve": bool}`, both defaulted (`false`,
+`true`). Use it to pick up a settings change (the response's `rebuilt` will
+name the figures that read the moved dial, and `results` carries everything
+the dial re-worded -- a band threshold re-serves the banded figure, its
+readings and its tiles even though no stored value moved), to recompute
+after loading a changed definition, or -- with `{"full": true}` -- to
+rebuild everything a tenant has from the facts stored.
 
 Returns the same run report as the facts route, with `written` and `deleted`
 zero -- deliberately the same shape, because a host's activity log should not
@@ -512,8 +521,7 @@ need to know which door the work came through. `409` while untaught.
 
 ### `GET /tenants/{tenant}/results`
 
-Every current answer, as a JSON array of `Result` objects -- what a screen's
-first paint reads:
+Every current answer, as a JSON array -- what a screen's first paint reads:
 
 ```bash
 curl -s "$BASE/tenants/t1/results" -H "$AUTH"
@@ -523,7 +531,13 @@ The list carries, in this order: every stored figure (except time-keyed and
 dimension-split ones, which serve by name only -- they are evidence panes, not
 cards, and shipping every stored person-day on the bulk surface would spend
 every pass on history nobody is watching), then every window reading, then
-every projection, evaluated live at this instant.
+every projection, evaluated live at this instant -- then every **bundle**, as
+a `BundleResult` (branch on `kind`), each at its declared windows, so a
+screen bound to a tile paints with everything else. An anchored request
+(`at`, below) serves no bundles: the by-name route refuses an anchor on a
+bundle because its non-reading members can only be served as they stand, and
+this route honours the same refusal rather than serving anchored readings
+beside the same readings unanchored inside a tile.
 
 `trailing` is a repeatable query parameter selecting the windows readings
 are served over. Each value is a **span of buckets counted back from the
@@ -913,27 +927,57 @@ string does not work, on purpose (see Authentication).
 
 ### Frames the client sends
 
-Two, both JSON:
+Three, all JSON:
 
 ```json
 {"type": "subscribe", "tenant": "t1"}
+{"type": "subscribe", "tenant": "t1", "entries": [
+  {"name": "shop_courier.card"},
+  {"name": "shop_courier.typical_ride", "trailing": ["9", "31-60"]}
+]}
+{"type": "unsubscribe", "entries": [{"name": "shop_courier.card"}]}
 {"type": "ping"}
 ```
 
-Anything that does not parse as one of these is **ignored** rather than
-fatal: a client that sends nonsense is a bug in that client, and taking the
-connection down makes the bug look like an outage. The one parseable mistake
-gets an answer: a `subscribe` with no `tenant` receives an error frame.
+A `subscribe` **without** `entries` is the firehose, unchanged from before
+subscriptions existed: everything, at the serving defaults. With `entries`
+it is a set of **standing GETs**: each entry names a calculation with the
+same arguments `GET /tenants/{t}/results/{name}` takes -- `trailing` for a
+windowed reading, nothing for everything else; a bundle is named bare,
+because its windows are declared in its definition. Each entry is answered
+immediately with its current answer at those arguments, and re-answered
+whenever a pass impacts it. Entries accumulate across frames;
+`unsubscribe` removes by the same identity (the name plus the canonical
+window spelling), and an `unsubscribe` naming nothing clears everything,
+firehose included.
 
-A connection watches one tenant at a time. Subscribing again switches it,
-with a fresh first paint.
+An entry the server cannot honour -- an unknown name, a window that does not
+parse, windows on a bundle, a span whose unit cannot slice the reading's
+storage, a live reading -- is refused with an `error` frame carrying the
+entry's `name` and the same sentence the HTTP route would answer, and is
+**not** followed; the valid entries beside it in the same frame proceed.
+Nothing is ever dropped silently.
+
+Anything that does not parse as one of these frames is **ignored** rather
+than fatal: a client that sends nonsense is a bug in that client, and taking
+the connection down makes the bug look like an outage. The one parseable
+mistake gets an answer: a `subscribe` with no `tenant` (and none remembered)
+receives an error frame.
+
+A connection watches one tenant at a time. Subscribing to a different tenant
+switches it and clears every prior interest -- entries made watching one
+board must not silently follow another.
 
 ### Frames the server sends
 
-All are one envelope, with absent fields omitted:
+All are one envelope, with absent fields omitted. `result` carries a
+`Result`, or a `BundleResult` for a bundle -- branch on its `kind`. An
+`error` about one subscription entry carries that entry's `name`; a
+frame-level complaint carries none.
 
 ```json
-{"type": "result", "tenant": "t1", "result": { …a Result… }}
+{"type": "result", "tenant": "t1", "result": { …a Result or BundleResult… }}
+{"type": "error", "tenant": "t1", "name": "no.such", "message": "No definition called no.such"}
 {"type": "error", "message": "subscribe names a tenant"}
 {"type": "pong"}
 ```
@@ -941,23 +985,28 @@ All are one envelope, with absent fields omitted:
 ### The lifecycle
 
 1. **Connect** (with the header when the server has a token).
-2. **Subscribe.** The server immediately sends the **first paint**: one
-   `result` frame per servable definition -- the same list, in the same
-   order, as `GET /tenants/{t}/results` (default windows) -- so a client
-   never renders from a partial world while waiting for a pass. A tenant with
-   nothing stored paints too: every frame an explained absence, because a
-   blank board and a board with nothing to say are different things.
+2. **Subscribe.** The server immediately answers: for the firehose, the
+   **first paint** -- one `result` frame per servable definition, bundles
+   included: the same list, in the same order, as `GET /tenants/{t}/results`
+   (default windows) -- so a client never renders from a partial world while
+   waiting for a pass. For entries, one frame per entry: its current answer
+   at the subscribed arguments. A tenant with nothing stored paints too:
+   every frame an explained absence, because a blank board and a board with
+   nothing to say are different things.
 3. **Movement.** Whenever a pass for the subscribed tenant changes something
-   (a facts post, a manual run), the server pushes one `result` frame per
-   figure or reading that **moved** -- and only those; an unchanged recompute
-   pushes nothing. Projections are pushed on every *sync*
-   pass (the facts door, or `full`), because a projection is evaluated at
-   the instant it is asked and the clock is one of its inputs, and the sync
-   is when that contract pays out. A definition-only pass pushes exactly the
-   projections its change can reach -- a rebuilt grouping, a moved figure it
-   reads, its own text, a dial it renders under; each projection's served
-   answer carries a stamp of what it was served under, so "did it move" is
-   compared rather than guessed.
+   (a facts post, a manual run, a settings save picked up by a run), the
+   firehose receives one `result` frame per definition that **moved** -- and
+   only those; an unchanged recompute pushes nothing. An entry receives a
+   frame exactly when the pass impacted it, re-evaluated at ITS OWN
+   arguments -- never the serving defaults -- and evaluated once however many
+   clients hold the same entry. "Impacted" means: a figure that moved or
+   whose served rendering a dial turned (a band threshold, the effort dial);
+   a reading whose source figure moved or whose own dial turned; a
+   projection being re-served (every sync pass -- the clock is one of its
+   inputs -- or a definition-only pass whose change reaches it); a bundle
+   any member of which is impacted, evaluated at its declared windows. A
+   subscription narrows which answers travel, never the population inside
+   any answer: every result is served whole.
 4. **Ping** whenever you like; the `pong` doubles as an ordering fence, since
    frames are delivered in order.
 

@@ -62,6 +62,7 @@ from .runtime import (
     World,
     compile_for_teach,
     facade_for,
+    push_pass,
     ready,
     record_pass,
     run_out,
@@ -753,6 +754,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             raise HTTPException(
                 status_code=404, detail=f"No tenant called {tenant} holds any facts here"
             )
+        facade = facade_for(s, world, library)
         async with s.lock_for(tenant):
             settings = await db.load_settings(s.pool, tenant)
             # The same debt rule as the API's run door: a bulk import that
@@ -760,11 +762,16 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             # editor pass that ran incremental over that gap would settle
             # the debt's flag without paying it.
             full = body.full or await db.deferred(s.pool, tenant)
-            report = await facade_for(s, world, library).run(tenant, settings, full=full)
+            report = await facade.run(tenant, settings, full=full)
             if full:
                 await db.clear_deferred(s.pool, tenant)
             out = run_out(report, world, library, settings, written=0, deleted=0)
             await record_pass(s, tenant, "run", full=full, out=out)
+            # The editor's pass reaches the socket exactly as the API's does:
+            # an editor save that recoloured a board while every subscribed
+            # screen kept the old answers would be the freeze this delivery
+            # path exists to end.
+            await push_pass(s, tenant, facade, settings, report)
         return EditRunOut(ok=True, changed=out.changed, rebuilt=out.rebuilt)
 
     # -------------------------------------------------------------- facts --
