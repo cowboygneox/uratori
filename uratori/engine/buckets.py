@@ -444,6 +444,13 @@ def resolve_span(at_ms: float, zone: str | None, spec: WindowSpec, rule: str) ->
         step = 1 if rule == "month" else 3
         year, month = anchor_day.year, anchor_day.month
         if rule == "quarter":
+            # Normalise the anchor to its quarter's first month, so the loop
+            # below steps between quarters rather than between arbitrary
+            # months inside them. A no-op for the label as written -- stepping
+            # three months from any month of a quarter lands in the
+            # corresponding month of the target quarter, which carries the
+            # same label -- and kept because it makes the stepping mean what
+            # it says: the sequence is quarters, not months counted by three.
             month = ((month - 1) // 3) * 3 + 1
         labels: list[str] = []
         for k in range(spec.last, spec.first - 1, -1):

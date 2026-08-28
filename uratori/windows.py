@@ -30,6 +30,7 @@ positions; `a-b` without `each` stays a single pooled window.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 MAX_BUCKETS = 3660
@@ -197,8 +198,11 @@ def refuse_window_count(count: int) -> str | None:
     """Why this many windows in one request is too many, or None."""
     if count <= MAX_WINDOWS:
         return None
+    # "at least", because the list is counted as it grows and refused the
+    # moment it passes: the true total may be far larger, and a precise
+    # number here would have cost exactly what the ceiling exists to avoid.
     return (
-        f"this request asks for {count} windows; the ceiling is {MAX_WINDOWS} (a year of "
+        f"this request asks for at least {count} windows; the ceiling is {MAX_WINDOWS} (a year of "
         "daily buckets). `each a-b` is one window per bucket, and the server answers each "
         "one per subject, so the cost is windows times subjects. A per-bucket comparison "
         "wider than a year is a chart a definition should declare, not a request parameter."
@@ -299,20 +303,32 @@ def expand_window_arg(value: int | str | WindowSpec) -> tuple[WindowSpec, ...]:
     return (as_window_spec(value),)
 
 
-def expand_window_args(values: list[str] | tuple[str, ...]) -> tuple[WindowSpec, ...]:
+def expand_window_args(
+    values: Sequence[int | str | WindowSpec],
+) -> tuple[WindowSpec, ...]:
     """A whole window list, expanded and bounded -- the door every request
     surface uses, so the HTTP route, the socket's subscribe entries and the
     UI's own route cannot disagree about what is too much to ask for.
 
-    The count is checked after expansion because `each` is what makes a short
-    argument list a long window list, and before anything is served because
-    the cost is windows times subjects.
+    The count is checked as the list grows, not once at the end: a repeatable
+    parameter is a second multiplier the ceiling has to see. Two thousand
+    copies of a legal `each:1-3660` is a 40 KB query string, and building the
+    whole list before counting it spent 15s and a gigabyte to answer 422 --
+    the same shape of bug as expanding an oversized `each`, reached by
+    repetition instead of by one big number. Refusing as soon as the running
+    total passes the ceiling bounds the peak at one argument's worth.
     """
-    out = tuple(spec for value in values for spec in expand_window_arg(value))
-    refusal = refuse_window_count(len(out))
-    if refusal is not None:
-        raise WindowError(refusal)
-    return out
+    out: list[WindowSpec] = []
+    for value in values:
+        # Each argument's own expansion is already bounded by the bucket
+        # ceiling, so this can never hold more than `MAX_WINDOWS` plus one
+        # argument's worth at any moment.
+        expanded = expand_window_arg(value)
+        refusal = refuse_window_count(len(out) + len(expanded))
+        if refusal is not None:
+            raise WindowError(refusal)
+        out.extend(expanded)
+    return tuple(out)
 
 
 __all__ = [

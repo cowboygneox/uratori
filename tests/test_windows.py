@@ -193,10 +193,10 @@ def test_a_span_is_bounded_in_buckets_before_anything_is_sized_by_it() -> None:
         "question in fewer buckets, not merely say no"
     )
 
-    # The span the days-based ceiling waves through. This is the regression.
-    assert refuse_reach(WindowSpec(1, 5_270_400), "minute") is None, (
-        "the premise of this test: the reach ceiling does not catch it"
-    )
+    # The span the days-based ceiling waves through: 5,270,400 minute buckets
+    # divide down to 3,660 days. Asserted only as the bucket ceiling catching
+    # it -- deliberately *not* as `refuse_reach` returning None, which would
+    # pin the absence of a bound and turn red on a correct future tightening.
     with pytest.raises(WindowError):
         make_window_spec(1, 5_270_400)
 
@@ -323,3 +323,46 @@ def test_a_fifth_weekday_bucket_reaches_a_quarter_not_a_month() -> None:
     # And its own boundary holds: 3660 / 92 is 39 buckets.
     assert refuse_reach(WindowSpec(1, 39), "fifth monday of month") is None
     assert refuse_reach(WindowSpec(1, 41), "fifth monday of month") is not None
+
+
+def test_the_window_ceiling_counts_as_the_list_grows_not_once_at_the_end() -> None:
+    """The same bomb by repetition instead of by one big number. Two thousand
+    copies of a perfectly legal `each:1-3660` is a 40 KB query string, and
+    building the whole list before counting it spent 15 seconds and a
+    gigabyte to arrive at a 422 -- the refusal costing exactly what it exists
+    to prevent, which is the bug this ceiling was added to fix in the first
+    place.
+
+    Counted, not timed: the peak must be bounded by one argument's worth, so
+    the assertion is on how many specs were ever constructed.
+    """
+    import uratori.windows as module
+
+    built = 0
+    real = module.WindowSpec
+
+    class Counted(real):  # type: ignore[misc,valid-type]
+        def __new__(cls, *args: object, **kwargs: object) -> Counted:
+            nonlocal built
+            built += 1
+            return super().__new__(cls)  # type: ignore[misc]
+
+    module.WindowSpec = Counted  # type: ignore[misc]
+    try:
+        with pytest.raises(WindowError) as refused:
+            expand_window_args([f"each:1-{MAX_BUCKETS}"] * 2000)
+        # One argument's expansion, and no more: the second copy is never
+        # reached, because the first already passed the ceiling.
+        assert built <= MAX_BUCKETS + MAX_WINDOWS, (
+            f"refusing a repeated window argument built {built} specs -- the "
+            "count must be checked as the list grows, or a repeatable "
+            "parameter multiplies past any per-argument bound"
+        )
+        assert str(MAX_WINDOWS) in str(refused.value)
+    finally:
+        module.WindowSpec = real  # type: ignore[misc]
+
+    # Many small arguments are bounded the same way, and the boundary holds.
+    assert len(expand_window_args(["1"] * MAX_WINDOWS)) == MAX_WINDOWS
+    with pytest.raises(WindowError):
+        expand_window_args(["1"] * (MAX_WINDOWS + 1))

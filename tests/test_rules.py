@@ -801,8 +801,25 @@ reading team_person.quarter_typical(range):
 group work_issue.by_month from (assignee_account_id through team_person.accounts.account_id, completed_at by month in tenant.timezone)
 group work_issue.by_calendar_quarter from (assignee_account_id through team_person.accounts.account_id, completed_at by quarter in tenant.timezone)
 group work_issue.by_hour from (assignee_account_id through team_person.accounts.account_id, completed_at by hour in tenant.timezone)
+group work_issue.by_week from (assignee_account_id through team_person.accounts.account_id, completed_at by week in tenant.timezone)
 group work_issue.by_first_monday from (assignee_account_id through team_person.accounts.account_id, completed_at by first monday of month in tenant.timezone)
 group work_issue.by_fifth_monday from (assignee_account_id through team_person.accounts.account_id, completed_at by fifth monday of month in tenant.timezone)
+
+# d
+figure team_person.weekly_lead:
+    display "x"
+    depends:
+        mine = work_issue.by_week:{team_person}
+    calculate:
+        list(work_issue.lead over mine)
+
+# d
+reading team_person.weekly_pace(range):
+    display "x"
+    depends:
+        m = team_person.weekly_lead in range
+    calculate:
+        median(m)
 
 # d
 figure team_person.monthly_volume:
@@ -981,8 +998,17 @@ def test_a_quarter_span_walks_calendar_quarters_across_the_year_edge() -> None:
 
 
 def test_a_week_span_is_iso_weeks_year_53_included() -> None:
-    """2027-01-01 belongs to ISO week 2026-W53 -- the label carries the ISO
-    year, so a New Year anchor does not tear the sequence."""
+    """A week label carries the **ISO** year, which is not always the calendar
+    year of the week's Monday -- so a New Year anchor must not tear the
+    sequence.
+
+    2027-01-01 alone cannot show this: its week's Monday is 2026-12-28, whose
+    calendar year already equals its ISO year, so a resolver using either
+    answers `2026-W53` and the test passes on a coincidence. 2025-12-31 is the
+    case that distinguishes them -- its week's Monday is 2025-12-29, calendar
+    year 2025 but ISO year **2026** -- so a calendar-year label would say
+    `2025-W01`, a week fifty-one places out of order.
+    """
     from uratori.engine.buckets import resolve_span
     from uratori.windows import WindowSpec
 
@@ -990,7 +1016,17 @@ def test_a_week_span_is_iso_weeks_year_53_included() -> None:
     assert resolve_span(at, "UTC", WindowSpec(1, 2), "week") == [
         "2026-W52",
         "2026-W53",
-    ]
+    ], "a 53-week year has a W53, and the sequence must reach it"
+
+    edge = end_of_day_ms("2025-12-31", "UTC")
+    assert resolve_span(edge, "UTC", WindowSpec(1, 2), "week") == [
+        "2025-W52",
+        "2026-W01",
+    ], (
+        "the anchor week's Monday is 2025-12-29 -- calendar year 2025, ISO "
+        "year 2026. A calendar-year label would file it as 2025-W01 and sort "
+        "it before the week it follows"
+    )
 
 
 def test_the_anchor_month_is_the_zones_month_not_utcs() -> None:
@@ -1151,6 +1187,85 @@ def test_a_record_lands_in_its_first_monday_bucket_or_in_none_at_all() -> None:
     assert buckets_of(mondays, edge, la, _resolve, NOW) == ["person-of-a1@2026-08-03"]
     utc = {"tenant": {"timezone": "UTC"}}
     assert buckets_of(mondays, edge, utc, _resolve, NOW) == []
+
+
+def test_a_coarse_bucket_holds_the_records_of_its_own_period_directly() -> None:
+    """**A month bucket is every record of the month, never a rollup of day
+    buckets.** This is the claim the whole coarse-grain design rests on: two
+    grains are two declarations, each computed from the records, so each is
+    citable on its own rather than one being a re-slicing of the other.
+
+    Every other coarse-grain test hand-seeds storage and then reads it back,
+    which proves the read paths agree given equal storage -- a write path
+    that derived month buckets from day aggregates would sail straight
+    through all of them. This one drives raw records into `buckets_of`, the
+    single place a record's buckets are decided.
+
+    The control is the day rule over the identical records: if the coarse
+    label were being derived from the day bucket rather than from the record,
+    the two would still agree here, so the property that catches it is the
+    *coverage* one below -- every record lands in exactly one bucket of every
+    total rule, with none dropped and none invented.
+    """
+    la = {"tenant": {"timezone": "America/Los_Angeles"}}
+    # Deliberately spread across month, quarter and year edges, and across a
+    # DST boundary, in a zone whose day differs from UTC's for part of each.
+    stamps = (
+        "2026-01-01T00:30:00-08:00",
+        "2026-01-31T23:30:00-08:00",
+        "2026-02-01T00:30:00-08:00",
+        "2026-03-08T03:30:00-07:00",
+        "2026-03-31T23:00:00-07:00",
+        "2026-04-01T00:00:00-07:00",
+        "2026-06-30T23:59:00-07:00",
+        "2026-07-01T00:01:00-07:00",
+        "2026-12-31T23:30:00-08:00",
+        "2027-01-01T00:30:00-08:00",
+    )
+    records = [{"assignee_account_id": "a1", "completed_at": stamp} for stamp in stamps]
+
+    by_rule = {
+        rule: [
+            buckets_of(GRAINED.indexes[index], record, la, _resolve, NOW)
+            for record in records
+        ]
+        for rule, index in (
+            ("day", "work_issue.by_day"),
+            ("month", "work_issue.by_month"),
+            ("quarter", "work_issue.by_calendar_quarter"),
+        )
+    }
+
+    # Every total rule files every record exactly once. A coarse rule that
+    # dropped a record -- or that only knew about records some other rule had
+    # already bucketed -- fails here, and that is the narrowing rule 4
+    # forbids.
+    for rule, filed in by_rule.items():
+        assert [len(b) for b in filed] == [1] * len(records), (
+            f"{rule} left a record in no bucket, or in two"
+        )
+
+    # And the coarse label is the record's own period, read off the record --
+    # not the day bucket's prefix. Spelled out per record so a wrong month at
+    # one edge names itself.
+    months = [b[0].split("@", 1)[1] for b in by_rule["month"]]
+    assert months == [
+        "2026-01", "2026-01", "2026-02", "2026-03", "2026-03",
+        "2026-04", "2026-06", "2026-07", "2026-12", "2027-01",
+    ]
+    quarters = [b[0].split("@", 1)[1] for b in by_rule["quarter"]]
+    assert quarters == [
+        "2026-Q1", "2026-Q1", "2026-Q1", "2026-Q1", "2026-Q1",
+        "2026-Q2", "2026-Q2", "2026-Q3", "2026-Q4", "2027-Q1",
+    ]
+
+    # The control that makes the above meaningful: the day rule, over the
+    # same records, and the coarse labels agreeing with the day each record
+    # actually fell on in this zone. A month figure and a day figure can
+    # never disagree about which month an event was in.
+    days = [b[0].split("@", 1)[1] for b in by_rule["day"]]
+    assert [d[:7] for d in days] == months
+    assert [f"{d[:4]}-Q{(int(d[5:7]) - 1) // 3 + 1}" for d in days] == quarters
 
 
 # --------------------------------------------------------- serving sequences --
@@ -1834,7 +1949,8 @@ async def test_a_calendar_edge_anchor_answers_at_every_grain_and_span_shape() ->
             grained_store, GRAINED, "t1", throughput, DEFAULTS, windows, at_day="9999-12-31"
         )
         assert result.empty is not None
-        assert result.empty.windows[0].to.startswith("9999-12-31")
+        far = result.empty.windows[0].to
+        assert far is not None and far.startswith("9999-12-31")
 
     # Third time in the same place. `ordinal_weekday_day` found its candidate
     # by adding days to the first of the month, so December 9999 -- whose
@@ -1951,3 +2067,113 @@ async def test_the_fetch_reaches_no_further_than_the_spans_it_serves() -> None:
         "the fetch walked past the span's newest day toward the anchor -- "
         "the whole offset paid to serve a ten-day window"
     )
+
+
+async def test_the_serving_door_refuses_a_reach_past_the_horizon_too() -> None:
+    """Two ceilings guard a span, and only one of them fires at the request
+    door for a coarse rule.
+
+    `MAX_BUCKETS` catches anything past 3,660 positions whatever the rule, so
+    it is what refuses a runaway day span. But 3,000 monthly buckets is two
+    and a half centuries and sits comfortably *inside* it -- only the
+    rule-aware reach ceiling knows that, and only the figure's declaration
+    knows the rule. `check.py` claims "one shared implementation, so the
+    tile's build error and the route's 422 speak the same words"; until this
+    test the route half could be deleted whole and the suite stayed green,
+    because every other reach test routes through the compile-time twin.
+    """
+    from uratori.windows import WindowError
+
+    figure = GRAINED.figure("team_person.monthly_lead")
+    reading = GRAINED.reading("team_person.monthly_pace")
+    assert figure is not None and reading is not None
+    store = await _figure_store(figure, "work_issue.by_month", (("p1@2026-08", [86_400.0]),))
+
+    with pytest.raises(WindowError) as refused:
+        await serve_reading(
+            store, GRAINED, "t1", reading, DEFAULTS, ["3000"], at_day="2026-08-15"
+        )
+    assert "3660" in str(refused.value)
+    assert "month" in str(refused.value), (
+        "the refusal must name the rule it converted through, or the number "
+        "reads as arbitrary against a span of three thousand"
+    )
+
+    # Inside the horizon, the same span shape answers -- so this is the
+    # ceiling talking and not the coarse rule being refused outright.
+    answer = await serve_reading(
+        store, GRAINED, "t1", reading, DEFAULTS, ["118"], at_day="2026-08-15"
+    )
+    assert answer.subjects[0].windows[0].span == "118"
+
+
+async def test_a_week_window_walks_iso_weeks_across_the_year_edge() -> None:
+    """The week rule, served end to end -- the one grain that had resolution
+    and label tests but no figure behind them anywhere.
+
+    The anchor is the last day of 2025, whose ISO week is `2026-W01`: bucket 1
+    carries a label a calendar year ahead of the anchor's own year, which is
+    the shape a week sequence has to get right and the one a naive
+    `{day.year}-W{week}` gets wrong.
+    """
+    figure = GRAINED.figure("team_person.weekly_lead")
+    reading = GRAINED.reading("team_person.weekly_pace")
+    assert figure is not None and reading is not None
+    store = await _figure_store(
+        figure,
+        "work_issue.by_week",
+        (
+            ("p1@2026-W01", [86_400.0]),
+            ("p1@2025-W52", [172_800.0]),
+        ),
+    )
+
+    answer = await serve_reading(
+        store, GRAINED, "t1", reading, DEFAULTS, ["each:1-2"], at_day="2025-12-31"
+    )
+    this_week, last_week = answer.subjects[0].windows
+    assert (this_week.bucket, this_week.frm, this_week.to) == ("week", "2026-W01", "2026-W01")
+    assert this_week.median == 86_400.0
+    assert (last_week.frm, last_week.to) == ("2025-W52", "2025-W52")
+    assert last_week.median == 172_800.0
+    # `trailing` stays null: this is not a count of days, and a "2" here
+    # would read as one on any screen keying off it.
+    assert this_week.trailing is None
+    # And the contiguous rule carries no bucket list -- the edges say it all.
+    assert this_week.buckets is None
+
+
+async def test_a_span_that_resolves_to_no_bucket_says_so_rather_than_empty_strings() -> None:
+    """Where the calendar runs out there is no bucket to name, and the window
+    must say that rather than carry `""` in a date field.
+
+    An empty string is a value: it renders, it sorts, and on the page it went
+    through a template literal that turned `null` into the word "null" -- a
+    date-shaped nothing where rule 3 wants a stated absence. Reachable only at
+    year 1, but this is the field a reader trusts to say which buckets an
+    answer covered.
+    """
+    figure = GRAINED.figure("team_person.monthly_lead")
+    reading = GRAINED.reading("team_person.monthly_pace")
+    assert figure is not None and reading is not None
+    store = await _figure_store(figure, "work_issue.by_month", (("p1@2026-08", [86_400.0]),))
+
+    answer = await serve_reading(
+        store, GRAINED, "t1", reading, DEFAULTS, ["2-5"], at_day="0001-01-15"
+    )
+    window = (answer.empty or answer.subjects[0]).windows[0]
+    assert window.frm is None and window.to is None, (
+        'no bucket resolved, so there is no label to report -- "" would be a '
+        "value where this is an absence"
+    )
+    assert window.buckets_requested == 0
+    assert window.buckets_covered == 0
+
+    # The control: one month later there *is* a bucket, and the edges are it.
+    # Without this the assertion above would also pass on a resolver that had
+    # simply stopped resolving anything.
+    reachable = await serve_reading(
+        store, GRAINED, "t1", reading, DEFAULTS, ["1-2"], at_day="0001-03-15"
+    )
+    edges = (reachable.empty or reachable.subjects[0]).windows[0]
+    assert (edges.frm, edges.to) == ("0001-02", "0001-03")

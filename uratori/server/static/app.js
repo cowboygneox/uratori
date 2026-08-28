@@ -878,7 +878,16 @@ function resultBlocks(result) {
           el('td', { class: 'mono' }, `${window.span}`, ' ',
             el('span', { class: 'dim' }, `× ${window.bucket}`), ' ',
             el('span', { class: 'faint' },
-              window.buckets ? window.buckets.join(', ') : `${window.frm} → ${window.to}`)),
+              // `frm`/`to` are null when the span resolved to no bucket at
+              // all -- only where the calendar runs out, but a template
+              // literal renders that as the word "null", which is a value
+              // where there is an absence. Say the absence.
+              window.buckets ? (window.buckets.length
+                ? window.buckets.join(', ')
+                : 'no buckets in range')
+                : (window.frm && window.to
+                  ? `${window.frm} → ${window.to}`
+                  : 'no buckets in range'))),
           window.unmet.length
             // Every statistic is withheld together, so one cell spans the
             // columns with the reason -- the columns still exist (the

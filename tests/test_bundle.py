@@ -1130,8 +1130,9 @@ def test_a_members_window_list_is_bounded_the_way_a_request_is() -> None:
 
 
 def test_the_reach_ceiling_reads_the_figures_own_bucket_rule() -> None:
-    """121 positions is five days of quarter-hours and over a decade of
-    months: the ceiling converts through the rule the figure declared, so a
+    """121 positions is a day and a quarter of quarter-hours and over a
+    decade of months: the ceiling converts through the rule the figure
+    declared, so a
     coarse sequence cannot smuggle a longer walk in under a smaller-looking
     span -- decided when the tile compiles, in the serving door's words."""
     monthly = (

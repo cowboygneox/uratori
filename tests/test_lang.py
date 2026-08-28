@@ -401,6 +401,37 @@ figure team_person.days across data_connection:
     )
 
 
+def test_a_time_bucket_may_not_be_a_groups_first_part() -> None:
+    """The first part of a group names the subject -- who or what the figure
+    is about. A time bucket there fans the figure out by date instead, and a
+    day has no roster and no name, so there is nothing for the figure to be
+    *of*.
+
+    Both bucket kinds, because the rule reads the truncation and the
+    selective rule separately and only the first half was ever asserted: the
+    check could be deleted whole and the suite stayed green.
+    """
+    for rule in ("by day", "by month", "by first monday of month"):
+        message = refuses(
+            f"group code_change.wrong_way from (mergedAt {rule} in tenant.timezone, authorAccountId)\n"
+            """
+# d
+figure team_person.upside_down:
+    display "x"
+    depends:
+        m = code_change.wrong_way:{team_person}
+    calculate:
+        count(m)
+""",
+            "fans",
+            "no roster and no name",
+        )
+        assert rule.removeprefix("by ") in message, (
+            "the refusal must name the rule that did it, so an author with a "
+            "two-part group knows which part to move"
+        )
+
+
 def test_a_bare_read_of_a_dimensioned_figure_would_take_whichever_part_sorted_first() -> None:
     refuses(
         """
@@ -2424,17 +2455,31 @@ figure team_person.first_monday_merges:
 
 
 def test_an_ordinal_rule_is_spelled_exactly_or_refused_with_directions() -> None:
-    for wrong in (
-        "by first friday of year",
-        "by first tuesday month",
-        "by first blursday of month",
-        "by sixth monday of month",
+    """The family is spelled one way -- `<first..fifth> <weekday> of month` --
+    and each way of getting it wrong must say what the right spelling is.
+
+    The message is the assertion, not the raise. A bare `pytest.raises` here
+    could not fail if every one of these degraded to a generic keyword error,
+    which is what two of them did: `of year` and a missing `of` fall out of
+    the keyword expectations rather than the rule's own refusal.
+    """
+    for wrong, expected in (
+        # The ordinal and the weekday are recognised, so the rule's own
+        # refusal fires and names the whole spelling.
+        ("by first blursday of month", "first monday of month"),
+        ("by sixth monday of month", "ordinal weekday"),
+        # These two miss the keyword the grammar is looking for, and the
+        # refusal is allowed to be the keyword's -- but it must still name
+        # the word it wanted, or an author sees only that something is wrong.
+        ("by first friday of year", "month"),
+        ("by first tuesday month", "of"),
     ):
-        with pytest.raises(SyntaxError_):
+        with pytest.raises(SyntaxError_) as caught:
             compile_source(
                 BASE
                 + f"group code_change.odd from (authorAccountId, mergedAt {wrong})\n"
             )
+        assert expected in caught.value.message, (wrong, caught.value.message)
 
 
 def test_an_ordinal_rules_zone_must_be_a_bucket_setting() -> None:
@@ -2536,10 +2581,16 @@ reading team_person.minute_rate(range):
     assert lib.reading("team_person.minute_rate") is not None
 
 
-def test_only_a_series_takes_a_grain() -> None:
-    """A scalar statistic runs over the window's raw values whatever the
-    series grain is -- grouping cannot change it, so a grain written on one
-    would be a declaration that does nothing."""
+def test_a_by_clause_on_any_statistic_is_refused_with_the_retirement() -> None:
+    """`series(...) by <grain>` is retired, and the parser no longer looks at
+    which statistic wears the clause -- so the refusal must be the retirement,
+    naming where a coarser view now lives, for a scalar as much as for a
+    series.
+
+    This test used to claim the old rule ("only a series takes a grain") and
+    asserted only that "series" appeared in the message. That word survives in
+    the retirement text, so it passed on a coincidence about a rule that no
+    longer exists. The message is what it pins now."""
     with pytest.raises(SyntaxError_) as caught:
         compile_source(
             BASE
@@ -2554,7 +2605,30 @@ reading team_person.throughput(range):
         sum(m) by hour
 """
         )
-    assert "series" in caught.value.message
+    message = caught.value.message
+    assert "retired" in message
+    assert "group the figure" in message, (
+        "the refusal must send the author to the declaration that replaces "
+        "the clause, not merely report that the clause is gone"
+    )
+
+    # And the same words for the statistic the clause was once legal on, so
+    # the two spellings cannot drift into two explanations.
+    with pytest.raises(SyntaxError_) as on_series:
+        compile_source(
+            BASE
+            + QUARTER
+            + """
+# d
+reading team_person.shape(range):
+    display "x"
+    depends:
+        m = team_person.merge_rate in range
+    calculate:
+        series(m) by hour
+"""
+        )
+    assert on_series.value.message == message
 
 
 def test_two_series_under_one_reading_are_refused() -> None:

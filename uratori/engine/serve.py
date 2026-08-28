@@ -48,7 +48,7 @@ from ..store import EngineStore, FactSource, StoredValue
 from ..windows import (
     WindowError,
     WindowSpec,
-    expand_window_arg,
+    expand_window_args,
     refuse_reach,
     span_text,
     window_token,
@@ -599,7 +599,13 @@ async def serve_reading(
     A spec past the reach ceiling raises `WindowError`, which the HTTP door
     wears as a 422: a malformed argument is the caller's to fix.
     """
-    specs = [spec for w in windows for spec in expand_window_arg(w)]
+    # `expand_window_args`, not a comprehension over `expand_window_arg`: the
+    # window-count ceiling lives in the plural form, and this is a door too --
+    # the facade's own `answer(trailing=[...])`, which an embedding host calls
+    # directly. It was the one door of four where `make_window_spec` and
+    # `refuse_reach` were enforced and the count was not, which is the kind of
+    # asymmetry that reads as deliberate and is not.
+    specs = list(expand_window_args(windows))
     seen_tokens: set[str] = set()
     for spec in specs:
         token = window_token(spec)
