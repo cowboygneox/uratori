@@ -28,10 +28,34 @@ in one place, below.
 from __future__ import annotations
 
 from bisect import bisect_right
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from ..lang.plan import Value
+
+LabelsBack = Callable[[int], list[str]]
+"""`n` -> the n most recent buckets of a figure's own sequence, oldest first,
+ending at the bucket containing the anchor instant.
+
+Exactly the resolver a window uses to turn `over 1-6` into six concrete
+labels. It is a *parameter* rather than something this module works out,
+because "which buckets does this figure have" must have one answer: a carry
+that counted months itself would agree with the window's resolver until the
+first ISO week that belongs to the previous year, and then quietly
+materialise a label no window ever asks for.
+"""
+
+
+class CarryReachExceeded(ValueError):
+    """A carried figure whose first change is further back than the reach
+    allows.
+
+    The reach *is* the cost -- every bucket between the anchor and now is a
+    row written per subject -- so an anchor dated decades ago is a refusal
+    rather than six hundred rows materialised on the first read that touches
+    it. The same reasoning the window's own reach bound records, at the other
+    end of the same sequence.
+    """
 
 
 @dataclass(frozen=True)
@@ -112,3 +136,47 @@ def carried_rows(
             )
         )
     return out
+
+
+def sequence_to_present(
+    earliest: str, labels_back: LabelsBack, *, cap: int
+) -> list[str]:
+    """The figure's own buckets from `earliest` through the present one.
+
+    Found by asking the resolver for a widening span until it reaches back
+    past the anchor, then keeping the tail from the anchor onward. Written
+    as a search rather than as arithmetic on the label deliberately: working
+    out "how many months since February" here would be a second calendar
+    implementation living beside the window's, and two calendars agree right
+    up until the day they do not.
+
+    **Never past the present** falls out of the resolver, which counts back
+    from the anchor instant and so cannot name a future bucket. A change
+    dated next month therefore materialises nothing at all until a pass runs
+    next month -- which is right: the bucket does not exist yet, and writing
+    it would put a value on a month that has not happened.
+    """
+    span = 1
+    labels: list[str] = []
+    while True:
+        got = labels_back(span)
+        if got and got[0] <= earliest:
+            labels = got
+            break
+        if len(got) < span:
+            # The resolver clamped at the beginning of its own calendar: it
+            # has no more buckets to give, so this is the whole sequence and
+            # the anchor simply predates it.
+            labels = got
+            break
+        if span >= cap:
+            raise CarryReachExceeded(
+                f"carrying forward from {earliest} would reach back more than {cap} "
+                "buckets. The reach is the cost -- every bucket between the change "
+                "and now is a stored row per subject -- so a first change this far "
+                "back is a definition question rather than a materialisation."
+            )
+        span = min(span * 2, cap)
+        labels = got
+
+    return [label for label in labels if label >= earliest]

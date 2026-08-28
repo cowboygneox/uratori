@@ -13,11 +13,44 @@ allowed to exist at all.
 
 from __future__ import annotations
 
-from uratori.engine.carry import Anchor, CarriedRow, carried_rows
+import pytest
+
+from uratori.engine.carry import (
+    Anchor,
+    CarriedRow,
+    CarryReachExceeded,
+    carried_rows,
+    sequence_to_present,
+)
 
 
 def months(*labels: str) -> list[str]:
     return list(labels)
+
+
+def month_walker(present: str) -> object:
+    """A stand-in for the engine's own span resolver: the n most recent
+    months, oldest first, ending at `present`.
+
+    The real caller hands `sequence_to_present` the *same* resolver a window
+    uses, which is the point of the parameter -- see the agreement test at
+    the bottom of this file.
+    """
+
+    year, month = (int(p) for p in present.split("-"))
+
+    def labels_back(n: int) -> list[str]:
+        out: list[str] = []
+        for k in range(n - 1, -1, -1):
+            y, m = year, month - k
+            y += (m - 1) // 12
+            m = (m - 1) % 12 + 1
+            if y < 1:
+                continue
+            out.append(f"{y:04d}-{m:02d}")
+        return out
+
+    return labels_back
 
 
 def test_nothing_to_carry_is_no_rows_at_all() -> None:
@@ -205,3 +238,87 @@ def test_a_word_valued_anchor_carries_as_the_word() -> None:
     anchors = [Anchor(label="2026-02", value="strict", members=("s1",))]
     rows = carried_rows(anchors, months("2026-02", "2026-03"))
     assert [r.value for r in rows] == ["strict", "strict"]
+
+
+# ------------------------------------------------- reaching the present --
+#
+# Which labels a carried figure owes is a question about the calendar, and
+# this package already has exactly one answer to that: the resolver a
+# window uses to turn `over 1-6` into six concrete buckets. `sequence_to_present`
+# takes that resolver as an argument rather than walking the calendar itself,
+# so a carried figure can never materialise a label a window would not ask
+# for -- the two cannot disagree, because there is only one of them.
+
+
+def test_the_sequence_runs_from_the_anchor_to_the_present_bucket() -> None:
+    got = sequence_to_present("2026-02", month_walker("2026-08"), cap=120)
+    assert got == [
+        "2026-02", "2026-03", "2026-04", "2026-05",
+        "2026-06", "2026-07", "2026-08",
+    ]
+
+
+def test_the_present_bucket_is_included_and_nothing_after_it() -> None:
+    """**Never past the present.** Whatever asks -- a pass, a read, a fact --
+    materialisation stops at the bucket containing now. A sequence running
+    one bucket further would put a value on a month that has not happened,
+    and a band would colour it."""
+    got = sequence_to_present("2026-07", month_walker("2026-08"), cap=120)
+    assert got[-1] == "2026-08"
+    assert all(label <= "2026-08" for label in got)
+
+
+def test_an_anchor_in_the_present_bucket_is_the_whole_sequence() -> None:
+    assert sequence_to_present("2026-08", month_walker("2026-08"), cap=120) == ["2026-08"]
+
+
+def test_a_future_dated_anchor_materialises_nothing_yet() -> None:
+    """A change dated next month is not a bucket to write; it is a bucket to
+    wait for. The pass that reaches September will anchor it then."""
+    assert sequence_to_present("2026-09", month_walker("2026-08"), cap=120) == []
+
+
+def test_the_walk_reuses_the_resolver_rather_than_counting_buckets_itself() -> None:
+    """The search grows the span until it reaches back past the anchor, and
+    asks the resolver for every candidate.
+
+    Written as a search on purpose: working out "how many months since
+    February" directly would be a second calendar implementation living
+    beside the window's, and the two would agree until the first leap
+    week.
+    """
+    seen: list[int] = []
+    walker = month_walker("2026-08")
+
+    def spy(n: int) -> list[str]:
+        seen.append(n)
+        return walker(n)  # type: ignore[operator]
+
+    sequence_to_present("2026-02", spy, cap=120)
+    assert seen, "the resolver is the only thing that knows what a bucket is"
+    assert max(seen) <= 120
+
+
+def test_the_reach_is_capped_rather_than_walked_for_ever() -> None:
+    """An anchor far outside any horizon is a refusal, not a million rows.
+
+    A figure whose first change was dated 1970 would otherwise materialise
+    six hundred months per subject on the first read that touched it. The
+    cap is the same reasoning the window's own reach bound records: the
+    reach *is* the cost.
+    """
+    with pytest.raises(CarryReachExceeded):
+        sequence_to_present("1900-01", month_walker("2026-08"), cap=24)
+
+
+def test_a_calendar_that_stops_growing_ends_the_walk() -> None:
+    """A resolver clamped at the start of its calendar answers the same list
+    however much more is asked of it, and the search has to notice rather
+    than spin."""
+
+    def clamped(n: int) -> list[str]:
+        # A two-bucket calendar: asked for more than it has, it answers all
+        # of it -- oldest first, still ending at the present bucket.
+        return ["0001-01", "0001-02"][-min(n, 2) :]
+
+    assert sequence_to_present("0001-01", clamped, cap=120) == ["0001-01", "0001-02"]
