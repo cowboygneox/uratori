@@ -26,6 +26,7 @@ from .ast import (
     Band,
     BucketAll,
     BucketScope,
+    BucketStat,
     BundleDecl,
     BundleMember,
     ByAge,
@@ -37,6 +38,7 @@ from .ast import (
     Combine,
     Comparison,
     Condition,
+    Coord,
     Count,
     CountDecl,
     DaysBetween,
@@ -201,6 +203,19 @@ class _Parser:
     def _at_word(self, word: str) -> bool:
         tok = self._peek()
         return tok.kind == "name" and tok.value == word
+
+    def _peek_at(self, ahead: int, kind: str, value: str) -> bool:
+        """Whether the token `ahead` positions on is exactly this.
+
+        One place needs two tokens of lookahead -- telling `name:{bucket}`
+        from a `name:` that ends a clause -- and guessing from the colon
+        alone is what broke a projection's flag condition.
+        """
+        at = self._at + ahead
+        if at >= len(self._tokens):
+            return False
+        tok = self._tokens[at]
+        return tok.kind == kind and tok.value == value
 
     def _at_op(self, op: str) -> bool:
         tok = self._peek()
@@ -1108,7 +1123,10 @@ class _Parser:
 
         name = self._next().value
 
-        if name in ("count", "list", "sum", "max", "min", "latest", "earliest") and self._at_op("("):
+        if name in (
+            "count", "list", "sum", "max", "min", "latest", "earliest",
+            "mean", "median", "worst",
+        ) and self._at_op("("):
             return self._call(name, line)
 
         if name == "days" and self._at_word("from"):
@@ -1117,6 +1135,39 @@ class _Parser:
             self._keyword("to")
             to = self._name("the later moment")
             return DaysBetween(frm=frm, to=to, line=line)
+
+        if self._at_op(":") and self._peek_at(1, "op", "{"):
+            # `<name>:{bucket}` -- the coordinate selector. The `{` is part
+            # of the test, not just of the parse: a projection's `flag x when
+            # swing >= thresholds.blowout:` ends a condition with a colon
+            # that opens a block, and treating that as a selector turned the
+            # NFL example into a syntax error.
+            #
+            # Spelled exactly like a group's `:{scope}` because it is the
+            # same idea one stratum up: address the one cell of a keyed
+            # thing that this calculation is already standing at.
+            self._next()
+            self._punct("{")
+            variable = self._name('the coordinate variable, which is "bucket"')
+            if variable != "bucket":
+                raise self._error(
+                    f'"{variable}" is not a coordinate. A sequenced figure is read at '
+                    "`:{bucket}` -- the bucket this calculation is already at.",
+                    line,
+                )
+            if not self._at_op("}"):
+                # `:{bucket - 1}` and friends land here. Refused in the
+                # grammar rather than the checker because there is nothing
+                # to explain about a construct that does not exist.
+                raise self._error(
+                    "a coordinate selector reads the bucket this calculation is at, and "
+                    "nothing else. There is no `:{bucket - 1}`: a stored value whose "
+                    "answer needs a bucket outside the population in view cannot be "
+                    "checked against the response that carries it.",
+                    line,
+                )
+            self._punct("}")
+            return Coord(name=name, line=line)
 
         # A dotted name is a settings path; a bare one is something the
         # definition bound above. Nothing else can produce either shape, so no
@@ -1143,6 +1194,17 @@ class _Parser:
             )
 
         first = self._name("a measure or a set")
+        if name in ("mean", "median", "worst"):
+            self._keyword("over")
+            target = self._name("a set defined in depends")
+            self._punct(")")
+            return BucketStat(
+                fn="mean" if name == "mean" else "median" if name == "median" else "worst",
+                measure=first,
+                set=target,
+                line=line,
+            )
+
         if name in ("latest", "earliest"):
             self._keyword("over")
             target = self._name("a set defined in depends")

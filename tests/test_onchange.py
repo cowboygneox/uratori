@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import pytest
 
-from uratori import CheckError, Schema, compile_source
+from uratori import CheckError, Schema, SyntaxError_, compile_source
 
 ONCHANGE = Schema(
     kinds=frozenset(),
@@ -63,14 +63,15 @@ fact setting_change:
 # Work that happened, so there is something to compare a target against.
 fact job:
     site_id as text
-    minutes as number
+    started_at as moment
     finished_at as moment
 
 filter setting_change.target where setting == "target_minutes"
 group setting_change.at_site from site_id
 group setting_change.by_month from (site_id, set_at by month in tenant.timezone)
 group job.by_month from (site_id, finished_at by month in tenant.timezone)
-measure job.length = minutes in count
+group job.at_site from site_id
+measure job.length = finished_at - started_at
 '''
 
 
@@ -849,3 +850,270 @@ async def test_the_run_log_names_the_figures_a_pass_carried() -> None:
     # so by naming nothing -- not by naming the figure with no rows behind it.
     again = await engine.execute("t1", full=True, at_ms=AT)
     assert again.carried == ()
+
+
+# ------------------------------------------------ the {bucket} selector --
+#
+# A sequenced figure is a point-in-time value, and its bare name in an
+# expression reads like a static declaration. So it may only be reached
+# through `:{bucket}` -- the same coordinate the reading is already at.
+
+MEDIAN = '''
+# The median job length each month.
+figure site.actual_month bucketed:
+    display "{site} actual"
+
+    depends:
+        done = job.by_month:{site}
+
+    calculate:
+        median(job.length over done)
+'''
+
+DELTA_FIGURE = MEDIAN + CARRIED + '''
+# How far each month ran over or under the target in force that month.
+figure site.gap_month bucketed:
+    display "{site} gap"
+    unit duration
+
+    combine:
+        actual = site.actual_month
+        goal = site.target_month
+
+    calculate:
+        actual:{bucket} - goal:{bucket}
+
+    band:
+        when value > 0 then "over"
+        otherwise "ok"
+'''
+
+
+def test_two_sequenced_figures_join_per_coordinate() -> None:
+    lib = compile_world(DELTA_FIGURE)
+    plan = lib.figure("site.gap_month")
+    assert plan is not None
+    assert plan.grain == "month"
+
+
+def test_a_bare_sequenced_name_in_calculate_is_refused() -> None:
+    """`goal` on its own reads like a static declaration, and it is a
+    point-in-time value.
+
+    Worse than unclear: with two sequences in one expression there is nothing
+    saying the arithmetic is per coordinate, so the obvious implementation is
+    a positional zip -- which is right until one source starts a month later
+    than the other, and then every number is silently paired with the wrong
+    month.
+    """
+    refuses(
+        MEDIAN + CARRIED + '''
+# Bare.
+figure site.bare bucketed:
+    display "{site} bare"
+    unit duration
+
+    combine:
+        actual = site.actual_month
+        goal = site.target_month
+
+    calculate:
+        actual - goal
+''',
+        "bucket",
+    )
+
+
+def test_a_band_rung_may_compare_against_the_same_coordinate() -> None:
+    lib = compile_world(
+        MEDIAN
+        + CARRIED
+        + '''
+# The month's actual, banded against the target in force that month.
+figure site.actual_banded bucketed:
+    display "{site} actual"
+
+    depends:
+        done = job.by_month:{site}
+
+    calculate:
+        median(job.length over done)
+
+    band:
+        when value > site.target_month:{bucket} then "over"
+        otherwise "ok"
+'''
+    )
+    plan = lib.figure("site.actual_banded")
+    assert plan is not None
+    assert plan.band is not None
+
+
+def test_a_band_rung_naming_a_sequenced_figure_bare_is_refused() -> None:
+    refuses(
+        MEDIAN
+        + CARRIED
+        + '''
+# Bare in a rung.
+figure site.rung_bare bucketed:
+    display "{site} actual"
+
+    depends:
+        done = job.by_month:{site}
+
+    calculate:
+        median(job.length over done)
+
+    band:
+        when value > site.target_month then "over"
+        otherwise "ok"
+''',
+        "bucket",
+    )
+
+
+def test_a_threshold_dial_keeps_its_bare_spelling() -> None:
+    """Bare means scalar and a selector means sequenced, so the two are
+    visually distinct by construction -- a reader never has to look up which
+    kind of thing a name is."""
+    lib = compile_world(
+        MEDIAN
+        + '''
+# Actual, against a fixed dial.
+figure site.actual_dialled bucketed:
+    display "{site} actual"
+
+    depends:
+        done = job.by_month:{site}
+
+    calculate:
+        median(job.length over done)
+
+    band:
+        when value > limits.target.over then "over"
+        otherwise "ok"
+'''
+    )
+    assert lib.figure("site.actual_dialled") is not None
+
+
+def test_an_offset_selector_does_not_exist() -> None:
+    """`:{bucket - 1}` is refused rather than supported.
+
+    A stored figure whose answer needs a bucket outside the population in
+    view cannot be audited from the response that carries it: the reader is
+    shown a number and, one coordinate back, nothing to check it against.
+    The same refusal `delta`'s oldest cell gets, one layer down.
+    """
+    with pytest.raises(SyntaxError_) as caught:
+        compile_world(
+            MEDIAN
+            + CARRIED
+            + '''
+# Offset.
+figure site.offset bucketed:
+    display "{site} offset"
+    unit duration
+
+    combine:
+        actual = site.actual_month
+        goal = site.target_month
+
+    calculate:
+        actual:{bucket} - goal:{bucket - 1}
+'''
+        )
+    assert "bucket - 1" in caught.value.message, (
+        "the refusal must name the thing that does not exist, so an author "
+        "reaching for an offset is told it is absent rather than mistyped"
+    )
+
+
+def test_a_coordinate_read_of_an_unsequenced_figure_is_refused() -> None:
+    """The mirror: a selector on something with no sequence names a
+    coordinate that does not exist."""
+    refuses(
+        '''
+# A plain per-site count.
+figure site.changes:
+    display "{site} changes"
+
+    depends:
+        sets = setting_change.at_site:{site}
+
+    calculate:
+        count(sets)
+
+# Selector over a scalar.
+figure site.nonsense bucketed:
+    display "{site} nonsense"
+    unit count
+
+    combine:
+        c = site.changes
+
+    calculate:
+        c:{bucket} - c:{bucket}
+''',
+        "bucket",
+    )
+
+
+# ------------------------------- distribution statistics over a bucket --
+
+
+def test_a_bucketed_figure_may_take_a_median_of_its_own_records() -> None:
+    """A declared bucket boundary is what makes the statistic a claim.
+
+    The standing refusal is against a mean of *aggregates* -- a mean of daily
+    counts is a mean per day wearing a per-record label. Here the population
+    is the bucket's own records, and the bucket is declared in the group, so
+    "the median job length in August" is a sentence with a checkable
+    population behind it.
+    """
+    lib = compile_world(MEDIAN)
+    plan = lib.figure("site.actual_month")
+    assert plan is not None
+    assert plan.unit == "duration"
+
+
+def test_a_distribution_statistic_outside_a_bucketed_figure_is_refused() -> None:
+    """Without a declared boundary the population is "everything ever", and
+    a median over that is a number whose meaning drifts with the data's age
+    -- it moves when nothing happened, and no reader can say what it is a
+    median *of*."""
+    refuses(
+        '''
+# Everything, ever.
+figure site.all_time:
+    display "{site} all time"
+
+    depends:
+        done = job.at_site:{site}
+
+    calculate:
+        median(job.length over done)
+''',
+        "bucketed",
+    )
+
+
+def test_a_bucket_statistic_may_not_run_over_a_combined_figure() -> None:
+    """A statistic over stored values is a statistic over aggregates again,
+    one construct along -- the mean-of-means this language refuses a reading
+    for the same reason."""
+    with pytest.raises((CheckError, Exception)):
+        compile_world(
+            MEDIAN
+            + '''
+# Median of medians.
+figure site.worse bucketed:
+    display "{site} worse"
+
+    combine:
+        m = site.actual_month
+
+    calculate:
+        median(m)
+'''
+        )

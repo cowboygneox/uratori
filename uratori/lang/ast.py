@@ -777,9 +777,77 @@ class FieldPick:
     line: int = 0
 
 
+@dataclass(frozen=True)
+class BucketStat:
+    """`median(job.length over done)` -- a distribution statistic over the
+    records of one bucket.
+
+    Legal **only in a `bucketed` figure**, and only over a set of records --
+    never over another figure's stored values. Both halves are the same rule
+    the readings enforce, arriving one stratum down.
+
+    A mean of daily counts is a mean *per day* wearing a label that says per
+    record: a plausible number of roughly the right magnitude, which is the
+    worst kind of wrong. That refusal is about a statistic over
+    **aggregates**. Here the population is the bucket's own records and the
+    bucket boundary is declared in the group, so "the median job length in
+    August" is a sentence with a checkable population behind it -- the
+    boundary is what turns the statistic into a claim.
+
+    Outside a bucketed figure the population is "everything ever", and a
+    median over that drifts with the data's age: it moves when nothing
+    happened, and nobody can say what it is a median *of*. Over a combined
+    figure it is a mean of means, weighting each bucket equally instead of
+    each record, which is the very thing `list` exists to defer to the read.
+    """
+
+    fn: Literal["mean", "median", "worst"]
+    measure: str
+    set: str
+    line: int = 0
+
+
+@dataclass(frozen=True)
+class Coord:
+    """`goal:{bucket}` -- a sequenced figure read at the coordinate this
+    calculation is already at.
+
+    A sequenced figure holds one value per bucket, so its **bare name is
+    refused in expression position**: written plain it reads like a static
+    declaration when it is a point-in-time value, and with two sequences in
+    one expression nothing says the arithmetic is per coordinate. The
+    obvious implementation of the bare form is a positional zip, which is
+    right until one source starts a month later than the other -- and then
+    every number is paired with the wrong month, silently, for ever.
+
+    The selector makes the join explicit and the semantics are
+    **join-by-bucket-key, never positional**: misalignment is not merely
+    unlikely, it is unrepresentable. A coordinate present on one side and
+    absent on the other yields an **absence** at that coordinate -- never a
+    nought, and never a shift that would slide every later value one place.
+
+    It reads the *same* coordinate and no other. There is deliberately no
+    `:{bucket - 1}`: a stored value whose answer needs a bucket outside the
+    population in view cannot be audited from the response carrying it, and
+    a reader shown the number would have nothing to check it against. That
+    is the refusal `delta`'s oldest cell gets, one layer down.
+
+    Bare stays scalar -- a settings dial keeps its plain spelling -- so the
+    two shapes are visually distinct by construction and a reader never has
+    to look up which kind of thing a name is.
+
+    `name` is a `combine` binding in a figure's `calculate`, and a figure
+    name in a `band:` rung, because those are the two places a second
+    sequenced value can appear at all.
+    """
+
+    name: str
+    line: int = 0
+
+
 CalcExpr: TypeAlias = (
     Count | ListOf | Sum | Part | Number | Text | Setting | Ladder | Arith | Pick | DaysBetween
-    | Extreme | FieldPick
+    | Extreme | FieldPick | Coord | BucketStat
 )
 
 

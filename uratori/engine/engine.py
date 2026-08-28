@@ -649,13 +649,25 @@ class Engine:
                 if key.partition(SEPARATOR)[0] in live
             )
         if plan.scope_index is None:
-            held = set(roster)
+            held: set[str] = set() if plan.grain is not None else set(roster)
             for source, _ in plan.combines.values():
                 source_plan = self._library.figure(source)
                 if source_plan is None:
                     continue
                 for stored in await self._store.values(tenant, source, source_plan.version):
-                    held.add(subject_of(stored.subject))
+                    if plan.grain is not None:
+                        # A figure built on sequenced sources is keyed by
+                        # coordinate, so its subjects are the coordinates its
+                        # sources actually hold -- never the bare roster,
+                        # which would write one row per site under a key that
+                        # names no bucket. The union across sources is
+                        # deliberate: a coordinate only one side has is a
+                        # coordinate the answer is *absent* at, and it has to
+                        # exist to say so.
+                        if SEPARATOR in stored.subject and subject_of(stored.subject) in roster:
+                            held.add(stored.subject)
+                    else:
+                        held.add(subject_of(stored.subject))
             return sorted(held)
         return sorted(roster)
 
@@ -803,9 +815,19 @@ class Engine:
             table: dict[str, list[tuple[str, float]]] = {}
             for stored in await store.values(tenant, source, source_plan.version):
                 if isinstance(stored.value, (int, float)):
+                    # Filed under the subject's base *and* -- for a sequenced
+                    # source -- under its full coordinate. A bare read looks
+                    # up the base and a `:{bucket}` read looks up the
+                    # coordinate; a key holding `@` can never collide with one
+                    # that does not, so one table serves both without either
+                    # having to know about the other.
                     table.setdefault(subject_of(stored.subject), []).append(
                         (stored.subject, float(stored.value))
                     )
+                    if SEPARATOR in stored.subject:
+                        table.setdefault(stored.subject, []).append(
+                            (stored.subject, float(stored.value))
+                        )
                 elif stored.value is None:
                     # **A null part is skipped, not treated as corrupt.** A share
                     # figure answers nothing for an unmeasurable subject and a

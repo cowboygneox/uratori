@@ -29,6 +29,7 @@ from .ast import (
     Arith,
     BucketAll,
     BucketScope,
+    BucketStat,
     BundleDecl,
     BundleMember,
     ByAge,
@@ -38,6 +39,7 @@ from .ast import (
     ByPresence,
     CalcExpr,
     Condition,
+    Coord,
     Count,
     DaysBetween,
     Decl,
@@ -555,6 +557,13 @@ class _Checker:
         # operations wearing one word; which one was meant is decidable here
         # and nowhere later, because only the checker holds the library.
         d = replace(d, calculate=self._resolve_field_reads(d, scope_index, grain))
+        if grain is None and d.bucketed and d.combines:
+            # A figure built on other figures has no group to read a grain
+            # from, so it inherits the sequence it is declared over. Without
+            # this it would compile as one-value-per-subject and store a
+            # single row per site under a coordinate key -- readable by
+            # nothing, and visibly empty only to whoever wrote the reading.
+            grain = self._grain_of(d)
         if d.carried and grain in ("minute", "15 minutes", "hour"):
             raise CheckError(
                 f"figure {d.name} is carried forward at {grain} grain, and a pass cannot "
@@ -707,6 +716,28 @@ class _Checker:
 
         paths = sorted(set(_settings_in(band)))
         for path in paths:
+            named = _find(self.figures, path)
+            if named is not None:
+                # A dotted name in a rung is a settings path *or* a figure,
+                # and a sequenced figure named bare here is the same mistake
+                # `calculate` refuses: it reads like a static declaration
+                # when it is a point-in-time value. Answered before the
+                # settings message, which would otherwise send the author
+                # looking for a dial nobody meant to name.
+                if named.grain is not None:
+                    raise CheckError(
+                        f"figure {d.name}'s band reads {path} bare, and it is one value per "
+                        f"{named.grain}. Compare against the same coordinate this figure is "
+                        f"at: `{path}:{{bucket}}`.",
+                        d.line,
+                    )
+                raise CheckError(
+                    f"figure {d.name}'s band reads {path}, which is a figure rather than a "
+                    "dial. A band compares this figure's own value against a threshold; "
+                    "reading another figure's number here would be a second calculation "
+                    "sharing the first one's name.",
+                    d.line,
+                )
             if path not in self._schema.figure_settings:
                 raise CheckError(
                     f'figure {d.name}\'s band reads "{path}", which is not a setting a '
@@ -916,11 +947,26 @@ class _Checker:
                         f"says nothing about a source. Write `over {source.across}`.",
                         c.line,
                     )
-                if source.grain is not None:
+                if source.grain is not None and not d.bucketed:
                     raise CheckError(
                         f"figure {d.name} reads {c.figure} as a single value, but {c.figure} "
                         f"is time-keyed, so it has one value per {source.grain} rather than "
-                        "one per subject.",
+                        "one per subject. A figure that is itself `bucketed` at the same "
+                        "grain may read it per coordinate, as `<binding>:{bucket}`.",
+                        c.line,
+                    )
+                if source.grain is not None and self._grain_of(d) != source.grain:
+                    # Two sequences that are not the same sequence. A
+                    # coordinate means "the same bucket in both", and months
+                    # against days share no bucket key at all -- the join
+                    # would match nothing and every coordinate would answer an
+                    # absence, which looks exactly like a figure waiting to be
+                    # computed.
+                    raise CheckError(
+                        f"figure {d.name} is keyed by {self._grain_of(d)} and reads "
+                        f"{c.figure}, which is keyed by {source.grain}. A coordinate is the "
+                        "same bucket in both sequences, and these are two different "
+                        "sequences.",
                         c.line,
                     )
             if source.scope != d.name.split(".", 1)[0]:
@@ -1053,6 +1099,56 @@ class _Checker:
                         d.line,
                     )
         return name, grain, dimension_part
+
+    def _grain_of(self, d: FigureDecl) -> str | None:
+        """This figure's own grain.
+
+        From the group that fans it out, or -- for a figure built on other
+        figures rather than on records -- from the sources it combines. A
+        `combine` figure has no group at all, so its sequence is inherited:
+        subtracting two monthly figures per coordinate is itself monthly, and
+        there is nowhere else the grain could come from.
+
+        Worked out here rather than threaded through, because the combine
+        check runs before `_scope_index` has settled -- and the answer is a
+        property of the declaration either way.
+        """
+        for named in d.sets:
+            for index in _indexes_in_sets((named,)):
+                spec = self.indexes[index].spec if index in self.indexes else None
+                if spec is None:
+                    continue
+                found = _ordering_grain(spec)
+                if found is not None:
+                    return found
+        for c in d.combines:
+            source = _find(self.figures, c.figure)
+            if source is not None and source.grain is not None:
+                return str(source.grain)
+        return None
+
+    def _coord_source(
+        self,
+        d: FigureDecl,
+        e: Coord,
+        combines: dict[str, tuple[str, str | None]],
+    ) -> FigurePlan:
+        """Which figure a `:{bucket}` names.
+
+        In a `calculate` it is a `combine` binding; in a `band:` rung it is a
+        figure named outright, because a band has no bindings but `value`.
+        """
+        bound = combines.get(e.name)
+        name = bound[0] if bound is not None else e.name
+        source: FigurePlan | None = _find(self.figures, name)
+        if source is None:
+            known = ", ".join(sorted(combines)) or "nothing"
+            raise CheckError(
+                f'figure {d.name} reads "{e.name}:{{bucket}}", which names neither a '
+                f"combine binding nor a figure declared before it. Bound here: {known}.",
+                e.line,
+            )
+        return source
 
     def _resolve_field_reads(
         self, d: FigureDecl, scope_index: str | None, grain: str | None
@@ -1250,6 +1346,17 @@ class _Checker:
                 )
             source = _find(self.figures, combines[e.name][0])
             assert source is not None
+            if source.grain is not None:
+                raise CheckError(
+                    f'figure {d.name} reads "{e.name}" bare, and it is one value per '
+                    f"{source.grain} rather than one number. Written plain it reads like a "
+                    "static declaration when it is a point-in-time value -- and with two "
+                    "sequences in one expression nothing says the arithmetic is per "
+                    "coordinate, so the obvious implementation is a positional zip: right "
+                    "until one source starts a bucket later than the other, and then every "
+                    f"number is paired with the wrong one. Write `{e.name}:{{bucket}}`.",
+                    e.line,
+                )
             if source.unit == "level":
                 raise CheckError(
                     f"figure {d.name} reads {source.name}, which stores a word rather than a "
@@ -1298,6 +1405,52 @@ class _Checker:
                 "event. A projection may do this; it stores nothing.",
                 e.line,
             )
+
+        if isinstance(e, BucketStat):
+            if not d.bucketed:
+                raise CheckError(
+                    f"figure {d.name} takes {e.fn}({e.set}), and it is not `bucketed`. A "
+                    "distribution statistic needs a declared boundary to be a claim about: "
+                    "without one the population is everything ever collected, so the number "
+                    "drifts with the data's age -- it moves when nothing happened, and "
+                    "nobody can say what it is a " + e.fn + " of.",
+                    e.line,
+                )
+            m = self._require_measure(d.name, e.measure, e.line)
+            self._require_set(d.name, e.set, sets, e.line)
+            if m.shape == "moment":
+                raise CheckError(
+                    f"figure {d.name} takes {e.fn} of {e.measure}, which names an instant. "
+                    "Averaging moments is a date, which is not a quantity anybody asked "
+                    "for.",
+                    e.line,
+                )
+            if m.clock:
+                raise CheckError(
+                    f"figure {d.name} takes {e.fn} of {e.measure}, which is measured to now. "
+                    "A stored value may not read a clock.",
+                    e.line,
+                )
+            self._measure_matches_set(d.name, m, e.set, sets, e.line)
+            return "number"
+
+        if isinstance(e, Coord):
+            source = self._coord_source(d, e, combines)
+            if source.grain is None:
+                raise CheckError(
+                    f"figure {d.name} reads {e.name}:{{bucket}}, but {source.name} holds one "
+                    "value per subject rather than a sequence -- there is no coordinate to "
+                    "read it at. Name it bare.",
+                    e.line,
+                )
+            if source.scope != scope:
+                raise CheckError(
+                    f"figure {d.name} reads {e.name}:{{bucket}}, which is one value per "
+                    f"{source.scope}. Different scopes are different id spaces, so every "
+                    "lookup would miss.",
+                    e.line,
+                )
+            return "number"
 
         if isinstance(e, FieldPick):
             self._require_set(d.name, e.set, sets, e.line)
@@ -1418,6 +1571,14 @@ class _Checker:
             e = d.calculate
             assert isinstance(e, ListOf)
             return "duration"
+        if isinstance(d.calculate, BucketStat):
+            # A statistic over a measure is in the measure's own quantity: the
+            # median of a column of durations is a duration. Derived, so it
+            # must not be declared -- the rule above already refuses that.
+            m = self.measures[d.calculate.measure]
+            if m.shape == "duration":
+                return "duration"
+            return "effort" if m.unit == "effort" else "count"
         if isinstance(d.calculate, Sum) and d.calculate.measure is not None:
             m = self.measures[d.calculate.measure]
             return "effort" if m.unit == "effort" else "count"
@@ -2387,7 +2548,14 @@ class _Checker:
                     e.line,
                 )
             return results[0]
-        if isinstance(e, (Count, ListOf, Sum, Extreme, FieldPick)):
+        if isinstance(e, Coord):
+            raise CheckError(
+                f"{noun} {owner} reads {e.name}:{{bucket}}. A row is one record, not a "
+                "coordinate in a sequence -- a sequenced figure is read over a range by a "
+                "reading.",
+                e.line,
+            )
+        if isinstance(e, (Count, ListOf, Sum, Extreme, FieldPick, BucketStat)):
             verb = {
                 "Count": "counts",
                 "ListOf": "lists",
@@ -2396,6 +2564,7 @@ class _Checker:
                 # A projection has one record per row already, so "the latest
                 # of a set" is an aggregate here exactly as a count is.
                 "FieldPick": "takes the extreme of",
+                "BucketStat": "averages",
             }[type(e).__name__]
             raise CheckError(
                 f"{noun} {owner} {verb} something. A projection aggregates nothing -- those "
@@ -2583,7 +2752,7 @@ def _measures_in(e: CalcExpr) -> set[str]:
         # loses the narrowing: a `Sum`'s measure is optional and the combined
         # condition proves it is present without the type checker being able to
         # see that it did.
-        if isinstance(n, (ListOf, Extreme)):
+        if isinstance(n, (ListOf, Extreme, BucketStat)):
             out.add(n.measure)
         elif isinstance(n, Sum) and n.measure is not None:
             out.add(n.measure)
@@ -2723,6 +2892,10 @@ def _calc_hash(e: CalcExpr) -> object:
         return {"op": "days", "from": e.frm, "to": e.to}
     if isinstance(e, Extreme):
         return {"op": e.which, "measure": e.measure, "set": e.set}
+    if isinstance(e, Coord):
+        return {"op": "coord", "name": e.name}
+    if isinstance(e, BucketStat):
+        return {"op": e.fn, "measure": e.measure, "set": e.set}
     if isinstance(e, FieldPick):
         # The ordering field is hashed with the rest: it decides *which*
         # record in the bucket answers, so two figures ordering differently
@@ -2790,6 +2963,15 @@ def _ordered_by_of(e: CalcExpr) -> str | None:
         return _ordered_by_of(e.otherwise)
     if isinstance(e, (Arith, Pick)):
         return _ordered_by_of(e.left) or _ordered_by_of(e.right)
+    return None
+
+
+def _ordering_grain(spec: IndexBy) -> str | None:
+    """The grain a composite group's truncated part declares."""
+    if isinstance(spec, ByComposite):
+        for part in spec.parts:
+            if part.truncate is not None or part.select is not None:
+                return part.truncate or part.select
     return None
 
 

@@ -18,6 +18,7 @@ decided entirely by which ids are in which sets.
 
 from __future__ import annotations
 
+import statistics
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, assert_never
@@ -26,8 +27,10 @@ from ..lang.ast import (
     Arith,
     BucketAll,
     BucketScope,
+    BucketStat,
     CalcExpr,
     Comparison,
+    Coord,
     Count,
     DaysBetween,
     Extreme,
@@ -161,6 +164,14 @@ def _members_of(
         return tuple(sorted(resolved.get(e.set, frozenset())))
     if isinstance(e, Extreme):
         return tuple(sorted(resolved.get(e.set, frozenset())))
+    if isinstance(e, BucketStat):
+        # Only the records that took part: one the measure could not read is
+        # not evidence for a number it contributed nothing to.
+        return tuple(
+            member
+            for member in sorted(resolved.get(e.set, frozenset()))
+            if readers.measures(e.measure, member) is not None
+        )
     if isinstance(e, FieldPick):
         # **The one record, not the whole bucket.** A field read's answer came
         # from exactly one change, and that change -- its value, when it was
@@ -172,7 +183,7 @@ def _members_of(
     if isinstance(e, Sum) and e.measure is None:
         source, _ = plan.combines[e.set]
         return readers.parts(source, subject).subjects
-    if isinstance(e, Part):
+    if isinstance(e, (Part, Coord)):
         source, _ = plan.combines[e.name]
         return readers.parts(source, subject).subjects
     # A ladder or arithmetic over combined figures: the evidence is whatever the
@@ -314,6 +325,45 @@ def _eval(
             # The empty population answers nothing for the same reason.
             return None
         return max(instants) if e.which == "latest" else min(instants)
+
+    if isinstance(e, BucketStat):
+        # The statistic over the bucket's own records. A record the measure
+        # cannot read takes no part -- the same skip `list` makes, and for the
+        # same reason: it is a record nobody measured, not a record measuring
+        # nought.
+        #
+        # The empty bucket answers **nothing**, never a nought. A month in
+        # which nothing finished has no median job length, and a nought there
+        # is a confident claim that everything was instantaneous.
+        sample = [
+            value
+            for member in sorted(sets.get(e.set, frozenset()))
+            if (value := readers.measures(e.measure, member)) is not None
+        ]
+        if not sample:
+            return None
+        if e.fn == "mean":
+            return statistics.fmean(sample)
+        if e.fn == "median":
+            return statistics.median(sample)
+        # "Worst" is the largest for every quantity this language stores --
+        # each is a duration or a tally of something, and more is worse.
+        return float(max(sample))
+
+    if isinstance(e, Coord):
+        # **Join by bucket key, never by position.** The subject a bucketed
+        # figure is evaluated for already *is* a coordinate -- `s1@2026-06` --
+        # so reading the source at the same coordinate is a lookup under the
+        # same key, and misalignment is not merely unlikely but
+        # unrepresentable.
+        #
+        # A coordinate the source holds no row for answers **nothing**. Not a
+        # nought, which a band would happily colour comfortable, and not a
+        # shift -- which is what a positional zip does the moment one source
+        # starts a month later than the other: every value paired with the
+        # wrong month, plausibly, for ever.
+        parts = readers.parts(*_source_of(plan, e.name), subject)
+        return _scalar(parts)
 
     if isinstance(e, FieldPick):
         # The value the most recent record in the bucket set it to. "Most
