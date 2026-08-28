@@ -346,10 +346,15 @@ def format_value(value: Value, unit: FigureUnit, settings: Mapping[str, Any]) ->
         from ..schema import EFFORT_HOURS_SETTING
 
         hours_per_day = float(setting_value(dict(settings), EFFORT_HOURS_SETTING))
-        days = value / (hours_per_day * 3600.0)
+        # Scaled on the magnitude for the reason `_duration` is: the rung is a
+        # `>=` against a positive bound, so a negative effort -- which
+        # subtraction under `unit effort` can produce -- fell past it and
+        # printed a fortnight of work as "-240.0h".
+        sign = "-" if value < 0 else ""
+        days = abs(value) / (hours_per_day * 3600.0)
         if days >= 1:
-            return f"{days:.1f}d"
-        return f"{value / 3600.0:.1f}h"
+            return f"{sign}{days:.1f}d"
+        return f"{sign}{abs(value) / 3600.0:.1f}h"
     if unit == "moment":
         from datetime import UTC, datetime
 
@@ -358,13 +363,24 @@ def format_value(value: Value, unit: FigureUnit, settings: Mapping[str, Any]) ->
 
 
 def _duration(seconds: float) -> str:
-    if seconds < 60:
-        return f"{round(seconds)}s"
-    if seconds < 3600:
-        return f"{round(seconds / 60)}m"
-    if seconds < 86_400:
-        return f"{seconds / 3600:.1f}h"
-    return f"{seconds / 86_400:.1f}d"
+    """A span of seconds, in the largest unit that keeps it readable.
+
+    **Scaled on the magnitude and signed afterwards.** Every rung here is a
+    `<` against a positive bound, so a negative fell through the first one
+    and printed raw: a rise of an hour read "1.0h" and a fall of two hours,
+    in the same column, read "-7200s". Nothing produced a negative duration
+    until `delta` did -- a change between buckets goes both ways -- which is
+    why the ladder survived this long looking total.
+    """
+    sign = "-" if seconds < 0 else ""
+    size = abs(seconds)
+    if size < 60:
+        return f"{sign}{round(size)}s"
+    if size < 3600:
+        return f"{sign}{round(size / 60)}m"
+    if size < 86_400:
+        return f"{sign}{size / 3600:.1f}h"
+    return f"{sign}{size / 86_400:.1f}d"
 
 
 # ------------------------------------------------------------- summary --

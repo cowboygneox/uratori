@@ -104,16 +104,32 @@ def test_the_answer_lines_up_positionally_with_the_series() -> None:
     assert got[1] == 4.0, "bucket 2's cell is the change from bucket 1 into it"
 
 
-def test_delta_reads_only_the_points_it_was_given() -> None:
-    """The bounded-access claim, at the unit level: `delta_of` is a pure
-    function of the sample, so there is no path by which it could reach a
-    bucket the window did not resolve. The serving-level half of this claim
-    -- that nothing widens the fetch either -- is asserted in
-    tests/test_server.py against a spying store."""
-    s = sample(("2026-02", 1.0), ("2026-03", 2.0))
-    before = s.points
-    delta_of(s)
-    assert s.points == before
+def test_a_delta_cell_is_never_computed_from_a_value_outside_the_points() -> None:
+    """The bounded-access claim at the unit level.
+
+    Asserted by giving the sample values that make an out-of-range reach
+    *visible*: if any cell were differenced against something other than its
+    own neighbour, the arithmetic would not close. Every non-null cell must
+    equal the difference of two adjacent points, and there must be exactly
+    one fewer of them than there are points.
+
+    (An earlier version of this test compared `sample.points` to itself
+    before and after the call, on a frozen dataclass -- a tautology that
+    could not fail under any implementation, including one that reached
+    outside the window. The serving-level half of the claim is
+    `test_no_fetch_reaches_outside_the_resolved_window`, below, in this
+    file.)
+    """
+    points = (("2026-01", 3.0), ("2026-02", 11.0), ("2026-03", 2.0), ("2026-04", 40.0))
+    got = delta_of(sample(*points))
+
+    assert got[0] is None
+    for index in range(1, len(points)):
+        expected = points[index][1] - points[index - 1][1]  # type: ignore[operator]
+        assert got[index] == expected, (
+            f"cell {index} is {got[index]}, not the change from its own predecessor"
+        )
+    assert sum(1 for v in got if v is not None) == len(points) - 1
 
 
 # --------------------------------------------------------- the grammar --
@@ -418,4 +434,204 @@ async def test_two_spans_fetch_across_their_union_and_neither_borrows_the_others
     assert newer.delta is not None and newer.delta[0] is None
     assert older.delta is not None and older.delta[0] is None, (
         "each span states its own missing predecessor; neither borrows the other's"
+    )
+
+
+async def test_a_failed_floor_withholds_the_delta_with_every_other_statistic() -> None:
+    """Every statistic is withheld together, and a delta is a statistic.
+
+    A trend published beside a suppressed median would be the outlier's
+    shape under a heading saying the sample was too thin to say anything --
+    the "three statistics or none" bargain broken by the one statistic that
+    draws a picture.
+    """
+    store, at = await _seeded()
+    lib = compile_source(
+        BASE
+        + """
+# How the merge time moved, if there is enough of it.
+reading team_person.fussy(range):
+    display "{team_person} fussy"
+    depends:
+        t = team_person.time_to_merge in range
+    requires:
+        at least 50 values in t
+    calculate:
+        median(t)
+        delta(t)
+"""
+    )
+    reading = lib.reading("team_person.fussy")
+    figure = lib.figure("team_person.time_to_merge")
+    assert reading is not None and figure is not None
+    result = await serve_reading(store, lib, "t1", reading, DEFAULTS, [3], at_ms=at)
+    window = result.subjects[0].windows[0]
+    assert window.unmet, "the floor should have fallen short"
+    assert window.delta is None, "a withheld reading may not still publish its trend"
+    assert window.delta_display is None
+
+
+async def test_the_delta_cells_are_served_rendered_and_signed() -> None:
+    """The page prints these strings and computes nothing, so they are the
+    whole of what a reader sees.
+
+    A fall must read as a fall in the reading's own unit. Rendering the rise
+    as `1.0h` and the fall beside it as `-3600s` is the same column speaking
+    two languages, and it is what happens when a unit ladder is written as a
+    series of `<` tests against positive bounds.
+    """
+    store, at = await _seeded()
+    reading = DAILY.reading("team_person.merge_trend")
+    assert reading is not None
+    result = await serve_reading(store, DAILY, "t1", reading, DEFAULTS, [3], at_ms=at)
+    window = result.subjects[0].windows[0]
+
+    assert window.delta == [None, 40.0, -20.0]
+    assert window.delta_display == [None, "40s", "-20s"], (
+        "one cell per bucket, rendered, signed, and null exactly where delta is"
+    )
+    assert window.delta is not None and window.delta_display is not None
+    assert len(window.delta_display) == len(window.delta)
+
+
+def test_a_negative_duration_renders_in_the_same_unit_as_a_positive_one() -> None:
+    """`delta` is the first statistic that can be negative, and it found the
+    unit ladder testing `seconds < 60` -- which every negative satisfies."""
+    from uratori.engine.project import format_value
+
+    settings = {"tenant": {"hoursPerDay": 8}}
+    assert format_value(3600.0, "duration", settings) == "1.0h"
+    assert format_value(-3600.0, "duration", settings) == "-1.0h"
+    assert format_value(-7200.0, "duration", settings) == "-2.0h"
+    assert format_value(-30.0, "duration", settings) == "-30s"
+    assert format_value(-172800.0, "duration", settings) == "-2.0d"
+    # The same ladder shape, one unit along: a subtraction under `unit effort`
+    # can go negative too, and printed a fortnight of work as "-240.0h".
+    assert format_value(-864000.0, "effort", settings) == "-30.0d"
+
+
+def test_a_delta_over_a_sub_day_figure_is_refused_rather_than_served_empty() -> None:
+    """A delta's cells are its source's own buckets, and it has no grain to
+    group them to the way a series has.
+
+    Left to compile it did not fail -- it answered `[]`, with no reason and
+    no unmet requirement, which is an empty list under a heading promising a
+    trend: exactly what the live-reading refusal exists to prevent, reached
+    by a different road.
+    """
+    sub_day = """
+group work_issue.by_quarter from (assigneeAccountId through team_person.accounts.accountId, completedAt by 15 minutes in tenant.timezone)
+
+# Delivered per quarter-hour.
+figure team_person.quarter_volume:
+    display "{team_person} per quarter"
+    depends:
+        done = work_issue.by_quarter:{team_person}
+    calculate:
+        count(done)
+"""
+    refuses(
+        sub_day
+        + """
+# Trend, too finely.
+reading team_person.quarter_trend(range):
+    display "{team_person} quarter trend"
+    depends:
+        q = team_person.quarter_volume in range
+    calculate:
+        delta(q)
+""",
+        "15 minutes",
+        "the raw collection the payload exists to withhold",
+    )
+
+    # The control: the same delta over a day-keyed figure compiles.
+    assert compile_source(
+        BASE
+        + """
+# Trend, at the day.
+reading team_person.day_trend(range):
+    display "{team_person} day trend"
+    depends:
+        d = team_person.delivered in range
+    calculate:
+        delta(d)
+"""
+    ).reading("team_person.day_trend") is not None
+
+
+def test_a_band_may_not_colour_a_series_either() -> None:
+    """The same refusal, and it closes a hole that predates the delta: a
+    band on a series compiled, `level_of` found no scalar to read, and every
+    row banded unknown for ever."""
+    refuses(
+        """
+# Banded series.
+reading team_person.banded_series(range):
+    display "{team_person} banded series"
+    band low on series against flow.leadTimeDays
+    depends:
+        t = team_person.time_to_merge in range
+    calculate:
+        series(t)
+""",
+        "series",
+        "one cell per bucket",
+    )
+
+    # The control: banding a scalar the reading does calculate is fine.
+    assert compile_source(
+        BASE
+        + """
+# Banded median.
+reading team_person.banded_median(range):
+    display "{team_person} banded median"
+    band low on median against flow.leadTimeDays
+    depends:
+        t = team_person.time_to_merge in range
+    calculate:
+        median(t)
+        delta(t)
+"""
+    ).reading("team_person.banded_median") is not None
+
+
+def test_adding_a_delta_moves_the_readings_version_and_nothing_elses() -> None:
+    """A reading that starts answering a trend is a different definition, so
+    its hash moves. Every other definition in the file is untouched, because
+    a new optional construct nobody used must leave existing versions
+    exactly where they were -- that is what lets a construct be added
+    without rebuilding a tenant's history."""
+    without = compile_source(
+        BASE
+        + """
+# Merge pace.
+reading team_person.pace(range):
+    display "{team_person} pace"
+    depends:
+        t = team_person.time_to_merge in range
+    calculate:
+        median(t)
+"""
+    )
+    with_delta = compile_source(
+        BASE
+        + """
+# Merge pace.
+reading team_person.pace(range):
+    display "{team_person} pace"
+    depends:
+        t = team_person.time_to_merge in range
+    calculate:
+        median(t)
+        delta(t)
+"""
+    )
+    before = without.reading("team_person.pace")
+    after = with_delta.reading("team_person.pace")
+    assert before is not None and after is not None
+    assert before.version != after.version
+
+    assert [f.version for f in without.figures] == [f.version for f in with_delta.figures], (
+        "the figures underneath did not change, so their stored values must be reused"
     )

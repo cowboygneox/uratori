@@ -826,8 +826,8 @@ tr.expansion li > .expansion {
   align-items: baseline;
   font-variant-numeric: tabular-nums;
 }
-.deltas .delta { font-family: var(--mono, monospace); }
-.deltas .delta-none { color: var(--faint, #888); font-style: italic; }
+.deltas .delta { font-family: var(--mono); }
+.deltas .delta-none { color: var(--ink-faint); font-style: italic; }
 
 /* The statistic a reading's band judges: quietly marked, so the band column
    beside it reads as its verdict and nobody else's. */

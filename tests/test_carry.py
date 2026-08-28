@@ -6,9 +6,14 @@ here is a claim about the step: where it starts, which direction it runs, what
 a later change does to the buckets before it, and what each row cites.
 
 The separation is deliberate. The three triggers (a fact landing, a pass
-extending, a read filling) share this one function, so a rule proved here is
-proved for all three at once -- which is the only reason three triggers are
-allowed to exist at all.
+extending, a read filling) are *meant* to share this one function, so a rule
+proved here is proved for all three at once -- which is the only reason
+three triggers are allowed to exist at all.
+
+None of those triggers exists yet: there is no `carried forward` in the
+grammar, so nothing under `uratori/` calls into this module. These are the
+step's own rules, pinned ahead of the wiring; the integration tests that
+prove the three triggers write byte-identical rows are owed and not here.
 """
 
 from __future__ import annotations
@@ -278,15 +283,38 @@ def test_a_future_dated_anchor_materialises_nothing_yet() -> None:
     assert sequence_to_present("2026-09", month_walker("2026-08"), cap=120) == []
 
 
-def test_the_walk_reuses_the_resolver_rather_than_counting_buckets_itself() -> None:
-    """The search grows the span until it reaches back past the anchor, and
-    asks the resolver for every candidate.
+def test_the_sequence_is_whatever_the_resolver_says_it_is() -> None:
+    """The delegation, proved by handing over a calendar nothing could guess.
 
-    Written as a search on purpose: working out "how many months since
-    February" directly would be a second calendar implementation living
-    beside the window's, and the two would agree until the first leap
-    week.
+    A resolver whose sequence skips arbitrary positions -- as a selective
+    rule's really does, a fifth Monday existing in some months and not
+    others -- must come back verbatim. An implementation that worked the
+    span out for itself, by counting months or days between labels, would
+    invent the missing entries and materialise buckets no window ever asks
+    for; one that did its own arithmetic on these labels could not produce
+    them at all.
+
+    Asserting the resolver was merely *called* is not enough: a second
+    calendar that also called it would pass that, which is how the earlier
+    version of this test managed to stay green when the search was replaced
+    with month arithmetic.
     """
+    sparse = [
+        "2026-01-05", "2026-02-02", "2026-04-06", "2026-04-27", "2026-09-07",
+    ]
+
+    def resolver(n: int) -> list[str]:
+        return sparse[-min(n, len(sparse)) :]
+
+    assert sequence_to_present("2026-02-02", resolver, cap=120) == [
+        "2026-02-02", "2026-04-06", "2026-04-27", "2026-09-07",
+    ], "the gaps are the calendar's own; nothing here may fill them in"
+
+    # And the whole of it when the anchor predates the sequence.
+    assert sequence_to_present("2025-01-01", resolver, cap=120) == sparse
+
+
+def test_the_walk_asks_the_resolver_and_stays_inside_the_cap() -> None:
     seen: list[int] = []
     walker = month_walker("2026-08")
 
@@ -296,7 +324,7 @@ def test_the_walk_reuses_the_resolver_rather_than_counting_buckets_itself() -> N
 
     sequence_to_present("2026-02", spy, cap=120)
     assert seen, "the resolver is the only thing that knows what a bucket is"
-    assert max(seen) <= 120
+    assert max(seen) <= 121, "one probe past the ceiling settles a full calendar; no more"
 
 
 def test_the_reach_is_capped_rather_than_walked_for_ever() -> None:
@@ -322,3 +350,58 @@ def test_a_calendar_that_stops_growing_ends_the_walk() -> None:
         return ["0001-01", "0001-02"][-min(n, 2) :]
 
     assert sequence_to_present("0001-01", clamped, cap=120) == ["0001-01", "0001-02"]
+
+
+def test_two_anchors_in_one_bucket_are_refused_rather_than_silently_picked() -> None:
+    """A bucket has one value, so a second anchor for it is a caller error.
+
+    Left to fall through, the sort is stable and `bisect_right` takes the
+    last of a tied run, so the answer would be whichever the caller happened
+    to list second -- a deterministic, invisible coin toss whose loser is
+    then carried forward over every later bucket. Aborting is the choice
+    `evaluate._scalar` makes in the same situation: a wrong number nobody
+    can see is worse than a failed pass somebody can.
+    """
+    clashing = [
+        Anchor(label="2026-06", value=1500.0, members=("g2",)),
+        Anchor(label="2026-06", value=1200.0, members=("g3",)),
+    ]
+    with pytest.raises(ValueError) as caught:
+        carried_rows(clashing, months("2026-06"))
+    assert "2026-06" in str(caught.value)
+
+    # The control: the same two values in *different* buckets are ordinary.
+    fine = [
+        Anchor(label="2026-06", value=1500.0, members=("g2",)),
+        Anchor(label="2026-07", value=1200.0, members=("g3",)),
+    ]
+    assert [r.value for r in carried_rows(fine, months("2026-06", "2026-07"))] == [
+        1500.0,
+        1200.0,
+    ]
+
+
+def test_a_calendar_exactly_as_long_as_the_cap_is_returned_whole() -> None:
+    """The boundary the search cannot see without asking.
+
+    It never requests more than `cap`, so a calendar of exactly `cap`
+    buckets looks identical to one that runs for ever -- and refusing to
+    carry a sequence that would have fitted is the wrong error. One probe
+    past the ceiling tells them apart.
+    """
+    calendar = [f"2026-{m:02d}-{d:02d}" for m in (1, 2) for d in range(1, 13)]
+    assert len(calendar) == 24
+
+    def resolver(n: int) -> list[str]:
+        return calendar[-min(n, len(calendar)) :]
+
+    assert sequence_to_present("1990-01-01", resolver, cap=24) == calendar
+
+    # And one bucket more than the cap is still refused: the reach is the cost.
+    longer = ["2025-12-31", *calendar]
+
+    def bigger(n: int) -> list[str]:
+        return longer[-min(n, len(longer)) :]
+
+    with pytest.raises(CarryReachExceeded):
+        sequence_to_present("1990-01-01", bigger, cap=24)

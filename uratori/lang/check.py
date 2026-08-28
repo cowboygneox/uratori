@@ -1487,6 +1487,16 @@ class _Checker:
                         "the second would be whichever the serve path kept, silently.",
                         stat.line,
                     )
+                if grain in ("minute", "15 minutes"):
+                    raise CheckError(
+                        f"reading {d.name} takes a delta over a figure keyed by {grain}. A "
+                        "delta's cells are its source's own buckets -- there is no grain to "
+                        "group them to, the way a series has -- so ninety days of "
+                        "quarter-hours would be 8,640 cells on the wire: the raw collection "
+                        "the payload exists to withhold. Take the delta over a day-keyed "
+                        "figure, or declare one at the grain the trend is about.",
+                        stat.line,
+                    )
             if stat.fn == "series":
                 series_declared += 1
                 if series_declared > 1:

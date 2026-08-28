@@ -928,9 +928,14 @@ function sparkline(window) {
 function deltaCells(window) {
   const cells = window.delta_display;
   if (!cells || !cells.length) return el('span', { class: 'faint' }, '—');
+  // The tooltip counts nothing. It said "N buckets, N-1 changes" for a
+  // while, which was arithmetic in the browser -- and wrong arithmetic: with
+  // a hole in the source, three buckets carry no changes at all and the
+  // sentence still claimed two. Cell count is what the page can honestly say
+  // about its own list.
   return el('span', {
     class: 'deltas',
-    title: `${cells.length} buckets, ${Math.max(cells.length - 1, 0)} changes; `
+    title: `${cells.length} buckets, one cell each; `
       + 'the oldest bucket has no predecessor inside this range',
   }, cells.map((text, at) => el('span', {
     class: text == null ? 'delta-none' : 'delta',
