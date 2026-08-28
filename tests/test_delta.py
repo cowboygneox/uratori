@@ -143,7 +143,7 @@ measure code_change.open_seconds = mergedAt - createdAt
 measure code_review_request.waiting_seconds = now - requestedAt
 
 # Time to merge.
-figure team_person.time_to_merge:
+figure team_person.time_to_merge bucketed:
     display "{team_person} to merge"
     depends:
         merged = code_change.merged_by_day:{team_person}
@@ -151,7 +151,7 @@ figure team_person.time_to_merge:
         list(code_change.open_seconds over merged)
 
 # Delivered per day.
-figure team_person.delivered:
+figure team_person.delivered bucketed:
     display "{team_person} delivered"
     depends:
         done = work_issue.delivered_by_day:{team_person}
@@ -529,7 +529,7 @@ def test_a_delta_over_a_sub_day_figure_is_refused_rather_than_served_empty() -> 
 group work_issue.by_quarter from (assigneeAccountId through team_person.accounts.accountId, completedAt by 15 minutes in tenant.timezone)
 
 # Delivered per quarter-hour.
-figure team_person.quarter_volume:
+figure team_person.quarter_volume bucketed:
     display "{team_person} per quarter"
     depends:
         done = work_issue.by_quarter:{team_person}

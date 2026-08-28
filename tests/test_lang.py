@@ -50,7 +50,7 @@ figure team_person.wip:
         count(mine)
 
 # Time to merge.
-figure team_person.time_to_merge:
+figure team_person.time_to_merge bucketed:
     display "{team_person} to merge"
     depends:
         merged = code_change.merged_by_day:{team_person}
@@ -723,7 +723,7 @@ figure team_person.listed_field:
     refuses(
         """
 # d
-figure team_person.summed_duration:
+figure team_person.summed_duration bucketed:
     display "x"
     depends:
         m = code_change.merged_by_day:{team_person}
@@ -842,7 +842,7 @@ def test_a_mean_over_daily_counts_is_a_mean_per_day_wearing_the_wrong_label() ->
     refuses(
         """
 # d
-figure team_person.merges:
+figure team_person.merges bucketed:
     display "x"
     depends:
         m = code_change.merged_by_day:{team_person}
@@ -867,7 +867,7 @@ def test_the_control_a_sum_over_daily_counts_is_allowed() -> None:
     lib = compile_ok(
         """
 # d
-figure team_person.merges:
+figure team_person.merges bucketed:
     display "x"
     depends:
         m = code_change.merged_by_day:{team_person}
@@ -1027,7 +1027,7 @@ def test_a_sum_reading_takes_no_default_minimum() -> None:
     lib = compile_ok(
         """
 # d
-figure team_person.merges:
+figure team_person.merges bucketed:
     display "x"
     depends:
         m = code_change.merged_by_day:{team_person}
@@ -1171,7 +1171,7 @@ def test_an_effort_figure_may_not_be_read_over_a_range() -> None:
     refuses(
         """
 # d
-figure team_person.effort_by_day:
+figure team_person.effort_by_day bucketed:
     display "x"
     depends:
         m = work_issue.delivered_by_day:{team_person}
@@ -1904,7 +1904,7 @@ def test_a_list_figure_cannot_be_banded() -> None:
     refuses(
         """
 # d
-figure team_person.listed:
+figure team_person.listed bucketed:
     display "x"
     depends:
         merged = code_change.merged_by_day:{team_person}
@@ -2323,7 +2323,7 @@ QUARTER = """
 group code_change.merged_by_quarter from (authorAccountId through team_person.accounts.accountId, mergedAt by 15 minutes in tenant.timezone)
 
 # d
-figure team_person.merge_rate:
+figure team_person.merge_rate bucketed:
     display "x"
     depends:
         mine = code_change.merged_by_quarter:{team_person}
@@ -2343,7 +2343,7 @@ def test_a_sub_day_truncation_is_the_figures_grain() -> None:
 group code_change.merged_by_minute from (authorAccountId through team_person.accounts.accountId, mergedAt by minute in tenant.timezone)
 
 # d
-figure team_person.merge_minutes:
+figure team_person.merge_minutes bucketed:
     display "x"
     depends:
         mine = code_change.merged_by_minute:{team_person}
@@ -2391,7 +2391,7 @@ group code_change.merged_by_month from (authorAccountId through team_person.acco
 group code_change.merged_by_calendar_quarter from (authorAccountId through team_person.accounts.accountId, mergedAt by quarter in tenant.timezone)
 
 # d
-figure team_person.merges_hourly:
+figure team_person.merges_hourly bucketed:
     display "x"
     depends:
         mine = code_change.merged_by_hour:{team_person}
@@ -2399,7 +2399,7 @@ figure team_person.merges_hourly:
         count(mine)
 
 # d
-figure team_person.merges_weekly:
+figure team_person.merges_weekly bucketed:
     display "x"
     depends:
         mine = code_change.merged_by_week:{team_person}
@@ -2407,7 +2407,7 @@ figure team_person.merges_weekly:
         count(mine)
 
 # d
-figure team_person.merges_monthly:
+figure team_person.merges_monthly bucketed:
     display "x"
     depends:
         mine = code_change.merged_by_month:{team_person}
@@ -2415,7 +2415,7 @@ figure team_person.merges_monthly:
         count(mine)
 
 # d
-figure team_person.merges_quarterly:
+figure team_person.merges_quarterly bucketed:
     display "x"
     depends:
         mine = code_change.merged_by_calendar_quarter:{team_person}
@@ -2442,7 +2442,7 @@ def test_an_ordinal_weekday_rule_parses_and_is_the_figures_sequence() -> None:
 group code_change.merged_first_mondays from (authorAccountId through team_person.accounts.accountId, mergedAt by first monday of month in tenant.timezone)
 
 # d
-figure team_person.first_monday_merges:
+figure team_person.first_monday_merges bucketed:
     display "x"
     depends:
         mine = code_change.merged_first_mondays:{team_person}
@@ -2544,7 +2544,7 @@ def test_a_minute_grain_figure_refuses_a_series() -> None:
 group code_change.merged_by_minute from (authorAccountId through team_person.accounts.accountId, mergedAt by minute in tenant.timezone)
 
 # d
-figure team_person.merges_by_minute:
+figure team_person.merges_by_minute bucketed:
     display "x"
     depends:
         mine = code_change.merged_by_minute:{team_person}
@@ -2743,7 +2743,7 @@ def test_a_changed_bucket_rule_moves_the_figures_version() -> None:
 group code_change.cut from (authorAccountId through team_person.accounts.accountId, mergedAt by {rule} in tenant.timezone)
 
 # d
-figure team_person.cut_count:
+figure team_person.cut_count bucketed:
     display "x"
     depends:
         mine = code_change.cut:{{team_person}}

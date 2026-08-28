@@ -759,7 +759,7 @@ grains, or a selective rule -- stores one value per subject *per bucket*:
 
 ```
 # How long each change merged that day had been open.
-figure team_person.time_to_merge:
+figure team_person.time_to_merge bucketed:
     display "{team_person} time to merge"
 
     depends:
@@ -941,7 +941,7 @@ figure shop_courier.daily_drops:
 
 # Deliveries per courier per calendar month -- the month's own records,
 # not a rollup of days.
-figure shop_courier.monthly_drops:
+figure shop_courier.monthly_drops bucketed:
     display "{shop_courier} deliveries that month"
     depends:
         done = shop_order.drops_by_month:{shop_courier}

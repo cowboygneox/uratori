@@ -57,7 +57,12 @@ _HEADERS = (
     r"^fact\s+{name}\s*:",
     r"^(?:group|filter)\s+{name}\s",
     r"^measure\s+{name}\s*=",
-    r"^figure\s+{name}(\s+across\s+\w+)?\s*:",
+    # `bucketed` and `across` are both optional and order-free after the
+    # name, so the header pattern has to admit either, both, or neither.
+    # Getting this wrong does not fail loudly: the block is simply not found
+    # and the definition serves a *blank* formula to the page that exists to
+    # show it -- which is how a figure nobody can read reaches a reader.
+    r"^figure\s+{name}(?:\s+(?:bucketed|across\s+\w+))*\s*:",
     r"^reading\s+{name}\s*\(",
     r"^projection\s+{name}\s*:",
     r"^summarise\s+{name}\s+over\s",

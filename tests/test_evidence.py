@@ -41,7 +41,7 @@ measure work_issue.rework = rework_seconds in effort
 measure work_issue.delivered_on = moment completed_at
 
 # Every merge's duration, kept whole for the readings over it.
-figure team_person.time_to_merge:
+figure team_person.time_to_merge bucketed:
     display "{team_person} time to merge"
     depends:
         merged = code_change.merged_by_day:{team_person}
@@ -49,7 +49,7 @@ figure team_person.time_to_merge:
         list(code_change.open_seconds over merged)
 
 # How many items this person closed on each day.
-figure team_person.delivered_issues:
+figure team_person.delivered_issues bucketed:
     display "{team_person} delivered"
     depends:
         mine = work_issue.delivered_by_day:{team_person}
@@ -108,7 +108,7 @@ figure team_person.last_delivery:
         latest(work_issue.delivered_on over mine)
 
 # Merges of this person's that were approved.
-figure team_person.approved_merges:
+figure team_person.approved_merges bucketed:
     display "{team_person} approved"
     depends:
         mine = code_change.merged_by_day:{team_person} & code_review.approved
@@ -116,7 +116,7 @@ figure team_person.approved_merges:
         count(mine)
 
 # How much is active around this person, tenant-wide.
-figure team_person.busy_context:
+figure team_person.busy_context bucketed:
     display "{team_person} context"
     depends:
         merged = code_change.merged_by_day:{team_person}
@@ -750,7 +750,7 @@ measure code_change.open_seconds = merged_at - created_at
 measure code_review_request.waiting_seconds = now - requested_at
 
 # Every merge's duration.
-figure team_person.time_to_merge:
+figure team_person.time_to_merge bucketed:
     display "{team_person} time to merge"
     depends:
         merged = code_change.merged_by_day:{team_person}
@@ -844,7 +844,7 @@ group code_change.merged_by_day from (author_account_id through team_person.acco
 filter work_issue.active where active == true
 
 # How much busier the board is than this person.
-figure team_person.context_gap:
+figure team_person.context_gap bucketed:
     display "{team_person} gap"
     unit count
 

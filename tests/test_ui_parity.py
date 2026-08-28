@@ -94,7 +94,7 @@ figure shop_courier.carrying:
         otherwise "ok"
 
 # Every delivery's ride time, day by day.
-figure shop_courier.ride_times:
+figure shop_courier.ride_times bucketed:
     display "{shop_courier} rides"
     depends:
         done = shop_order.delivered_by_day:{shop_courier}

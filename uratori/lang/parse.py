@@ -750,7 +750,22 @@ class _Parser:
         self._prefix_of(name, "a figure", line)
 
         across: str | None = None
-        if self._at_word("across"):
+        bucketed = False
+        # `bucketed` and `across` are the two things a figure can say about
+        # its second key part, and they are mutually exclusive by grammar as
+        # well as by rule: a bucket of time has no roster and no name, so it
+        # is not a dimension. Accepted in either order because directive
+        # order is free everywhere else in this language and a reader should
+        # not have to remember an exception.
+        while self._at_word("across") or self._at_word("bucketed"):
+            if self._at_word("bucketed"):
+                self._next()
+                if bucketed:
+                    raise self._error(
+                        f"figure {name} says `bucketed` twice.", line
+                    )
+                bucketed = True
+                continue
             self._next()
             across = self._name("the fact kind this is split across")
 
@@ -822,6 +837,7 @@ class _Parser:
             display=display,
             calculate=calculate,
             across=across,
+            bucketed=bucketed,
             unit=unit,
             sets=tuple(sets),
             combines=tuple(combines),

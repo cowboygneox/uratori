@@ -443,7 +443,7 @@ READINGS = compile_source(
     BASE
     + """
 # d
-figure team_person.per_day:
+figure team_person.per_day bucketed:
     display "x"
     depends:
         mine = work_issue.by_day:{team_person}
@@ -451,7 +451,7 @@ figure team_person.per_day:
         list(work_issue.lead over mine)
 
 # d
-figure team_person.volume:
+figure team_person.volume bucketed:
     display "x"
     depends:
         mine = work_issue.by_day:{team_person}
@@ -653,7 +653,7 @@ def test_a_band_with_no_on_needs_the_reading_to_calculate_a_mean() -> None:
     refuses(
         """
 # d
-figure team_person.spans:
+figure team_person.spans bucketed:
     display "x"
     depends:
         mine = work_issue.by_day:{team_person}
@@ -755,7 +755,7 @@ GRAINED = compile_source(
     BASE
     + """
 # d
-figure team_person.quarter_volume:
+figure team_person.quarter_volume bucketed:
     display "x"
     depends:
         mine = work_issue.by_quarter:{team_person}
@@ -763,7 +763,7 @@ figure team_person.quarter_volume:
         count(mine)
 
 # d
-figure team_person.quarter_lead:
+figure team_person.quarter_lead bucketed:
     display "x"
     depends:
         mine = work_issue.by_quarter:{team_person}
@@ -806,7 +806,7 @@ group work_issue.by_first_monday from (assignee_account_id through team_person.a
 group work_issue.by_fifth_monday from (assignee_account_id through team_person.accounts.account_id, completed_at by fifth monday of month in tenant.timezone)
 
 # d
-figure team_person.weekly_lead:
+figure team_person.weekly_lead bucketed:
     display "x"
     depends:
         mine = work_issue.by_week:{team_person}
@@ -822,7 +822,7 @@ reading team_person.weekly_pace(range):
         median(m)
 
 # d
-figure team_person.monthly_volume:
+figure team_person.monthly_volume bucketed:
     display "x"
     depends:
         mine = work_issue.by_month:{team_person}
@@ -830,7 +830,7 @@ figure team_person.monthly_volume:
         count(mine)
 
 # d
-figure team_person.monthly_lead:
+figure team_person.monthly_lead bucketed:
     display "x"
     depends:
         mine = work_issue.by_month:{team_person}
@@ -838,7 +838,7 @@ figure team_person.monthly_lead:
         list(work_issue.lead over mine)
 
 # d
-figure team_person.quarterly_volume:
+figure team_person.quarterly_volume bucketed:
     display "x"
     depends:
         mine = work_issue.by_calendar_quarter:{team_person}
@@ -846,7 +846,7 @@ figure team_person.quarterly_volume:
         count(mine)
 
 # d
-figure team_person.hourly_lead:
+figure team_person.hourly_lead bucketed:
     display "x"
     depends:
         mine = work_issue.by_hour:{team_person}
@@ -854,7 +854,7 @@ figure team_person.hourly_lead:
         list(work_issue.lead over mine)
 
 # d
-figure team_person.first_monday_lead:
+figure team_person.first_monday_lead bucketed:
     display "x"
     depends:
         mine = work_issue.by_first_monday:{team_person}
@@ -862,7 +862,7 @@ figure team_person.first_monday_lead:
         list(work_issue.lead over mine)
 
 # d
-figure team_person.fifth_monday_volume:
+figure team_person.fifth_monday_volume bucketed:
     display "x"
     depends:
         mine = work_issue.by_fifth_monday:{team_person}
@@ -920,7 +920,7 @@ reading team_person.fifth_monday_shipped(range):
         sum(m)
 
 # d
-figure team_person.minute_lead:
+figure team_person.minute_lead bucketed:
     display "x"
     depends:
         mine = work_issue.by_minute:{team_person}

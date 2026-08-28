@@ -368,7 +368,7 @@ figure nfl_team.last_played:
 
 # Points per calendar day, stored one value per team per day -- the shape a
 # windowed reading can range over, a quarter of a century deep.
-figure nfl_team.points_by_day:
+figure nfl_team.points_by_day bucketed:
     display "{nfl_team} points that day"
 
     depends:
@@ -381,7 +381,7 @@ figure nfl_team.points_by_day:
 # previous game, stored per day so a reading can take a mean or a worst.
 # Openers are filtered out by declaration -- a game that cannot carry a gap
 # is not evidence about rest.
-figure nfl_team.rest_by_day:
+figure nfl_team.rest_by_day bucketed:
     display "{nfl_team} rest before kickoff"
 
     depends:
@@ -608,7 +608,7 @@ figure nfl_player.tds_by_season across nfl_season:
 
 # Scrimmage yards per calendar day, the career as a line a reading can
 # draw over any window.
-figure nfl_player.yards_by_day:
+figure nfl_player.yards_by_day bucketed:
     display "{nfl_player} yards that day"
 
     depends:
@@ -620,7 +620,7 @@ figure nfl_player.yards_by_day:
 # Scrimmage yards per calendar month: the trio's middle grain, summed from
 # the month's own stat lines. `over each 1-12` on the reading below is a
 # year of these, one window per month, each banded and floored on its own.
-figure nfl_player.yards_by_month:
+figure nfl_player.yards_by_month bucketed:
     display "{nfl_player} yards that month"
 
     depends:
@@ -631,7 +631,7 @@ figure nfl_player.yards_by_month:
 
 # Scrimmage yards per calendar quarter -- the coarse end of the trio,
 # quarters in the tenant's own calendar, year straddles included.
-figure nfl_player.yards_by_quarter:
+figure nfl_player.yards_by_quarter bucketed:
     display "{nfl_player} yards that quarter"
 
     depends:
@@ -748,7 +748,7 @@ figure nfl_team.third_down_rate:
 
 # Points put on the board per quarter-hour of the day -- the grain that lets
 # a reading show when, on the clock, a team actually scores.
-figure nfl_team.scoring_clock:
+figure nfl_team.scoring_clock bucketed:
     display "{nfl_team} points in that quarter-hour"
 
     depends:
@@ -761,7 +761,7 @@ figure nfl_team.scoring_clock:
 # declared at the coarser grain under their own name -- so an hourly
 # timeline and a quarter-hour one are two citable answers to two written
 # questions, not one figure re-sliced on the way out.
-figure nfl_team.scoring_by_hour:
+figure nfl_team.scoring_by_hour bucketed:
     display "{nfl_team} points in that hour"
 
     depends:

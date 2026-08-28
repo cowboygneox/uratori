@@ -810,6 +810,33 @@ class FigureDecl:
     person-keyed number under a name that now means a pair.
     """
 
+    bucketed: bool = False
+    """`figure site.target_month bucketed:` -- this figure holds one value per
+    subject *per bucket* of its group's declared sequence.
+
+    A bare keyword, with no grain repeated after it. The grain is already
+    written in the group and implied by the name, and a figure that restated
+    it would be a second place for the two to disagree -- the checker would
+    then have to decide which one wins, which is a question with no good
+    answer.
+
+    **Required when the group makes a sequence, refused when it does not.**
+    Both directions are the same argument `across` makes one key-part along:
+    what the keyword adds is the *declaration*, and without it every reader
+    downstream is silently wrong in its own way -- a projection binds a
+    column that never resolves, a bundle subscribes to every stored bucket of
+    every subject, a rollup totals a sequence as though it were one number.
+
+    **Not in the version hash.** It is a checker-verified mirror of the
+    group's spec, and that spec is already hashed into every definition that
+    reads it, so hashing it here would add nothing but a second copy. The
+    `keyed as` rule exactly: a construct that decides what the checker
+    permits, never what the arithmetic produces, stays out. It also has to
+    stay out to be introducible at all -- hashed, making it required would
+    have moved every sequenced figure's version in every deployment, and
+    rebuilt every tenant's history to store byte-identical values.
+    """
+
     unit: DeclaredUnit | None = None
     sets: tuple[NamedSet, ...] = ()
     combines: tuple[Combine, ...] = ()

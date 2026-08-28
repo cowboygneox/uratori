@@ -71,7 +71,7 @@ summarise work_issue.backlog over work_issue.item:
 group code_change.merged_by_quarter from (authorAccountId through team_person.accounts.accountId, mergedAt by 15 minutes in tenant.timezone)
 
 # Time to merge, quarter by quarter.
-figure team_person.merge_quarters:
+figure team_person.merge_quarters bucketed:
     display "{team_person} merge quarters"
     depends:
         merged = code_change.merged_by_quarter:{team_person}
@@ -98,7 +98,7 @@ reading team_person.merge_daily(range):
 group code_change.merged_by_minute from (authorAccountId through team_person.accounts.accountId, mergedAt by minute in tenant.timezone)
 
 # Merge times, minute by minute.
-figure team_person.merge_minutes:
+figure team_person.merge_minutes bucketed:
     display "{team_person} merge minutes"
     depends:
         merged = code_change.merged_by_minute:{team_person}
@@ -337,7 +337,7 @@ def test_a_reversed_span_and_a_span_past_the_ceiling_are_refused() -> None:
 group code_change.merged_by_month from (authorAccountId through team_person.accounts.accountId, mergedAt by month in tenant.timezone)
 
 # Time to merge, month by month.
-figure team_person.merge_months:
+figure team_person.merge_months bucketed:
     display "{team_person} merge months"
     depends:
         merged = code_change.merged_by_month:{team_person}
@@ -554,7 +554,7 @@ figure shop_courier.carrying:
         count(mine)
 
 # Every delivery's ride time, day by day.
-figure shop_courier.ride_times:
+figure shop_courier.ride_times bucketed:
     display "{shop_courier} rides"
     depends:
         done = shop_order.delivered_by_day:{shop_courier}
@@ -1138,7 +1138,7 @@ def test_the_reach_ceiling_reads_the_figures_own_bucket_rule() -> None:
     monthly = (
         "\ngroup code_change.merged_by_month from (authorAccountId through team_person.accounts.accountId, mergedAt by month in tenant.timezone)\n"
         "\n# Merges per month.\n"
-        "figure team_person.merges_monthly:\n"
+        "figure team_person.merges_monthly bucketed:\n"
         '    display "{team_person} merges that month"\n'
         "    depends:\n"
         "        mine = code_change.merged_by_month:{team_person}\n"

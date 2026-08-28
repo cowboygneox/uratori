@@ -489,7 +489,7 @@ group shop_order.delivered_by_day from (courier_id, delivered_at by day in tenan
 measure shop_order.riding_seconds = delivered_at - picked_up_at
 
 # Every delivery's ride time, day by day.
-figure shop_courier.ride_times:
+figure shop_courier.ride_times bucketed:
     display "{shop_courier} rides"
     depends:
         done = shop_order.delivered_by_day:{shop_courier}
@@ -548,7 +548,7 @@ group shop_order.dropped_by_month from (courier_id, delivered_at by month in ten
 group shop_order.dropped_first_monday from (courier_id, delivered_at by first monday of month in tenant.timezone)
 
 # Deliveries per courier per calendar month.
-figure shop_courier.monthly_drops:
+figure shop_courier.monthly_drops bucketed:
     display "{shop_courier} deliveries that month"
     depends:
         done = shop_order.dropped_by_month:{shop_courier}
@@ -556,7 +556,7 @@ figure shop_courier.monthly_drops:
         count(done)
 
 # Deliveries per courier on each month's first Monday.
-figure shop_courier.first_monday_drops:
+figure shop_courier.first_monday_drops bucketed:
     display "{shop_courier} deliveries that first Monday"
     depends:
         done = shop_order.dropped_first_monday:{shop_courier}
@@ -709,7 +709,7 @@ measure code_change.open_seconds = merged_at - created_at
 measure code_review_request.waiting_seconds = now - requested_at
 
 # Every merge's duration.
-figure team_person.time_to_merge:
+figure team_person.time_to_merge bucketed:
     display "{team_person} time to merge"
     depends:
         merged = code_change.merged_by_day:{team_person}
@@ -2915,7 +2915,7 @@ ABOUT_SOURCE = COURIER_SOURCE + """
 group shop_order.by_courier_day from (courier_id, placed by day in tenant.timezone)
 
 # How many orders this courier took on, day by day.
-figure shop_courier.daily:
+figure shop_courier.daily bucketed:
     display "{value} orders"
     depends:
         slice = shop_order.by_courier_day:{shop_courier}

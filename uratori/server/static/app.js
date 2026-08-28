@@ -1839,6 +1839,7 @@ const FIG_WORDS = new Set([
   'from', 'where', 'keyed', 'as', 'through', 'by', 'in', 'label', 'is', 'set', 'not',
   'older', 'younger', 'than', 'against', 'on', 'at', 'least', 'values', 'over',
   'when', 'then', 'otherwise', 'now', 'days', 'moment', 'ascending', 'descending',
+  'bucketed', 'carried', 'forward',
   'detail', 'action', 'severity', 'info', 'attention', 'true', 'false',
   'mean', 'median', 'worst', 'sum', 'series', 'delta', 'list', 'latest', 'earliest', 'max', 'min',
   ...FIG_UNITS, ...FIG_FACT_TYPES, ...FIG_FIELD_TYPES,

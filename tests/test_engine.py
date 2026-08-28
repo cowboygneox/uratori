@@ -852,7 +852,7 @@ group code_change.by_author from author_account_id through team_person.accounts.
 measure code_change.open_seconds = merged_at - created_at
 
 # Every merge's duration, day by day.
-figure team_person.merge_spans:
+figure team_person.merge_spans bucketed:
     display "{team_person} spans"
     depends:
         merged = code_change.merged_by_day:{team_person}

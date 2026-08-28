@@ -956,7 +956,7 @@ measure shop_order.riding_seconds = delivered_at - picked_up_at
 measure shop_order.waiting_seconds = now - requested_at
 
 # Every delivery's ride time, day by day.
-figure shop_courier.ride_times:
+figure shop_courier.ride_times bucketed:
     display "{shop_courier} rides"
     depends:
         done = shop_order.delivered_by_day:{shop_courier}
@@ -1108,7 +1108,7 @@ group shop_order.delivered_by_day from (courier_id, delivered_at by day in tenan
 measure shop_order.riding_seconds = delivered_at - picked_up_at
 
 # Every delivery's ride time, day by day.
-figure shop_courier.ride_times:
+figure shop_courier.ride_times bucketed:
     display "{shop_courier} rides"
     depends:
         done = shop_order.delivered_by_day:{shop_courier}
@@ -1496,7 +1496,7 @@ QUARTER_RIDES_SOURCE = (
 group shop_order.delivered_by_hour from (courier_id, delivered_at by hour in tenant.timezone)
 
 # Every delivery's ride time, hour by hour.
-figure shop_courier.ride_hours:
+figure shop_courier.ride_hours bucketed:
     display "{shop_courier} ride hours"
     depends:
         done = shop_order.delivered_by_hour:{shop_courier}

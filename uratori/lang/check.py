@@ -547,6 +547,21 @@ class _Checker:
         set_names = self._named_sets(d)
         combines = self._combines(d)
         scope_index, grain, dimension_part = self._scope_index(d, set_names, scope)
+        if d.bucketed and grain is None:
+            # The mirror of the refusal in `_scope_index`, and checked here
+            # rather than there because a rollup reaches no group at all --
+            # `_scope_index` returns early for it, and a `bucketed` rollup is
+            # exactly the case worth catching: it would have readings written
+            # over a sequence that does not exist, answering an absence for
+            # ever with nothing to say why.
+            raise CheckError(
+                f"figure {d.name} says `bucketed`, but nothing gives it a sequence of "
+                "buckets: the group that fans it out would have to end in a truncated "
+                "or selective part (`... by month in tenant.timezone`). A figure "
+                "declaring a sequence it does not have is one a reading can be written "
+                "over and never find a bucket in.",
+                d.line,
+            )
 
         kind = self._calc_kind(d.calculate, d, set_names, combines, scope)
         unit = self._figure_unit(d, kind, combines)
@@ -930,6 +945,13 @@ class _Checker:
             tail = parts[1]
             if tail.truncate is not None or tail.select is not None:
                 grain = tail.truncate or tail.select
+                # `across` is answered before the missing `bucketed`, and the
+                # order is load-bearing rather than arbitrary. A figure that
+                # says `across` over a truncated part has made a *wrong*
+                # claim; one that says nothing has merely omitted one. Told
+                # to add `bucketed`, the author of the first would add it
+                # beside the `across` and hit a second refusal -- so the
+                # message that names the real mistake goes first.
                 if d.across is not None:
                     raise CheckError(
                         f"figure {d.name} is split across {d.across}, but {name} buckets "
@@ -937,6 +959,18 @@ class _Checker:
                         "dimension: it has no roster and no name, and whether a figure is "
                         "time-keyed is what decides if a reading may roll it up over a "
                         "range.",
+                        d.line,
+                    )
+                if not d.bucketed:
+                    raise CheckError(
+                        f"figure {d.name} is fanned out by {name}, which buckets its "
+                        f"second part by {grain} -- so it holds one value per {scope} "
+                        f"per {grain}, not one per {scope}. Say so: "
+                        f"`figure {d.name} bucketed:`. Unsaid, every reader downstream "
+                        "is wrong in its own way -- a projection binds a column that "
+                        "never resolves, a bundle subscribes to every stored bucket of "
+                        "every subject, and a rollup totals a sequence as though it "
+                        "were one number.",
                         d.line,
                     )
             else:
