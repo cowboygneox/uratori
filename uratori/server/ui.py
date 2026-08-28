@@ -52,7 +52,16 @@ from ..lang.ast import ByAge, ByComposite, ByField, FigureUnit, IndexBy, IndexFi
 from ..lang.lex import DefinitionError, lex
 from ..lang.plan import CompiledFactField, CompiledIndex, CompiledMeasure, Library
 from ..lang.source import declaration_prose, declaration_source
-from ..results import Availability, BundleResult, Evidence, Ok, Result, Subject, Unavailable
+from ..results import (
+    Availability,
+    BundleMemberResult,
+    BundleResult,
+    Evidence,
+    Ok,
+    Result,
+    Subject,
+    Unavailable,
+)
 from ..schema import EFFORT_HOURS_SETTING, Schema
 from ..store.postgres import PostgresEngineStore
 from ..windows import WindowError, as_window_spec, window_token
@@ -360,6 +369,10 @@ class ActivityOut(BaseModel):
     quiet_hidden: int
     """How many do-nothing runs the default listing is not showing."""
 
+    more: bool = False
+    """Whether kept runs continue past the last one listed -- the pager's
+    fact, so "showing the newest 50 of 200" is a door and not a wall."""
+
 
 class MembershipBucket(BaseModel):
     bucket: str
@@ -498,6 +511,82 @@ class AboutFigureOut(BaseModel):
 
     result: Result
     more: bool
+    total: int = 0
+    """How many rows this figure holds for this record, before the cap --
+    the page says "the latest 60 of 214", because "more than sixty" is not a
+    number a reader can reconcile against anything. Zero when nothing is
+    capped away and nothing was held: a count, never a flag."""
+
+
+class AboutReadingOut(BaseModel):
+    """One reading scoped to the record's kind, narrowed to this record --
+    the same evaluation the reading's own page runs (the serving default
+    windows), with this subject's rows picked out. A fetch scope, exactly
+    like the figure entries: availability, statistics, banding and window
+    resolution are the identical code either way.
+
+    `result` is None only for a reading the engine cannot serve at all (a
+    live reading, today), and `note` then carries the same sentence its own
+    route answers with -- the section must state that absence rather than
+    silently omit the one reading kind, which is how readings went missing
+    from this page in the first place. `name` and `version` always travel,
+    result or not: two live readings answering two identical anonymous
+    sentences would leave the reader unable to say WHICH reading is
+    missing."""
+
+    name: str
+    version: str
+    result: Result | None = None
+    note: str | None = None
+
+
+class TileMemberOut(BaseModel):
+    """One slot of a tile, as a record's page shows it.
+
+    `result` is the member's ordinary Result -- served by `answer_bundle`
+    like the tile's own page, then narrowed to this record's rows as a fetch
+    scope -- so the number under the slot here cannot disagree with the
+    number on the tile. When the member is not about this record at all
+    (another kind's rows, or a summarise -- a page-level row by definition),
+    `result` stays home and `note` says why: shipping another kind's data
+    under a record would invite exactly the misreading this page exists to
+    end, and a silently absent slot would misdraw the composition the
+    bundle's hash covers.
+
+    `name` and `version` always travel, result or not: every number a slot
+    could show cites its own member's version, and the slot row must say so
+    even when the rows stay home."""
+
+    slot: str
+    kind: Literal["figure", "reading", "projection", "summary"]
+    name: str
+    version: str
+    result: Result | None = None
+    more: bool = False
+    total: int = 0
+    note: str | None = None
+
+
+class AboutTileOut(BaseModel):
+    """One bundle with at least one member about this record's kind: the
+    composition, slot by slot, each member narrowed to this record. The
+    bundle's own hash rides as `version` -- review-only, cited by nothing,
+    exactly as the tile's page states it."""
+
+    bundle: str
+    version: str
+    label: str
+    doc: str
+    at: str | None = None
+    """When the tile was evaluated -- absent for a tile that could not be
+    (see `note`), because stamping a fresh instant on a non-answer would be
+    a fabricated clock."""
+
+    members: list[TileMemberOut]
+    note: str | None = None
+    """Set when the tile could not be evaluated at all (a live-reading
+    member, today); the members then list with their addresses and no rows,
+    and this says why -- the same sentence the results route answers with."""
 
 
 class CitedRowOut(BaseModel):
@@ -527,6 +616,10 @@ class CitedFigureOut(BaseModel):
     state: Availability
     rows: list[CitedRowOut]
     more: bool
+    total: int = 0
+    """Every stored row of this figure that counted the record, before the
+    cap -- the honest number beside the sample, and the count the paged
+    citation route serves the rest of."""
 
 
 class AboutPageOut(BaseModel):
@@ -557,8 +650,73 @@ class AboutOut(BaseModel):
     verdict about definitions that do not exist."""
 
     figures: list[AboutFigureOut]
+    readings: list[AboutReadingOut]
     cited: list[CitedFigureOut]
     pages: list[AboutPageOut]
+    tiles: list[AboutTileOut]
+
+
+class ComputedPageOut(BaseModel):
+    """One page of a figure's rows for one record -- the door behind the
+    about page's capped "Computed for this record" entry.
+
+    `result` is the same narrowed `Result` the about entry is cut from, its
+    `subjects` holding just this page: the figure's own serving order (one
+    subject's rows sort by row id, which for day and dimension cells is
+    chronological -- `<key>@<ISO day>` sorts lexicographically), keyset-paged
+    on the row id. The order is the figure's answer, never the pager's: a
+    limit with no order returns an arbitrary subset, which is exactly what
+    this language refuses."""
+
+    result: Result
+    more: bool
+    total: int
+    order: str
+    """The total order the pages walk, in words -- the server's to state,
+    because a pager over an unstated order is an arbitrary subset with
+    buttons, which is what this language refuses a `limit` without a sort
+    for. Derived from the figure's own shape: a time-grained figure's rows
+    for one subject run chronologically; a split figure's run by dimension
+    key, which need not be time."""
+
+
+class CitedPageOut(BaseModel):
+    """One page of the stored rows of one figure that counted one record --
+    the door behind the about page's capped "Counted into" entry. Rows in
+    codepoint subject order (the same order `values_citing` caps by, and
+    the default page size is the overview's cap, so the overview's sample
+    IS this walk's first page), keyset-paged on the subject id."""
+
+    figure: str
+    scope: str
+    rows: list[CitedRowOut]
+    more: bool
+    total: int
+
+
+class DialOut(BaseModel):
+    """One tenant dial, valued: what a definition names by name, answered
+    with what the tenant's copy currently holds. A definition compiles
+    against the name and reads the value at serve time -- so the page
+    joining these to a declaration's setting edges is showing the exact pair
+    the engine computes with.
+
+    `display` is rendered server-side (a threshold pair prints both rungs)
+    and is None exactly when nobody holds a value -- declarable, defaulted
+    nowhere, set by nobody -- which `source: "unset"` states rather than
+    dressing the absence as a value."""
+
+    name: str
+    display: str | None
+    source: Literal["tenant", "default", "unset"]
+    """Who answered: the tenant's own settings document, the schema's
+    defaults, or nobody. On the wire because "3, because nobody changed it"
+    and "3, because this tenant chose it" are different facts about the same
+    number, and the page must not flatten them."""
+
+
+class DialsOut(BaseModel):
+    dials: list[DialOut]
 
 
 def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
@@ -956,8 +1114,10 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                     detail="no definitions are loaded, so nothing is derived from any record",
                 ),
                 figures=[],
+                readings=[],
                 cited=[],
                 pages=[],
+                tiles=[],
             )
 
         store = PostgresEngineStore(s.pool)
@@ -976,7 +1136,8 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 result = await serve_figure(
                     store, library, tenant, plan, document, subject=key
                 )
-                more = len(result.subjects) > ABOUT_ROWS
+                total = len(result.subjects)
+                more = total > ABOUT_ROWS
                 if more:
                     # The LATEST rows survive the cap, still in the page's own
                     # ascending order: this page verifies what a number says
@@ -985,7 +1146,47 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                     result = result.model_copy(
                         update={"subjects": result.subjects[-ABOUT_ROWS:]}
                     )
-                figures.append(AboutFigureOut(result=result, more=more))
+                figures.append(AboutFigureOut(result=result, more=more, total=total))
+
+            # Readings scoped to this kind, the same way: evaluated exactly
+            # as their own pages evaluate them (the serving default windows),
+            # this subject's rows picked out -- a fetch scope, never a second
+            # serving path. A reading the engine cannot serve at all (live,
+            # today) lists with the sentence its own route answers, because
+            # this section exists precisely so no reading is silently absent.
+            about_readings: list[AboutReadingOut] = []
+            facade = facade_for(s, s.world, library)
+            for reading in library.readings:
+                if reading.scope != kind:
+                    continue
+                try:
+                    answer = await facade.answer(tenant, reading.name, raw)
+                except NotImplementedError as gap:
+                    about_readings.append(
+                        AboutReadingOut(
+                            name=reading.name,
+                            version=reading.version,
+                            result=None,
+                            note=str(gap),
+                        )
+                    )
+                    continue
+                if not isinstance(answer, Result):  # pragma: no cover - a
+                    # reading's name answers a reading; for the type checker.
+                    continue
+                about_readings.append(
+                    AboutReadingOut(
+                        name=reading.name,
+                        version=reading.version,
+                        result=answer.model_copy(
+                            update={
+                                "subjects": [
+                                    sub for sub in answer.subjects if sub.id == key
+                                ]
+                            }
+                        ),
+                    )
+                )
 
             # Every figure whose stored members MAY be keys of this kind --
             # the spaces, not the single-kind reduction the evidence panel
@@ -1000,12 +1201,16 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 for plan in library.figures
                 if kind in _citing_spaces(plan, library)
             ]
+            # Uncapped on purpose: the SQL fetches every citing row either
+            # way (the cap was applied in Python), and the entry must state
+            # the TRUE count -- "more than sixty" is not a number a reader
+            # can reconcile against anything. The sample stays capped.
             citing = (
                 await store.values_citing(
                     tenant,
                     key,
                     {plan.name: plan.version for plan in cited_plans},
-                    limit=ABOUT_ROWS + 1,
+                    limit=None,
                 )
                 if cited_plans
                 else {}
@@ -1015,24 +1220,15 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 state = await figure_availability(store, library, tenant, plan, document)
                 rows: list[CitedRowOut] = []
                 more = False
+                total = 0
                 if isinstance(state, Ok):
                     found = citing.get(plan.name, [])
-                    more = len(found) > ABOUT_ROWS
-                    for stored in found[:ABOUT_ROWS]:
-                        tail = (
-                            stored.subject.split(SEPARATOR, 1)[1]
-                            if SEPARATOR in stored.subject
-                            else None
-                        )
-                        rows.append(
-                            CitedRowOut(
-                                id=stored.subject,
-                                subject=subject_of(stored.subject),
-                                name=stored.label,
-                                dimension=tail,
-                                display=format_value(stored.value, plan.unit, document),
-                            )
-                        )
+                    total = len(found)
+                    more = total > ABOUT_ROWS
+                    rows = [
+                        _cited_row(stored, plan.unit, document)
+                        for stored in found[:ABOUT_ROWS]
+                    ]
                 cited.append(
                     CitedFigureOut(
                         figure=plan.name,
@@ -1041,11 +1237,11 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                         state=state,
                         rows=rows,
                         more=more,
+                        total=total,
                     )
                 )
 
             pages: list[AboutPageOut] = []
-            facade = facade_for(s, s.world, library)
             for project in library.projections:
                 if project.kind != kind:
                     continue
@@ -1079,6 +1275,64 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                     )
                 )
 
+            # The tiles: every bundle with at least one member about this
+            # kind, the whole tile evaluated exactly as its own page
+            # evaluates it (one clock, shared projections, the bundle's own
+            # window arguments) and each member then narrowed to this record
+            # -- a fetch scope over the tile's answer, never a re-serve of
+            # the members one by one, which could disagree with the tile.
+            tiles: list[AboutTileOut] = []
+            for bundle in library.bundles:
+                if not any(
+                    _member_concerns(library, member.kind, member.name, kind)
+                    for member in bundle.members
+                ):
+                    continue
+                try:
+                    served = await facade.answer(tenant, bundle.name, raw)
+                except NotImplementedError as gap:
+                    # A tile with a live-reading member cannot be evaluated
+                    # at all today; it still lists, addresses intact, with
+                    # the same sentence its own route answers -- a tile
+                    # silently absent from this section would read as "this
+                    # record is on no tile", a claim nobody made.
+                    tiles.append(
+                        AboutTileOut(
+                            bundle=bundle.name,
+                            version=bundle.version,
+                            label=_label_of(bundle.name),
+                            doc=bundle.doc,
+                            # No `at`: nothing was evaluated, and a fresh
+                            # timestamp on a non-answer is a fabricated clock.
+                            members=[
+                                TileMemberOut(
+                                    slot=member.slot,
+                                    kind=member.kind,
+                                    name=member.name,
+                                    version=_member_version(library, member.kind, member.name),
+                                )
+                                for member in bundle.members
+                            ],
+                            note=str(gap),
+                        )
+                    )
+                    continue
+                if not isinstance(served, BundleResult):  # pragma: no cover -
+                    # a bundle's name answers a BundleResult; for the checker.
+                    continue
+                tiles.append(
+                    AboutTileOut(
+                        bundle=bundle.name,
+                        version=served.version,
+                        label=served.label,
+                        doc=served.doc,
+                        at=served.at,
+                        members=[
+                            _tile_member(library, member, kind, key)
+                            for member in served.results
+                        ],
+                    )
+                )
 
         except KeyError as gap:
             raise HTTPException(
@@ -1086,8 +1340,201 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             ) from gap
 
         return AboutOut(
-            kind=kind, key=key, state=Ok(), figures=figures, cited=cited, pages=pages
+            kind=kind,
+            key=key,
+            state=Ok(),
+            figures=figures,
+            readings=about_readings,
+            cited=cited,
+            pages=pages,
+            tiles=tiles,
         )
+
+    @ui.get(
+        "/ui/api/tenants/{tenant}/computed/{figure}/{kind}/{key:path}",
+        response_model=ComputedPageOut,
+        include_in_schema=False,
+    )
+    async def computed_rows(
+        tenant: str,
+        figure: str,
+        kind: str,
+        key: str,
+        request: Request,
+        after: str | None = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    ) -> ComputedPageOut:
+        """Every row one figure holds for one record, paged -- the door the
+        about page's capped entry opens. The whole narrowed answer is served
+        by the same `serve_figure` call the about entry is cut from, and the
+        page is a slice of it: the order is the figure's own (row ids, which
+        for one subject run chronologically), the cursor is the last row id
+        shown, and the total is the honest count beside every page."""
+        s = _state(request)
+        world, library = ready(s)
+        plan = next((p for p in library.figures if p.name == figure), None)
+        if plan is None:
+            raise HTTPException(status_code=404, detail=f"No figure called {figure}")
+        if plan.scope != kind:
+            raise HTTPException(
+                status_code=404,
+                detail=f"{figure} is scoped to {plan.scope}, not {kind}",
+            )
+        if await db.fact_record(s.pool, tenant, kind, key) is None:
+            raise HTTPException(
+                status_code=404, detail=f"Nothing is stored for {key} under {kind}"
+            )
+        store = PostgresEngineStore(s.pool)
+        document = taught_schema(world).settings_for(await db.load_settings(s.pool, tenant))
+        state = await figure_availability(store, library, tenant, plan, document)
+        if not isinstance(state, Ok):
+            # 409 like the cited door's: a fixable state (run a pass), and a
+            # 200 whose empty page reads as "zero rows" is the confident
+            # absence this whole surface exists to prevent. The overview
+            # only offers this door under an Ok state, so landing here means
+            # the world moved since -- exactly when the sentence matters.
+            raise HTTPException(status_code=409, detail=state.detail or state.because)
+        try:
+            result = await serve_figure(
+                store=store,
+                library=library,
+                tenant=tenant,
+                plan=plan,
+                settings=document,
+                subject=key,
+            )
+        except KeyError as gap:
+            # The same fixable dial gap the about route wears as a 409.
+            raise HTTPException(
+                status_code=409, detail=gap.args[0] if gap.args else str(gap)
+            ) from gap
+        rows = result.subjects
+        total = len(rows)
+        if after is not None:
+            rows = [row for row in rows if row.id > after]
+        more = len(rows) > limit
+        return ComputedPageOut(
+            result=result.model_copy(update={"subjects": rows[:limit]}),
+            more=more,
+            total=total,
+            # In words, from the plan's own shape: the row id's tail is a
+            # time bucket only when the figure declares a grain -- a split
+            # figure's tail is a dimension key, and calling that
+            # chronological would state an order the server never chose.
+            order=(
+                "chronological, oldest first"
+                if plan.grain is not None
+                else "by dimension key"
+                if (plan.across is not None or plan.dimension_part is not None)
+                else "single row per subject"
+            ),
+        )
+
+    @ui.get(
+        "/ui/api/tenants/{tenant}/cited/{figure}/{kind}/{key:path}",
+        response_model=CitedPageOut,
+        include_in_schema=False,
+    )
+    async def cited_rows(
+        tenant: str,
+        figure: str,
+        kind: str,
+        key: str,
+        request: Request,
+        after: str | None = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = ABOUT_ROWS,
+    ) -> CitedPageOut:
+        """Every stored row of one figure that counted one record, paged --
+        the door behind "… and N more citations". Codepoint subject order,
+        the same order the about sample is capped by, and the default page
+        size is the sample's cap, so the first page IS the sample and the
+        cursor is the last subject id shown."""
+        s = _state(request)
+        world, library = ready(s)
+        plan = next((p for p in library.figures if p.name == figure), None)
+        if plan is None:
+            raise HTTPException(status_code=404, detail=f"No figure called {figure}")
+        if kind not in _citing_spaces(plan, library):
+            raise HTTPException(
+                status_code=404,
+                detail=f"{figure} never cites {kind} records",
+            )
+        if await db.fact_record(s.pool, tenant, kind, key) is None:
+            raise HTTPException(
+                status_code=404, detail=f"Nothing is stored for {key} under {kind}"
+            )
+        store = PostgresEngineStore(s.pool)
+        document = taught_schema(world).settings_for(await db.load_settings(s.pool, tenant))
+        state = await figure_availability(store, library, tenant, plan, document)
+        if not isinstance(state, Ok):
+            # 409 like the membership drill's: a fixable state (run a pass),
+            # and the page that links here has already shown the sentence.
+            raise HTTPException(status_code=409, detail=state.detail or state.because)
+        citing = await store.values_citing(
+            tenant, key, {plan.name: plan.version}, limit=None
+        )
+        found = citing.get(plan.name, [])
+        total = len(found)
+        if after is not None:
+            found = [value for value in found if value.subject > after]
+        more = len(found) > limit
+        return CitedPageOut(
+            figure=plan.name,
+            scope=plan.scope,
+            rows=[_cited_row(stored, plan.unit, document) for stored in found[:limit]],
+            more=more,
+            total=total,
+        )
+
+    # ---------------------------------------------------------------- dials --
+
+    @ui.get("/ui/api/tenants/{tenant}/dials", response_model=DialsOut, include_in_schema=False)
+    async def dials(tenant: str, request: Request) -> DialsOut:
+        """Every declarable dial, valued for this tenant.
+
+        A definition names a dial by name and the engine reads the value at
+        serve time -- this is that read, exposed, so a declaration page can
+        put the current value beside every setting edge it lists. The merge
+        is the same precedence `settings_for` applies (tenant over default),
+        answered per dial so the page can also say WHO answered -- a
+        threshold left on its default and one a tenant chose are different
+        facts about the same number."""
+        s = _state(request)
+        if s.world is None:
+            raise HTTPException(status_code=409, detail="No schema has been declared yet")
+        schema = taught_schema(s.world)
+        raw = await db.load_settings(s.pool, tenant)
+        # The MERGED document, because that is what the engine reads: a
+        # tenant that half-overrides a threshold pair must show the pair the
+        # bands actually compare against, and a page that walked the raw
+        # document alone would show a dial disagreeing with the calculation
+        # it claims to explain.
+        merged = schema.settings_for(raw)
+        out: list[DialOut] = []
+        for name in sorted({*schema.declarable, EFFORT_HOURS_SETTING}):
+            held, has = _at_path(merged, name)
+            if not has or held is None:
+                # Nothing servable at this name -- never written, written as
+                # an explicit null, or shadowed by a non-mapping ancestor.
+                # The engine's read through this name finds the same
+                # nothing, so the page states the absence instead of
+                # rendering a repr of it or a default the merge discarded.
+                out.append(DialOut(name=name, display=None, source="unset"))
+                continue
+            tenant_held, tenant_has = _at_path(raw, name)
+            out.append(
+                DialOut(
+                    name=name,
+                    display=_dial_display(held),
+                    # "tenant" means the tenant's document contributed here
+                    # (wholly, or one rung of a merged pair); "default"
+                    # means the schema's copy serves untouched.
+                    source=(
+                        "tenant" if tenant_has and tenant_held is not None else "default"
+                    ),
+                )
+            )
+        return DialsOut(dials=out)
 
     # ---------------------------------------------------------- membership --
 
@@ -1256,10 +1703,18 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         tenant: str,
         request: Request,
         quiet: bool = False,
+        after: Annotated[int | None, Query()] = None,
         limit: Annotated[int, Query(ge=1, le=200)] = 50,
     ) -> ActivityOut:
         s = _state(request)
-        runs, hidden, total = await db.page_runs(s.pool, tenant, limit=limit, quiet=quiet)
+        # One more than asked, so `more` is a fact about the log rather than
+        # an inference from a full page -- a page exactly at the end would
+        # otherwise offer a next page holding nothing.
+        runs, hidden, total = await db.page_runs(
+            s.pool, tenant, limit=limit + 1, quiet=quiet, after=after
+        )
+        more = len(runs) > limit
+        runs = runs[:limit]
         return ActivityOut(
             runs=[
                 RunOutLog(
@@ -1279,6 +1734,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             ],
             total=total,
             quiet_hidden=hidden,
+            more=more,
         )
 
     # ------------------------------------------------------------ answers --
@@ -1482,6 +1938,162 @@ def _measured_display(
     if held is None:
         return None
     return format_value(held, _measure_unit(measure), settings)
+
+
+def _cited_row(stored: Any, unit: Any, document: Mapping[str, Any]) -> CitedRowOut:
+    """One citing value as the page shows it -- shared by the about entry's
+    capped sample and the paged walk, so the first page IS the sample."""
+    tail = stored.subject.split(SEPARATOR, 1)[1] if SEPARATOR in stored.subject else None
+    return CitedRowOut(
+        id=stored.subject,
+        subject=subject_of(stored.subject),
+        name=stored.label,
+        dimension=tail,
+        display=format_value(stored.value, unit, document),
+    )
+
+
+def _at_path(document: Mapping[str, Any] | None, dotted: str) -> tuple[Any, bool]:
+    """Walk a dotted dial name into a settings document: the value, and
+    whether the document actually holds one -- two answers, because None as
+    a sentinel cannot tell "set to nothing" from "never set", and the dials
+    payload states who answered."""
+    node: Any = document or {}
+    for segment in dotted.split("."):
+        if not isinstance(node, Mapping) or segment not in node:
+            return None, False
+        node = node[segment]
+    return node, True
+
+
+def _dial_display(value: Any) -> str:
+    """A dial's value as text, rendered here because every rendered string
+    on the page is the server's. Deliberately plain: a dial is configuration
+    (a zone name, a threshold, a pair of rungs), not a computed quantity, so
+    there is no unit arithmetic -- a threshold pair prints both rungs,
+    because the pair IS the dial."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, Mapping):
+        return " · ".join(f"{k} {_dial_display(v)}" for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return ", ".join(_dial_display(v) for v in value)
+    return str(value)
+
+
+def _member_concerns(library: Library, member_kind: str, name: str, kind: str) -> bool:
+    """Whether one tile member could hold rows about a record of `kind`.
+
+    A summarise never does -- its one row is about the whole page -- so it
+    cannot pull a tile onto a record's page by itself, though it still lists
+    (with the sentence saying why it has no rows here) once another member
+    has."""
+    if member_kind == "figure":
+        plan = library.figure(name)
+        return plan is not None and plan.scope == kind
+    if member_kind == "reading":
+        reading = library.reading(name)
+        return reading is not None and reading.scope == kind
+    if member_kind == "projection":
+        projection = library.projection(name)
+        return projection is not None and projection.kind == kind
+    return False
+
+
+def _member_version(library: Library, member_kind: str, name: str) -> str:
+    if member_kind == "figure":
+        plan = library.figure(name)
+        return plan.version if plan is not None else ""
+    if member_kind == "reading":
+        reading = library.reading(name)
+        return reading.version if reading is not None else ""
+    if member_kind == "projection":
+        projection = library.projection(name)
+        return projection.version if projection is not None else ""
+    summary = library.summary(name)
+    return summary.version if summary is not None else ""
+
+
+def _tile_member(
+    library: Library, member: BundleMemberResult, kind: str, key: str
+) -> TileMemberOut:
+    """One served slot, narrowed to one record.
+
+    The narrowing is a fetch scope over the tile's own answer: which rows
+    travel, never how any of them was computed. Members about other kinds
+    keep their rows home behind a sentence -- another kind's data under this
+    record would invite exactly the misattribution this page exists to end
+    -- and the page-level summarise states its nature instead of wearing an
+    empty table."""
+    result = member.result
+    base = TileMemberOut(
+        slot=member.slot,
+        kind=result.kind,
+        name=result.name,
+        version=result.version,
+    )
+    if result.kind == "summary":
+        base.note = (
+            "a summarise is one row about the whole page, never about one "
+            "record -- the tile's own page carries it"
+        )
+        return base
+    if not _member_concerns(library, result.kind, result.name, kind):
+        whose = _member_scope(library, result.kind, result.name)
+        base.note = (
+            f"its rows are {whose} records, not this one's kind -- "
+            "the tile's own page renders them"
+        )
+        return base
+    if result.kind == "figure":
+        mine = [s for s in result.subjects if subject_of(s.id) == key]
+        base.total = len(mine)
+        base.more = base.total > ABOUT_ROWS
+        # The LATEST rows survive, like every capped entry on this page.
+        base.result = result.model_copy(
+            update={"subjects": mine[-ABOUT_ROWS:] if base.more else mine}
+        )
+        return base
+    if result.kind == "reading":
+        mine = [s for s in result.subjects if s.id == key]
+        base.total = len(mine)
+        base.result = result.model_copy(update={"subjects": mine})
+        return base
+    # A projection: this record's row alone. The summary row stays home --
+    # it is computed by the summarise declared over the page (a different
+    # definition), and under a single record's row it would read as this
+    # record's contribution, which it is not. Staying home is STATED: a
+    # row silently thinner here than on the tile would read as the tile
+    # having no summary, a claim nobody made.
+    match = [s for s in result.subjects if s.id == key]
+    base.total = len(match)
+    had_summary = result.summary is not None
+    base.result = result.model_copy(update={"subjects": match, "summary": None})
+    notes = []
+    if isinstance(result.state, Ok) and not match:
+        notes.append(
+            "Not on this page. Its from-set, omit gate, sort and limit "
+            "decide the rows, and they did not take this record."
+        )
+    if had_summary:
+        notes.append(
+            "The page's summary row stays on the tile's own page: it is the "
+            "summarise's number about the whole page, not this record's "
+            "contribution."
+        )
+    base.note = " ".join(notes) or None
+    return base
+
+
+def _member_scope(library: Library, member_kind: str, name: str) -> str:
+    if member_kind == "figure":
+        plan = library.figure(name)
+        return plan.scope if plan is not None else "another kind's"
+    if member_kind == "reading":
+        reading = library.reading(name)
+        return reading.scope if reading is not None else "another kind's"
+    projection = library.projection(name)
+    return projection.kind if projection is not None else "another kind's"
 
 
 # ----------------------------------------------------------- declarations --

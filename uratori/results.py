@@ -141,6 +141,17 @@ class Window(BaseModel):
     that is not a scalar; it exists so a sparkline is a definition's answer
     rather than the client slicing a range into ten and computing ten means."""
 
+    series_scale: list[float | None] | None = None
+    """Each series point as a fraction of this window's own largest point,
+    0..1, computed here so a screen drawing bars multiplies a served
+    fraction by a bar height and composes nothing -- deriving the scale
+    client-side means a maximum and a share, the two calculations a client
+    must not make. Scaled within the window on purpose, and a screen
+    stacking two windows should say so; the raw values ride beside it for a
+    client that owns real axes. All-nought (or non-positive) windows scale
+    to 0.0 per point: a zero drawn at zero height, never invented relief.
+    None exactly when `series` is None."""
+
     series_by: Literal["15 minutes", "hour", "day"] | None = None
     """What one series point spans, when the definition grouped a sub-day
     figure. Absent for a day-keyed source, where a point has always been a
@@ -375,6 +386,31 @@ class Result(BaseModel):
     column of stated absences under definitions that never claimed to band.
     A projection is never banded: the band words it binds travel as row values,
     cited to the figure whose thresholds produced them."""
+
+    statistics: list[str] | None = None
+    """For a reading: the statistics its `calculate` block declares, as the
+    wire spells them (`sum` travels as `total`, the `Window` field it fills),
+    in declaration order. This is the column set a table of windows draws --
+    served rather than derived from whichever `display` keys happen to be
+    present, because a withheld window carries no values at all and a table
+    that unioned present keys would silently narrow itself the day every
+    window fell short. `None` for every other kind: statistics are a
+    reading's vocabulary, and null here means "does not apply", never
+    "empty".
+
+    The catalogue (`DeclarationOut.statistics` on `/definitions`) speaks the
+    language instead -- `sum` there, `total` here -- because it describes
+    the declaration as written while this list names the fields an answer
+    fills. Two vocabularies for two questions; a client binding columns
+    binds to THIS one."""
+
+    banded_on: str | None = None
+    """For a banded reading: which statistic the band judges, in the same
+    wire spelling. On the wire because the band word is a verdict on ONE
+    number -- a screen colouring the whole row would band statistics the
+    definition never banded, and without this field the screen could only
+    guess which column the word belongs beside. `None` wherever `banded` is
+    false, and for figures, whose single value leaves nothing to name."""
 
     subjects: list[Subject] = Field(default_factory=list)
     """In the server's order. A screen does not sort, because sorting is a

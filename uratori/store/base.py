@@ -200,12 +200,16 @@ class EngineStore(Protocol):
     ) -> list[StoredValue]: ...
 
     async def values_citing(
-        self, tenant: str, member: str, versions: Mapping[str, str], *, limit: int
+        self, tenant: str, member: str, versions: Mapping[str, str], *, limit: int | None
     ) -> dict[str, list[CitingValue]]:
         """The reverse citation: stored values whose `members` include this
         record key, grouped by figure name, each group in codepoint subject
         order -- stated because the cap makes ordering load-bearing, and the
         database's collation and Python's are not the same sort.
+        `limit: None` serves every citing row: the paged citation route
+        orders and slices at the route, and needs the true total beside the
+        page -- a sentinel "big number" here would be a silent cap wearing a
+        costume.
 
         Exact membership -- never prefix or substring, because the caller
         prints these as "this record was counted into", and a loose match

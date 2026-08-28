@@ -21,8 +21,17 @@ product's end users; a host builds its own screens against the
   **used by**, the reverse. Every page then shows its data for the chosen
   tenant -- a filter its matching records, a group its buckets and their
   members, a measure each record's rendered measurement -- and drills to the
-  record pages themselves. For servable kinds the page also asks for the
-  current answer, and a figure's rows carry an *evidence* button -- the
+  record pages themselves. Every setting leaf under **moved by** carries the
+  chosen tenant's current value beside the name -- who answered (the
+  tenant's own document or the schema's default) said out loud, and a dial
+  nobody holds stated as the finding it is -- because a definition names a
+  dial by name and a reader should not need a settings document to finish
+  the sentence. For servable kinds the page also asks for the
+  current answer. A reading's windows draw one column per **declared**
+  statistic -- the column set is the definition's, stable even when a
+  window is withheld, the band column sits beside exactly the statistic the
+  band judges, and a declared `series` draws as bars in a column of its own
+  -- and a figure's rows carry an *evidence* button -- the
   stored citation, joined back to the records, and made to *lead to the
   amount*: the panel names the measure the value reads its members through,
   a sum's or an extreme's rows each show that record as the measure reads it
@@ -43,19 +52,31 @@ product's end users; a host builds its own screens against the
   where every grouping filed it, what every measure reads off it. Upward,
   which is where a verification usually starts: every figure scoped to the
   record's kind answers with this record's rows (day and dimension cells
-  included, each with its evidence one click away); every leaf figure that
+  included, each with its evidence one click away); every reading scoped to
+  the kind answers with this record's windows, the same evaluation its own
+  page runs narrowed to one subject (a live reading states the sentence its
+  route answers instead of vanishing); every leaf figure that
   counts records of this kind says whether a stored value cites this one --
   "did not count it" is stated, not inferred -- with each citing row linking
-  on to *its* record's page; and every projection of the kind shows this
-  record's row exactly as the page serves it, or says why it is not on it.
-  Long row sets cap and say so; an unavailable figure answers with its state
-  rather than an empty table.
+  on to *its* record's page; every projection of the kind shows this
+  record's row exactly as the page serves it, or says why it is not on it;
+  and every **bundle** with a member about this kind lists as a tile, each
+  such member rendered under its slot by the same blocks its kind gets
+  standalone, narrowed to this record, with its own `name @ version` --
+  members about other kinds, and the page-level summarise, arrive as stated
+  sentences rather than another kind's rows.
+  Long row sets cap, say the true total, and open a paged walk over every
+  row -- the figure's own order for computed rows, subject order for
+  citations, keyset-paged so a boundary neither drops nor doubles a row; an
+  unavailable figure answers with its state rather than an empty table.
 - **Activity.** One entry per engine pass, newest first, cause before
   effect: what arrived (written/deleted counts, the kinds covered, whether it
   was a full rebuild) and then the movements it caused, each one
   `before → after` in text frozen at the moment it happened. The true
   `changed` count travels beside the capped sample, and runs that did nothing
-  are hidden behind a toggle that says how many it is hiding.
+  are hidden behind a toggle that says how many it is hiding. The listing
+  pages: "the newest 50 of 200" is a door, keyset over run ids back to the
+  first kept run.
 
 The run log behind the activity view is persisted server-side (`run_log`,
 capped at 1000 rows per tenant, pruned on insert) and is recorded whether or

@@ -331,24 +331,37 @@ hidden behind `quiet` so the log reads as cause and effect."""
 
 
 async def page_runs(
-    pool: asyncpg.Pool[Any], tenant: str, *, limit: int, quiet: bool
+    pool: asyncpg.Pool[Any],
+    tenant: str,
+    *,
+    limit: int,
+    quiet: bool,
+    after: int | None = None,
 ) -> tuple[list[dict[str, Any]], int, int]:
     """Newest runs first, plus the two counts that keep the listing honest:
     the true total of runs the filter matches (a limit-capped list under no
     total reads as complete at every size) and, when quiet runs are being
-    hidden, how many the default view is not showing."""
+    hidden, how many the default view is not showing.
+
+    `after` is the keyset cursor -- the id of the last run the previous page
+    showed, so the next page starts strictly below it. Ids because the log
+    is ordered by them (assigned by insert, so newest-first is descending
+    id), and a keyset over the display order is the one pager that neither
+    drops nor doubles a row when a pass lands between two clicks."""
     where = "tenant_id = $1" if quiet else f"tenant_id = $1 and {_LOUD}"
+    page_where = where if after is None else f"{where} and id < $3"
     rows = await pool.fetch(
         f"""
         select id, at, cause, full_pass, written, deleted, changed,
                rebuilt, covered, shown
         from run_log
-        where {where}
+        where {page_where}
         order by id desc
         limit $2
         """,
         tenant,
         limit,
+        *([] if after is None else [after]),
     )
     total = int(
         await pool.fetchval(f"select count(*) from run_log where {where}", tenant) or 0

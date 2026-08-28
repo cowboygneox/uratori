@@ -746,9 +746,31 @@ async def serve_reading(
         doc=plan.doc,
         state=state,
         banded=plan.band is not None,
+        statistics=_statistic_keys(plan),
+        banded_on=_banded_on(plan),
         subjects=subjects,
         empty=empty,
     )
+
+
+def _statistic_keys(plan: ReadingPlan) -> list[str]:
+    """The declared statistics, spelled the way the wire spells them.
+
+    `sum` fills the `total` field (see `statistics_of`), so the declared list
+    must say `total` -- a column headed by a key the display map never uses
+    would dash every row it draws."""
+    return [{"sum": "total"}.get(s.fn, s.fn) for s in plan.calculate]
+
+
+def _banded_on(plan: ReadingPlan) -> str | None:
+    """Which statistic's column the band word belongs beside -- the `on`
+    clause's statistic, the mean when unwritten, exactly as `level_of`
+    reads it. One translation, kept beside the other, so the wire cannot
+    name a column the banding never judged."""
+    if plan.band is None:
+        return None
+    which = plan.band.on or "mean"
+    return {"sum": "total"}.get(which, which)
 
 
 def _window(
@@ -774,6 +796,7 @@ def _window(
         # does not, so it passed here and failed in CI.
         stats = dict.fromkeys(stats)
     wants_series = any(s.fn == "series" for s in plan.calculate)
+    points = series_of(sample) if wants_series and not unmet else None
     # `count` is a tally whatever the source measures, so it renders as a plain
     # number rather than through the reading's own unit -- otherwise a queue of
     # three prints as three seconds.
@@ -798,7 +821,8 @@ def _window(
         worst=stats.get("worst"),
         total=stats.get("total"),
         count=stats.get("count"),
-        series=series_of(sample) if wants_series and not unmet else None,
+        series=points,
+        series_scale=_series_scale(points) if points is not None else None,
         series_by=_series_grain(series_by) if wants_series and not unmet else None,
         display=rendered,
         sample=len(sample.values),
@@ -807,6 +831,18 @@ def _window(
         level="unknown" if unmet else _level_word_from(level_of(plan, stats, settings)),
         unmet=unmet,
     )
+
+
+def _series_scale(points: list[float | None]) -> list[float | None]:
+    """Each point as a fraction of the window's own peak -- the bar heights,
+    served. Computed here because deriving them in a browser is a maximum
+    and a share, and this engine's one promise is that no client ever has
+    to make either. A window whose peak is not positive scales to noughts:
+    a zero drawn at zero height, never a bar invented to look alive."""
+    peak = max((p for p in points if p is not None), default=0.0)
+    if peak <= 0:
+        return [None if p is None else 0.0 for p in points]
+    return [None if p is None else p / peak for p in points]
 
 
 def _level_word_from(word: str) -> Level:

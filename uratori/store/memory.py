@@ -206,7 +206,7 @@ class MemoryEngineStore:
         ]
 
     async def values_citing(
-        self, tenant: str, member: str, versions: Mapping[str, str], *, limit: int
+        self, tenant: str, member: str, versions: Mapping[str, str], *, limit: int | None
     ) -> dict[str, list[CitingValue]]:
         # Exact membership, per the protocol: `in` over the tuple, never a
         # text match. Sorted by codepoint explicitly, like the Postgres half
@@ -222,7 +222,7 @@ class MemoryEngineStore:
                 key=lambda v: v.subject,
             )
             if found:
-                out[name] = found[:limit]
+                out[name] = found if limit is None else found[:limit]
         return out
 
     async def values_in_range(
