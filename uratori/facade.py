@@ -43,18 +43,21 @@ from .engine.serve import (
     serve_figure,
     serve_reading,
 )
-from .lang.plan import Library
+from .lang.plan import BundlePlan, Library
 from .lang.settings import fingerprint as settings_fingerprint
 from .lang.source import declaration_source
 from .results import BundleResult, Evidence, Result
-from .schema import Schema
+from .schema import EFFORT_HOURS_SETTING, Schema
 from .store import EngineStore, FactSource, Pointer
 from .verify import verify_writes
 from .windows import WindowSpec
 
 log = logging.getLogger("uratori")
 
-Listener = Callable[[str, Outcome, tuple[Result, ...]], Awaitable[None] | None]
+Served = Result | BundleResult
+"""What a serving surface hands out: a definition's answer, or a tile of them."""
+
+Listener = Callable[[str, Outcome, tuple[Result | BundleResult, ...]], Awaitable[None] | None]
 """(tenant, what moved, the re-served answers). Sync or async, the host's choice."""
 
 DEFAULT_TRAILING: tuple[int, ...] = (30, 14, 7)
@@ -69,7 +72,15 @@ stored days take part. That is the only reason this may be a default at all.
 @dataclass(frozen=True)
 class RunReport:
     outcome: Outcome
-    results: tuple[Result, ...]
+    results: tuple[Result | BundleResult, ...]
+    moved: frozenset[str] = frozenset()
+    """Every definition whose *served* answer this pass may have changed --
+    touched figures, dial-refreshed figures and readings, readings over a
+    touched source, re-served projections and their summaries, and every
+    bundle a moved member sits in. Computed without evaluating anything, so a
+    host that owns its own delivery (per-client subscriptions) can intersect
+    this with what is actually watched and evaluate only that -- `serve=False`
+    is the other half of that seam."""
 
 
 class Uratori:
@@ -201,6 +212,7 @@ class Uratori:
         deleted: Mapping[str, Sequence[str]] | None = None,
         full: bool = False,
         trailing: Sequence[int | str | WindowSpec] = DEFAULT_TRAILING,
+        serve: bool = True,
     ) -> RunReport:
         """A pass, its re-served answers, and delivery, in that order.
 
@@ -208,6 +220,13 @@ class Uratori:
         or a served result (a projection re-serves on every pass because the
         clock is one of its inputs). A poll in which nothing happened notifying
         every listener is how listeners stop being read.
+
+        `serve=False` skips the evaluation and the listeners entirely and
+        reports only `moved`: the caller has said it owns delivery -- it will
+        intersect the moved set with what its clients actually watch and
+        evaluate exactly that, by name, at each watcher's own arguments. The
+        stamps still settle, because the movement *was* reported; leaving them
+        would re-report the same dial move on every pass for ever.
         """
         outcome = await self.execute(
             tenant, settings, written=written, deleted=deleted, full=full
@@ -225,26 +244,32 @@ class Uratori:
         sync = full or written is not None or deleted is not None
         document = self._schema.settings_for(settings)
         stamps = self._serve_stamps(document)
+        held = await self._store.pointers(tenant)
+        refreshed = self._refreshed(stamps, held)
         if sync:
             projections = None
         else:
-            held = await self._store.pointers(tenant)
             projections = self._reached(outcome.reindexed, touched, stamps, held)
-        results = await self._serve(
-            tenant,
-            settings,
-            touched=touched,
-            projections=projections,
-            trailing=trailing,
-        )
-        if outcome.changes or results:
+        moved = self._moved(touched, refreshed, projections)
+        if serve:
+            results = await self._serve(
+                tenant,
+                settings,
+                touched=touched,
+                refreshed=refreshed,
+                projections=projections,
+                trailing=trailing,
+            )
+        else:
+            results = ()
+        if serve and (outcome.changes or results):
             await self._notify(tenant, outcome, results)
         # The stamps settle only after the answers actually went out: a crash
         # between serving and stamping re-serves next pass, which is the safe
         # direction. Settled on sync passes too, or the first definition-only
         # pass after a sync would re-serve everything the sync already sent.
         await self._settle_serve_stamps(tenant, stamps)
-        return RunReport(outcome=outcome, results=results)
+        return RunReport(outcome=outcome, results=results, moved=moved)
 
     def _serve_stamps(self, document: Mapping[str, Any]) -> dict[str, Pointer]:
         """What each projection and summary currently serves under.
@@ -281,7 +306,117 @@ class Uratori:
                     dict(document), list(summary.settings)
                 ),
             )
+        # Figures and readings carry serve stamps too, under a prefixed key
+        # because a figure's own name already holds its *compute* pointer.
+        # The dials here are exactly the ones that move a served answer
+        # without moving a stored value: a figure's band dials (a band is
+        # worded at serve time, deliberately outside the compute
+        # fingerprint), a reading's own dials (its band -- a reading stores
+        # nothing, so no pointer ever noticed for it), and the effort
+        # rendering dial where the unit is effort (`format_value` divides by
+        # it, so the rendered text moves the moment it does -- the same edge
+        # the UI's dependency closure draws). Before these stamps existed, a
+        # band threshold save updated nothing stored and pushed nothing, and
+        # every connected screen kept the old colour until a reload.
+        for plan in lib.figures:
+            dials = set(plan.band_settings)
+            if plan.unit == "effort":
+                dials.add(EFFORT_HOURS_SETTING)
+            stamps[_serve_key(plan.name)] = Pointer(
+                version=plan.version,
+                settings_fingerprint=settings_fingerprint(dict(document), sorted(dials)),
+            )
+        for reading in lib.readings:
+            dials = set(reading.settings)
+            if reading.unit == "effort":
+                dials.add(EFFORT_HOURS_SETTING)
+            stamps[_serve_key(reading.name)] = Pointer(
+                version=reading.version,
+                settings_fingerprint=settings_fingerprint(dict(document), sorted(dials)),
+            )
         return stamps
+
+    def _refreshed(
+        self, stamps: Mapping[str, Pointer], held: Mapping[str, Pointer]
+    ) -> frozenset[str]:
+        """The figures and readings whose *served* answer a dial (or their own
+        redefinition) has moved since they last went out. On the first pass
+        after this stamp discipline arrives nothing is held, so everything
+        reads as refreshed and re-serves once -- the safe direction, exactly
+        as the projection stamps behaved when they were introduced."""
+        out: set[str] = set()
+        for plan in self._library.figures:
+            if held.get(_serve_key(plan.name)) != stamps[_serve_key(plan.name)]:
+                out.add(plan.name)
+        for reading in self._library.readings:
+            if held.get(_serve_key(reading.name)) != stamps[_serve_key(reading.name)]:
+                out.add(reading.name)
+        return frozenset(out)
+
+    def _moved(
+        self,
+        touched: set[str],
+        refreshed: frozenset[str],
+        projections: set[str] | None,
+    ) -> frozenset[str]:
+        """Every name whose current answer this pass may have changed --
+        the impact set, computed from what the pass already knows and
+        evaluating nothing. `projections` is None on a sync pass, meaning
+        all of them: a projection's inputs include the clock, and the sync
+        is the moment that contract pays out."""
+        lib = self._library
+        out: set[str] = set(touched) | set(refreshed)
+        for reading in lib.readings:
+            if reading.source is not None and reading.source in touched:
+                out.add(reading.name)
+        if projections is None:
+            out.update(plan.name for plan in lib.projections)
+            out.update(summary.name for summary in lib.summaries)
+        else:
+            out.update(projections)
+            out.update(s.name for s in lib.summaries if s.over in projections)
+        out.update(self._bundles_impacted(touched, refreshed, projections))
+        return frozenset(out)
+
+    def _bundles_impacted(
+        self,
+        touched: set[str],
+        refreshed: frozenset[str],
+        projections: set[str] | None,
+    ) -> set[str]:
+        """A bundle is impacted exactly when a member is, by the member's own
+        kind's test: a figure member that was touched or dial-refreshed, a
+        reading member whose source was touched (or that was itself
+        refreshed), a projection or summary member whose projection is being
+        re-served. The union and nothing wider -- a tile containing none of
+        what moved must stay off the wire, or every card flickers on every
+        pass and the push surface stops meaning anything."""
+        lib = self._library
+        out: set[str] = set()
+        for bundle in lib.bundles:
+            if not _servable(lib, bundle):
+                continue
+            for member in bundle.members:
+                if member.kind == "figure":
+                    if member.name in touched or member.name in refreshed:
+                        break
+                elif member.kind == "reading":
+                    reading = lib.reading(member.name)
+                    source = reading.source if reading is not None else None
+                    if member.name in refreshed or (source is not None and source in touched):
+                        break
+                elif member.kind == "projection":
+                    if projections is None or member.name in projections:
+                        break
+                else:  # summary
+                    summary = lib.summary(member.name)
+                    over = summary.over if summary is not None else None
+                    if projections is None or (over is not None and over in projections):
+                        break
+            else:
+                continue
+            out.add(bundle.name)
+        return out
 
     def _reached(
         self,
@@ -340,6 +475,38 @@ class Uratori:
                 {"over": summary.over},
             )
             await self._store.set_pointer(tenant, summary.name, stamps[summary.name])
+        # Figure and reading serve stamps, under their prefixed keys. The
+        # figure's definition row already exists on any pass that computed it,
+        # but a warm pass writes none -- and a reading has never had one --
+        # so each is ensured here for the same reason the projections above
+        # are: the pointer table cites a definition version, and the stamp
+        # must be able to land on every pass, not only cold ones.
+        for plan in lib.figures:
+            await self._store.ensure_definition(
+                plan.version,
+                plan.name,
+                "figure",
+                plan.doc,
+                plan.display,
+                declaration_source(lib, plan.name) or "",
+                {"unit": plan.unit, "scope": plan.scope, "depth": plan.depth},
+            )
+            await self._store.set_pointer(
+                tenant, _serve_key(plan.name), stamps[_serve_key(plan.name)]
+            )
+        for reading in lib.readings:
+            await self._store.ensure_definition(
+                reading.version,
+                reading.name,
+                "reading",
+                reading.doc,
+                reading.display,
+                declaration_source(lib, reading.name) or "",
+                {"unit": reading.unit, "scope": reading.scope, "mode": reading.mode},
+            )
+            await self._store.set_pointer(
+                tenant, _serve_key(reading.name), stamps[_serve_key(reading.name)]
+            )
 
     # ------------------------------------------------------------- serving --
 
@@ -351,7 +518,7 @@ class Uratori:
         touched: set[str] | None = None,
         trailing: Sequence[int | str | WindowSpec] = DEFAULT_TRAILING,
         at: str | None = None,
-    ) -> tuple[Result, ...]:
+    ) -> tuple[Result | BundleResult, ...]:
         """The current answers: touched figures and their readings, or all of
         them when `touched` is None (a client's first paint).
 
@@ -361,9 +528,17 @@ class Uratori:
         ignore it: they are point-in-time answers with no window to move, and
         each result's own `at` says when it was computed.
 
-        Bundles are deliberately not served here: every member already is,
-        under its own name, and a tile is a by-name request (`answer`) --
-        pushing each bundle too would put every answer on the wire twice.
+        Bundles serve here too -- a first paint that omitted the tiles would
+        leave every screen bound to one blank until a pass happened to touch
+        a member. Each member also serves under its own name, so a tile's
+        numbers do travel twice; that redundancy is the price of both
+        surfaces being complete, and it is bytes, not arithmetic. The one
+        exception is an anchored read (`at`): a bundle refuses an anchor by
+        name -- its non-reading members can only be served as they stand, so
+        an anchored tile would disagree with itself under a wrapper claiming
+        one clock -- and this surface honours the same refusal by serving an
+        anchored list without the tiles rather than quietly serving them
+        unanchored beside anchored readings of the same names.
 
         Every projection serves, every time, from here: a projection stores
         nothing and is evaluated at the instant it is asked, so its rows move
@@ -385,13 +560,14 @@ class Uratori:
         settings: Mapping[str, Any] | None = None,
         *,
         touched: set[str] | None = None,
+        refreshed: frozenset[str] = frozenset(),
         projections: set[str] | None = None,
         trailing: Sequence[int | str | WindowSpec] = DEFAULT_TRAILING,
         at: str | None = None,
-    ) -> tuple[Result, ...]:
+    ) -> tuple[Result | BundleResult, ...]:
         document = self._schema.settings_for(settings)
         lib = self._library
-        out: list[Result] = []
+        out: list[Result | BundleResult] = []
 
         for plan in lib.figures:
             if plan.grain is not None or plan.across is not None:
@@ -403,14 +579,18 @@ class Uratori:
                 # person-day here would spend every pass on history nobody is
                 # watching.
                 continue
-            if touched is not None and plan.name not in touched:
+            if touched is not None and plan.name not in touched and plan.name not in refreshed:
                 continue
             out.append(await serve_figure(self._store, lib, tenant, plan, document))
 
         for reading in lib.readings:
             if reading.mode != "window" or reading.source is None:
                 continue
-            if touched is not None and reading.source not in touched:
+            if (
+                touched is not None
+                and reading.source not in touched
+                and reading.name not in refreshed
+            ):
                 continue
             out.append(
                 await serve_reading(
@@ -426,6 +606,37 @@ class Uratori:
                     self._store, self._facts, lib, tenant, projection, document
                 )
             )
+
+        # Bundles last, after every kind they compose: impacted ones on a
+        # narrowed serve (the member-union in `_bundles_impacted`), all of
+        # them on a first paint -- and none on an anchored read, per the
+        # refusal `results` explains. Members are evaluated at their DECLARED
+        # windows (`answer_bundle`'s own contract), never at this call's
+        # `trailing`: a tile whose windows the transport could move would be
+        # a different tile under the same hash.
+        if at is None:
+            narrowed = touched is not None or projections is not None
+            impacted = (
+                self._bundles_impacted(touched or set(), refreshed, projections)
+                if narrowed
+                else None
+            )
+            for bundle in lib.bundles:
+                if not _servable(lib, bundle):
+                    continue
+                if impacted is not None and bundle.name not in impacted:
+                    continue
+                out.append(
+                    await answer_bundle(
+                        self._store,
+                        self._facts,
+                        lib,
+                        tenant,
+                        bundle,
+                        document,
+                        default_trailing=DEFAULT_TRAILING,
+                    )
+                )
 
         return tuple(out)
 
@@ -567,3 +778,31 @@ class Uratori:
                 "member's own name."
             )
         raise LookupError(f"No figure called {name}")
+
+
+def _serve_key(name: str) -> str:
+    """The pointer key a figure's or reading's serve stamp lives under.
+
+    Prefixed because a figure's bare name already holds its compute pointer,
+    and the two answer different questions: the compute pointer says what the
+    STORED values were built under, the serve stamp says what the last-served
+    answer was rendered under. A `:` cannot appear in a declaration name, so
+    the prefix cannot collide with a future definition."""
+    return f"serve:{name}"
+
+
+def _servable(lib: Library, bundle: BundlePlan) -> bool:
+    """Whether this bundle can be served at all today.
+
+    A live reading is not servable yet, and `answer_bundle` refuses a tile
+    holding one rather than serving the rest around a silently dropped
+    member. The bulk surface honours the same refusal by leaving the whole
+    tile off it -- the by-name route still answers 501 for it, so the absence
+    is stated where the tile is actually asked for, instead of one member's
+    gap failing the entire first paint."""
+    for member in bundle.members:
+        if member.kind == "reading":
+            reading = lib.reading(member.name)
+            if reading is not None and reading.mode == "live":
+                return False
+    return True
