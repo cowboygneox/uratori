@@ -371,7 +371,7 @@ def test_a_bad_entry_is_refused_by_name_while_the_good_one_proceeds(pg_dsn: str)
             second = socket.receive_json()
             assert second["type"] == "error"
             assert second["name"] == "shop_courier.carrying"
-            assert "banana" in second["message"]
+            assert "takes no windows" in second["message"]
             third = socket.receive_json()
             assert third["type"] == "result"
             assert third["result"]["name"] == "shop_courier.carrying"
@@ -403,6 +403,22 @@ def test_windows_on_a_bundle_entry_are_refused(pg_dsn: str) -> None:
             assert refused["type"] == "error"
             assert refused["name"] == "shop_courier.card"
             assert "declared" in refused["message"]
+
+            # A window that does not parse is refused in the window
+            # vocabulary, on the one kind windows mean something for.
+            socket.send_json(
+                {
+                    "type": "subscribe",
+                    "tenant": "t1",
+                    "entries": [
+                        {"name": "shop_courier.typical_ride", "trailing": ["banana"]}
+                    ],
+                }
+            )
+            junk = socket.receive_json()
+            assert junk["type"] == "error"
+            assert junk["name"] == "shop_courier.typical_ride"
+            assert "banana" in junk["message"]
 
 
 def test_a_bundle_entry_fetches_and_follows_its_members_movement(pg_dsn: str) -> None:
@@ -522,16 +538,25 @@ def test_a_bare_subscribe_paints_tiles_too_and_serve_false_keeps_the_response_le
             socket.send_json({"type": "subscribe", "tenant": "t1"})
             names = set()
             kinds = set()
-            for _ in range(7):
+            for _ in range(9):
                 frame = socket.receive_json()
                 assert frame["type"] == "result"
                 names.add(frame["result"]["name"])
                 kinds.add(frame["result"]["kind"])
-            assert {
+            # Equality, not subset: the paint is exactly the servable world
+            # -- every plain figure, windowed reading, projection and tile,
+            # and NOT the grained figure, the live reading or the live tile.
+            assert names == {
+                "shop_courier.carrying",
+                "shop_courier.reviews",
+                "shop_courier.lugging",
+                "shop_courier.typical_ride",
+                "shop_courier.desk",
+                "shop_order.board",
                 "shop_courier.card",
                 "shop_courier.reviews_card",
                 "shop_order.board_card",
-            } <= names, "first paint must carry the tiles"
+            }
             assert "bundle" in kinds
 
             posted = client.post(
@@ -553,12 +578,13 @@ def test_a_bare_subscribe_paints_tiles_too_and_serve_false_keeps_the_response_le
             assert "shop_courier.reviews_card" not in body["moved"]
 
             heard = set()
-            for _ in range(4):
+            for _ in range(5):
                 frame = socket.receive_json()
                 assert frame["type"] == "result"
                 heard.add(frame["result"]["name"])
             assert heard == {
                 "shop_courier.carrying",
+                "shop_courier.desk",
                 "shop_order.board",
                 "shop_courier.card",
                 "shop_order.board_card",
@@ -580,3 +606,358 @@ def test_a_departed_subscriber_stops_being_delivered_to(pg_dsn: str) -> None:
             assert state.hub.watching("t1") == 1
         # The context manager closed the socket; the hub must have let go.
         assert state.hub.watching("t1") == 0
+
+
+def test_entry_frames_carry_their_entry_name_so_a_summary_tile_can_fill(pg_dsn: str) -> None:
+    """A summary is answered with its projection's Result -- correct and
+    documented -- but on the socket there is no request to correlate the
+    response to, so without the envelope's `name` a client keyed by
+    `result.name` could never attribute the frame and its tile would stay
+    blank for ever."""
+    with _service(pg_dsn) as client:
+        _teach_tiles(client)
+        with client.websocket_connect("/stream") as socket:
+            socket.send_json(
+                {
+                    "type": "subscribe",
+                    "tenant": "t1",
+                    "entries": [{"name": "shop_order.book"}],
+                }
+            )
+            fetched = socket.receive_json()
+            assert fetched["type"] == "result"
+            assert fetched["name"] == "shop_order.book"
+            assert fetched["result"]["kind"] == "projection"
+            assert fetched["result"]["name"] == "shop_order.board"
+
+            client.post(
+                "/tenants/t1/facts",
+                json={"writes": {"shop_order": {"oX": {"ref": "A-X", "courier_id": "c1", "status": "riding"}}}},
+            )
+            pushed = socket.receive_json()
+            assert pushed["type"] == "result"
+            assert pushed["name"] == "shop_order.book", (
+                "the follow lost the address the fetch carried"
+            )
+
+
+def test_windows_where_they_mean_nothing_are_refused_per_entry(pg_dsn: str) -> None:
+    """The HTTP route quietly ignores `trailing` on a figure; a standing
+    entry cannot, because the ignored argument becomes part of the entry's
+    identity and one question forks into two subscriptions serving identical
+    frames."""
+    with _service(pg_dsn) as client:
+        _teach_and_feed(client)
+        with client.websocket_connect("/stream") as socket:
+            socket.send_json(
+                {
+                    "type": "subscribe",
+                    "tenant": "t1",
+                    "entries": [{"name": "shop_courier.carrying", "trailing": ["7"]}],
+                }
+            )
+            refused = socket.receive_json()
+            assert refused["type"] == "error"
+            assert refused["name"] == "shop_courier.carrying"
+            assert "takes no windows" in refused["message"]
+
+
+def test_a_teach_that_removes_a_definition_ends_its_subscriptions_with_a_reason(
+    pg_dsn: str,
+) -> None:
+    """A removed definition can never appear in a moved set again, so a
+    standing entry on it would simply go quiet -- the last answer rendering
+    for ever with nothing stating the absence. The teach must end it, once,
+    in the vocabulary a fresh subscribe would meet."""
+    with _service(pg_dsn) as client:
+        _teach_tiles(client)
+        with client.websocket_connect("/stream") as socket:
+            socket.send_json(
+                {
+                    "type": "subscribe",
+                    "tenant": "t1",
+                    "entries": [{"name": "shop_courier.reviews"}],
+                }
+            )
+            assert socket.receive_json()["result"]["name"] == "shop_courier.reviews"
+
+            from .test_push import SOURCE as FULL
+
+            start = FULL.index("# How many reviews")
+            end = FULL.index("# Working time in hand")
+            shrunk = (FULL[:start] + FULL[end:]).replace(
+                "# The reviews tile: one figure nothing else here touches.\n"
+                "bundle shop_courier.reviews_card:\n"
+                "    reviews = figure shop_courier.reviews\n",
+                "",
+            )
+            taught = client.put("/definitions", json={"source": shrunk})
+            assert taught.status_code == 200, taught.text
+
+            ended = socket.receive_json()
+            assert ended["type"] == "error"
+            assert ended["name"] == "shop_courier.reviews"
+            assert "any more" in ended["message"]
+
+            # And it stays ended: a pass moves things, the retired entry is
+            # not among them and is not resurrected.
+            ran = client.post("/tenants/t1/runs", json={})
+            assert ran.status_code == 200, ran.text
+            socket.send_json({"type": "ping"})
+            assert socket.receive_json()["type"] == "pong"
+
+
+def test_a_tenant_switch_resets_the_interest_instead_of_carrying_it_across(
+    pg_dsn: str,
+) -> None:
+    """Entries made watching one board silently following another is a
+    cross-board leak; the reset makes it impossible by construction, and
+    this is the test that keeps the construction."""
+    with _service(pg_dsn) as client:
+        _teach_and_feed(client)
+        with client.websocket_connect("/stream") as socket:
+            socket.send_json(
+                {
+                    "type": "subscribe",
+                    "tenant": "t1",
+                    "entries": [{"name": "shop_courier.carrying"}],
+                }
+            )
+            assert socket.receive_json()["type"] == "result"
+            socket.send_json(
+                {
+                    "type": "subscribe",
+                    "tenant": "t2",
+                    "entries": [{"name": "shop_courier.load_band"}],
+                }
+            )
+            assert socket.receive_json()["result"]["name"] == "shop_courier.load_band"
+
+            client.post(
+                "/tenants/t1/facts",
+                json={"writes": {"shop_order": {"o2": {"ref": "A-2", "courier_id": "c1", "status": "riding"}}}},
+            )
+            socket.send_json({"type": "ping"})
+            assert socket.receive_json()["type"] == "pong", (
+                "the old board's entry survived the switch and followed it"
+            )
+
+
+def test_unsubscribe_removes_exactly_what_it_names_and_a_bare_one_clears_all(
+    pg_dsn: str,
+) -> None:
+    with _service(pg_dsn) as client:
+        _teach_and_feed(client)
+        client.post(
+            "/tenants/t1/facts",
+            json={"writes": {"shop_order": {"o2": {"ref": "A-2", "courier_id": "c1", "status": "riding"}}}},
+        )
+        with client.websocket_connect("/stream") as socket:
+            socket.send_json(
+                {
+                    "type": "subscribe",
+                    "tenant": "t1",
+                    "entries": [
+                        {"name": "shop_courier.carrying"},
+                        {"name": "shop_courier.load_band"},
+                    ],
+                }
+            )
+            assert socket.receive_json()["type"] == "result"
+            assert socket.receive_json()["type"] == "result"
+
+            socket.send_json(
+                {"type": "unsubscribe", "entries": [{"name": "shop_courier.carrying"}]}
+            )
+            # The third order moves BOTH figures; only the survivor travels.
+            client.post(
+                "/tenants/t1/facts",
+                json={"writes": {"shop_order": {"o3": {"ref": "A-3", "courier_id": "c1", "status": "riding"}}}},
+            )
+            pushed = socket.receive_json()
+            assert pushed["result"]["name"] == "shop_courier.load_band"
+            socket.send_json({"type": "ping"})
+            assert socket.receive_json()["type"] == "pong", (
+                "the unsubscribed entry was delivered anyway"
+            )
+
+            socket.send_json({"type": "unsubscribe"})
+            client.post(
+                "/tenants/t1/facts",
+                json={"writes": {"shop_order": {"o4": {"ref": "A-4", "courier_id": "c1", "status": "riding"}}}},
+            )
+            socket.send_json({"type": "ping"})
+            assert socket.receive_json()["type"] == "pong", (
+                "a bare unsubscribe must clear every interest"
+            )
+
+
+def test_entry_identity_is_canonical_across_window_spellings(pg_dsn: str) -> None:
+    """`1-9` and `9` are one span; an identity built on the client's spelling
+    would let an unsubscribe miss the entry its subscribe added."""
+    with _service(pg_dsn) as client:
+        _teach_tiles(client)
+        _deliver(client, "r1")
+        with client.websocket_connect("/stream") as socket:
+            socket.send_json(
+                {
+                    "type": "subscribe",
+                    "tenant": "t1",
+                    "entries": [{"name": "shop_courier.typical_ride", "trailing": ["1-9"]}],
+                }
+            )
+            assert socket.receive_json()["type"] == "result"
+            socket.send_json(
+                {
+                    "type": "unsubscribe",
+                    "entries": [{"name": "shop_courier.typical_ride", "trailing": ["9"]}],
+                }
+            )
+            _deliver(client, "r2")
+            socket.send_json({"type": "ping"})
+            assert socket.receive_json()["type"] == "pong", (
+                "the respelt unsubscribe missed the entry"
+            )
+
+
+def test_a_serving_run_reports_moved_as_a_superset_of_its_results(pg_dsn: str) -> None:
+    """`moved` is what a subscribing host trusts instead of the payloads, so
+    every name in `results` must appear there -- a result that moved without
+    being named would be exactly the missed push the field exists to end."""
+    with _service(pg_dsn) as client:
+        _teach_tiles(client)
+        posted = client.post(
+            "/tenants/t1/facts",
+            json={"writes": {"shop_order": {"oS": {"ref": "A-S", "courier_id": "c1", "status": "riding"}}}},
+        )
+        assert posted.status_code == 200
+        body = posted.json()
+        assert body["results"], "the control: this pass must have served something"
+        assert {r["name"] for r in body["results"]} <= set(body["moved"])
+
+
+def test_the_runs_route_honours_serve_false_too(pg_dsn: str) -> None:
+    with _service(pg_dsn) as client:
+        _teach_tiles(client)
+        saved = client.put(
+            "/tenants/t1/settings",
+            json={"document": {"limits": {"carrying": {"over": 1}}}},
+        )
+        assert saved.status_code == 200
+        ran = client.post("/tenants/t1/runs", json={"serve": False})
+        assert ran.status_code == 200, ran.text
+        body = ran.json()
+        assert body["results"] == []
+        assert "shop_courier.carrying" in body["moved"]
+
+
+def test_the_editors_run_reaches_a_subscriber(pg_dsn: str) -> None:
+    """The editor's pass door is the one a definitions save points every
+    operator at; a push wired into the API's doors and not this one would
+    recolour the board for curl and freeze it for the editor."""
+    with _service(pg_dsn) as client:
+        _teach_tiles(client)
+        with client.websocket_connect("/stream") as socket:
+            socket.send_json(
+                {
+                    "type": "subscribe",
+                    "tenant": "t1",
+                    "entries": [{"name": "shop_courier.carrying"}],
+                }
+            )
+            first = socket.receive_json()
+            assert [s["level"] for s in first["result"]["subjects"]] == ["ok"]
+
+            saved = client.put(
+                "/tenants/t1/settings",
+                json={"document": {"limits": {"carrying": {"over": 1}}}},
+            )
+            assert saved.status_code == 200
+            ran = client.post("/ui/api/tenants/t1/runs", json={})
+            assert ran.status_code == 200, ran.text
+
+            pushed = socket.receive_json()
+            assert pushed["result"]["name"] == "shop_courier.carrying"
+            assert [s["level"] for s in pushed["result"]["subjects"]] == ["over"]
+
+
+def test_a_pass_landing_during_a_subscribes_fetch_is_not_lost(pg_dsn: str) -> None:
+    """The race the tenant lock closes: without it, a pass committing while
+    the subscribe's fetch is in flight pushes to an interest map that does
+    not know the client yet, and the older fetch then paints over nothing --
+    a subscription born stale, with no further push until the next movement.
+    The stall injected here is the reviewer's harness made permanent: it
+    holds the fetch open long enough for the concurrent pass to try."""
+    import threading
+    import time as _time
+
+    import uratori.server.app as app_module
+
+    with _service(pg_dsn) as client:
+        _teach_and_feed(client)
+        real = app_module.facade_for
+
+        def stalling(s, world, library):  # type: ignore[no-untyped-def]
+            facade = real(s, world, library)
+            original = facade.answer
+
+            async def slow_answer(*args, **kwargs):  # type: ignore[no-untyped-def]
+                import asyncio
+
+                await asyncio.sleep(0.4)
+                return await original(*args, **kwargs)
+
+            facade.answer = slow_answer  # type: ignore[method-assign]
+            return facade
+
+        app_module.facade_for = stalling
+        try:
+            with client.websocket_connect("/stream") as socket:
+                socket.send_json(
+                    {
+                        "type": "subscribe",
+                        "tenant": "t1",
+                        "entries": [{"name": "shop_courier.carrying"}],
+                    }
+                )
+                # While the fetch stalls, a pass lands from another thread.
+                # Under the lock it queues behind the fetch; without the
+                # lock it completes first and its push is lost.
+                landed = threading.Event()
+
+                def pass_now() -> None:
+                    _time.sleep(0.1)
+                    client.post(
+                        "/tenants/t1/facts",
+                        json={
+                            "writes": {
+                                "shop_order": {
+                                    "o2": {"ref": "A-2", "courier_id": "c1", "status": "riding"}
+                                }
+                            }
+                        },
+                    )
+                    landed.set()
+
+                thread = threading.Thread(target=pass_now)
+                thread.start()
+                try:
+                    seen: list[float] = []
+                    for _ in range(3):
+                        frame = socket.receive_json()
+                        if frame["type"] != "result":
+                            continue
+                        [subject] = frame["result"]["subjects"]
+                        seen.append(subject["value"])
+                        if subject["value"] == 2.0:
+                            break
+                    assert 2.0 in seen, (
+                        f"the client never heard the pass that landed during its "
+                        f"fetch (frames carried {seen}); the subscription was born "
+                        "stale"
+                    )
+                finally:
+                    thread.join(timeout=10)
+                assert landed.is_set()
+        finally:
+            app_module.facade_for = real

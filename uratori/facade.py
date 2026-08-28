@@ -5,8 +5,9 @@ library, engine store, fact source -- and gets three verbs:
 
 - `execute`: facts moved (or a full pass is due); recompute what followed from
   them, cascading through every figure built on a figure that moved.
-- `results`: the current `Result` for definitions worth serving, the same
-  object a route would return and a listener receives.
+- `results`: the current answers (`Result`s, and `BundleResult`s for the
+  bundles) for definitions worth serving, the same objects a route would
+  return and a listener receives.
 - `answer`: one definition by name, for a host wiring a request path.
 
 `run` is `execute` + `results` + listener dispatch in the one correct order,
@@ -53,9 +54,6 @@ from .verify import verify_writes
 from .windows import WindowSpec
 
 log = logging.getLogger("uratori")
-
-Served = Result | BundleResult
-"""What a serving surface hands out: a definition's answer, or a tile of them."""
 
 Listener = Callable[[str, Outcome, tuple[Result | BundleResult, ...]], Awaitable[None] | None]
 """(tenant, what moved, the re-served answers). Sync or async, the host's choice."""
@@ -269,7 +267,7 @@ class Uratori:
         # between serving and stamping re-serves next pass, which is the safe
         # direction. Settled on sync passes too, or the first definition-only
         # pass after a sync would re-serve everything the sync already sent.
-        await self._settle_serve_stamps(tenant, stamps)
+        await self._settle_serve_stamps(tenant, stamps, held)
         return RunReport(outcome=outcome, results=results, moved=moved)
 
     def _serve_stamps(self, document: Mapping[str, Any]) -> dict[str, Pointer]:
@@ -296,15 +294,32 @@ class Uratori:
                     read = lib.figure(figure)
                     if read is not None:
                         dials.update(read.band_settings)
+            # The effort rendering dial, when any row value is an effort:
+            # `format_value` divides by it on the way to `display`, so the
+            # rendered rows move the moment it does -- the same edge the UI's
+            # dependency closure draws, and for a release the one dial that
+            # re-served the figures while every projection rendering the same
+            # efforts kept the old text.
+            if any(
+                unit == "effort" for _, _, unit, band in plan.reads if not band
+            ) or any(unit == "effort" for _, _, unit in plan.values):
+                dials.add(EFFORT_HOURS_SETTING)
             stamps[plan.name] = Pointer(
                 version=plan.version,
-                settings_fingerprint=settings_fingerprint(dict(document), sorted(dials)),
+                settings_fingerprint=_serve_fingerprint(
+                    document, sorted(dials), plan.doc
+                ),
             )
         for summary in lib.summaries:
+            dials = set(summary.settings)
+            if any(unit == "effort" for _, _, unit, _ in summary.totals) or any(
+                unit == "effort" for _, _, unit in summary.values
+            ):
+                dials.add(EFFORT_HOURS_SETTING)
             stamps[summary.name] = Pointer(
                 version=summary.version,
-                settings_fingerprint=settings_fingerprint(
-                    dict(document), list(summary.settings)
+                settings_fingerprint=_serve_fingerprint(
+                    document, sorted(dials), summary.doc
                 ),
             )
         # Figures and readings carry serve stamps too, under a prefixed key
@@ -325,7 +340,9 @@ class Uratori:
                 dials.add(EFFORT_HOURS_SETTING)
             stamps[_serve_key(figure_plan.name)] = Pointer(
                 version=figure_plan.version,
-                settings_fingerprint=settings_fingerprint(dict(document), sorted(dials)),
+                settings_fingerprint=_serve_fingerprint(
+                    document, sorted(dials), figure_plan.doc, figure_plan.display
+                ),
             )
         for reading in lib.readings:
             dials = set(reading.settings)
@@ -333,7 +350,19 @@ class Uratori:
                 dials.add(EFFORT_HOURS_SETTING)
             stamps[_serve_key(reading.name)] = Pointer(
                 version=reading.version,
-                settings_fingerprint=settings_fingerprint(dict(document), sorted(dials)),
+                settings_fingerprint=_serve_fingerprint(
+                    document, sorted(dials), reading.doc, reading.display
+                ),
+            )
+        # Bundles carry a serve stamp too, for the one thing on their wire
+        # that is theirs alone: the prose. A tile's `doc` is deliberately
+        # outside its version hash (prose is not composition), so without a
+        # stamp an edited explanation would reach the artifact and never a
+        # connected screen.
+        for bundle in lib.bundles:
+            stamps[_serve_key(bundle.name)] = Pointer(
+                version=bundle.version,
+                settings_fingerprint=_serve_fingerprint(document, [], bundle.doc),
             )
         return stamps
 
@@ -352,6 +381,9 @@ class Uratori:
         for reading in self._library.readings:
             if held.get(_serve_key(reading.name)) != stamps[_serve_key(reading.name)]:
                 out.add(reading.name)
+        for bundle in self._library.bundles:
+            if held.get(_serve_key(bundle.name)) != stamps[_serve_key(bundle.name)]:
+                out.add(bundle.name)
         return frozenset(out)
 
     def _moved(
@@ -397,6 +429,11 @@ class Uratori:
         for bundle in lib.bundles:
             if not _servable(lib, bundle):
                 continue
+            if bundle.name in refreshed:
+                # The tile's own prose moved -- nothing about any member did,
+                # but the wrapper on the wire changed and must re-serve.
+                out.add(bundle.name)
+                continue
             for member in bundle.members:
                 if member.kind == "figure":
                     if member.name in touched or member.name in refreshed:
@@ -422,7 +459,7 @@ class Uratori:
     def _reached(
         self,
         reindexed: Sequence[str],
-        moved: set[str],
+        touched: set[str],
         stamps: Mapping[str, Pointer],
         held: Mapping[str, Pointer],
     ) -> set[str]:
@@ -441,7 +478,7 @@ class Uratori:
             reads = set(plan.figures) | {name for _, name, _, _ in plan.reads}
             if (
                 set(plan.indexes) & rebuilt
-                or reads & moved
+                or reads & touched
                 or held.get(plan.name) != stamps[plan.name]
             ):
                 out.add(plan.name)
@@ -451,7 +488,7 @@ class Uratori:
         return out
 
     async def _settle_serve_stamps(
-        self, tenant: str, stamps: Mapping[str, Pointer]
+        self, tenant: str, stamps: Mapping[str, Pointer], held: Mapping[str, Pointer]
     ) -> None:
         lib = self._library
         for plan in lib.projections:
@@ -476,13 +513,18 @@ class Uratori:
                 {"over": summary.over},
             )
             await self._store.set_pointer(tenant, summary.name, stamps[summary.name])
-        # Figure and reading serve stamps, under their prefixed keys. The
-        # figure's definition row already exists on any pass that computed it,
-        # but a warm pass writes none -- and a reading has never had one --
-        # so each is ensured here for the same reason the projections above
+        # Figure, reading and bundle serve stamps, under their prefixed keys.
+        # The figure's definition row already exists on any pass that computed
+        # it, but a warm pass writes none -- and a reading or bundle has never
+        # had one -- so each is ensured for the reason the projections above
         # are: the pointer table cites a definition version, and the stamp
-        # must be able to land on every pass, not only cold ones.
+        # must be able to land on every pass, not only cold ones. Settled only
+        # when the stamp actually moved, so a quiet poll over a large library
+        # costs a read it already paid rather than two writes per definition.
         for figure_plan in lib.figures:
+            key = _serve_key(figure_plan.name)
+            if held.get(key) == stamps[key]:
+                continue
             await self._store.ensure_definition(
                 figure_plan.version,
                 figure_plan.name,
@@ -496,10 +538,11 @@ class Uratori:
                     "depth": figure_plan.depth,
                 },
             )
-            await self._store.set_pointer(
-                tenant, _serve_key(figure_plan.name), stamps[_serve_key(figure_plan.name)]
-            )
+            await self._store.set_pointer(tenant, key, stamps[key])
         for reading in lib.readings:
+            key = _serve_key(reading.name)
+            if held.get(key) == stamps[key]:
+                continue
             await self._store.ensure_definition(
                 reading.version,
                 reading.name,
@@ -509,9 +552,21 @@ class Uratori:
                 declaration_source(lib, reading.name) or "",
                 {"unit": reading.unit, "scope": reading.scope, "mode": reading.mode},
             )
-            await self._store.set_pointer(
-                tenant, _serve_key(reading.name), stamps[_serve_key(reading.name)]
+            await self._store.set_pointer(tenant, key, stamps[key])
+        for bundle in lib.bundles:
+            key = _serve_key(bundle.name)
+            if held.get(key) == stamps[key]:
+                continue
+            await self._store.ensure_definition(
+                bundle.version,
+                bundle.name,
+                "bundle",
+                bundle.doc,
+                "",
+                declaration_source(lib, bundle.name) or "",
+                {"members": [member.name for member in bundle.members]},
             )
+            await self._store.set_pointer(tenant, key, stamps[key])
 
     # ------------------------------------------------------------- serving --
 
@@ -783,6 +838,27 @@ class Uratori:
                 "member's own name."
             )
         raise LookupError(f"No figure called {name}")
+
+
+def _serve_fingerprint(
+    document: Mapping[str, Any], dials: Sequence[str], *prose: str
+) -> str:
+    """What a definition's SERVED answer is rendered under: the dials it
+    renders with, and the prose that travels on the wire beside the numbers
+    (`doc`, and the display template where one exists).
+
+    The prose rides in the fingerprint because it is deliberately outside
+    every version hash -- an explanation is not a calculation -- yet it IS on
+    the wire: without this, editing the sentence above a figure updated the
+    artifact and the routes while every connected screen kept the old words
+    until a reload, and `moved` claimed nothing had."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for part in prose:
+        h.update(part.encode("utf-8"))
+        h.update(b"\x00")
+    return f"{settings_fingerprint(dict(document), list(dials))}|{h.hexdigest()[:16]}"
 
 
 def _serve_key(name: str) -> str:

@@ -52,6 +52,7 @@ group shop_order.delivered_by_day from (courier_id, delivered_at by day in tenan
 group shop_review.rated_by from courier_id
 
 measure shop_order.riding_seconds = delivered_at - picked_up_at
+measure shop_order.lug_seconds = lug_seconds in effort
 
 # Orders in hand right now.
 figure shop_courier.carrying:
@@ -89,6 +90,22 @@ figure shop_courier.reviews:
     calculate:
         count(mine)
 
+# Working time in hand right now.
+figure shop_courier.lugging:
+    display "{value} in hand"
+    depends:
+        mine = shop_order.carried_by:{shop_courier} & shop_order.open
+    calculate:
+        sum(shop_order.lug_seconds over mine)
+
+# One row per courier, with their working time in hand.
+projection shop_courier.desk:
+    field:
+        name = name as text
+
+    read:
+        lugging = shop_courier.lugging
+
 # One row per order, alphabetically.
 projection shop_order.board:
     sort by ref ascending
@@ -113,6 +130,18 @@ bundle shop_courier.reviews_card:
 bundle shop_order.board_card:
     board = projection shop_order.board
     book = summarise shop_order.book
+
+# Orders being ridden right now, against the clock.
+reading shop_courier.riding_now():
+    display "{value}"
+    depends:
+        w = shop_order.riding_seconds over (shop_order.carried_by:{shop_courier} & shop_order.open)
+    calculate:
+        count(w)
+
+# The live tile: a member that is not servable yet.
+bundle shop_courier.live_card:
+    now = reading shop_courier.riding_now
 """
 
 
@@ -385,3 +414,116 @@ async def test_serve_false_reports_what_moved_without_evaluating_answers() -> No
         "a serve=False pass failed to settle its stamps, so the next pass "
         "re-reported the same movement"
     )
+
+    # The dial variant is the assertion with teeth: a fact write moves no
+    # serve stamp (they were settled before it), so only a dial pass can
+    # prove serve=False still settles them. Skipping the settle would make
+    # the second run here re-report the same dial move for ever.
+    dial = await engine.run("t1", {"limits": {"carrying": {"over": 1}}}, serve=False)
+    assert dial.results == ()
+    assert "shop_courier.carrying" in dial.moved
+    assert "shop_courier.card" in dial.moved
+    settled = await engine.run("t1", {"limits": {"carrying": {"over": 1}}})
+    assert settled.moved == frozenset(), (
+        "the dial move was reported once and must not be reported again"
+    )
+
+
+async def test_the_effort_dial_re_serves_everything_that_renders_an_effort() -> None:
+    """`format_value` divides an effort by tenant.hoursPerDay on the way to
+    every `display`, so moving the dial re-words the effort figure AND the
+    projection rendering the same efforts -- for a release the figure
+    re-served and the projection kept the old text, which put two different
+    sentences about one quantity on one screen."""
+    engine, facts = _engine()
+    facts.put(
+        "t1",
+        "shop_order",
+        "e1",
+        {"ref": "E-1", "courier_id": "c1", "status": "riding", "lug_seconds": 28800},
+    )
+    await _settled(engine, facts)
+
+    report = await engine.run("t1", {"tenant": {"hoursPerDay": 4}})
+
+    served = _results(report.results)
+    assert "shop_courier.lugging" in served, "the effort figure did not re-serve"
+    assert "shop_courier.desk" in served, (
+        "the projection renders the same efforts and kept the old text"
+    )
+    assert "shop_courier.carrying" not in served, (
+        "a count renders under no effort dial; re-serving it is the "
+        "whole-document fingerprint bug wearing a fix's name"
+    )
+    assert "shop_order.board" not in served
+
+
+async def test_a_prose_edit_re_serves_the_definition_and_its_tiles() -> None:
+    """Prose is deliberately outside every version hash -- an explanation is
+    not a calculation -- but it IS on the wire (`Result.doc`), so an editor
+    save that re-words a figure must reach every connected screen. Before
+    the serve stamps carried the prose, `moved` reported nothing and every
+    screen kept the old sentence until a reload."""
+    engine, facts = _engine()
+    await _settled(engine, facts)
+
+    edited = SOURCE.replace(
+        "# Orders in hand right now.", "# Orders currently being carried."
+    )
+    library = compile_against(edited, WORLD)
+    redeployed = Uratori(
+        schema=WORLD, library=library, store=engine._store, facts=facts
+    )
+    report = await redeployed.run("t1")
+
+    served = _results(report.results)
+    assert "shop_courier.carrying" in served
+    assert served["shop_courier.carrying"].doc == "Orders currently being carried."
+    bundles = _bundles(report.results)
+    assert "shop_courier.card" in bundles, (
+        "the tile carries the member's doc and kept the old words"
+    )
+    assert "shop_courier.reviews_card" not in bundles
+    assert "shop_courier.reviews" not in served
+
+
+async def test_a_bundle_prose_edit_re_serves_the_tile_alone() -> None:
+    """The tile's own sentence travels on `BundleResult.doc` and lives
+    outside the bundle's hash (prose is not composition), so only the serve
+    stamp can notice it moved -- and nothing else may move with it."""
+    engine, facts = _engine()
+    await _settled(engine, facts)
+
+    edited = SOURCE.replace(
+        "# The courier tile: a banded count and a windowed reading.",
+        "# The courier tile, re-worded.",
+    )
+    library = compile_against(edited, WORLD)
+    redeployed = Uratori(
+        schema=WORLD, library=library, store=engine._store, facts=facts
+    )
+    report = await redeployed.run("t1")
+
+    assert {r.name for r in report.results} == {"shop_courier.card"}
+    [card] = report.results
+    assert isinstance(card, BundleResult)
+    assert card.doc == "The courier tile, re-worded."
+
+
+async def test_a_live_member_keeps_its_tile_off_the_bulk_surface_not_the_by_name_one() -> None:
+    """`shop_courier.live_card` composes a reading that is not servable yet.
+    Serving the bulk surface anyway would 500 the entire first paint over
+    one member's gap; dropping the member would serve a tile quietly shorter
+    than its definition. So the whole tile stays off the bulk surface, and
+    the by-name route still refuses it with the reason -- the absence is
+    stated exactly where the tile is asked for."""
+    import pytest
+
+    engine, facts = _engine()
+    _feed(facts)
+    await engine.run("t1", full=True)
+
+    everything = await engine.results("t1")
+    assert "shop_courier.live_card" not in {r.name for r in everything}
+    with pytest.raises(NotImplementedError):
+        await engine.answer("t1", "shop_courier.live_card")

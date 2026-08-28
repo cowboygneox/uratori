@@ -221,6 +221,19 @@ def run_out(
     )
 
 
+def known_names(library: Library) -> frozenset[str]:
+    """Every name a subscription entry can stand on in this library -- what
+    a teach hands the hub so entries on retired definitions are ended with a
+    stated reason instead of going quiet for ever."""
+    return frozenset(
+        [plan.name for plan in library.figures]
+        + [reading.name for reading in library.readings]
+        + [plan.name for plan in library.projections]
+        + [summary.name for summary in library.summaries]
+        + [bundle.name for bundle in library.bundles]
+    )
+
+
 def facade_for(s: State, world: World, library: Library) -> Uratori:
     # No listener is wired here any more, deliberately: the facade's listener
     # hook carries the default-argument results and nothing else, and a

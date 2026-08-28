@@ -161,9 +161,49 @@ class Hub:
             if result is None:
                 continue
             for client in clients:
+                # `name` is the entry's own address: a summary entry is
+                # answered with its projection's Result, and a client keyed
+                # only by the payload's name could never attribute the frame
+                # to the entry that asked for it.
                 await self.send(
-                    client, Envelope(type="result", tenant=tenant_id, result=result)
+                    client,
+                    Envelope(
+                        type="result", tenant=tenant_id, name=entry.name, result=result
+                    ),
                 )
+
+    async def retire_entries(self, known: frozenset[str]) -> None:
+        """End every subscription whose definition the deployed library no
+        longer holds, and say so to its holder.
+
+        A redeploy that removes a definition removes it from every pass's
+        `moved` set for ever, so a standing entry on it would simply go quiet
+        -- the last answer rendering indefinitely with nothing stating the
+        absence. The refusal a fresh subscribe would earn is delivered
+        instead, once, and the entry is dropped.
+        """
+        doomed: list[tuple[Client, Entry]] = []
+        async with self._lock:
+            for client in self.clients:
+                for key, entry in list(client.entries.items()):
+                    if entry.name not in known:
+                        del client.entries[key]
+                        doomed.append((client, entry))
+        # Sends happen outside the lock: a dead socket's `send` calls `leave`,
+        # which takes the same lock.
+        for client, entry in doomed:
+            await self.send(
+                client,
+                Envelope(
+                    type="error",
+                    tenant=client.tenant_id,
+                    name=entry.name,
+                    message=(
+                        f"No definition called {entry.name} in the deployed "
+                        "definitions any more; this subscription has ended."
+                    ),
+                ),
+            )
 
     def wants_everything(self, tenant_id: str) -> bool:
         """Whether any firehose subscriber is on this tenant -- what decides

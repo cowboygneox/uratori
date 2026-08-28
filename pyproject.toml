@@ -42,6 +42,10 @@ dev = [
     # config below depends on: an older resolve would silently fall back to
     # per-test loops -- the exact failure the session-scope setting prevents.
     "pytest-asyncio>=0.26",
+    # A stream regression tends to surface as a socket that never sends the
+    # next frame, and an unbounded receive_json turns that red test into a
+    # CI hang. The global timeout is the backstop that makes it a failure.
+    "pytest-timeout>=2.3",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "httpx>=0.28",
@@ -118,3 +122,6 @@ asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
 filterwarnings = ["error::DeprecationWarning"]
+# A regression in the push path shows up as a frame that never arrives, and
+# an unbounded receive turns that into a hang instead of a red test.
+timeout = 120

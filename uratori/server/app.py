@@ -15,9 +15,12 @@ Design decisions a reader should not have to rediscover:
   membership before writing it, so two concurrent passes over one tenant could
   interleave those reads and writes into a state neither pass computed. A lock
   per tenant is the whole fix; passes for different tenants still overlap.
-- **The websocket is fed by the facade's listener hook** -- the same mechanism
-  an embedding host would use -- rather than by a special path inside the
-  routes. The socket therefore carries exactly the objects the routes return.
+- **The websocket carries exactly the objects the routes return**, delivered
+  by `push_pass` from every route that runs a pass. The facade's listener
+  hook remains the embedding host's mechanism, but this server outgrew it
+  the day subscriptions arrived: an entry is re-answered at ITS OWN
+  arguments, which needs the facade and the pass's moved set together, and
+  the listener carries neither.
 - **Configuration survives restart, compiled state does not.** The schema
   document and the definitions *source* are persisted; the library is
   recompiled from source at boot, because the source is the truth and a stored
@@ -72,6 +75,7 @@ from .runtime import (
     World,
     compile_for_teach,
     facade_for,
+    known_names,
     push_pass,
     ready,
     record_pass,
@@ -296,6 +300,10 @@ def create_app(
                 source=body.source,
                 library=library,
             )
+        # Entries standing on definitions this teach removed would never
+        # appear in a moved set again -- ended now, with the same refusal a
+        # fresh subscribe would earn, instead of going quiet for ever.
+        await s.hub.retire_entries(known_names(library))
         return _library_out(library)
 
     # ----------------------------------------------------------- settings --
@@ -671,18 +679,24 @@ def create_app(
                 if frame.entries is None:
                     # The original contract, unchanged: everything, at the
                     # serving defaults -- the current answers now, every
-                    # re-served answer thereafter.
+                    # re-served answer thereafter. Under the tenant's pass
+                    # lock, deliberately: a pass landing between this fetch
+                    # and the flag taking effect would push to a client the
+                    # hub does not know yet and then be overwritten by this
+                    # older paint -- a screen stale until the next movement,
+                    # with nothing saying so.
                     client.firehose = True
                     if world is not None and world.library is not None:
                         facade = facade_for(s, world, world.library)
-                        results = await facade.results(
-                            tenant, await db.load_settings(s.pool, tenant)
-                        )
-                        for result in results:
-                            await s.hub.send(
-                                client,
-                                Envelope(type="result", tenant=tenant, result=result),
+                        async with s.lock_for(tenant):
+                            results = await facade.results(
+                                tenant, await db.load_settings(s.pool, tenant)
                             )
+                            for result in results:
+                                await s.hub.send(
+                                    client,
+                                    Envelope(type="result", tenant=tenant, result=result),
+                                )
                     continue
                 # Named entries: each is a standing GET. Fetch now (the same
                 # answer the route would serve for these arguments), follow on
@@ -703,51 +717,76 @@ def create_app(
                         )
                     continue
                 facade = facade_for(s, world, world.library)
-                settings = await db.load_settings(s.pool, tenant)
-                for asked in frame.entries:
-                    refusal = _refuse_entry(world.library, asked)
-                    if refusal is not None:
+                # The fetch-and-register runs under the tenant's pass lock,
+                # and the entry is registered BEFORE its fetch: a pass landing
+                # in between would otherwise push to an interest map that does
+                # not know this client yet and then be shadowed by this older
+                # fetch -- a subscription born stale, with nothing saying so.
+                # Under the lock neither order matters, but registering first
+                # keeps the window shut even if the locking ever changes.
+                async with s.lock_for(tenant):
+                    settings = await db.load_settings(s.pool, tenant)
+                    for asked in frame.entries:
+                        refusal = _refuse_entry(world.library, asked)
+                        if refusal is not None:
+                            await s.hub.send(
+                                client,
+                                Envelope(
+                                    type="error",
+                                    tenant=tenant,
+                                    name=asked.name,
+                                    message=refusal,
+                                ),
+                            )
+                            continue
+                        entry = _entry_of(asked)
+                        if entry is None:  # pragma: no cover - _refuse_entry caught it
+                            continue
+                        client.entries[entry.key()] = entry
+                        try:
+                            answer = await facade.answer(
+                                tenant,
+                                entry.name,
+                                settings,
+                                trailing=entry.windows
+                                if entry.windows is not None
+                                else DEFAULT_TRAILING,
+                            )
+                        except (WindowError, ValueError, NotImplementedError) as failure:
+                            # The API's own refusals (a span over the wrong
+                            # grain, a live reading), carried to the entry
+                            # that asked. The entry is removed again:
+                            # following something that cannot be fetched
+                            # would push the same error on every pass for
+                            # ever.
+                            client.entries.pop(entry.key(), None)
+                            await s.hub.send(
+                                client,
+                                Envelope(
+                                    type="error",
+                                    tenant=tenant,
+                                    name=asked.name,
+                                    message=str(failure),
+                                ),
+                            )
+                            continue
+                        if answer is None:  # pragma: no cover - _refuse_entry caught it
+                            client.entries.pop(entry.key(), None)
+                            continue
+                        # `name` on the envelope is the entry's own address,
+                        # so a client can attribute the frame even where the
+                        # payload answers under another name -- a summary
+                        # serves its projection's Result, and without this
+                        # the tile asking for the summary never fills.
                         await s.hub.send(
                             client,
                             Envelope(
-                                type="error", tenant=tenant, name=asked.name, message=refusal
-                            ),
-                        )
-                        continue
-                    entry = _entry_of(asked)
-                    if entry is None:  # pragma: no cover - _refuse_entry caught it
-                        continue
-                    try:
-                        answer = await facade.answer(
-                            tenant,
-                            entry.name,
-                            settings,
-                            trailing=entry.windows
-                            if entry.windows is not None
-                            else DEFAULT_TRAILING,
-                        )
-                    except (WindowError, ValueError, NotImplementedError) as failure:
-                        # The API's own refusals (a span over the wrong grain,
-                        # a live reading), carried to the entry that asked.
-                        # The entry is NOT added: following something that
-                        # cannot be fetched would push the same error on
-                        # every pass for ever.
-                        await s.hub.send(
-                            client,
-                            Envelope(
-                                type="error",
+                                type="result",
                                 tenant=tenant,
-                                name=asked.name,
-                                message=str(failure),
+                                name=entry.name,
+                                result=answer,
                             ),
                         )
-                        continue
-                    if answer is None:  # pragma: no cover - _refuse_entry caught it
-                        continue
-                    client.entries[entry.key()] = entry
-                    await s.hub.send(
-                        client, Envelope(type="result", tenant=tenant, result=answer)
-                    )
         except WebSocketDisconnect:
             pass
         finally:
@@ -817,8 +856,11 @@ def _parse(raw: str) -> Subscribe | None:
 def _entry_of(asked: SubscribeEntry) -> Entry | None:
     """The entry as the hub holds it: windows parsed to specs, or None when
     the spelling does not parse -- the caller has already refused (or is
-    removing, where an unparseable identity matches nothing)."""
-    if asked.trailing is None:
+    removing, where an unparseable identity matches nothing). An EMPTY window
+    list is the bare entry: it named no windows, and a `()` identity distinct
+    from `None`'s would let two spellings of one question shadow each other
+    in the interest map."""
+    if not asked.trailing:
         return Entry(name=asked.name, windows=None)
     try:
         return Entry(
@@ -836,7 +878,11 @@ def _refuse_entry(library: Library, asked: SubscribeEntry) -> str | None:
 
     Serve-time refusals (a span whose unit cannot slice the reading's
     storage, a live reading) surface from the fetch itself; this is only what
-    the frame alone can be wrong about."""
+    the frame alone can be wrong about. `trailing` is accepted exactly where
+    it means something -- a windowed reading. The HTTP route quietly ignores
+    it elsewhere; a standing entry cannot afford that generosity, because the
+    ignored argument would become part of the entry's identity and one
+    question would fork into two subscriptions serving identical frames."""
     known = (
         library.figure(asked.name) is not None
         or library.reading(asked.name) is not None
@@ -852,6 +898,13 @@ def _refuse_entry(library: Library, asked: SubscribeEntry) -> str | None:
                 f"{asked.name} is a bundle: its windows are declared in the "
                 "definition, so a subscription names it bare -- an entry that "
                 "could move them would be a different tile under the same hash."
+            )
+        reading = library.reading(asked.name)
+        if reading is None or reading.mode != "window":
+            return (
+                f"{asked.name} takes no windows: `trailing` selects the spans a "
+                "windowed reading is served over, and nothing else serves over "
+                "windows. Subscribe to it bare."
             )
         try:
             for token in asked.trailing:

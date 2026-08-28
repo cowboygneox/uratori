@@ -461,12 +461,13 @@ known/unknown, not required/optional.
 | `covered` | The fact kinds this pass actually read, sorted. A webhook covers almost nothing and a reconcile covers everything, and the difference says which values were *confirmed* unchanged rather than merely not checked. |
 | `shown` | A **ranked sample** of the movements, capped at 40, for an activity log. See below. |
 | `results` | The re-served answers for everything the pass moved -- plus, on any pass through the facts door or one that ran `full` (an empty batch counts: the door is the sync moment, not the batch's contents, and a standing import debt upgrades a run to `full`), every projection, because the clock is one of a projection's inputs and the sync is when that contract pays out. A definition-only pass (`POST /tenants/{t}/runs` after a deploy or a settings save) re-serves exactly what the change reached: the moved figures, the figures and readings a moved dial re-words or re-renders (a band threshold, the effort dial), and the projections whose answer can differ -- a rebuilt grouping they filter through, a moved figure they read, their own text (or a summary's over them) having changed, or a dial they render under having turned. Every **bundle** any of those members sits in re-serves whole, at its declared windows, as a `BundleResult` in the same list -- branch on `kind`. A change that reaches none of that serves nothing. The same objects `GET /tenants/{t}/results` returns and the websocket pushes; there is no run-only shape to drift. (One spelling difference: HTTP responses write absent fields as `null`, the socket omits them -- treat both as absent.) Empty when the request said `"serve": false`. |
-| `moved` | Every definition name whose served answer this pass may have changed -- exactly what `results` re-serves, bundles included, as names instead of payloads, computed without evaluating anything. For the host that owns its own delivery (per-client subscriptions): send `"serve": false`, intersect `moved` with what your clients actually watch, and fetch exactly those by name at each watcher's own arguments. Carried on every response, not only lean ones, so a caller can cross-check. |
+| `moved` | Every definition name whose served answer this pass may have changed -- bundles included, computed without evaluating anything. A **superset** of what `results` re-serves, in exactly two ways: a summary's name appears here while its numbers travel inside its projection's `Result`, and a time-keyed or dimension-split figure appears here while the bulk surface leaves it to the by-name route -- both answer `GET /tenants/{t}/results/{name}` under the names listed. For the host that owns its own delivery (per-client subscriptions): send `"serve": false`, intersect `moved` with what your clients actually watch, and fetch exactly those by name at each watcher's own arguments. Carried on every response, not only lean ones. |
 
-`"serve": false` in the request body (facts and runs alike) skips evaluating
-and shipping `results`; `moved` still reports. The server's own websocket
-subscribers are unaffected -- their delivery is the server's job, not the
-HTTP caller's.
+`"serve": false` in the request body (facts and runs alike) skips *shipping*
+`results`, and skips evaluating them unless the server's own websocket has a
+firehose subscriber on the tenant -- those subscribers' delivery is the
+server's job, not the HTTP caller's, and their paint must not depend on
+which client triggered the pass. `moved` still reports either way.
 
 A **deferred** post answers the same shape with only `written` and `deleted`
 populated -- `changed` 0, everything else empty -- because nothing recomputed,
@@ -533,11 +534,14 @@ cards, and shipping every stored person-day on the bulk surface would spend
 every pass on history nobody is watching), then every window reading, then
 every projection, evaluated live at this instant -- then every **bundle**, as
 a `BundleResult` (branch on `kind`), each at its declared windows, so a
-screen bound to a tile paints with everything else. An anchored request
-(`at`, below) serves no bundles: the by-name route refuses an anchor on a
-bundle because its non-reading members can only be served as they stand, and
-this route honours the same refusal rather than serving anchored readings
-beside the same readings unanchored inside a tile.
+screen bound to a tile paints with everything else. Two stated exceptions:
+an anchored request (`at`, below) serves no bundles -- the by-name route
+refuses an anchor on a bundle because its non-reading members can only be
+served as they stand, and this route honours the same refusal rather than
+serving anchored readings beside the same readings unanchored inside a tile
+-- and a bundle naming a **live reading** is left off entirely, because such
+a tile is not servable yet anywhere (its by-name route answers `501`) and
+one member's gap must not fail the whole first paint.
 
 `trailing` is a repeatable query parameter selecting the windows readings
 are served over. Each value is a **span of buckets counted back from the
@@ -654,9 +658,7 @@ instead. A summarise member arrives with `subjects` empty
 and the population row in `summary` -- computed over ALL the projection's
 rows, never the page; only the row payload stays home. The wrapper's
 `version` is the bundle's content hash -- the review token for the committed
-artifact -- and appears in no storage key and no number's citation. Bundles
-are deliberately absent from the bulk route above: every member already
-serves there under its own name.
+artifact -- and appears in no storage key and no number's citation.
 
 - `200` with a single `Result` -- or, for a bundle, a single wrapper as
   above.
@@ -943,20 +945,28 @@ A `subscribe` **without** `entries` is the firehose, unchanged from before
 subscriptions existed: everything, at the serving defaults. With `entries`
 it is a set of **standing GETs**: each entry names a calculation with the
 same arguments `GET /tenants/{t}/results/{name}` takes -- `trailing` for a
-windowed reading, nothing for everything else; a bundle is named bare,
-because its windows are declared in its definition. Each entry is answered
-immediately with its current answer at those arguments, and re-answered
-whenever a pass impacts it. Entries accumulate across frames;
-`unsubscribe` removes by the same identity (the name plus the canonical
-window spelling), and an `unsubscribe` naming nothing clears everything,
-firehose included.
+windowed reading, nothing for everything else. `trailing` anywhere it means
+nothing is refused rather than ignored: on a bundle because its windows are
+declared in its definition, and on a figure, projection or summary because
+an ignored argument would still become part of the entry's identity, and
+one question would fork into two subscriptions serving identical frames
+(the HTTP route can afford to ignore it; a standing entry cannot). Each
+entry is answered immediately with its current answer at those arguments,
+and re-answered whenever a pass impacts it. Entries accumulate across
+frames; `unsubscribe` removes by the same identity (the name plus the
+canonical window spelling), and an `unsubscribe` naming nothing clears
+everything, firehose included. An empty `entries` list is an empty set of
+standing GETs -- it subscribes to nothing and is not the firehose.
 
 An entry the server cannot honour -- an unknown name, a window that does not
-parse, windows on a bundle, a span whose unit cannot slice the reading's
-storage, a live reading -- is refused with an `error` frame carrying the
-entry's `name` and the same sentence the HTTP route would answer, and is
-**not** followed; the valid entries beside it in the same frame proceed.
-Nothing is ever dropped silently.
+parse, windows where they mean nothing, a span whose unit cannot slice the
+reading's storage, a live reading -- is refused with an `error` frame
+carrying the entry's `name` and the same sentence the HTTP route would
+answer, and is **not** followed; the valid entries beside it in the same
+frame proceed. Nothing is ever dropped silently -- including at a redeploy:
+a teach that removes a definition ends every standing entry on it with one
+`error` frame naming the entry, because a subscription that can never be
+impacted again going quiet would be the freeze this protocol exists to end.
 
 Anything that does not parse as one of these frames is **ignored** rather
 than fatal: a client that sends nonsense is a bug in that client, and taking
@@ -971,12 +981,16 @@ board must not silently follow another.
 ### Frames the server sends
 
 All are one envelope, with absent fields omitted. `result` carries a
-`Result`, or a `BundleResult` for a bundle -- branch on its `kind`. An
-`error` about one subscription entry carries that entry's `name`; a
-frame-level complaint carries none.
+`Result`, or a `BundleResult` for a bundle -- branch on its `kind`. `name`
+is the subscription entry a frame answers or refuses: set on every
+entry-addressed `result` (a summary entry is answered with its projection's
+`Result`, and without the address the asking tile could never attribute the
+frame) and on every entry-scoped `error`; firehose results and frame-level
+complaints carry none.
 
 ```json
 {"type": "result", "tenant": "t1", "result": { …a Result or BundleResult… }}
+{"type": "result", "tenant": "t1", "name": "shop_order.book", "result": { …the projection's Result… }}
 {"type": "error", "tenant": "t1", "name": "no.such", "message": "No definition called no.such"}
 {"type": "error", "message": "subscribe names a tenant"}
 {"type": "pong"}

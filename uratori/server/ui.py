@@ -62,6 +62,7 @@ from .runtime import (
     World,
     compile_for_teach,
     facade_for,
+    known_names,
     push_pass,
     ready,
     record_pass,
@@ -723,6 +724,10 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 source=body.source,
                 library=library,
             )
+        # The same retirement the API's teach door performs: an editor save
+        # that removes a definition must end its standing subscriptions with
+        # a stated reason, not leave them silent.
+        await s.hub.retire_entries(known_names(library))
         return SaveOut(
             ok=True,
             fingerprint=_fingerprint(body.source),
