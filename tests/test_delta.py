@@ -26,9 +26,13 @@ from __future__ import annotations
 import pytest
 
 from uratori.engine.read import Sample, delta_of
+from uratori.engine.serve import serve_reading
 from uratori.lang.check import CheckError
+from uratori.lang.settings import fingerprint
+from uratori.results import Ok
+from uratori.store import MemoryEngineStore, Pointer
 
-from .world import compile_source
+from .world import DEFAULTS, compile_source
 
 
 def sample(*points: tuple[str, float | None]) -> Sample:
@@ -263,3 +267,155 @@ reading team_person.grained(range):
 """
         )
     assert "series" in str(caught.value)
+
+
+# ----------------------------------------------- the range really bounds --
+
+
+DAILY = compile_source(
+    BASE
+    + """
+# How the merge time moved, day to day.
+reading team_person.merge_trend(range):
+    display "{team_person} merge trend"
+    depends:
+        t = team_person.time_to_merge in range
+    calculate:
+        median(t)
+        delta(t)
+"""
+)
+
+
+class SpyStore(MemoryEngineStore):
+    """A store that remembers every way it was asked for stored values.
+
+    The claim `delta` makes is that no fetch reaches outside the buckets the
+    window resolved to. That is not something a value assertion can prove --
+    a widened fetch that happened to be filtered afterwards would look
+    identical on the wire -- so the proof has to be about the calls.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ranges: list[tuple[str, str]] = []
+        self.unbounded: list[str] = []
+        self._inside_range = 0
+
+    async def values_in_range(self, tenant, name, version, frm, to):  # type: ignore[no-untyped-def]
+        self.ranges.append((frm, to))
+        # The in-memory store answers a bounded fetch by scanning `values` and
+        # filtering -- a legitimate implementation detail (the Postgres store
+        # issues a real bounded query), and not a fetch the *serving path*
+        # made. Counting it would make this test assert the store's shape
+        # instead of the reading's behaviour, and it would fail against one
+        # store and pass against the other.
+        self._inside_range += 1
+        try:
+            return await super().values_in_range(tenant, name, version, frm, to)
+        finally:
+            self._inside_range -= 1
+
+    async def values(self, tenant, name, version):  # type: ignore[no-untyped-def]
+        if not self._inside_range:
+            self.unbounded.append(f"values({name})")
+        return await super().values(tenant, name, version)
+
+    async def values_under(self, tenant, name, version, prefix):  # type: ignore[no-untyped-def]
+        if not self._inside_range:
+            self.unbounded.append(f"values_under({name})")
+        return await super().values_under(tenant, name, version, prefix)
+
+
+async def _seeded() -> tuple[SpyStore, float]:
+    store = SpyStore()
+    figure = DAILY.figure("team_person.time_to_merge")
+    assert figure is not None
+    tenant = "t1"
+    await store.set_pointer(
+        tenant,
+        figure.name,
+        Pointer(
+            version=figure.version,
+            settings_fingerprint=fingerprint(dict(DEFAULTS), list(figure.settings)),
+        ),
+    )
+    await store.set_buckets(tenant, "code_change.merged_by_day", "c1", ["p1@2026-03-10"])
+    for day, value in (
+        ("2026-03-01", [100.0]),  # well before the window -- must never be read
+        ("2026-03-07", [900.0]),  # the day *before* the window opens
+        ("2026-03-08", [100.0]),  # the window's oldest day
+        ("2026-03-09", [140.0]),
+        ("2026-03-10", [120.0]),  # the anchor day
+    ):
+        await store.save(
+            tenant, figure.name, figure.version, f"p1@{day}", value, (), "P One"
+        )
+    return store, 1_773_172_800_000.0  # 2026-03-10T20:00Z, midday in Los Angeles
+
+
+async def test_the_oldest_bucket_is_absent_rather_than_reaching_one_day_back() -> None:
+    """The day before the window holds a value, and the answer must not use
+    it.
+
+    This is the whole discipline in one assertion. Differencing 2026-03-08
+    against 2026-03-07 would produce a complete-looking column with no empty
+    cell -- and a number computed from a bucket the response does not
+    contain, which nobody reading the response could check.
+    """
+    store, at = await _seeded()
+    reading = DAILY.reading("team_person.merge_trend")
+    assert reading is not None
+    result = await serve_reading(store, DAILY, "t1", reading, DEFAULTS, [3], at_ms=at)
+
+    assert isinstance(result.state, Ok)
+    window = result.subjects[0].windows[0]
+    assert (window.frm, window.to) == ("2026-03-08", "2026-03-10")
+    assert window.delta == [None, 40.0, -20.0], (
+        "the oldest bucket in range has no predecessor in range, and 900.0 "
+        "from the day before must not have been reached for"
+    )
+
+
+async def test_no_fetch_reaches_outside_the_resolved_window() -> None:
+    """The call-level half: every bounded fetch sits inside the window, and
+    no unbounded fetch of the source happens at all.
+
+    Asserted on the calls rather than on the values because a widened fetch
+    filtered afterwards is invisible on the wire -- and it is the fetch, not
+    the filter, that the cheap-path rule is about.
+    """
+    store, at = await _seeded()
+    reading = DAILY.reading("team_person.merge_trend")
+    assert reading is not None
+    await serve_reading(store, DAILY, "t1", reading, DEFAULTS, [3], at_ms=at)
+
+    assert store.ranges, "the window is served from a bounded fetch"
+    for frm, to in store.ranges:
+        assert frm[:10] >= "2026-03-08", f"fetch opened at {frm}, before the window"
+        assert to[:10] <= "2026-03-10", f"fetch ran to {to}, past the window"
+    assert store.unbounded == [], (
+        "a whole-figure read would drag every bucket of every subject back and "
+        "make the range a filter rather than a bound: " + repr(store.unbounded)
+    )
+
+
+async def test_two_spans_fetch_across_their_union_and_neither_borrows_the_others_edge() -> None:
+    """One request, two spans, one fetch -- and the older span's newest
+    bucket must not become the newer span's predecessor.
+
+    The join is per span: each resolves its own labels and each answers its
+    own stated absence. Sharing one fetch is an efficiency; sharing an edge
+    would be two windows quietly reporting a change between them.
+    """
+    store, at = await _seeded()
+    reading = DAILY.reading("team_person.merge_trend")
+    assert reading is not None
+    result = await serve_reading(
+        store, DAILY, "t1", reading, DEFAULTS, ["1-2", "3-4"], at_ms=at
+    )
+    newer, older = result.subjects[0].windows
+    assert newer.delta is not None and newer.delta[0] is None
+    assert older.delta is not None and older.delta[0] is None, (
+        "each span states its own missing predecessor; neither borrows the other's"
+    )
