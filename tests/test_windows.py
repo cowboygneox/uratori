@@ -366,3 +366,34 @@ def test_the_window_ceiling_counts_as_the_list_grows_not_once_at_the_end() -> No
     assert len(expand_window_args(["1"] * MAX_WINDOWS)) == MAX_WINDOWS
     with pytest.raises(WindowError):
         expand_window_args(["1"] * (MAX_WINDOWS + 1))
+
+
+def test_a_span_of_thousands_of_digits_is_a_refusal_not_a_crash() -> None:
+    """`int()` refuses a string past CPython's 4,300-digit limit with a plain
+    `ValueError` -- which is not a `WindowError`, so it walked past every
+    door's refusal handler and came out as a 500, on the unauthenticated
+    deployment, carrying the interpreter's own `sys.set_int_max_str_digits`
+    advice in the body.
+
+    A 5 KB query string is not a hard thing to send. The token grammar is
+    bounded in digits instead, which costs no legal span anything: the bucket
+    ceiling is four digits, so nine is already far past every window that can
+    be served.
+    """
+    for wrong in ("9" * 5000, "1-" + "9" * 5000, "each:1-" + "9" * 5000, "9" * 10):
+        with pytest.raises(WindowError):
+            expand_window_arg(wrong)
+
+    # The refusal is the *grammar's*, not the ceiling's, and it must not quote
+    # the interpreter at the caller.
+    with pytest.raises(WindowError) as caught:
+        as_window_spec("9" * 5000)
+    assert "is not a window" in str(caught.value)
+    assert "set_int_max_str_digits" not in str(caught.value)
+
+    # Nine digits still parse, and meet the ceiling on their own terms -- so
+    # the digit bound is a guard on the conversion, never a second ceiling
+    # wearing a confusing message.
+    with pytest.raises(WindowError) as ceiling:
+        as_window_spec("9" * 9)
+    assert str(MAX_BUCKETS) in str(ceiling.value)

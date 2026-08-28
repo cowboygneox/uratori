@@ -1197,15 +1197,27 @@ def test_a_coarse_bucket_holds_the_records_of_its_own_period_directly() -> None:
 
     Every other coarse-grain test hand-seeds storage and then reads it back,
     which proves the read paths agree given equal storage -- a write path
-    that derived month buckets from day aggregates would sail straight
-    through all of them. This one drives raw records into `buckets_of`, the
-    single place a record's buckets are decided.
+    that only bucketed some of the records would sail straight through all of
+    them. This one drives raw records into `buckets_of`, the single place a
+    record's buckets are decided.
 
-    The control is the day rule over the identical records: if the coarse
-    label were being derived from the day bucket rather than from the record,
-    the two would still agree here, so the property that catches it is the
-    *coverage* one below -- every record lands in exactly one bucket of every
-    total rule, with none dropped and none invented.
+    Be precise about what "directly" means here, because the source does the
+    opposite of one reading of it: `label_in` derives a month, quarter or week
+    label from the record's own *local day*, deliberately, so a month figure
+    and a day figure can never disagree about which month an event was in. The
+    claim under test is not that the label avoids the day -- it is that the
+    month bucket is filled by **the records themselves**, one pass over each,
+    rather than by rolling up what a day *figure* already computed. A rollup
+    would inherit the day figure's population, and any record the day rule
+    dropped would silently vanish from the month.
+
+    So the load-bearing assertion is the coverage one: every record lands in
+    exactly one bucket of every total rule, none dropped and none invented.
+    That is what catches a narrowing `_keys_for`, and it is the only test in
+    the suite that does. The month and quarter lists beneath it pin the
+    calendar arithmetic at the edges; the day-rule comparison at the end is
+    the agreement `label_in` promises, restated where a reader of this test
+    will look for it.
     """
     la = {"tenant": {"timezone": "America/Los_Angeles"}}
     # Deliberately spread across month, quarter and year edges, and across a
@@ -1245,9 +1257,9 @@ def test_a_coarse_bucket_holds_the_records_of_its_own_period_directly() -> None:
             f"{rule} left a record in no bucket, or in two"
         )
 
-    # And the coarse label is the record's own period, read off the record --
-    # not the day bucket's prefix. Spelled out per record so a wrong month at
-    # one edge names itself.
+    # The coarse label is the record's own period. Spelled out per record
+    # rather than computed, so a wrong month at one edge names itself instead
+    # of being reproduced by the same arithmetic on both sides.
     months = [b[0].split("@", 1)[1] for b in by_rule["month"]]
     assert months == [
         "2026-01", "2026-01", "2026-02", "2026-03", "2026-03",
@@ -1259,10 +1271,11 @@ def test_a_coarse_bucket_holds_the_records_of_its_own_period_directly() -> None:
         "2026-Q2", "2026-Q2", "2026-Q3", "2026-Q4", "2027-Q1",
     ]
 
-    # The control that makes the above meaningful: the day rule, over the
-    # same records, and the coarse labels agreeing with the day each record
-    # actually fell on in this zone. A month figure and a day figure can
-    # never disagree about which month an event was in.
+    # The agreement `label_in` promises, restated here: a month figure and a
+    # day figure can never disagree about which month an event was in,
+    # because both read the same zoned day. Not a control for the assertions
+    # above -- it is the same relation from the other side -- but the
+    # property a reader of a two-grain board depends on.
     days = [b[0].split("@", 1)[1] for b in by_rule["day"]]
     assert [d[:7] for d in days] == months
     assert [f"{d[:4]}-Q{(int(d[5:7]) - 1) // 3 + 1}" for d in days] == quarters

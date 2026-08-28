@@ -226,7 +226,16 @@ def refuse_reach(spec: WindowSpec, rule: str) -> str | None:
 # ASCII digits only, deliberately: `\d` matches every Unicode digit class,
 # and "٣٠" quietly becoming 30 is a coercion -- a plausible window nobody
 # spelled.
-_TOKEN = re.compile(r"([0-9]+)(?:-([0-9]+))?\Z")
+#
+# Bounded in digits, too. `int()` refuses a string over CPython's 4,300-digit
+# limit with a plain ValueError, which is not a WindowError, so a 5 KB query
+# string walked straight past every door's refusal handler and out as a 500 --
+# on the unauthenticated deployment, with the interpreter's own
+# `sys.set_int_max_str_digits` advice in the body. Any window past the bucket
+# ceiling is refused anyway, so nothing legal is longer than four digits and
+# the bound costs no real span anything.
+_MAX_DIGITS = 9
+_TOKEN = re.compile(r"([0-9]{1,9})(?:-([0-9]{1,9}))?\Z")
 
 # The retired unit suffixes, matched only to refuse them with directions:
 # the unit moved into the declarations, and a message that just said
@@ -242,7 +251,7 @@ _RETIRED_SUFFIX = re.compile(r"[0-9-]+(h|hr|hrs|m|min|mins|d)\Z", re.IGNORECASE)
 # not the single bucket 12, which is what `each:12-12` says. The two
 # readings matter: a tile author writing the bare form wants twelve columns,
 # and silently handing back one is a wrong answer with no error attached.
-_EACH = re.compile(r"each:([0-9]+)(?:-([0-9]+))?\Z")
+_EACH = re.compile(r"each:([0-9]{1,9})(?:-([0-9]{1,9}))?\Z")
 
 
 def as_window_spec(value: int | str | WindowSpec) -> WindowSpec:
