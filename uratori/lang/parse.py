@@ -92,7 +92,9 @@ _DERIVED_UNITS: frozenset[str] = frozenset({"level", "moment"})
 _MEASURE_UNITS: frozenset[str] = frozenset({"effort", "count"})
 _FIELD_TYPES: frozenset[str] = frozenset({"text", "date", "number", "flag"})
 _THRESHOLD_UNITS: frozenset[str] = frozenset({"minutes", "hours", "days"})
-_STATISTICS: frozenset[str] = frozenset({"mean", "median", "worst", "sum", "count", "series"})
+_STATISTICS: frozenset[str] = frozenset(
+    {"mean", "median", "worst", "sum", "count", "series", "delta"}
+)
 _COMPARISONS: frozenset[str] = frozenset({">=", ">", "<=", "<", "==", "!="})
 
 

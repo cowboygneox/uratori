@@ -1,0 +1,265 @@
+"""`delta`: the change between adjacent buckets, inside the range and nowhere
+else.
+
+The language's oldest "still missing" item was a trend, and it had been
+punted to the server computing one over a reading's response -- which is
+rule 2 with extra steps: a number on a screen that no definition claims and
+no version cites. `delta` is that number, declared.
+
+Two properties carry the whole construct, and each has a wrong version that
+would look right on a chart:
+
+**The range bounds it.** n buckets in range produce n-1 changes. The oldest
+bucket has no predecessor *in range*, and the answer is that stated absence
+-- never a quiet fetch of the bucket before the window to make the series
+come out even. A window is the population, and reaching outside it for one
+more value is the cheap path narrowing -- or here, widening -- what the
+answer is computed over, with nothing on the response to show it happened.
+
+**A hole is not a bridge.** A bucket with no value breaks the chain in both
+directions. Differencing across it instead would report a change spanning
+two buckets under a label claiming one.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from uratori.engine.read import Sample, delta_of
+from uratori.lang.check import CheckError
+
+from .world import compile_source
+
+
+def sample(*points: tuple[str, float | None]) -> Sample:
+    return Sample(
+        values=tuple(v for _, v in points if v is not None),
+        points=points,
+        days_covered=sum(1 for _, v in points if v is not None),
+        days_requested=len(points),
+    )
+
+
+def test_the_oldest_bucket_in_range_has_no_predecessor_and_says_so() -> None:
+    """A stated absence, not an omission. The response still describes n
+    buckets, so a chart's x-axis is the window the caller asked for and not
+    the window minus one."""
+    got = delta_of(sample(("2026-01", 10.0), ("2026-02", 14.0), ("2026-03", 12.0)))
+    assert got == [None, 4.0, -2.0]
+    assert len(got) == 3, "n buckets in, n buckets out -- one of them absent"
+
+
+def test_n_buckets_produce_n_minus_one_changes() -> None:
+    got = delta_of(sample(*[(f"2026-{m:02d}", float(m)) for m in range(1, 7)]))
+    assert sum(1 for v in got if v is not None) == 5
+
+
+def test_a_single_bucket_window_is_one_stated_absence() -> None:
+    """Not an empty list: the caller asked about one bucket and the honest
+    answer is "there is nothing here to compare it against"."""
+    assert delta_of(sample(("2026-01", 10.0))) == [None]
+
+
+def test_an_empty_window_is_an_empty_answer() -> None:
+    assert delta_of(sample()) == []
+
+
+def test_a_hole_breaks_the_chain_in_both_directions() -> None:
+    """February never happened. The change *into* February and the change
+    *out of* it are both unknown.
+
+    The wrong version bridges the hole -- differencing March against January
+    -- which reports a two-month movement in a column headed "per month",
+    and it does it most often exactly where collection was patchy.
+    """
+    got = delta_of(sample(("2026-01", 10.0), ("2026-02", None), ("2026-03", 20.0)))
+    assert got == [None, None, None]
+
+
+def test_a_hole_at_the_start_does_not_shift_the_answer() -> None:
+    got = delta_of(sample(("2026-01", None), ("2026-02", 5.0), ("2026-03", 8.0)))
+    assert got == [None, None, 3.0]
+
+
+def test_a_flat_run_reads_nought_rather_than_absent() -> None:
+    """A carried figure is flat by construction, and nought is a real change:
+    "the goal did not move" is a finding. Absent would say the opposite --
+    that nobody knows whether it moved."""
+    got = delta_of(sample(("2026-01", 25.0), ("2026-02", 25.0), ("2026-03", 25.0)))
+    assert got == [None, 0.0, 0.0]
+
+
+def test_the_answer_lines_up_positionally_with_the_series() -> None:
+    """Point i's delta is the change *into* bucket i, so a chart can draw the
+    two against one x-axis. The other convention -- the change *out of*
+    bucket i -- puts the last bucket's cell empty instead of the first, and a
+    reader comparing the two columns would be off by one everywhere."""
+    s = sample(("2026-01", 10.0), ("2026-02", 14.0))
+    got = delta_of(s)
+    assert len(got) == len(s.points)
+    assert got[1] == 4.0, "bucket 2's cell is the change from bucket 1 into it"
+
+
+def test_delta_reads_only_the_points_it_was_given() -> None:
+    """The bounded-access claim, at the unit level: `delta_of` is a pure
+    function of the sample, so there is no path by which it could reach a
+    bucket the window did not resolve. The serving-level half of this claim
+    -- that nothing widens the fetch either -- is asserted in
+    tests/test_server.py against a spying store."""
+    s = sample(("2026-02", 1.0), ("2026-03", 2.0))
+    before = s.points
+    delta_of(s)
+    assert s.points == before
+
+
+# --------------------------------------------------------- the grammar --
+
+BASE = """
+group code_change.merged_by_day from (authorAccountId through team_person.accounts.accountId, mergedAt by day in tenant.timezone)
+group work_issue.delivered_by_day from (assigneeAccountId through team_person.accounts.accountId, completedAt by day in tenant.timezone)
+group code_review_request.asked_of from reviewerAccountId through team_person.accounts.accountId
+filter code_review_request.pending where pending == true
+measure code_change.open_seconds = mergedAt - createdAt
+measure code_review_request.waiting_seconds = now - requestedAt
+
+# Time to merge.
+figure team_person.time_to_merge:
+    display "{team_person} to merge"
+    depends:
+        merged = code_change.merged_by_day:{team_person}
+    calculate:
+        list(code_change.open_seconds over merged)
+
+# Delivered per day.
+figure team_person.delivered:
+    display "{team_person} delivered"
+    depends:
+        done = work_issue.delivered_by_day:{team_person}
+    calculate:
+        count(done)
+"""
+
+
+def refuses(extra: str, *fragments: str) -> str:
+    with pytest.raises(CheckError) as caught:
+        compile_source(BASE + extra)
+    message = caught.value.message
+    for fragment in fragments:
+        assert fragment in message, f"{fragment!r} not in {message!r}"
+    return message
+
+
+def test_delta_compiles_over_a_windowed_reading() -> None:
+    lib = compile_source(
+        BASE
+        + """
+# How the merge time moved.
+reading team_person.merge_trend(range):
+    display "{team_person} merge trend"
+    depends:
+        t = team_person.time_to_merge in range
+    calculate:
+        median(t)
+        delta(t)
+"""
+    )
+    plan = lib.reading("team_person.merge_trend")
+    assert plan is not None
+    assert [s.fn for s in plan.calculate] == ["median", "delta"]
+
+
+def test_delta_is_allowed_over_a_count_figure() -> None:
+    """The distribution statistics are refused over daily counts because a
+    mean of them is a mean per *day* wearing a per-record label. `delta` is
+    not a distribution: the change between one day's count and the next is a
+    claim about days, which is exactly what the buckets are."""
+    lib = compile_source(
+        BASE
+        + """
+# How delivery moved.
+reading team_person.delivery_trend(range):
+    display "{team_person} delivery trend"
+    depends:
+        d = team_person.delivered in range
+    calculate:
+        delta(d)
+"""
+    )
+    assert lib.reading("team_person.delivery_trend") is not None
+
+
+def test_a_live_reading_may_not_take_a_delta() -> None:
+    """A live reading measures records as they stand and stores nothing, so
+    there is no sequence of buckets to difference. Left to compile it would
+    answer an empty list under a heading promising a trend."""
+    refuses(
+        """
+# Pending, now.
+reading team_person.pending():
+    display "{team_person} pending"
+    depends:
+        waiting = code_review_request.waiting_seconds over (code_review_request.asked_of:{team_person} & code_review_request.pending)
+    calculate:
+        delta(waiting)
+""",
+        "delta",
+        "measures records as they stand",
+    )
+
+
+def test_two_deltas_are_refused_the_way_two_series_are() -> None:
+    refuses(
+        """
+# Twice over.
+reading team_person.twice(range):
+    display "{team_person} twice"
+    depends:
+        t = team_person.time_to_merge in range
+    calculate:
+        delta(t)
+        delta(t)
+""",
+        "two deltas",
+    )
+
+
+def test_a_band_may_not_colour_a_delta() -> None:
+    """A band colours one number. A delta is one cell per bucket, so there is
+    no single value to compare against a threshold -- and a band that
+    compiled here would leave `level_of` with nothing to read and every row
+    permanently grey, which reads as missing data rather than as a broken
+    definition. That is the same argument the "bands on the mean, which it
+    does not calculate" refusal makes."""
+    refuses(
+        """
+# Trend, banded.
+reading team_person.banded(range):
+    display "{team_person} banded"
+    band low on delta against flow.leadTimeDays
+    depends:
+        t = team_person.time_to_merge in range
+    calculate:
+        delta(t)
+""",
+        "delta",
+        "one cell per bucket",
+    )
+
+
+def test_delta_takes_no_grain() -> None:
+    """No stride and no offset variants either -- each would be a second
+    spelling of a question no definition has asked."""
+    with pytest.raises(Exception) as caught:
+        compile_source(
+            BASE
+            + """
+# Grained.
+reading team_person.grained(range):
+    display "{team_person} grained"
+    depends:
+        t = team_person.time_to_merge in range
+    calculate:
+        delta(t) by hour
+"""
+        )
+    assert "series" in str(caught.value)

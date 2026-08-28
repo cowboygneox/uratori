@@ -896,6 +896,11 @@ UNRENDERED: dict[str, str] = {
     "Result.zone": "the windows carry their own zone; the result-level copy is for API clients",
     "Subject.value": "positional only, and the page draws series bars from the served scale, not this scalar",
     "Window.series": "the page draws the served series_scale; the raw values are for clients with axes of their own",
+    "Window.delta": (
+        "the page prints the served delta_display cells; the raw signed numbers are "
+        "for clients with axes of their own, and a page reading them would be one "
+        "step from formatting a duration, which is a division"
+    ),
     "Window.zone": "the frm/to labels are already local; printing the zone per row is noise",
     "Window.trailing": "span+bucket state the window; trailing exists for typed API clients",
     "Window.mean": "rendered through the display map, never the raw scalar",

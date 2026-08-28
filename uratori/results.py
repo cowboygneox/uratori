@@ -152,6 +152,26 @@ class Window(BaseModel):
     to 0.0 per point: a zero drawn at zero height, never invented relief.
     None exactly when `series` is None."""
 
+    delta: list[float | None] | None = None
+    """The change into each bucket, when the definition asked for one -- one
+    cell per bucket, positionally aligned with `series` so both draw against
+    one axis.
+
+    The oldest cell is **always** absent: it has no predecessor inside the
+    range, and the response says so rather than omitting the bucket or
+    reaching outside the window for one more value. A hole in the source is
+    absent in both directions for the same reason -- differencing across it
+    would report a two-bucket movement in a column headed per-bucket.
+
+    Served rather than derived, because a client differencing `series` for
+    itself is arithmetic on a screen that no definition claims and no version
+    cites -- which is exactly what this field exists to stop."""
+
+    delta_display: list[str | None] | None = None
+    """Each delta cell rendered in the reading's own unit, for the reason the
+    scalar statistics are: formatting a duration is a division. Signed, so a
+    fall reads as one. None exactly where `delta` is None."""
+
     series_by: Literal["15 minutes", "hour", "day"] | None = None
     """What one series point spans, when the definition grouped a sub-day
     figure. Absent for a day-keyed source, where a point has always been a

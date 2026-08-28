@@ -885,7 +885,9 @@ class LiveSource:
     line: int = 0
 
 
-StatisticFn: TypeAlias = Literal["mean", "median", "worst", "sum", "count", "series"]
+StatisticFn: TypeAlias = Literal[
+    "mean", "median", "worst", "sum", "count", "series", "delta"
+]
 """A closed vocabulary, not an expression grammar.
 
 Each is a claim about a distribution that a reader has to be able to check
@@ -901,10 +903,20 @@ a mean per *day* wearing a label that says per record.
 beside it would be one quantity under two names -- and the two would not even
 agree, because for a count source the sample is days that contributed.
 
-`series` returns the per-bucket values rather than a statistic over them. It is
-the one statistic that is not a scalar, and it exists because a sparkline is a
-real thing a screen needs and the alternative was the browser slicing a range
-into ten and computing ten means, which is arithmetic nobody could check.
+`series` returns the per-bucket values rather than a statistic over them, and
+`delta` the change into each bucket. They are the two that are not scalars, and
+each exists because the alternative was the browser doing the arithmetic: a
+sparkline sliced out of a range, and a trend differenced out of a response.
+
+`delta` closes the language's oldest gap. A trend had been listed as missing
+for as long as there were readings, on the reasoning that the server could
+compute one over a reading's answer -- which is rule 2 with extra steps, a
+number on a screen that no definition claims and no version cites. What makes
+it declarable is that the window already fixes the population: n buckets in
+range produce n-1 changes, and the oldest bucket's cell is a stated absence
+rather than a quiet fetch of the bucket before the window. There are
+deliberately no stride or offset variants; each would be a second spelling of
+a question nothing has asked.
 """
 
 

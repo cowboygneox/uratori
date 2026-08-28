@@ -876,6 +876,8 @@ function resultBlocks(result) {
                 stats.map((stat) => [
                   stat === 'series'
                     ? el('td', {}, sparkline(window))
+                    : stat === 'delta'
+                    ? el('td', {}, deltaCells(window))
                     : el('td', { class: 'mono' }, window.display[stat] ?? '—'),
                   stat === bandOn ? bandCell(window) : null,
                 ]),
@@ -908,6 +910,32 @@ function sparkline(window) {
     bar.style.height = `${fraction * 100}%`;
     return bar;
   }));
+}
+
+// The change into each bucket, one cell per bucket -- the same count the
+// series draws, so the two columns line up by position.
+//
+// The oldest cell is ALWAYS "no predecessor in range", and it is written out
+// rather than left blank: n buckets in, n cells out, one of which is a stated
+// absence. Dropping it would silently shorten the row by one and leave a
+// reader counting cells to work out which bucket each change belongs to.
+// A hole in the middle reads the same way and means the same thing -- the
+// change is unknowable, never nought.
+//
+// Every value here is served pre-rendered (`delta_display`); the sign is the
+// server's too. Nothing below computes a difference, which is the whole point
+// of the field existing.
+function deltaCells(window) {
+  const cells = window.delta_display;
+  if (!cells || !cells.length) return el('span', { class: 'faint' }, '—');
+  return el('span', {
+    class: 'deltas',
+    title: `${cells.length} buckets, ${Math.max(cells.length - 1, 0)} changes; `
+      + 'the oldest bucket has no predecessor inside this range',
+  }, cells.map((text, at) => el('span', {
+    class: text == null ? 'delta-none' : 'delta',
+    title: at === 0 && text == null ? 'no predecessor in range' : '',
+  }, text == null ? (at === 0 ? 'no predecessor in range' : '—') : text)));
 }
 
 async function evidenceRow(row, figure, subject) {
@@ -1781,7 +1809,7 @@ const FIG_WORDS = new Set([
   'older', 'younger', 'than', 'against', 'on', 'at', 'least', 'values', 'over',
   'when', 'then', 'otherwise', 'now', 'days', 'moment', 'ascending', 'descending',
   'detail', 'action', 'severity', 'info', 'attention', 'true', 'false',
-  'mean', 'median', 'worst', 'sum', 'series', 'list', 'latest', 'earliest', 'max', 'min',
+  'mean', 'median', 'worst', 'sum', 'series', 'delta', 'list', 'latest', 'earliest', 'max', 'min',
   ...FIG_UNITS, ...FIG_FACT_TYPES, ...FIG_FIELD_TYPES,
   'hour', 'hours', 'minute', 'minutes', 'day',
 ]);

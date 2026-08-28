@@ -86,6 +86,43 @@ def series_of(sample: Sample) -> list[float | None]:
     return [value for _, value in sample.points]
 
 
+def delta_of(sample: Sample) -> list[float | None]:
+    """The change into each bucket, one cell per bucket of the range.
+
+    n buckets produce n-1 changes, and the cell that has none is the oldest
+    one: it has no predecessor **in range**. That absence is stated rather
+    than omitted, so the answer still describes the n buckets the caller
+    asked about and a chart's axis is the window rather than the window
+    minus one.
+
+    **The range is the population, and nothing here reaches outside it.**
+    The tempting fix for the empty first cell is to fetch the bucket before
+    the window and difference against that. It would produce a fuller chart
+    and a wrong one: the response could no longer be audited from its own
+    contents, because one of its numbers would be about a bucket the
+    response does not contain. That is the same refusal `:{bucket - 1}` got,
+    at the reading layer.
+
+    A hole breaks the chain in **both** directions -- the change into a
+    missing bucket and the change out of it are equally unknowable.
+    Differencing across the gap instead would report a two-bucket movement
+    in a column headed per-bucket, and it would do it exactly where
+    collection was patchy.
+
+    The cell is the change *into* its bucket rather than out of it, so the
+    deltas line up positionally with the series and one x-axis carries both.
+    """
+    out: list[float | None] = []
+    previous: float | None = None
+    for index, (_, value) in enumerate(sample.points):
+        if index == 0 or previous is None or value is None:
+            out.append(None)
+        else:
+            out.append(value - previous)
+        previous = value
+    return out
+
+
 def unmet_of(plan: ReadingPlan, sample: Sample) -> list[str]:
     """Which requirements fell short, in words a reader can act on.
 

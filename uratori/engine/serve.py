@@ -70,6 +70,7 @@ from .evaluate import band_of
 from .project import ProjectedRow, RenderedFlag, Summary, format_value
 from .read import (
     Sample,
+    delta_of,
     level_of,
     sample_from_buckets,
     sample_from_days,
@@ -797,6 +798,15 @@ def _window(
         stats = dict.fromkeys(stats)
     wants_series = any(s.fn == "series" for s in plan.calculate)
     points = series_of(sample) if wants_series and not unmet else None
+    # Withheld with everything else when a requirement falls short: a trend
+    # over a sample too thin to state a mean of is the same claim wearing a
+    # different shape, and "every statistic is withheld together" is the
+    # bargain the floor exists to keep.
+    changes = (
+        delta_of(sample)
+        if any(s.fn == "delta" for s in plan.calculate) and not unmet
+        else None
+    )
     # `count` is a tally whatever the source measures, so it renders as a plain
     # number rather than through the reading's own unit -- otherwise a queue of
     # three prints as three seconds.
@@ -822,6 +832,15 @@ def _window(
         total=stats.get("total"),
         count=stats.get("count"),
         series=points,
+        delta=changes,
+        delta_display=(
+            [
+                None if v is None else format_value(v, plan.unit, settings)
+                for v in changes
+            ]
+            if changes is not None
+            else None
+        ),
         series_scale=_series_scale(points) if points is not None else None,
         series_by=_series_grain(series_by) if wants_series and not unmet else None,
         display=rendered,

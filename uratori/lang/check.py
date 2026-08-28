@@ -1448,6 +1448,7 @@ class _Checker:
         grain = source.grain if source is not None else None
         seen: set[str] = set()
         series_declared = 0
+        delta_declared = 0
         for stat in d.calculate:
             if stat.set not in bound:
                 raise CheckError(
@@ -1470,6 +1471,22 @@ class _Checker:
                     "kind of wrong. Only sum is allowed over a count.",
                     stat.line,
                 )
+            if stat.fn == "delta":
+                delta_declared += 1
+                if live:
+                    raise CheckError(
+                        f"reading {d.name} takes a delta, and it measures records as they "
+                        "stand. A delta is the change between adjacent stored buckets, and "
+                        "a live reading stores none -- it would answer an empty list under "
+                        "a heading promising a trend.",
+                        stat.line,
+                    )
+                if delta_declared > 1:
+                    raise CheckError(
+                        f"reading {d.name} declares two deltas. A response carries one, so "
+                        "the second would be whichever the serve path kept, silently.",
+                        stat.line,
+                    )
             if stat.fn == "series":
                 series_declared += 1
                 if series_declared > 1:
@@ -1583,6 +1600,16 @@ class _Checker:
                 f"reading {d.name} bands on {written}, which it does not calculate. It "
                 f"calculates {', '.join(sorted({s.fn for s in d.calculate}))}; name one of "
                 "those with `on`, or the band colours nothing and every row reads unknown.",
+                d.band.line,
+            )
+        if wanted in ("delta", "series"):
+            raise CheckError(
+                f"reading {d.name} bands on {wanted}(...), which is one cell per bucket "
+                "rather than one number. A band compares a single value against a "
+                "threshold, so there is nothing here for it to colour -- left to "
+                "compile, every row would band unknown for ever, which reads as missing "
+                "data rather than as a broken definition. Band a scalar statistic, or "
+                "leave the band off.",
                 d.band.line,
             )
         if d.band.on == "count" and d.band.unit is not None:
