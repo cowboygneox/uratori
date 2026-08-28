@@ -746,9 +746,31 @@ async def serve_reading(
         doc=plan.doc,
         state=state,
         banded=plan.band is not None,
+        statistics=_statistic_keys(plan),
+        banded_on=_banded_on(plan),
         subjects=subjects,
         empty=empty,
     )
+
+
+def _statistic_keys(plan: ReadingPlan) -> list[str]:
+    """The declared statistics, spelled the way the wire spells them.
+
+    `sum` fills the `total` field (see `statistics_of`), so the declared list
+    must say `total` -- a column headed by a key the display map never uses
+    would dash every row it draws."""
+    return [{"sum": "total"}.get(s.fn, s.fn) for s in plan.calculate]
+
+
+def _banded_on(plan: ReadingPlan) -> str | None:
+    """Which statistic's column the band word belongs beside -- the `on`
+    clause's statistic, the mean when unwritten, exactly as `level_of`
+    reads it. One translation, kept beside the other, so the wire cannot
+    name a column the banding never judged."""
+    if plan.band is None:
+        return None
+    which = plan.band.on or "mean"
+    return {"sum": "total"}.get(which, which)
 
 
 def _window(

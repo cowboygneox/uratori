@@ -158,6 +158,14 @@ The Postgres-backed tests fail rather than skip without `TEST_DATABASE_URL`;
 they keep their tables in a schema of their own, so the database can be shared
 with other suites.
 
+**A language construct is not landed until every `/ui` surface renders
+everything it carries.** New wire fields, declaration kinds and result kinds
+are enumerated by `tests/test_ui_parity.py`, which goes red naming the
+unrendered surface -- render the addition, or write the reason it stays off
+the page into that test's allowlist. The history that earned this rule:
+bundles reached the language two releases before the page could show one,
+and a reading's `series` travelled on the wire with nothing drawing it.
+
 ## License
 
 [BUSL-1.1](LICENSE): production use is granted for anything *except* two

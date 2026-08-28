@@ -376,6 +376,25 @@ class Result(BaseModel):
     A projection is never banded: the band words it binds travel as row values,
     cited to the figure whose thresholds produced them."""
 
+    statistics: list[str] | None = None
+    """For a reading: the statistics its `calculate` block declares, as the
+    wire spells them (`sum` travels as `total`, the `Window` field it fills),
+    in declaration order. This is the column set a table of windows draws --
+    served rather than derived from whichever `display` keys happen to be
+    present, because a withheld window carries no values at all and a table
+    that unioned present keys would silently narrow itself the day every
+    window fell short. `None` for every other kind: statistics are a
+    reading's vocabulary, and null here means "does not apply", never
+    "empty"."""
+
+    banded_on: str | None = None
+    """For a banded reading: which statistic the band judges, in the same
+    wire spelling. On the wire because the band word is a verdict on ONE
+    number -- a screen colouring the whole row would band statistics the
+    definition never banded, and without this field the screen could only
+    guess which column the word belongs beside. `None` wherever `banded` is
+    false, and for figures, whose single value leaves nothing to name."""
+
     subjects: list[Subject] = Field(default_factory=list)
     """In the server's order. A screen does not sort, because sorting is a
     calculation and the sort key is a definition's answer."""

@@ -791,3 +791,25 @@ tr.expansion li > .expansion {
 /* Folded rows on a record page: a by-day figure's dozens of cells wait
    behind their count, so the sections below stay reachable. */
 .ledger tr.folded { display: none; }
+
+/* A reading's series, drawn in its cell: bars scaled to the window's own
+   tallest point, gaps where a point is null -- an absence drawn as an
+   absence. Positional presentation of server numbers, never a numeral. */
+.spark {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 18px;
+  vertical-align: middle;
+}
+.spark-bar {
+  width: 3px;
+  min-height: 1px;
+  background: var(--accent);
+  display: inline-block;
+}
+.spark-gap { width: 3px; }
+
+/* The statistic a reading's band judges: quietly marked, so the band column
+   beside it reads as its verdict and nobody else's. */
+th.banded-stat { text-decoration: underline dotted; text-underline-offset: 3px; }

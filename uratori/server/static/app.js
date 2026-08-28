@@ -180,7 +180,7 @@ async function render() {
   // "nothing here" with a null, and replaceChildren would print the word.
   const draw = (nodes) => view.replaceChildren(...nodes.flat(Infinity).filter((n) => n != null));
   if (route === 'facts') draw(await factsView(segments, params));
-  else if (route === 'activity') draw(await activityView());
+  else if (route === 'activity') draw(await activityView(params));
   else if (route === 'edit') draw(await editorView(params));
   else draw(await definitionsView(argument, params));
 }
@@ -291,17 +291,35 @@ function recordHash(kind, key) {
 }
 
 // One leaf of the impact answer: where the records live, or which dial.
-function leafLine(edge) {
+// A dial line carries the tenant's current value when the dials payload is
+// in hand: the definition names the dial by NAME (the compile-once rule),
+// and this is the value the engine reads through that name at serve time —
+// both halves on one line, because "which dial" without "holding what" sends
+// the reader to a settings document to finish the sentence.
+function leafLine(edge, dials) {
   if (edge.type === 'fact') {
     return el('li', {},
       el('span', { class: 'badge fact' }, 'fact'), ' ',
       el('a', { class: 'mono', href: `#/facts/${encodeURIComponent(edge.name)}` }, edge.name),
       el('span', { class: 'leaf' }, ' — the records themselves'));
   }
+  const held = dials instanceof Map ? dials.get(edge.name) : null;
   return el('li', {},
     el('span', { class: 'badge setting' }, 'setting'), ' ',
     el('span', { class: 'mono' }, edge.name),
-    el('span', { class: 'leaf' }, ' — a tenant dial'));
+    el('span', { class: 'leaf' }, ' — a tenant dial'),
+    held
+      ? (held.source === 'unset'
+          // Declarable, defaulted nowhere, set by nobody: a stated absence,
+          // in the finding voice — a definition reading a dial that holds
+          // nothing is exactly what an investigator came to find.
+          ? el('span', { class: 'finding' }, ' — holding no value anywhere')
+          : el('span', { class: 'leaf' }, ', currently ',
+              el('span', { class: 'mono' }, held.display),
+              held.source === 'tenant' ? ' (set by this tenant)' : ' (the schema default)'))
+      : dials === 'failed'
+        ? el('span', { class: 'faint' }, ' — its current value could not be read')
+        : null);
 }
 
 // One direct dependency, one hop, never a subtree. The old recursive tree
@@ -402,13 +420,28 @@ async function declarationPane(name, params) {
   // wrong sentence about the records everything else moves with.
   const movedBy = declaration.moved_by || [];
   if (declaration.kind !== 'fact') {
+    // The dial values, for the setting leaves below: fetched only when this
+    // declaration reads a dial, and joined here by name — the joining is
+    // structure (which value sits on which line), the values themselves are
+    // the server's, rendered.
+    let dials = null;
+    if (tenant() && movedBy.some((edge) => edge.type === 'setting')) {
+      const answer = await get(`tenants/${encodeURIComponent(tenant())}/dials`);
+      dials = answer.ok
+        ? new Map(answer.body.dials.map((dial) => [dial.name, dial]))
+        : 'failed';
+    }
     parts.push(el('h2', {}, 'Moved by'));
     if (movedBy.length) {
       parts.push(
         el('p', { class: 'prose' },
           'A change to any of these records or dials can move this ',
-          declaration.kind, ' — nothing else can.'),
-        el('ul', { class: 'tree' }, movedBy.map(leafLine)));
+          declaration.kind, ' — nothing else can.',
+          dials
+            ? [' Dial values are tenant ',
+               el('span', { class: 'verbatim' }, tenant()), '’s, as served right now.']
+            : null),
+        el('ul', { class: 'tree' }, movedBy.map((edge) => leafLine(edge, dials))));
     } else {
       parts.push(el('p', { class: 'faint' }, 'Nothing — it reads no records and no dials.'));
     }
@@ -790,37 +823,84 @@ function resultBlocks(result) {
         return row;
       })));
   } else if (result.kind === 'reading') {
+    // One column per DECLARED statistic (result.statistics -- the wire's
+    // own spelling, `sum` travelling as `total`), never a union of whatever
+    // display keys happen to be present: a withheld window carries no
+    // values, and a table shaped by presence would silently narrow itself
+    // the day every window fell short. The band column sits immediately
+    // after the one statistic the band judges (result.banded_on) -- the
+    // word is that column's verdict, never a tint on the statistics beside
+    // it -- and trails the row only if the banded statistic is somehow not
+    // declared, so the verdict always has a home.
+    const stats = result.statistics || [];
+    const bandOn = result.banded ? result.banded_on : null;
+    const bandCell = (window) => el('td', { class: 'mono dim' }, window.level);
+    // A factory, not a shared array: DOM nodes appended twice MOVE, so a
+    // header built once would vanish from every table but the last one.
+    const statHeads = () => {
+      const heads = stats.map((stat) => [
+        el('th', { class: stat === bandOn ? 'banded-stat' : '' }, stat),
+        stat === bandOn ? el('th', { title: `the band judges ${bandOn}` }, 'band') : null,
+      ]);
+      if (result.banded && !stats.includes(bandOn)) heads.push(el('th', {}, 'band'));
+      return heads;
+    };
+    const bandCols = result.banded ? 1 : 0;
     for (const subject of result.subjects) {
       // class 'subject': the drawing-label h2 uppercases, and this text is
       // a server-rendered name that must appear verbatim.
       blocks.push(el('h2', { class: 'subject' }, subject.name));
       blocks.push(el('table', {},
-        // The band column under the same gate the figure table uses: only a
-        // definition that declares a band gets one, and a banded reading
-        // with no verdict column read as permanently grey data. The word is
-        // the window's whole verdict — it is never a tint on the statistics
-        // beside it, because the band judges only the statistic it names.
-        el('tr', {}, el('th', {}, 'window'), el('th', {}, 'statistics'),
-          el('th', {}, 'sample'), el('th', {}, 'coverage'),
-          result.banded ? el('th', {}, 'band') : null),
+        el('tr', {}, el('th', {}, 'window'), statHeads(),
+          el('th', {}, 'sample'), el('th', {}, 'coverage')),
         (subject.windows || []).map((window) => el('tr', {},
           // The span with its bucket unit -- `30d`, `31-60d`, `1-48h` --
           // never `trailing`, which is null for any span that is not a
           // plain trailing-days count.
           el('td', { class: 'mono' }, `${window.span}${{ day: 'd', hour: 'h', minute: 'm' }[window.bucket] || ''}`, ' ',
             el('span', { class: 'faint' }, `${window.frm} → ${window.to}`)),
-          el('td', { class: 'mono' },
-            Object.entries(window.display).map(([stat, text], i) =>
-              [i ? ' · ' : null, el('span', { class: 'faint' }, `${stat} `), text]),
-            window.unmet.length
-              ? el('div', { class: 'faint' }, window.unmet.join('; '))
-              : null),
+          window.unmet.length
+            // Every statistic is withheld together, so one cell spans the
+            // columns with the reason -- the columns still exist (the
+            // header holds their names); this is an absence stated where
+            // the values would sit, never a blank that reads as computed.
+            ? el('td', { class: 'faint', colspan: String(stats.length + bandCols) },
+                window.unmet.join('; '))
+            : [
+                stats.map((stat) => [
+                  stat === 'series'
+                    ? el('td', {}, sparkline(window))
+                    : el('td', { class: 'mono' }, window.display[stat] ?? '—'),
+                  stat === bandOn ? bandCell(window) : null,
+                ]),
+                result.banded && !stats.includes(bandOn) ? bandCell(window) : null,
+              ],
           el('td', { class: 'mono' }, String(window.sample)),
-          el('td', { class: 'mono dim' }, `${window.days_covered}/${window.days_requested}d`),
-          result.banded ? el('td', { class: 'mono dim' }, window.level) : null))));
+          el('td', { class: 'mono dim' }, `${window.days_covered}/${window.days_requested}d`)))));
     }
   }
   return blocks;
+}
+
+// A series, drawn: one bar per point, heights scaled to the window's own
+// tallest. Positional only -- the wire sends the numbers exactly so a bar
+// can have a width or a height (Subject.value's documented purpose), and no
+// numeral is ever composed from them here. A null point is a gap with its
+// own look: an absence drawn as an absence, never a zero-height bar.
+function sparkline(window) {
+  const points = window.series;
+  if (!points || !points.length) return el('span', { class: 'faint' }, '—');
+  const held = points.filter((value) => value != null);
+  const peak = held.length ? Math.max(...held) : 0;
+  return el('span', {
+    class: 'spark',
+    title: `${points.length} points, one per ${window.series_by || 'day'}`,
+  }, points.map((value) => {
+    if (value == null) return el('span', { class: 'spark-gap' });
+    const bar = el('span', { class: 'spark-bar' });
+    bar.style.height = `${peak > 0 ? Math.max(8, (value / peak) * 100) : 8}%`;
+    return bar;
+  }));
 }
 
 async function evidenceRow(row, figure, subject) {
@@ -916,6 +996,104 @@ async function partDrill(item, member) {
   }
 }
 
+// A self-contained paged browser in an expansion row: the door behind a
+// capped entry. The pages come from the server already ordered and totalled;
+// this walks them with a local cursor trail, so ← back re-asks the exact
+// previous page. Second click on the opener folds it away.
+async function pagedExpansion(anchorRow, span, fetchPage) {
+  if (anchorRow.nextSibling && anchorRow.nextSibling.classList.contains('expansion')) {
+    anchorRow.nextSibling.remove();
+    return;
+  }
+  const holder = el('td', { colspan: span });
+  const expansion = el('tr', { class: 'expansion' }, holder);
+  anchorRow.after(expansion);
+  const trail = [];
+  let cursor = null;
+  const draw = async () => {
+    holder.replaceChildren(el('p', { class: 'faint' }, 'loading…'));
+    const page = await fetchPage(cursor);
+    if (!expansion.isConnected) return;
+    if (!page.ok) { holder.replaceChildren(page.problem); return; }
+    holder.replaceChildren(
+      el('div', { class: 'controls' },
+        el('span', { class: 'dim' }, page.summary),
+        el('span', { class: 'spacer' }),
+        el('button', {
+          disabled: trail.length ? undefined : 'disabled',
+          onclick: () => { cursor = trail.pop() ?? null; draw(); },
+        }, '← back'),
+        el('button', {
+          disabled: page.more ? undefined : 'disabled',
+          onclick: () => { trail.push(cursor); cursor = page.lastKey; draw(); },
+        }, 'next →')),
+      el('table', { class: 'ledger' }, page.header, page.rows));
+  };
+  draw();
+}
+
+// One page of a figure's rows for one record, drawn like the overview's own
+// rows — value, band, evidence — from the same narrowed serving the
+// overview entry is cut from. The order sentence is part of the page: a
+// pager over an unstated order is an arbitrary subset with buttons.
+async function computedPage(kind, key, figure, banded, after) {
+  const query = new URLSearchParams();
+  if (after) query.set('after', after);
+  const answer = await get(
+    `tenants/${encodeURIComponent(tenant())}/computed/${encodeURIComponent(figure.name)}`
+    + `/${encodeURIComponent(kind)}/${encodeURIComponent(key)}`
+    + (query.toString() ? `?${query}` : ''));
+  if (!answer.ok) return { ok: false, problem: problem(answer, 'Could not page the rows:') };
+  const body = answer.body;
+  const served = body.result;
+  const rows = served.subjects.map((subject) => {
+    const row = el('tr', {},
+      el('td', {}, el('span', { class: 'faint mono' }, subject.id),
+        subject.dimension ? el('span', { class: 'dim' }, ` × ${subject.dimension}`) : null),
+      el('td', { class: 'mono num' }, subject.display ?? '—'),
+      banded ? el('td', { class: 'mono dim' }, served.banded ? subject.level : '') : null,
+      el('td', {}, el('button', {
+        onclick: () => evidenceRow(row, served.name, subject.id),
+      }, 'evidence')));
+    return row;
+  });
+  return {
+    ok: true,
+    summary: `${rows.length} of ${body.total} rows — the figure’s own order, oldest first`,
+    header: el('tr', {}, el('th', {}, 'row'), el('th', { class: 'num' }, 'value'),
+      banded ? el('th', {}, 'band') : null, el('th', {})),
+    rows,
+    lastKey: served.subjects.length ? served.subjects[served.subjects.length - 1].id : null,
+    more: body.more,
+  };
+}
+
+// One page of the stored rows of one figure that counted this record — the
+// continuation of the overview's sample, in the same subject order.
+async function citedPage(kind, key, entry, after) {
+  const query = new URLSearchParams();
+  if (after) query.set('after', after);
+  const answer = await get(
+    `tenants/${encodeURIComponent(tenant())}/cited/${encodeURIComponent(entry.figure)}`
+    + `/${encodeURIComponent(kind)}/${encodeURIComponent(key)}`
+    + (query.toString() ? `?${query}` : ''));
+  if (!answer.ok) return { ok: false, problem: problem(answer, 'Could not page the citations:') };
+  const body = answer.body;
+  const rows = body.rows.map((row) => el('tr', {},
+    el('td', {}, el('a', { href: recordHash(body.scope, row.subject) }, row.name),
+      ' ', el('span', { class: 'faint mono' }, row.subject),
+      row.dimension ? el('span', { class: 'dim' }, ` × ${row.dimension}`) : null),
+    el('td', { class: 'mono num' }, row.display ?? '—')));
+  return {
+    ok: true,
+    summary: `${rows.length} of ${body.total} citations — subject order`,
+    header: el('tr', {}, el('th', {}, 'whose row'), el('th', { class: 'num' }, 'value')),
+    rows,
+    lastKey: body.rows.length ? body.rows[body.rows.length - 1].id : null,
+    more: body.more,
+  };
+}
+
 // --------------------------------------------------------------- facts --
 
 async function factsView(segments, params) {
@@ -953,10 +1131,13 @@ function moverLinks(kind) {
   // it is.
   return el('div', {},
     el('p', { class: 'faint' }, 'A change to these records can move:'),
+    // Each chip wears its kind, like the roster: a bundle and a figure in
+    // one unlabelled list read as the same sort of thing, and they are not.
     el('ul', { class: 'movers' }, movers.map((declaration) =>
       el('li', {}, el('a', {
         class: 'mono', href: `#/definitions/${encodeURIComponent(declaration.name)}`,
-      }, declaration.name)))));
+      }, declaration.name), ' ',
+        el('span', { class: `badge ${declaration.kind}` }, declaration.kind)))));
 }
 
 async function recordView(kind, key) {
@@ -1113,15 +1294,59 @@ async function recordView(kind, key) {
         }
         // After the fold, so the cap is stated on the collapsed view too —
         // a capped set whose disclosure hides behind its own fold reads as
-        // complete, which is the lie this row exists to prevent.
+        // complete, which is the lie this row exists to prevent. The true
+        // total is the server's, and the browse button opens the paged walk
+        // over every row — the cap keeps this overview light, it no longer
+        // seals the rest away.
         if (entry.more) {
-          rows.push(el('tr', {}, el('td', { colspan: banded ? '4' : '3', class: 'faint' },
-            `… the latest ${figure.subjects.length} rows — `,
-            el('a', { href: defHash(figure.name) }, 'the figure page'),
-            ' has the earlier ones')));
+          const span = banded ? '4' : '3';
+          const capRow = el('tr', {}, el('td', { colspan: span, class: 'faint' },
+            `… the latest ${figure.subjects.length} of ${entry.total} rows — `,
+            el('button', {
+              onclick: () => pagedExpansion(capRow, span, (after) =>
+                computedPage(kind, key, figure, banded, after)),
+            }, `browse all ${entry.total}, paged`)));
+          rows.push(capRow);
         }
         return rows;
       })));
+  }
+
+  // The readings scoped to this kind, narrowed to this record — the same
+  // evaluation each reading's own page runs, this subject's rows picked
+  // out, rendered by the same blocks. A reading the engine cannot serve
+  // (live, today) states the route's own sentence instead of vanishing.
+  parts.push(el('h2', {}, 'Readings — tenant ',
+    el('span', { class: 'verbatim' }, tenant() || '?')));
+  if (!aboutAnswer.ok) {
+    parts.push(el('p', { class: 'faint' }, 'Unavailable (see above).'));
+  } else if (!aboutAnswer.body.state.ok) {
+    parts.push(unavailable(aboutAnswer.body.state));
+  } else if (!aboutAnswer.body.readings.length) {
+    parts.push(el('p', { class: 'faint' },
+      'No reading is scoped to ', el('span', { class: 'mono' }, kind), '.'));
+  } else {
+    for (const entry of aboutAnswer.body.readings) {
+      if (!entry.result) {
+        parts.push(el('p', { class: 'faint' },
+          entry.note ?? 'This reading cannot be served.'));
+        continue;
+      }
+      const r = entry.result;
+      parts.push(el('p', { class: 'faint' },
+        el('span', { class: 'badge reading' }, 'reading'), ' ',
+        el('a', { class: 'mono', href: defHash(r.name) }, r.name),
+        el('span', { class: 'mono' }, ` @ ${r.version}`)));
+      if (r.state.ok && !r.subjects.length) {
+        // Computed, and this record earned no windows: its source figure
+        // holds no days for it — a per-record absence the reading's own
+        // page would show by this subject simply not appearing.
+        parts.push(el('p', { class: 'faint' },
+          'Computed, and there are no rows for this record.'));
+      } else {
+        parts.push(resultBlocks(r));
+      }
+    }
   }
 
   parts.push(el('h2', {}, 'Counted into — tenant ',
@@ -1157,8 +1382,15 @@ async function recordView(kind, key) {
                 ? el('span', { class: 'dim' }, ` × ${row.dimension}`) : null),
             el('td', { class: 'mono num' }, row.display ?? '—')));
           if (entry.more) {
-            rows.push(el('tr', {}, el('td', { colspan: '3', class: 'faint' },
-              '… and more citations than this page shows')));
+            // The first rows in subject order ARE this walk's first page,
+            // so the browse below continues rather than repeats.
+            const capRow = el('tr', {}, el('td', { colspan: '3', class: 'faint' },
+              `… the first ${entry.rows.length} of ${entry.total} citations — `,
+              el('button', {
+                onclick: () => pagedExpansion(capRow, '3', (after) =>
+                  citedPage(kind, key, entry, after)),
+              }, `browse all ${entry.total}, paged`)));
+            rows.push(capRow);
           }
           return rows;
         })));
@@ -1201,6 +1433,62 @@ async function recordView(kind, key) {
             el('div', { class: flag.severity === 'attention' ? 'dim' : 'faint' },
               `⚑ ${flag.label} — ${flag.detail}`))));
       }
+    }
+  }
+
+  // The tiles: every bundle with a member about this record's kind, served
+  // whole by the server and narrowed to this record there — each member
+  // rendered by the same blocks its kind gets standalone, under its slot,
+  // with its own name @ version, exactly like the tile's own page. Members
+  // whose rows are another kind's, and the page-level summarise, arrive as
+  // sentences instead of rows; both are stated, never skipped.
+  parts.push(el('h2', {}, 'On the tiles — tenant ',
+    el('span', { class: 'verbatim' }, tenant() || '?')));
+  if (!aboutAnswer.ok) {
+    parts.push(el('p', { class: 'faint' }, 'Unavailable (see above).'));
+  } else if (!aboutAnswer.body.state.ok) {
+    parts.push(unavailable(aboutAnswer.body.state));
+  } else if (!aboutAnswer.body.tiles.length) {
+    parts.push(el('p', { class: 'faint' },
+      'No bundle has a member about ', el('span', { class: 'mono' }, kind), ' records.'));
+  } else {
+    for (const tile of aboutAnswer.body.tiles) {
+      parts.push(el('h2', { class: 'subject' },
+        el('a', { class: 'mono', href: defHash(tile.bundle) }, tile.bundle), ' ',
+        el('span', { class: 'badge bundle' }, 'bundle')));
+      if (tile.note) {
+        parts.push(el('div', { class: 'notice' },
+          'This tile cannot be served: ', el('span', { class: 'mono' }, tile.note)));
+      }
+      for (const member of tile.members) {
+        parts.push(el('p', { class: 'faint' },
+          el('span', { class: 'mono' }, member.slot), ' — ',
+          el('span', { class: `badge ${member.kind}` }, member.kind), ' ',
+          el('a', { class: 'mono', href: defHash(member.name) }, member.name),
+          el('span', { class: 'mono' }, ` @ ${member.version}`)));
+        if (member.note) {
+          parts.push(el('p', { class: 'faint' }, member.note));
+        }
+        if (member.result) {
+          if (member.result.state.ok && !member.result.subjects.length && !member.note) {
+            parts.push(el('p', { class: 'faint' },
+              'Computed, and there are no rows for this record.'));
+          } else if (member.result.subjects.length || !member.result.state.ok) {
+            parts.push(resultBlocks(member.result));
+          }
+          if (member.more) {
+            // The figure member keeps the latest rows, like every capped
+            // entry here; the full walk lives under Computed for this
+            // record, which pages the same figure's rows for this record.
+            parts.push(el('p', { class: 'faint' },
+              `… the latest ${member.result.subjects.length} of ${member.total} rows — `,
+              'the same figure is paged in full under Computed for this record.'));
+          }
+        }
+      }
+      parts.push(el('p', { class: 'faint' },
+        'tile hash ', el('span', { class: 'mono' }, tile.version),
+        ', review-only; every number above cites its own member’s version'));
     }
   }
 
@@ -1337,13 +1625,17 @@ async function kindView(kind, q, after, trail) {
 
 // ------------------------------------------------------------ activity --
 
-async function activityView() {
+async function activityView(params) {
   if (!tenant()) {
     return [el('h1', {}, 'Activity'), el('p', { class: 'faint' }, 'No tenant has run yet.')];
   }
   const quiet = sessionStorage.getItem('uratori.quiet') === '1';
+  const query = new URLSearchParams();
+  if (quiet) query.set('quiet', '1');
+  const after = params.get('after');
+  if (after) query.set('after', after);
   const answer = await get(
-    `tenants/${encodeURIComponent(tenant())}/activity${quiet ? '?quiet=1' : ''}`);
+    `tenants/${encodeURIComponent(tenant())}/activity${query.toString() ? '?' + query : ''}`);
   if (!answer.ok) return [problem(answer, 'Could not read the run log:')];
   const page = answer.body;
 
@@ -1407,6 +1699,10 @@ async function activityView() {
         : null);
   });
 
+  // Keyset over run ids, newest first — the log's own order. The pager and
+  // the count share the controls row, and "the newest 50 of 200" is now a
+  // door: the kept log pages back to its first retained run.
+  const lastId = page.runs.length ? String(page.runs[page.runs.length - 1].id) : null;
   return [
     el('h1', {}, 'Activity'),
     el('p', { class: 'prose' },
@@ -1415,9 +1711,23 @@ async function activityView() {
     el('div', { class: 'controls' }, toggle,
       page.total > page.runs.length
         ? el('span', { class: 'faint' },
-            `showing the newest ${page.runs.length} of ${page.total} runs`)
+            after
+              ? `${page.runs.length} of ${page.total} runs, newest first`
+              : `showing the newest ${page.runs.length} of ${page.total} runs`)
+        : null,
+      el('span', { class: 'spacer' }),
+      page.more || after || params.get('trail')
+        ? pager(params, page.more, lastId, (nextAfter, trail) => {
+            const next = new URLSearchParams();
+            if (nextAfter) next.set('after', nextAfter);
+            if (trail) next.set('trail', trail);
+            location.hash = `#/activity${next.toString() ? '?' + next : ''}`;
+          })
         : null),
-    runs.length ? runs : el('p', { class: 'faint' }, 'No runs recorded for this tenant.'),
+    runs.length
+      ? runs
+      : el('p', { class: 'faint' },
+          page.total ? 'No runs past this cursor.' : 'No runs recorded for this tenant.'),
   ];
 }
 

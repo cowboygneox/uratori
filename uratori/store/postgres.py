@@ -382,7 +382,7 @@ class PostgresEngineStore:
         return [_stored(r) for r in rows]
 
     async def values_citing(
-        self, tenant: str, member: str, versions: Mapping[str, str], *, limit: int
+        self, tenant: str, member: str, versions: Mapping[str, str], *, limit: int | None
     ) -> dict[str, list[CitingValue]]:
         # jsonb containment is exact element membership -- the semantics the
         # protocol demands -- and it is what the GIN index on `members`
@@ -417,7 +417,11 @@ class PostgresEngineStore:
                 )
             )
         return {
-            name: sorted(group, key=lambda v: v.subject)[:limit]
+            name: (
+                sorted(group, key=lambda v: v.subject)
+                if limit is None
+                else sorted(group, key=lambda v: v.subject)[:limit]
+            )
             for name, group in grouped.items()
         }
 
