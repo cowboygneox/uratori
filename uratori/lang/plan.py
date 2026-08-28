@@ -157,6 +157,16 @@ class FigurePlan:
     asks for. Not in the version hash directly: the index spec that carries
     it already is."""
 
+    carried: bool = False
+    """Whether this figure's buckets are a step function -- see
+    `ast.FigureDecl.carried`. In the version hash, because it changes what a
+    stored value means."""
+
+    ordered_by: str | None = None
+    """Which field decides "latest" for a declared-field read: the field the
+    scope group truncates on. Derived rather than written, so the ordering
+    and the bucketing cannot disagree about when a change happened."""
+
     dimension_part: str | None = None
     depth: int = 0
     """How many figures deep this is. Stored, and every path sorts by it: the

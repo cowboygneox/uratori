@@ -233,3 +233,252 @@ def test_a_bucketed_figures_formula_is_still_served() -> None:
     assert text, "a bucketed figure served no formula at all"
     assert "bucketed" in text
     assert "count(sets)" in text, "the block was found but truncated"
+
+
+# ------------------------------------------- reading a declared field --
+#
+# The canonical shape: `latest(setting_change.value over sets)` -- the value
+# the most recent record in the bucket set it to. A measure alias for it
+# would be a second name for one field, written only to satisfy the grammar,
+# and the language already refuses a second place to write one thing.
+
+
+CARRIED = '''
+# The target in force each month: the latest one set within the month,
+# carried across the months where nobody changed it.
+figure site.target_month bucketed:
+    display "{site} target"
+    unit count
+
+    depends:
+        sets = setting_change.by_month:{site} & setting_change.target
+
+    calculate:
+        latest(setting_change.value over sets) carried forward
+'''
+
+
+def test_a_declared_field_is_readable_by_name() -> None:
+    lib = compile_world(CARRIED)
+    plan = lib.figure("site.target_month")
+    assert plan is not None
+    assert plan.grain == "month"
+    assert plan.carried is True
+
+
+def test_the_latest_of_a_field_is_ordered_by_the_groups_own_time_part() -> None:
+    """Which record is "latest" is not a second thing to declare.
+
+    The group already said `set_at by month` -- that field is when the change
+    happened, and it is the only ordering in sight. Asking the definition to
+    name it again would be a second place for the two to disagree, and the
+    disagreement would be silent: order by the wrong field and the bucket
+    reports a superseded value with no error anywhere.
+    """
+    lib = compile_world(CARRIED)
+    plan = lib.figure("site.target_month")
+    assert plan is not None
+    assert plan.ordered_by == "set_at"
+
+
+def test_a_field_read_over_a_kind_the_set_does_not_hold_is_refused() -> None:
+    """The same silence a measure over the wrong kind produces: every lookup
+    misses and the figure answers nothing, for everybody, for ever."""
+    refuses(
+        '''
+# Wrong kind.
+figure site.confused bucketed:
+    display "{site} confused"
+    unit count
+
+    depends:
+        sets = setting_change.by_month:{site} & setting_change.target
+
+    calculate:
+        latest(job.minutes over sets) carried forward
+''',
+        "job",
+    )
+
+
+def test_a_field_that_does_not_exist_is_refused_with_what_the_record_carries() -> None:
+    refuses(
+        '''
+# Typo.
+figure site.typo bucketed:
+    display "{site} typo"
+    unit count
+
+    depends:
+        sets = setting_change.by_month:{site} & setting_change.target
+
+    calculate:
+        latest(setting_change.valeu over sets) carried forward
+''',
+        "valeu",
+    )
+
+
+def test_reading_a_text_field_is_refused() -> None:
+    """A figure's value is a number, a word from a ladder, or a list. A
+    word straight off a record would be arbitrary text with a version hash --
+    the thing the ladder's closed vocabulary exists to prevent."""
+    refuses(
+        '''
+# Who set it.
+figure site.who bucketed:
+    display "{site} who"
+    unit count
+
+    depends:
+        sets = setting_change.by_month:{site} & setting_change.target
+
+    calculate:
+        latest(setting_change.set_by over sets) carried forward
+''',
+        "set_by",
+    )
+
+
+def test_a_field_read_must_declare_its_unit() -> None:
+    """Declare only what cannot be derived -- and nothing can derive this
+    one.
+
+    A count is a count and a sum of an effort measure is an effort, because
+    the construct says what the number is. A field read says only that a
+    record carries a number: the fact layer is structural on purpose, so
+    there is no unit riding on `value as number` to inherit. Left to a
+    default, the same integer prints as `144000` or as `5d` and neither
+    throws.
+    """
+    refuses(
+        '''
+# No unit.
+figure site.unitless bucketed:
+    display "{site} unitless"
+
+    depends:
+        sets = setting_change.by_month:{site} & setting_change.target
+
+    calculate:
+        latest(setting_change.value over sets) carried forward
+''',
+        "unit",
+    )
+
+
+def test_a_measure_extreme_still_returns_an_instant() -> None:
+    """The two readings of `latest` sit side by side and must not blur: over
+    a *moment measure* it answers when, over a *field* it answers what.
+
+    The control for the whole section -- if the field form had quietly taken
+    over the word, this would now return a number.
+    """
+    lib = compile_world(
+        '''
+measure setting_change.when = moment set_at
+
+# When this site was last reconfigured.
+figure site.last_change:
+    display "{site} last change"
+
+    depends:
+        sets = setting_change.at_site:{site} & setting_change.target
+
+    calculate:
+        latest(setting_change.when over sets)
+'''
+    )
+    plan = lib.figure("site.last_change")
+    assert plan is not None
+    assert plan.unit == "moment"
+
+
+# --------------------------------------------- the field read, evaluated --
+
+
+async def _run(source: str, changes: list[tuple[str, str, float, str, str]]):
+    """A tenant with one site and a list of changes, passed through a full run."""
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    facts = MemoryFactStore()
+    engine = Uratori(
+        schema=ONCHANGE,
+        library=compile_world(source),
+        store=MemoryEngineStore(),
+        facts=facts,
+    )
+    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    for key, at, value, who, _ in changes:
+        facts.put(
+            "t1",
+            "setting_change",
+            key,
+            {
+                "site_id": "s1",
+                "setting": "target_minutes",
+                "value": value,
+                "set_at": at,
+                "set_by": who,
+            },
+        )
+    await engine.run("t1", full=True)
+    return engine
+
+
+async def test_the_bucket_reports_the_last_change_made_within_it() -> None:
+    """Two changes in one month: the later one is what the month says.
+
+    The earlier is not averaged in and not preferred -- it was superseded
+    inside the month, and the month's answer is the value in force at its
+    end.
+    """
+    engine = await _run(
+        CARRIED,
+        [
+            ("c1", "2026-02-03T09:00:00Z", 30.0, "Aki", ""),
+            ("c2", "2026-02-20T09:00:00Z", 25.0, "Bo", ""),
+        ],
+    )
+    answer = await engine.answer("t1", "site.target_month")
+    values = {s.id: s.value for s in answer.subjects}
+    assert values.get("s1@2026-02") == 25.0, (
+        "the month reported a change that had already been replaced within it"
+    )
+
+
+async def test_a_tie_inside_a_bucket_resolves_the_same_way_every_time() -> None:
+    """Two changes stamped at the same instant are a data problem, and the
+    engine's job is to be *stable* about it rather than right.
+
+    Answering differently on each pass would be a figure that moves with
+    nothing behind it -- a change report, a push to every subscribed screen,
+    and no cause anybody can point at.
+    """
+    stamped = [
+        ("c1", "2026-02-03T09:00:00Z", 30.0, "Aki", ""),
+        ("c2", "2026-02-03T09:00:00Z", 25.0, "Bo", ""),
+    ]
+    first = await _run(CARRIED, stamped)
+    second = await _run(CARRIED, list(reversed(stamped)))
+    a = {s.id: s.value for s in (await first.answer("t1", "site.target_month")).subjects}
+    b = {s.id: s.value for s in (await second.answer("t1", "site.target_month")).subjects}
+    assert a["s1@2026-02"] == b["s1@2026-02"], (
+        "the same two records in a different write order gave two answers"
+    )
+
+
+async def test_the_evidence_is_the_one_change_the_value_came_from() -> None:
+    """"Why 25 in February?" has to be answerable, and the answer is one
+    record -- not the bucket it was in."""
+    engine = await _run(
+        CARRIED,
+        [
+            ("c1", "2026-02-03T09:00:00Z", 30.0, "Aki", ""),
+            ("c2", "2026-02-20T09:00:00Z", 25.0, "Bo", ""),
+        ],
+    )
+    evidence = await engine.evidence("t1", "site.target_month", "s1@2026-02")
+    assert [m.key for m in evidence.members] == ["c2"], (
+        "the citation named the whole bucket, burying the change that answered"
+    )

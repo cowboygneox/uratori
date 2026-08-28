@@ -778,6 +778,7 @@ class _Parser:
         sets: list[NamedSet] = []
         combines: list[Combine] = []
         calculate: CalcExpr | None = None
+        carried = False
         band: CalcExpr | None = None
         seen: set[str] = set()
 
@@ -804,7 +805,7 @@ class _Parser:
                 combines = self._combine_block()
             elif word == "calculate":
                 self._once(seen, "calculate", name)
-                calculate = self._calculate_block()
+                calculate, carried = self._calculate_block()
             else:
                 raise self._error(
                     'expected "display", "unit", "depends", "combine", "calculate" or "band", '
@@ -838,6 +839,7 @@ class _Parser:
             calculate=calculate,
             across=across,
             bucketed=bucketed,
+            carried=carried,
             unit=unit,
             sets=tuple(sets),
             combines=tuple(combines),
@@ -858,7 +860,7 @@ class _Parser:
         self._punct(":")
         self._end_of_line()
         self._expect("indent", "an indented block after band")
-        expr = self._calc_body()
+        expr, _ = self._calc_body()
         self._expect("dedent", "the end of the band block")
         return expr
 
@@ -921,14 +923,23 @@ class _Parser:
         self._expect("dedent", "the end of the combine block")
         return out
 
-    def _calculate_block(self) -> CalcExpr:
+    def _calculate_block(self) -> tuple[CalcExpr, bool]:
+        """The calculation, and whether it is carried forward.
+
+        `carried forward` is a suffix on the expression rather than a
+        directive of its own, because it is not a second thing the figure
+        does -- it says what the one calculation *means* between the buckets
+        that have records. Written as a sibling directive it would read like
+        a switch on storage, and a reader could plausibly expect a figure
+        with a `carried forward:` block and no calculate.
+        """
         self._keyword("calculate")
         self._punct(":")
         self._end_of_line()
         self._expect("indent", "an indented block after calculate")
-        expr = self._calc_body()
+        expr, carried = self._calc_body(allow_carried=True)
         self._expect("dedent", "the end of the calculate block")
-        return expr
+        return expr, carried
 
     # --------------------------------------------------------------- set --
 
@@ -971,18 +982,28 @@ class _Parser:
 
     # --------------------------------------------------------- expression --
 
-    def _calc_body(self) -> CalcExpr:
-        """A ladder, or a single expression.
+    def _calc_body(self, allow_carried: bool = False) -> tuple[CalcExpr, bool]:
+        """A ladder, or a single expression, and whether it is carried forward.
 
         A ladder is recognised by its first word rather than by lookahead,
         because `when` cannot begin any other expression.
+
+        `carried forward` is read here rather than after the block, because
+        it sits on the expression's own line -- it says what this
+        calculation means between the buckets that have records, so putting
+        it on a line of its own would read like a directive about storage.
         """
         if self._at_word("when"):
-            return self._ladder()
+            return self._ladder(), False
         expr = self._calc_expr()
+        carried = False
+        if allow_carried and self._at_word("carried"):
+            self._next()
+            self._keyword("forward")
+            carried = True
         self._end_of_line()
         self._skip_newlines()
-        return expr
+        return expr, carried
 
     def _ladder(self) -> CalcExpr:
         line = self._peek().line
@@ -1531,7 +1552,7 @@ class _Parser:
             expr = self._ladder()
             self._expect("dedent", "the end of the ladder")
         else:
-            expr = self._calc_body()
+            expr, _ = self._calc_body()
         return ValueDecl(name=name, expr=expr, unit=unit, line=line)
 
     def _flag(self) -> FlagDecl:

@@ -31,6 +31,7 @@ from ..lang.ast import (
     Count,
     DaysBetween,
     Extreme,
+    FieldPick,
     Ladder,
     ListOf,
     Number,
@@ -59,6 +60,21 @@ SettingReader = Callable[[str], float]
 
 MomentReader = Callable[[str, str], float | None]
 """(measure name, record id) -> an epoch in milliseconds."""
+
+FieldReader = Callable[[str, str, str], float | None]
+"""(fact kind, field path, record id) -> the number the record carries there.
+
+A *declared field*, read straight off the record rather than through a
+measure. The measure layer exists to say what a number means; where the field
+already is the value -- an on-change record's `value` -- a measure would be a
+second name for one field, so the calculation reads it directly and the
+figure declares the unit, because nothing can derive it."""
+
+InstantReader = Callable[[str, str, str], float | None]
+"""(fact kind, field path, record id) -> an epoch in milliseconds.
+
+Used for the *ordering* of a field read, never for its value: which record in
+a bucket is the latest is decided by the field the group truncates on."""
 
 
 @dataclass(frozen=True)
@@ -99,12 +115,16 @@ class Readers:
         moments: MomentReader,
         parts: PartReader,
         settings: SettingReader,
+        fields: FieldReader | None = None,
+        instants: InstantReader | None = None,
     ) -> None:
         self.buckets = buckets
         self.measures = measures
         self.moments = moments
         self.parts = parts
         self.settings = settings
+        self.fields = fields or (lambda kind, path, member: None)
+        self.instants = instants or (lambda kind, path, member: None)
 
 
 def evaluate(plan: FigurePlan, subject: str, readers: Readers) -> Result:
@@ -141,6 +161,14 @@ def _members_of(
         return tuple(sorted(resolved.get(e.set, frozenset())))
     if isinstance(e, Extreme):
         return tuple(sorted(resolved.get(e.set, frozenset())))
+    if isinstance(e, FieldPick):
+        # **The one record, not the whole bucket.** A field read's answer came
+        # from exactly one change, and that change -- its value, when it was
+        # made and by whom -- is what a reader asking "why 25 in September?"
+        # has to be shown. Citing every record in the bucket would bury the
+        # answer among the ones that lost.
+        winner = _picked(e, resolved, readers)
+        return () if winner is None else (winner,)
     if isinstance(e, Sum) and e.measure is None:
         source, _ = plan.combines[e.set]
         return readers.parts(source, subject).subjects
@@ -287,6 +315,24 @@ def _eval(
             return None
         return max(instants) if e.which == "latest" else min(instants)
 
+    if isinstance(e, FieldPick):
+        # The value the most recent record in the bucket set it to. "Most
+        # recent" is decided by the field the group truncates on, so the
+        # ordering and the bucketing cannot disagree about when a change
+        # happened.
+        #
+        # A record whose ordering instant cannot be read takes no part --
+        # skipped rather than sorted to the bottom, for the reason `Extreme`
+        # skips one: nought is a real instant, and a record with an
+        # unreadable stamp would otherwise win every `earliest` for ever.
+        # The empty set answers **nothing**, never a nought: a bucket nobody
+        # changed anything in has no value of its own, which is precisely
+        # what `carried forward` then fills from the bucket before it.
+        winner = _picked(e, sets, readers)
+        if winner is None:
+            return None
+        return readers.fields(e.kind, e.field, winner)
+
     if isinstance(e, DaysBetween):  # pragma: no cover - refused for a figure
         raise AssertionError(
             "a span reads the clock and the checker refuses it to a figure; this is a "
@@ -294,6 +340,38 @@ def _eval(
         )
 
     assert_never(e)
+
+
+def _picked(
+    e: FieldPick, sets: dict[str, frozenset[str]], readers: Readers
+) -> str | None:
+    """Which record in the set answers -- the whole of what `latest` means
+    here, in one place.
+
+    Shared by the value and by the evidence deliberately. The evidence for a
+    field read is the *one record the value came from*, and a second walk to
+    find it could disagree with the first -- which would print "25, set on
+    3 June by X" beside a number taken from a different row, the most
+    convincing kind of wrong.
+
+    A record whose ordering instant cannot be read takes no part: skipped
+    rather than sorted to one end, for the reason `Extreme` skips one --
+    nought is a real instant, and an unreadable stamp would otherwise win
+    every `earliest` for ever.
+    """
+    best: tuple[float, str] | None = None
+    for member in sorted(sets.get(e.set, frozenset())):
+        at = readers.instants(e.kind, e.ordered_by, member)
+        if at is None:
+            continue
+        # Ties break on the record key -- arbitrary, but *stable*. Two changes
+        # stamped at the same instant are a data problem, and answering them
+        # differently on each pass would be a figure that moves with nothing
+        # behind it.
+        here = (at, member)
+        if best is None or (here > best if e.which == "latest" else here < best):
+            best = here
+    return None if best is None else best[1]
 
 
 def _source_of(plan: FigurePlan, binding: str) -> tuple[str]:

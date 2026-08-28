@@ -16,6 +16,7 @@ message that only says "invalid" sends somebody looking for a typo.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Literal, NoReturn, assert_never
 
 from ..schema import Schema
@@ -46,6 +47,7 @@ from .ast import (
     FactField,
     FieldDecl,
     FieldMeasure,
+    FieldPick,
     FigureDecl,
     FigureUnit,
     FlagDecl,
@@ -547,6 +549,12 @@ class _Checker:
         set_names = self._named_sets(d)
         combines = self._combines(d)
         scope_index, grain, dimension_part = self._scope_index(d, set_names, scope)
+        # Rewritten before anything reads the calculation, so the plan, the
+        # hash, the kind check and the evaluator all see one tree. `latest`
+        # over a measure and `latest` over a declared field are different
+        # operations wearing one word; which one was meant is decidable here
+        # and nowhere later, because only the checker holds the library.
+        d = replace(d, calculate=self._resolve_field_reads(d, scope_index, grain))
         if d.bucketed and grain is None:
             # The mirror of the refusal in `_scope_index`, and checked here
             # rather than there because a rollup reaches no group at all --
@@ -611,6 +619,8 @@ class _Checker:
             band=d.band if isinstance(d.band, Ladder) else None,
             band_settings=band_settings,
             grain=grain,
+            carried=d.carried,
+            ordered_by=_ordered_by_of(d.calculate),
             dimension_part=dimension_part,
             depth=depth,
         )
@@ -737,6 +747,32 @@ class _Checker:
         if isinstance(expr, SetOp):
             return self._spaces_in(expr.left, defined) | self._spaces_in(expr.right, defined)
         assert_never(expr)
+
+    def _field_matches_set(
+        self,
+        owner: str,
+        pick: FieldPick,
+        sets: dict[str, SetExpr],
+        line: int,
+    ) -> None:
+        """A field read reads a record, so the set must hold that kind's ids.
+
+        The same silence `_measure_matches_set` guards, one construct along:
+        over a set of other ids every lookup misses, the extreme finds
+        nothing, and the figure answers an absence for everybody, for ever,
+        with nothing thrown.
+        """
+        expr = sets.get(pick.set)
+        if expr is None:
+            return
+        spaces = self._spaces_in(expr, sets)
+        if spaces and pick.kind not in spaces:
+            raise CheckError(
+                f"figure {owner} reads {pick.kind}.{pick.field} over \"{pick.set}\", which "
+                f'holds {" and ".join(sorted(spaces))} ids. Every lookup would miss, so the '
+                "figure would answer nothing for everybody with nothing thrown.",
+                line,
+            )
 
     def _measure_matches_set(
         self,
@@ -1000,6 +1036,101 @@ class _Checker:
                     )
         return name, grain, dimension_part
 
+    def _resolve_field_reads(
+        self, d: FigureDecl, scope_index: str | None, grain: str | None
+    ) -> CalcExpr:
+        """Turn `latest(<kind>.<field> over <set>)` into a `FieldPick`.
+
+        The dotted name is a measure or it is a fact field, and the two mean
+        genuinely different things: over a moment measure `latest` answers
+        *when*, over a field it answers *what the value was then*. A measure
+        wins if one exists by that name -- otherwise declaring a measure
+        could silently change what an existing figure computes.
+        """
+
+        def walk(e: CalcExpr) -> CalcExpr:
+            if isinstance(e, Extreme) and e.measure not in self.measures:
+                kind, _, field = e.measure.partition(".")
+                if kind in self._kinds and field:
+                    return self._field_pick(d, e, kind, field, scope_index, grain)
+            if isinstance(e, Ladder):
+                return replace(
+                    e,
+                    rungs=tuple(
+                        replace(
+                            r,
+                            left=walk(r.left),
+                            then=walk(r.then),
+                            right=walk(r.right) if r.right is not None else None,
+                        )
+                        for r in e.rungs
+                    ),
+                    otherwise=walk(e.otherwise),
+                )
+            if isinstance(e, Arith):
+                return replace(e, left=walk(e.left), right=walk(e.right))
+            if isinstance(e, Pick):
+                return replace(e, left=walk(e.left), right=walk(e.right))
+            return e
+
+        return walk(d.calculate)
+
+    def _field_pick(
+        self,
+        d: FigureDecl,
+        e: Extreme,
+        kind: str,
+        field: str,
+        scope_index: str | None,
+        grain: str | None,
+    ) -> FieldPick:
+        """One resolved field read, with every way it could be silently wrong
+        refused by name."""
+        found = self._record_field(
+            kind, field, f"figure {d.name} takes the {e.which} of {kind}.{field}", e.line
+        )
+        if found is not None and found[0].type not in ("number", None):
+            raise CheckError(
+                f"figure {d.name} takes the {e.which} of {kind}.{field}, which is declared "
+                f"as {found[0].type}. A figure's value is a number, a word a ladder chose, "
+                "or a list -- a word read straight off a record would be arbitrary text "
+                "with a version hash, which is what the ladder's closed vocabulary exists "
+                "to prevent.",
+                e.line,
+            )
+        if found is not None and found[1]:
+            raise CheckError(
+                f"figure {d.name} takes the {e.which} of {kind}.{field}, whose path crosses "
+                "a list, so one record holds several of them. Which one is 'the latest' "
+                "has no answer, and first-wins would be a fabrication about the wrong "
+                "element.",
+                e.line,
+            )
+        if grain is None or scope_index is None:
+            raise CheckError(
+                f"figure {d.name} takes the {e.which} of a declared field, and it has no "
+                "sequence of buckets. The ordering that decides which record is latest is "
+                "the group's own time part, so this construct only means something inside "
+                "a `bucketed` figure.",
+                e.line,
+            )
+        ordered_by = _ordering_field(self.indexes[scope_index].spec)
+        if ordered_by is None:
+            raise CheckError(
+                f"figure {d.name} takes the {e.which} of a declared field, but the group "
+                f"that fans it out buckets by {grain} without a field to order within a "
+                "bucket by.",
+                e.line,
+            )
+        return FieldPick(
+            which=e.which,
+            kind=kind,
+            field=field,
+            set=e.set,
+            ordered_by=ordered_by,
+            line=e.line,
+        )
+
     # ------------------------------------------------- calculate: kinds --
 
     def _calc_kind(
@@ -1150,6 +1281,11 @@ class _Checker:
                 e.line,
             )
 
+        if isinstance(e, FieldPick):
+            self._require_set(d.name, e.set, sets, e.line)
+            self._field_matches_set(d.name, e, sets, e.line)
+            return "number"
+
         if isinstance(e, Extreme):
             m = self._require_measure(d.name, e.measure, e.line)
             self._require_set(d.name, e.set, sets, e.line)
@@ -1227,7 +1363,17 @@ class _Checker:
         quantity they were both in, and 0.6 renders as "60%" or as "0.6" with no
         way to tell which was meant.
         """
-        arithmetic = isinstance(d.calculate, (Arith, Pick))
+        # A declared-field read joins arithmetic on the "nothing can derive
+        # it" side. A count is a count and a sum of an effort measure is an
+        # effort because the construct says what the number is; a field read
+        # says only that a record carries a number. The fact layer is
+        # structural on purpose -- `value as number` claims a shape, never a
+        # meaning -- so there is nothing riding on it to inherit, and the
+        # same integer would print as "144000" or as "5d" with no way to
+        # tell which was meant. That is the rule in its sharpened form:
+        # declare only what cannot be derived, and a redundant declaration
+        # is still refused above.
+        arithmetic = isinstance(d.calculate, (Arith, Pick, FieldPick))
         if d.unit is not None and not arithmetic:
             raise CheckError(
                 f'figure {d.name} declares "unit {d.unit}", and its calculation already says '
@@ -2223,10 +2369,16 @@ class _Checker:
                     e.line,
                 )
             return results[0]
-        if isinstance(e, (Count, ListOf, Sum, Extreme)):
-            verb = {"Count": "counts", "ListOf": "lists", "Sum": "totals", "Extreme": "takes the extreme of"}[
-                type(e).__name__
-            ]
+        if isinstance(e, (Count, ListOf, Sum, Extreme, FieldPick)):
+            verb = {
+                "Count": "counts",
+                "ListOf": "lists",
+                "Sum": "totals",
+                "Extreme": "takes the extreme of",
+                # A projection has one record per row already, so "the latest
+                # of a set" is an aggregate here exactly as a count is.
+                "FieldPick": "takes the extreme of",
+            }[type(e).__name__]
             raise CheckError(
                 f"{noun} {owner} {verb} something. A projection aggregates nothing -- those "
                 "are figures, and offering them here would be a second way to compute a "
@@ -2553,6 +2705,17 @@ def _calc_hash(e: CalcExpr) -> object:
         return {"op": "days", "from": e.frm, "to": e.to}
     if isinstance(e, Extreme):
         return {"op": e.which, "measure": e.measure, "set": e.set}
+    if isinstance(e, FieldPick):
+        # The ordering field is hashed with the rest: it decides *which*
+        # record in the bucket answers, so two figures ordering differently
+        # over one set are two different numbers.
+        return {
+            "op": e.which,
+            "kind": e.kind,
+            "field": e.field,
+            "set": e.set,
+            "orderedBy": e.ordered_by,
+        }
     assert_never(e)
 
 
@@ -2594,6 +2757,40 @@ def _index_hash(idx: CompiledIndex) -> object:
     else:
         assert_never(spec)
     return {"name": idx.name, "kind": idx.kind, "spec": body}
+
+
+def _ordered_by_of(e: CalcExpr) -> str | None:
+    """The ordering a resolved field read settled on, lifted onto the plan so
+    the engine need not walk the tree to find it."""
+    if isinstance(e, FieldPick):
+        return e.ordered_by or None
+    if isinstance(e, Ladder):
+        for rung in e.rungs:
+            for side in (rung.left, rung.then, rung.right):
+                if side is not None and (found := _ordered_by_of(side)) is not None:
+                    return found
+        return _ordered_by_of(e.otherwise)
+    if isinstance(e, (Arith, Pick)):
+        return _ordered_by_of(e.left) or _ordered_by_of(e.right)
+    return None
+
+
+def _ordering_field(spec: IndexBy) -> str | None:
+    """Which field a composite group truncates on -- the field that says
+    *when* each record happened.
+
+    This is what orders records inside a bucket, and it is derived rather
+    than written for the reason the zone is derived: the group already
+    decided which instant files a record under which bucket, and a second
+    declaration of that would be a second thing to keep in step. Order by a
+    different field than you bucketed by and a bucket reports a superseded
+    value, silently.
+    """
+    if isinstance(spec, ByComposite):
+        for part in spec.parts:
+            if part.truncate is not None or part.select is not None:
+                return part.field
+    return None
 
 
 def _field_hash(part: IndexField) -> object:
@@ -2703,6 +2900,17 @@ def _versioned_figure(
             or None
         ),
         "calculate": _calc_hash(plan.calculate),
+        # **Hashed, where `bucketed` beside it is not**, and the asymmetry is
+        # the rule rather than an inconsistency. `bucketed` mirrors the
+        # group's spec, which is already hashed wherever it is read; this
+        # changes what the stored values *are*. The same records under the
+        # same calculation give two buckets without it and twelve with it, so
+        # a version reused across the change would serve carried numbers from
+        # a definition that never claimed any. `or None` keeps it
+        # absent-unless-declared, so every figure written before the suffix
+        # existed keeps its version and no tenant rebuilds for a feature it
+        # does not use.
+        "carried": plan.carried or None,
         # The band is an answer this figure gives, so a definition that starts
         # banding differently is a different definition. Hashed
         # absent-unless-declared, which `canonical` gives for free by dropping

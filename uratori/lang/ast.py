@@ -737,8 +737,49 @@ class Extreme:
     line: int = 0
 
 
+@dataclass(frozen=True)
+class FieldPick:
+    """`latest(setting_change.value over sets)` -- the value the most recent
+    record in the set carries.
+
+    The construct on-change data needs, and it is deliberately not a measure.
+    A measure decorates a record with a *quantity a definition names*: a
+    duration between two moments, or a field re-labelled with what its number
+    means. Here there is nothing to name -- `value` is already the value, and
+    a `measure setting_change.goal = value in count` would be a second name
+    for one field, written only to satisfy the grammar. The language refuses
+    a second place to write one thing everywhere else; this is that rule
+    reaching the calculate block.
+
+    **Not the same word twice.** `latest` over a *moment measure* answers
+    *when* -- the most recent instant in a population. This answers *what*
+    the value was at that instant. They are told apart by what the dotted
+    name resolves to, which is decidable at compile time and is why the
+    checker rewrites one into the other rather than leaving the evaluator to
+    guess.
+
+    `ordered_by` is not written in the definition. The group that fans the
+    figure out already said `set_at by month`, and that field is when the
+    change happened -- the only ordering in sight. Making the definition name
+    it again would be a second place for the two to disagree, and the
+    disagreement is silent: order by the wrong field and the bucket reports a
+    superseded value with nothing thrown. Ties break on the record key, which
+    is arbitrary but *stable*: two changes stamped at the same instant are a
+    data problem, and answering them differently on each pass would be a
+    figure that moves with nothing behind it.
+    """
+
+    which: Literal["latest", "earliest"]
+    kind: str
+    field: str
+    set: str
+    ordered_by: str = ""
+    line: int = 0
+
+
 CalcExpr: TypeAlias = (
-    Count | ListOf | Sum | Part | Number | Text | Setting | Ladder | Arith | Pick | DaysBetween | Extreme
+    Count | ListOf | Sum | Part | Number | Text | Setting | Ladder | Arith | Pick | DaysBetween
+    | Extreme | FieldPick
 )
 
 
@@ -835,6 +876,23 @@ class FigureDecl:
     stay out to be introducible at all -- hashed, making it required would
     have moved every sequenced figure's version in every deployment, and
     rebuilt every tenant's history to store byte-identical values.
+    """
+
+    carried: bool = False
+    """`latest(...) carried forward` -- a step function over the figure's own
+    bucket sequence.
+
+    Sparse facts, dense buckets. One record exists each time somebody changed
+    the value, so a month nobody touched it has no record -- and the answer
+    for that month is not an absence but the same value, still in force. The
+    suffix says the buckets between changes carry the last change forward.
+
+    **In the version hash**, unlike `bucketed` beside it, and the difference
+    is exactly the rule: `bucketed` mirrors something already hashed, while
+    this changes what the stored values *mean*. The same records under the
+    same calculation produce two months of values without it and twelve with
+    it, so reusing a version across the change would serve carried numbers
+    from a definition that never claimed them.
     """
 
     unit: DeclaredUnit | None = None

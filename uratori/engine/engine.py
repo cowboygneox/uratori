@@ -26,6 +26,8 @@ from .buckets import (
     ThroughResolver,
     buckets_of,
     measure_of,
+    read_instant,
+    read_number,
     read_path,
     subject_of,
 )
@@ -723,6 +725,14 @@ class Engine:
                 records[measure.kind] = {
                     row.key: row.value for row in await facts.of_kind(tenant, measure.kind)
                 }
+        # A declared-field read loads its kind the same way a measure does --
+        # once per figure per pass, not per subject, which is the shape
+        # test_pass_cost.py holds the line on.
+        for kind in _field_kinds(plan):
+            if kind not in records:
+                records[kind] = {
+                    row.key: row.value for row in await facts.of_kind(tenant, kind)
+                }
 
         parts: dict[str, dict[str, list[tuple[str, float]]]] = {}
         for source, _ in plan.combines.values():
@@ -776,17 +786,53 @@ class Engine:
         def read_setting(path: str) -> float:
             return float(setting_value(dict(settings), path))
 
+        def read_field(kind: str, path: str, member: str) -> float | None:
+            record = records.get(kind, {}).get(member)
+            return None if record is None else read_number(record, path)
+
+        def read_when(kind: str, path: str, member: str) -> float | None:
+            record = records.get(kind, {}).get(member)
+            return None if record is None else read_instant(record, path)
+
         return Readers(
             buckets=read_bucket,
             measures=read_measure,
             moments=read_moment,
             parts=read_parts,
             settings=read_setting,
+            fields=read_field,
+            instants=read_when,
         )
 
     def _indexes_over(self, kind: str) -> list[CompiledIndex]:
         return [i for i in self._library.indexes.values() if i.kind == kind]
 
+
+
+def _field_kinds(plan: FigurePlan) -> frozenset[str]:
+    """Fact kinds a figure reads declared fields off, which its readers must
+    load. Distinct from `plan.measures` because a field read names no
+    measure -- that is the whole point of it."""
+    from ..lang.ast import Arith, FieldPick, Ladder, Pick
+
+    found: set[str] = set()
+
+    def walk(e: Any) -> None:
+        if isinstance(e, FieldPick):
+            found.add(e.kind)
+        elif isinstance(e, Ladder):
+            for rung in e.rungs:
+                walk(rung.left)
+                walk(rung.then)
+                if rung.right is not None:
+                    walk(rung.right)
+            walk(e.otherwise)
+        elif isinstance(e, (Arith, Pick)):
+            walk(e.left)
+            walk(e.right)
+
+    walk(plan.calculate)
+    return frozenset(found)
 
 
 def _kinds_read(lib: Library) -> frozenset[str]:
