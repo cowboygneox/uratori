@@ -248,7 +248,7 @@ CARRIED = '''
 # carried across the months where nobody changed it.
 figure site.target_month bucketed:
     display "{site} target"
-    unit count
+    unit duration
 
     depends:
         sets = setting_change.by_month:{site} & setting_change.target
@@ -482,3 +482,370 @@ async def test_the_evidence_is_the_one_change_the_value_came_from() -> None:
     assert [m.key for m in evidence.members] == ["c2"], (
         "the citation named the whole bucket, burying the change that answered"
     )
+
+
+# ------------------------------------------------------ carried forward --
+
+
+CHANGES = [
+    ("c1", "2026-02-10T09:00:00Z", 1800.0, "Aki", ""),
+    ("c2", "2026-06-03T09:00:00Z", 1500.0, "Bo", ""),
+]
+
+# Sean's pinned scenario: 30m set in February, 25m set in June. January is
+# absent because nothing had ever been set; February and June are anchors;
+# March to May and July onward are carried.
+EXPECTED = {
+    "s1@2026-01": None,
+    "s1@2026-02": 1800.0,
+    "s1@2026-03": 1800.0,
+    "s1@2026-04": 1800.0,
+    "s1@2026-05": 1800.0,
+    "s1@2026-06": 1500.0,
+    "s1@2026-07": 1500.0,
+    "s1@2026-08": 1500.0,
+}
+
+AT = 1_787_572_800_000.0  # 2026-08-24T12:00Z -- "now" for these tests
+
+
+async def _carried(changes=CHANGES, at: float = AT):
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(CARRIED)
+    engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
+    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    for key, when, value, who, _ in changes:
+        facts.put(
+            "t1",
+            "setting_change",
+            key,
+            {
+                "site_id": "s1",
+                "setting": "target_minutes",
+                "value": value,
+                "set_at": when,
+                "set_by": who,
+            },
+        )
+    await engine.run("t1", full=True, at_ms=at)
+    return engine, store, library, facts
+
+
+async def _stored(engine, store, library) -> dict[str, float | None]:
+    plan = library.figure("site.target_month")
+    rows = await store.values("t1", plan.name, plan.version)
+    return {r.subject: r.value for r in rows}
+
+
+async def test_a_pass_fills_every_month_from_the_first_change_to_the_present() -> None:
+    """The scenario, whole. Nothing before February, the two anchors, and a
+    value in every month between and after -- to *this* month and no
+    further."""
+    engine, store, library, _ = await _carried()
+    stored = await _stored(engine, store, library)
+    assert stored.get("s1@2026-01") is None, (
+        "January reported a target that had not been set yet"
+    )
+    for label, value in EXPECTED.items():
+        if value is not None:
+            assert stored.get(label) == value, f"{label} reads {stored.get(label)}"
+
+
+def test_a_bucket_before_the_first_change_is_absent_not_a_nought() -> None:
+    """Restated as its own claim because it is the one a band would get
+    wrong: a nought here is comfortably under every threshold, and would
+    colour January green for a target nobody had set."""
+    assert EXPECTED["s1@2026-01"] is None
+
+
+async def test_materialisation_never_runs_past_the_present_bucket() -> None:
+    engine, store, library, _ = await _carried()
+    stored = await _stored(engine, store, library)
+    assert all(label.split("@")[1] <= "2026-08" for label in stored), (
+        f"a bucket past the present month was written: {sorted(stored)}"
+    )
+
+
+async def test_a_later_change_rewrites_forward_and_leaves_history_alone() -> None:
+    """A change dated in April, entered after the June one already existed.
+
+    April and May must move to the new value; February and March must be
+    **byte-identical** to what they were. History is never rewritten by a
+    later arrival -- which is the property that makes these rows safe to
+    store at all.
+    """
+    engine, store, library, facts = await _carried()
+    before = await _stored(engine, store, library)
+
+    facts.put(
+        "t1",
+        "setting_change",
+        "c3",
+        {
+            "site_id": "s1",
+            "setting": "target_minutes",
+            "value": 1200.0,
+            "set_at": "2026-04-05T09:00:00Z",
+            "set_by": "Cyd",
+        },
+    )
+    await engine.run("t1", written={"setting_change": ["c3"]}, at_ms=AT)
+    after = await _stored(engine, store, library)
+
+    assert after["s1@2026-02"] == before["s1@2026-02"] == 1800.0
+    assert after["s1@2026-03"] == before["s1@2026-03"] == 1800.0
+    assert after["s1@2026-04"] == 1200.0, "the anchor month did not take the new value"
+    assert after["s1@2026-05"] == 1200.0, "the month after the change still carries the old one"
+    assert after["s1@2026-06"] == 1500.0, "June has its own change and must keep it"
+    assert after["s1@2026-07"] == 1500.0
+
+
+async def test_every_trigger_writes_byte_identical_rows() -> None:
+    """The rule that makes three triggers legal at all.
+
+    A pass, a fact landing and a read all reach the same materialiser, so
+    the rows cannot differ -- and this asserts it literally rather than
+    trusting the structure, because "they share a function" is a claim about
+    today's code and this is a claim about the answer.
+    """
+    whole, whole_store, whole_lib, _ = await _carried()
+    by_pass = await _stored(whole, whole_store, whole_lib)
+
+    # Trigger two: the same world assembled one change at a time, each
+    # arriving through the facts door.
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(CARRIED)
+    incremental = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
+    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    await incremental.run("t1", full=True, at_ms=AT)
+    for key, when, value, who, _ in CHANGES:
+        facts.put(
+            "t1",
+            "setting_change",
+            key,
+            {
+                "site_id": "s1",
+                "setting": "target_minutes",
+                "value": value,
+                "set_at": when,
+                "set_by": who,
+            },
+        )
+        await incremental.run("t1", written={"setting_change": [key]}, at_ms=AT)
+    by_fact = await _stored(incremental, store, library)
+
+    assert by_fact == by_pass, (
+        "a world built change-by-change disagrees with the same world built in "
+        "one pass -- the two triggers are not the one materialiser they claim"
+    )
+
+
+async def test_a_carried_grain_finer_than_a_pass_can_honour_is_refused() -> None:
+    """Extension is the pass noticing time, and the pass is the only event
+    there is -- the clock itself never is.
+
+    A carried figure at minute grain would owe a new bucket every minute and
+    get one per sync, so its most recent bucket would read as an absence for
+    as long as the gap. Fenced the way `older than` is fenced: that clause
+    admits only dials in whole days precisely so the unenforceable version
+    cannot be written, and this admits only grains a pass can plausibly keep
+    up with.
+    """
+    refuses(
+        '''
+group setting_change.by_minute from (site_id, set_at by minute in tenant.timezone)
+
+# Far too fine.
+figure site.target_minute bucketed:
+    display "{site} target"
+    unit count
+
+    depends:
+        sets = setting_change.by_minute:{site} & setting_change.target
+
+    calculate:
+        latest(setting_change.value over sets) carried forward
+''',
+        "minute",
+        "carried",
+    )
+
+
+PACE = CARRIED + '''
+# How the target moved across the months in view.
+reading site.target_pace(range):
+    display "{site} target pace"
+
+    depends:
+        t = site.target_month in range
+
+    calculate:
+        median(t)
+        delta(t)
+'''
+
+
+async def _paced(at: float = AT):
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(PACE)
+    engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
+    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    for key, when, value, who, _ in CHANGES:
+        facts.put(
+            "t1",
+            "setting_change",
+            key,
+            {
+                "site_id": "s1",
+                "setting": "target_minutes",
+                "value": value,
+                "set_at": when,
+                "set_by": who,
+            },
+        )
+    await engine.run("t1", full=True, at_ms=at)
+    return engine, store, library
+
+
+async def test_a_read_after_the_pass_fills_the_buckets_time_has_added() -> None:
+    """A pass extends to the bucket it ran in, so between passes the newest
+    bucket has no row.
+
+    Told "never computed" there, a screen would report an absence for a value
+    that has demonstrably been in force for months -- which is exactly the
+    wrong answer for a figure whose whole point is that it persists. The read
+    materialises what time has added and then serves it.
+    """
+    from uratori.engine.serve import serve_reading
+
+    _, store, library = await _paced(at=AT)
+    plan = library.reading("site.target_pace")
+    figure = library.figure("site.target_month")
+
+    before = {r.subject for r in await store.values("t1", figure.name, figure.version)}
+    assert "s1@2026-09" not in before, "August was the present month at the pass"
+
+    # Two months pass with no sync at all, and then somebody looks.
+    later = 1_792_843_200_000.0  # 2026-10-24T12:00Z
+    result = await serve_reading(
+        store, library, "t1", plan, ONCHANGE.defaults, [3], at_ms=later
+    )
+    after = {r.subject for r in await store.values("t1", figure.name, figure.version)}
+    assert {"s1@2026-09", "s1@2026-10"} <= after, (
+        "a read found unmaterialised buckets and served an absence instead of "
+        f"filling them: {sorted(after)}"
+    )
+    window = result.subjects[0].windows[0]
+    assert window.median == 1500.0, "the carried value did not reach the reader"
+
+
+async def test_the_read_writes_the_same_rows_a_pass_would_have() -> None:
+    """The third trigger, held to the same claim as the other two.
+
+    One world is filled by a read at October; another by a pass at October.
+    Every row must match -- value and evidence -- or the lazy path is a
+    second implementation wearing the first one's name.
+    """
+    from uratori.engine.serve import serve_reading
+
+    later = 1_792_843_200_000.0  # 2026-10-24T12:00Z
+
+    _, read_store, read_lib = await _paced(at=AT)
+    await serve_reading(
+        read_store,
+        read_lib,
+        "t1",
+        read_lib.reading("site.target_pace"),
+        ONCHANGE.defaults,
+        [3],
+        at_ms=later,
+    )
+    figure = read_lib.figure("site.target_month")
+    read_rows = {
+        r.subject: (r.value, r.members)
+        for r in await read_store.values("t1", figure.name, figure.version)
+    }
+
+    _, pass_store, pass_lib = await _paced(at=later)
+    pass_figure = pass_lib.figure("site.target_month")
+    pass_rows = {
+        r.subject: (r.value, r.members)
+        for r in await pass_store.values("t1", pass_figure.name, pass_figure.version)
+    }
+
+    assert read_rows == pass_rows, (
+        "the lazy fill and the pass disagree about what a carried bucket says"
+    )
+
+
+async def test_two_first_readers_race_benignly_and_only_one_creates_each_row() -> None:
+    """Both readers compute the same rows, because there is one materialiser
+    -- so the race cannot corrupt anything.
+
+    What it must not do is let both *report* having created a bucket: a
+    movement is pushed to every subscribed screen, and the same bucket
+    announced twice is a board that flickers for no reason anybody can point
+    at. The insert-or-nothing write is what settles it.
+    """
+    import asyncio
+
+    from uratori.engine.carry import materialise
+
+    _, store, library = await _paced(at=AT)
+    figure = library.figure("site.target_month")
+    later = 1_792_843_200_000.0
+
+    first, second = await asyncio.gather(
+        materialise(
+            store, figure, "t1", ["s1"], at_ms=later, zone="UTC", trigger="read"
+        ),
+        materialise(
+            store, figure, "t1", ["s1"], at_ms=later, zone="UTC", trigger="read"
+        ),
+    )
+    created = [s for s, _, _ in first] + [s for s, _, _ in second]
+    assert len(created) == len(set(created)), (
+        f"a bucket was reported created twice: {sorted(created)}"
+    )
+    assert {"s1@2026-09", "s1@2026-10"} <= set(created)
+
+
+async def test_the_run_log_names_the_figures_a_pass_carried() -> None:
+    """Ran-versus-never-ran must not be something a reader infers from
+    whether a bucket happens to hold a value."""
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(CARRIED)
+    engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
+    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    for key, when, value, who, _ in CHANGES:
+        facts.put(
+            "t1",
+            "setting_change",
+            key,
+            {
+                "site_id": "s1",
+                "setting": "target_minutes",
+                "value": value,
+                "set_at": when,
+                "set_by": who,
+            },
+        )
+    outcome = await engine.execute("t1", full=True, at_ms=AT)
+    assert outcome.carried == ("site.target_month",)
+
+    # A second pass at the same instant has nothing left to extend, and says
+    # so by naming nothing -- not by naming the figure with no rows behind it.
+    again = await engine.execute("t1", full=True, at_ms=AT)
+    assert again.carried == ()

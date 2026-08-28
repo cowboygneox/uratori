@@ -755,7 +755,9 @@ async def test_a_failed_reindex_is_retried_rather_than_recorded_as_built() -> No
     upgraded = Engine(store, facts, grown, WORLD)
     real_reindex = upgraded._reindex
 
-    async def dies(tenant: str, settings: Any, only: Any = None) -> None:
+    async def dies(
+        tenant: str, settings: Any, only: Any = None, *, now_ms: float = 0.0
+    ) -> None:
         raise RuntimeError("the database went away mid-rebuild")
 
     upgraded._reindex = dies  # type: ignore[method-assign]

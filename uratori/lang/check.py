@@ -555,6 +555,24 @@ class _Checker:
         # operations wearing one word; which one was meant is decidable here
         # and nowhere later, because only the checker holds the library.
         d = replace(d, calculate=self._resolve_field_reads(d, scope_index, grain))
+        if d.carried and grain in ("minute", "15 minutes", "hour"):
+            raise CheckError(
+                f"figure {d.name} is carried forward at {grain} grain, and a pass cannot "
+                "honour that. Extension is the pass noticing time -- the clock itself is "
+                "never an event -- so a figure owing a new bucket every minute gets one "
+                "per sync, and its most recent bucket reads as an absence for as long as "
+                "the gap. Fenced the way an age filter is fenced to whole days: the "
+                "unenforceable version is refused rather than left to disappoint. Carry "
+                "at day grain or coarser.",
+                d.line,
+            )
+        if d.carried and grain is None:
+            raise CheckError(
+                f"figure {d.name} is carried forward, but it has no sequence of buckets to "
+                "carry across. A carry fills the buckets between the ones somebody changed "
+                "something in, and a figure with one value per subject has none.",
+                d.line,
+            )
         if d.bucketed and grain is None:
             # The mirror of the refusal in `_scope_index`, and checked here
             # rather than there because a rollup reaches no group at all --

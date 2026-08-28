@@ -46,11 +46,24 @@ property it reads.
 
 from __future__ import annotations
 
+import logging
 from bisect import bisect_right
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from ..lang.plan import Value
+
+log = logging.getLogger("uratori.engine")
+
+MAX_CARRY_BUCKETS = 3660
+"""How far back a carry may reach, in buckets of the figure's own sequence.
+
+The same number the window's reach ceiling uses, and for the same reason:
+the reach *is* the cost, since every bucket between the first change and now
+is a stored row per subject. Ten years of days, or three centuries of
+months -- far beyond any board's horizon, and a first change older than that
+is a definition question rather than a materialisation."""
 
 LabelsBack = Callable[[int], list[str]]
 """`n` -> the n most recent buckets of a figure's own sequence, oldest first,
@@ -266,3 +279,145 @@ def sequence_to_present(
         span = min(span * 2, cap)
 
     return [label for label in labels if label >= earliest]
+
+
+# --------------------------------------------------------- materialising --
+
+
+async def materialise(
+    store: Any,
+    plan: Any,
+    tenant: str,
+    bases: Iterable[str],
+    *,
+    at_ms: float,
+    zone: str | None,
+    trigger: str,
+    cap: int = MAX_CARRY_BUCKETS,
+) -> list[tuple[str, Value, Value]]:
+    """Bring a carried figure's buckets up to the present, for these subjects.
+
+    **The one implementation all three triggers use.** A fact landing, a pass
+    reaching a new bucket and a read filling a window it found unmaterialised
+    all arrive here; what they do differently is *when* they call and which
+    subjects they name, never what a bucket ends up saying. Three code paths
+    writing these rows would be three chances to disagree, and the
+    disagreement would be invisible -- every row plausible, only some of them
+    the same.
+
+    The anchors are read from the **index**, not from the stored values: the
+    buckets holding records are exactly the buckets somebody changed
+    something in, which is what an anchor is. Reading them back out of the
+    figure's own rows instead would mean carried rows and anchor rows became
+    indistinguishable after the first pass, and the second pass would carry
+    a carried value forward from a bucket nobody ever touched.
+
+    Returns `(subject, before, after)` per row that actually moved, so the
+    caller can report exactly what changed and nothing else. A pass in which
+    nothing moved writes nothing and says nothing.
+    """
+    from .buckets import SEPARATOR, compose
+
+    rule = plan.grain or "day"
+    moved: list[tuple[str, Value, Value]] = []
+
+    held = {
+        row.subject: row
+        for row in await store.values(tenant, plan.name, plan.version)
+    }
+
+    for base in sorted(set(bases)):
+        anchor_labels = sorted(
+            label
+            for key in await store.bucket_keys(tenant, plan.scope_index)
+            if (parts := key.split(SEPARATOR, 1)) and parts[0] == base and len(parts) == 2
+            for label in (parts[1],)
+        )
+        if not anchor_labels:
+            # Nothing has ever been set for this subject, so there is nothing
+            # to carry. An absence, and the pass leaves it that way.
+            continue
+
+        anchors: list[Anchor] = []
+        # The anchor's own stored row, kept beside it: a carried bucket is
+        # headed by the same rendered subject name as the change it reports,
+        # and re-resolving the name here would be a second lookup that could
+        # answer differently after a rename.
+        anchor_rows: dict[str, Any] = {}
+        for label in anchor_labels:
+            row = held.get(compose([base, label]))
+            if row is None:
+                # The anchor's own value has not been computed yet. Skipping
+                # rather than inventing one: the ordinary recompute owns
+                # anchor buckets, and carrying from a bucket whose value we
+                # do not know would fabricate the very number this figure is
+                # supposed to be evidence for.
+                continue
+            anchors.append(Anchor(label=label, value=row.value, members=row.members))
+            anchor_rows[label] = row
+        if not anchors:
+            continue
+
+        def labels_back(n: int, _at: float = at_ms) -> list[str]:
+            from ..windows import WindowSpec
+            from .buckets import resolve_span
+
+            return resolve_span(_at, zone, WindowSpec(first=1, last=n), rule)
+
+        sequence = sequence_to_present(anchors[0].label, labels_back, cap=cap)
+        wanted = carried_rows(anchors, sequence)
+
+        for row in wanted:
+            if row.label in anchor_labels:
+                # The ordinary recompute owns a bucket somebody changed
+                # something in. Writing it again here would be a second
+                # author for one row, and the two could drift.
+                continue
+            subject = compose([base, row.label])
+            before = held.get(subject)
+            if before is None:
+                # **Insert-or-nothing.** Two readers racing on the same
+                # unmaterialised bucket both compute it, benignly -- the rows
+                # are identical because this function is the only thing that
+                # makes them -- but only the one that actually inserted may
+                # report a movement.
+                inserted = await store.save_if_absent(
+                    tenant,
+                    plan.name,
+                    plan.version,
+                    subject,
+                    row.value,
+                    row.members,
+                    anchor_rows[row.anchor].label,
+                )
+                if inserted:
+                    moved.append((subject, None, row.value))
+                continue
+            if before.value == row.value and before.members == row.members:
+                # An unchanged bucket writes nothing and reports nothing: a
+                # pass in which nothing happened filling the log is how the
+                # log stops being read.
+                continue
+            # The value in force changed -- a retroactive edit, reaching
+            # forward from its own bucket. Buckets *before* it compute to
+            # what they already hold and are skipped by the line above, so
+            # history is left alone without a rule saying so.
+            await store.save(
+                tenant,
+                plan.name,
+                plan.version,
+                subject,
+                row.value,
+                row.members,
+                anchor_rows[row.anchor].label,
+            )
+            moved.append((subject, before.value, row.value))
+
+    if moved:
+        log.info(
+            "carried %s to the present for %d bucket(s), triggered by %s",
+            plan.name,
+            len(moved),
+            trigger,
+        )
+    return moved

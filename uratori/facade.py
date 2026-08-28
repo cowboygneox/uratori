@@ -157,6 +157,7 @@ class Uratori:
         written: Mapping[str, Sequence[str]] | None = None,
         deleted: Mapping[str, Sequence[str]] | None = None,
         full: bool = False,
+        at_ms: float | None = None,
     ) -> Outcome:
         """One engine pass. Raises on failure -- it never reports "nothing changed".
 
@@ -191,6 +192,7 @@ class Uratori:
             written=written,
             deleted=deleted,
             full=full or escalate,
+            at_ms=at_ms,
         )
 
     def _through_kinds(self) -> frozenset[str]:
@@ -211,6 +213,7 @@ class Uratori:
         written: Mapping[str, Sequence[str]] | None = None,
         deleted: Mapping[str, Sequence[str]] | None = None,
         full: bool = False,
+        at_ms: float | None = None,
         trailing: Sequence[int | str | WindowSpec] = DEFAULT_TRAILING,
         serve: bool = True,
     ) -> RunReport:
@@ -229,7 +232,7 @@ class Uratori:
         would re-report the same dial move on every pass for ever.
         """
         outcome = await self.execute(
-            tenant, settings, written=written, deleted=deleted, full=full
+            tenant, settings, written=written, deleted=deleted, full=full, at_ms=at_ms
         )
         touched = {change.figure for change in outcome.changes}
         # A pass through the facts door (or `full`, or deleting) is the

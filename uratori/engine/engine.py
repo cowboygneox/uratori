@@ -31,6 +31,7 @@ from .buckets import (
     read_path,
     subject_of,
 )
+from .carry import materialise
 from .change import Change, Outcome
 from .evaluate import Parts, Readers, evaluate, same_value
 
@@ -56,6 +57,7 @@ class Engine:
         written: Mapping[str, Sequence[str]] | None = None,
         deleted: Mapping[str, Sequence[str]] | None = None,
         full: bool = False,
+        at_ms: float | None = None,
     ) -> Outcome:
         """One pass. Raises on failure -- it never reports "nothing changed".
 
@@ -66,6 +68,13 @@ class Engine:
         only thing that can decide what to do about it.
         """
         lib = self._library
+        # The pass's own instant, read once. Every age bucket and every
+        # carried extension in this pass answers to it, so a pass cannot
+        # disagree with itself about what "now" is -- the same
+        # one-instant rule a projection has always had, one layer up.
+        # Injectable because "how far has the sequence been extended" is
+        # otherwise untestable without waiting.
+        now = at_ms if at_ms is not None else _now_ms()
         # Not `not lib.figures`: a projection's `from` reads index buckets with
         # no figure anywhere near them, so a library of indexes and projections
         # alone still has indexing work to do -- returning early would serve
@@ -145,10 +154,10 @@ class Engine:
                     {"unit": plan.unit, "scope": plan.scope, "depth": plan.depth},
                 )
             if full:
-                await self._reindex(tenant, settings)
+                await self._reindex(tenant, settings, now_ms=now)
                 reindexed = tuple(sorted(lib.indexes))
             elif stale:
-                await self._reindex(tenant, settings, only=stale)
+                await self._reindex(tenant, settings, only=stale, now_ms=now)
                 reindexed = tuple(sorted(stale))
             changes.extend(await self._remove_departed(tenant, settings))
             only = None if full else {p.name for p in pending}
@@ -170,7 +179,7 @@ class Engine:
                 # in the library, and a definition-only pass would pay those
                 # scans to apply an empty batch.
                 changes.extend(
-                    await self._apply(tenant, settings, written or {}, deleted or {})
+                    await self._apply(tenant, settings, written or {}, deleted or {}, now_ms=now)
                 )
             if stale:
                 # A grouping moved with no figure pointer moving -- an index
@@ -183,7 +192,7 @@ class Engine:
                 # diffs a record's old buckets against its new ones to decide
                 # whose figures moved, and a rebuild beforehand would erase
                 # the "old" half of that comparison and silence the stream.
-                await self._reindex(tenant, settings, only=stale)
+                await self._reindex(tenant, settings, only=stale, now_ms=now)
                 reindexed = tuple(sorted(stale))
                 # A wholesale rebuild is diffless -- `replace_index` cannot
                 # say whose buckets moved -- so every figure reading a
@@ -232,6 +241,49 @@ class Engine:
                 # or `full` -- see `Uratori.run`.
                 changes.extend(await self._backfill(tenant, settings))
 
+        # **Extension on every pass.** The pass is the event that notices
+        # time -- the clock itself never is one, which is the whole reason a
+        # stored value may not read it. So a carried figure reaches the
+        # bucket containing *this pass's* instant here, whatever else the
+        # pass did, and a tenant that syncs daily gets a new bucket a day
+        # after it exists rather than never.
+        #
+        # After the recomputes above, deliberately: the anchors this reads
+        # are the values those just wrote, and carrying from a bucket whose
+        # own value is still stale would spread the stale number forward.
+        carried: list[str] = []
+        for plan in lib.figures:
+            if not plan.carried or plan.scope_index is None:
+                continue
+            bases = {
+                subject_of(key)
+                for key in await self._store.bucket_keys(tenant, plan.scope_index)
+            }
+            alive = {row.key for row in await self._facts.of_kind(tenant, plan.scope)}
+            rows = await materialise(
+                self._store,
+                plan,
+                tenant,
+                bases & alive,
+                at_ms=now,
+                zone=_zone_of(lib, plan, settings),
+                trigger="pass",
+            )
+            if rows:
+                carried.append(plan.name)
+            for subject, before, after in rows:
+                changes.append(
+                    Change(
+                        figure=plan.name,
+                        subject=subject,
+                        kind="moved",
+                        before=before,
+                        after=after,
+                        label=await self._label(tenant, plan, subject),
+                        display=plan.display,
+                    )
+                )
+
         # `covered` is what the host re-dates evidence on, so it must name
         # the kinds this pass *read*, not the kinds the batch happened to
         # mention. A full pass recomputed every figure from every fact its
@@ -243,7 +295,11 @@ class Engine:
         if full:
             covered |= _kinds_read(lib)
         return Outcome(
-            changes=tuple(changes), covered=covered, reindexed=reindexed, rebuilt=rebuilt
+            changes=tuple(changes),
+            covered=covered,
+            reindexed=reindexed,
+            rebuilt=rebuilt,
+            carried=tuple(sorted(carried)),
         )
 
     # -------------------------------------------------------------- pending --
@@ -301,10 +357,14 @@ class Engine:
         return resolve
 
     async def _reindex(
-        self, tenant: str, settings: Mapping[str, Any], only: set[str] | None = None
+        self,
+        tenant: str,
+        settings: Mapping[str, Any],
+        only: set[str] | None = None,
+        *,
+        now_ms: float,
     ) -> None:
         resolve = await self._resolver(tenant, only=only)
-        now_ms = _now_ms()
         for index in self._library.indexes.values():
             if only is not None and index.name not in only:
                 continue
@@ -329,9 +389,10 @@ class Engine:
         settings: Mapping[str, Any],
         written: Mapping[str, Sequence[str]],
         deleted: Mapping[str, Sequence[str]],
+        *,
+        now_ms: float,
     ) -> list[Change]:
         resolve = await self._resolver(tenant)
-        now_ms = _now_ms()
         touched: dict[str, set[str]] = {}
 
         def touch(subject: str, figure: str) -> None:
@@ -807,6 +868,28 @@ class Engine:
     def _indexes_over(self, kind: str) -> list[CompiledIndex]:
         return [i for i in self._library.indexes.values() if i.kind == kind]
 
+
+
+def _zone_of(
+    lib: Library, plan: FigurePlan, settings: Mapping[str, Any]
+) -> str | None:
+    """Whose calendar the figure's buckets were written in.
+
+    Resolved from the scope group's own zone dial, which is the only thing
+    that decided the labels at write time -- so extension and reading walk
+    the same sequence. A second answer here would materialise labels a
+    window never asks for.
+    """
+    from ..lang.ast import ByComposite
+
+    if plan.scope_index is None:
+        return None
+    spec = lib.indexes[plan.scope_index].spec
+    if isinstance(spec, ByComposite):
+        for part in spec.parts:
+            if part.zone is not None:
+                return str(setting_value(dict(settings), part.zone))
+    return None
 
 
 def _field_kinds(plan: FigurePlan) -> frozenset[str]:

@@ -57,7 +57,7 @@ class Outcome:
 
     changes: tuple[Change, ...]
     covered: frozenset[str]
-    rebuilt: tuple[str, ...] = ()
+    rebuilt: tuple[str, ...]
     """Which figures were rebuilt from scratch, and why it is worth reporting:
     the observable difference between a narrow settings save and a full rebuild
     is *work*, and a figure recomputed to the value it already held writes
@@ -71,3 +71,18 @@ class Outcome:
     re-serves on a definition-only pass when a grouping it filters through is
     in this tuple (beside the moved-figure, moved-text and moved-dial
     checks)."""
+
+    carried: tuple[str, ...] = ()
+    """Carried figures this pass extended to the present bucket -- the
+    trigger, recorded on the run log.
+
+    Named rather than counted so "the pass ran and moved nothing" stays a
+    different finding from "the pass never reached this figure". A lazy fill
+    on a read is the other trigger and never appears here, which is the
+    distinction the field exists to keep: ran-versus-never-ran must not be
+    something a reader has to infer from whether a bucket happens to hold a
+    value.
+
+    Appended after `reindexed` so an embedder constructing `Outcome`
+    positionally keeps its meaning, exactly as `reindexed` was.
+    """

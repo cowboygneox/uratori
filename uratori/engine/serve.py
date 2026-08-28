@@ -62,6 +62,7 @@ from .buckets import (
     subject_of,
     tail_of,
 )
+from .carry import materialise
 from .engine import (  # the same hashes the pass records, shared deliberately
     _index_version,
     _versions_if_legacy_current,
@@ -651,6 +652,37 @@ async def serve_reading(
 
     subjects: list[Subject] = []
     if isinstance(state, Ok) and all_labels:
+        if source.carried:
+            # **Lazy fill on first read.** A pass extends a carried figure to
+            # the bucket it ran in, so between passes the present bucket has
+            # no row -- and a screen asking for it would be told "never
+            # computed" about a value that has demonstrably been in force for
+            # months. A read that finds an unmaterialised bucket materialises
+            # it, through the same function the pass uses, and then serves it.
+            #
+            # Legal for exactly one reason: a carried row is deterministic and
+            # **time-invariant**. September's answer is the same answer for
+            # ever once September exists, so writing it during a read cannot
+            # make the store disagree with a pass. Nothing clock-*derived*
+            # could be stored from here -- only the question of whether a
+            # bucket exists yet is clock-dependent, and that is what the read
+            # is answering.
+            #
+            # Concurrent first-readers race benignly: both compute identical
+            # rows, and the insert-or-nothing write lets exactly one of them
+            # count as having created each.
+            await materialise(
+                store,
+                source,
+                tenant,
+                {
+                    subject_of(key)
+                    for key in await store.bucket_keys(tenant, source.scope_index or "")
+                },
+                at_ms=at,
+                zone=zone,
+                trigger="read",
+            )
         rows = await store.values_in_range(
             tenant, source.name, source.version, min(all_labels), max(all_labels)
         )
