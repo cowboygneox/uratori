@@ -1558,12 +1558,28 @@ async def test_a_bundle_is_one_request_on_the_results_surface(server: Server) ->
     assert summary["summary"]["values"]["orders"] == 7.0
     assert len(projection["subjects"]) == 2
 
-    # The bulk surface does not repeat the tile: every member serves there
-    # under its own name already.
+    # The bulk surface carries the tile too, since the socket's first paint
+    # reads it: a client binding a tile must not render blank until a pass
+    # happens to touch a member. The members' numbers therefore travel twice
+    # -- bytes, not arithmetic.
     listed = await server.http.get("/tenants/t1/results")
     assert listed.status_code == 200
-    assert all(r["kind"] != "bundle" for r in listed.json())
-    assert "shop_courier.card" not in {r["name"] for r in listed.json()}
+    tiles = [r for r in listed.json() if r["kind"] == "bundle"]
+    assert [t["name"] for t in tiles] == ["shop_courier.card"]
+    assert [m["slot"] for m in tiles[0]["results"]] == [
+        "typical",
+        "carrying",
+        "board",
+        "book",
+    ]
+
+    # An anchored bulk read serves no tiles, for the reason the by-name route
+    # refuses `at` on a bundle: the non-reading members can only be served as
+    # they stand, and a tile served as-it-stands inside a response the caller
+    # anchored would disagree with itself under a wrapper claiming one clock.
+    anchored = await server.http.get("/tenants/t1/results", params={"at": "2026-06-30"})
+    assert anchored.status_code == 200
+    assert all(r["kind"] != "bundle" for r in anchored.json())
 
 
 async def test_the_described_library_lists_the_bundle_and_its_members_in_order(
