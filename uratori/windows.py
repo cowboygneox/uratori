@@ -12,14 +12,13 @@ before them, with no overlap and no gap. A bare number `N` is exactly `1-N`
 
 A span is **positions in an ordered bucket sequence, and nothing else**.
 What one bucket *is* -- a day, a month, a quarter, the first Monday of each
-month -- lives in the declarations, hashed: the source figure's group clause
-declares the stored grain, and a reading's `buckets` clause declares any
-coarser sequence its windows walk. It has to live there, because the bucket
-rule changes what a number means, and the language's own law is that an
-argument may narrow the population and may never change the calculation. A
-unit riding on the argument (`1-48h`, `over ... in hours` -- shipped briefly
-and retired) was that law broken quietly: the same reading meant two
-different things under two spellings of one request.
+month -- lives in the source figure's group clause, hashed. It has to live
+there, because the bucket rule changes what a number means, and the
+language's own law is that an argument may narrow the population and may
+never change the calculation. A unit riding on the argument (`1-48h`,
+`over ... in hours` -- shipped briefly and retired) was that law broken
+quietly: the same reading meant two different things under two spellings of
+one request.
 
 `each a-b` is the one piece of sugar: it expands to the one-bucket windows
 `a-a, a+1-a+1, ..., b-b`, one window per bucket in order, so a per-bucket
@@ -208,7 +207,7 @@ def expand_window_arg(value: int | str | WindowSpec) -> tuple[WindowSpec, ...]:
         matched = _EACH.fullmatch(value.strip())
         if matched is not None:
             spec = make_window_spec(int(matched.group(1)), int(matched.group(2)))
-            return tuple(WindowSpec(first=k, last=k) for k in range(spec.first, spec.last + 1))
+            return (spec,)
     return (as_window_spec(value),)
 
 
