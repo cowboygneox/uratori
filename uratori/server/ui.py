@@ -45,7 +45,7 @@ from pydantic import BaseModel
 
 from ..engine.buckets import SEPARATOR, measure_of, subject_of
 from ..engine.project import format_value
-from ..engine.serve import _citing_spaces, _iso, _label_of, now_ms, serve_figure
+from ..engine.serve import _citing_spaces, _label_of, serve_figure
 from ..engine.serve import availability as figure_availability
 from ..facade import DEFAULT_TRAILING
 from ..lang.ast import ByAge, ByComposite, ByField, FigureUnit, IndexBy, IndexField
@@ -527,8 +527,13 @@ class AboutReadingOut(BaseModel):
     live reading, today), and `note` then carries the same sentence its own
     route answers with -- the section must state that absence rather than
     silently omit the one reading kind, which is how readings went missing
-    from this page in the first place."""
+    from this page in the first place. `name` and `version` always travel,
+    result or not: two live readings answering two identical anonymous
+    sentences would leave the reader unable to say WHICH reading is
+    missing."""
 
+    name: str
+    version: str
     result: Result | None = None
     note: str | None = None
 
@@ -570,7 +575,11 @@ class AboutTileOut(BaseModel):
     version: str
     label: str
     doc: str
-    at: str
+    at: str | None = None
+    """When the tile was evaluated -- absent for a tile that could not be
+    (see `note`), because stamping a fresh instant on a non-answer would be
+    a fabricated clock."""
+
     members: list[TileMemberOut]
     note: str | None = None
     """Set when the tile could not be evaluated at all (a live-reading
@@ -660,17 +669,23 @@ class ComputedPageOut(BaseModel):
     result: Result
     more: bool
     total: int
+    order: str
+    """The total order the pages walk, in words -- the server's to state,
+    because a pager over an unstated order is an arbitrary subset with
+    buttons, which is what this language refuses a `limit` without a sort
+    for. Derived from the figure's own shape: a time-grained figure's rows
+    for one subject run chronologically; a split figure's run by dimension
+    key, which need not be time."""
 
 
 class CitedPageOut(BaseModel):
     """One page of the stored rows of one figure that counted one record --
     the door behind the about page's capped "Counted into" entry. Rows in
-    codepoint subject order (the same order `values_citing` caps by, so the
-    overview's sample is this walk's first page), keyset-paged on the
-    subject id."""
+    codepoint subject order (the same order `values_citing` caps by, and
+    the default page size is the overview's cap, so the overview's sample
+    IS this walk's first page), keyset-paged on the subject id."""
 
     figure: str
-    label: str
     scope: str
     rows: list[CitedRowOut]
     more: bool
@@ -1135,20 +1150,29 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 try:
                     answer = await facade.answer(tenant, reading.name, raw)
                 except NotImplementedError as gap:
-                    about_readings.append(AboutReadingOut(result=None, note=str(gap)))
+                    about_readings.append(
+                        AboutReadingOut(
+                            name=reading.name,
+                            version=reading.version,
+                            result=None,
+                            note=str(gap),
+                        )
+                    )
                     continue
                 if not isinstance(answer, Result):  # pragma: no cover - a
                     # reading's name answers a reading; for the type checker.
                     continue
                 about_readings.append(
                     AboutReadingOut(
+                        name=reading.name,
+                        version=reading.version,
                         result=answer.model_copy(
                             update={
                                 "subjects": [
                                     sub for sub in answer.subjects if sub.id == key
                                 ]
                             }
-                        )
+                        ),
                     )
                 )
 
@@ -1266,7 +1290,8 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                             version=bundle.version,
                             label=_label_of(bundle.name),
                             doc=bundle.doc,
-                            at=_iso(now_ms()),
+                            # No `at`: nothing was evaluated, and a fresh
+                            # timestamp on a non-answer is a fabricated clock.
                             members=[
                                 TileMemberOut(
                                     slot=member.slot,
@@ -1347,10 +1372,19 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             raise HTTPException(
                 status_code=404, detail=f"Nothing is stored for {key} under {kind}"
             )
+        store = PostgresEngineStore(s.pool)
         document = taught_schema(world).settings_for(await db.load_settings(s.pool, tenant))
+        state = await figure_availability(store, library, tenant, plan, document)
+        if not isinstance(state, Ok):
+            # 409 like the cited door's: a fixable state (run a pass), and a
+            # 200 whose empty page reads as "zero rows" is the confident
+            # absence this whole surface exists to prevent. The overview
+            # only offers this door under an Ok state, so landing here means
+            # the world moved since -- exactly when the sentence matters.
+            raise HTTPException(status_code=409, detail=state.detail or state.because)
         try:
             result = await serve_figure(
-                store=PostgresEngineStore(s.pool),
+                store=store,
                 library=library,
                 tenant=tenant,
                 plan=plan,
@@ -1371,6 +1405,17 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             result=result.model_copy(update={"subjects": rows[:limit]}),
             more=more,
             total=total,
+            # In words, from the plan's own shape: the row id's tail is a
+            # time bucket only when the figure declares a grain -- a split
+            # figure's tail is a dimension key, and calling that
+            # chronological would state an order the server never chose.
+            order=(
+                "chronological, oldest first"
+                if plan.grain is not None
+                else "by dimension key"
+                if (plan.across is not None or plan.dimension_part is not None)
+                else "single row per subject"
+            ),
         )
 
     @ui.get(
@@ -1385,12 +1430,13 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         key: str,
         request: Request,
         after: str | None = None,
-        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+        limit: Annotated[int, Query(ge=1, le=200)] = ABOUT_ROWS,
     ) -> CitedPageOut:
         """Every stored row of one figure that counted one record, paged --
         the door behind "… and N more citations". Codepoint subject order,
-        the same order the about sample is capped by, so the first page IS
-        the sample and the cursor is the last subject id shown."""
+        the same order the about sample is capped by, and the default page
+        size is the sample's cap, so the first page IS the sample and the
+        cursor is the last subject id shown."""
         s = _state(request)
         world, library = ready(s)
         plan = next((p for p in library.figures if p.name == figure), None)
@@ -1422,7 +1468,6 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         more = len(found) > limit
         return CitedPageOut(
             figure=plan.name,
-            label=_label_of(plan.name),
             scope=plan.scope,
             rows=[_cited_row(stored, plan.unit, document) for stored in found[:limit]],
             more=more,
@@ -1447,20 +1492,34 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             raise HTTPException(status_code=409, detail="No schema has been declared yet")
         schema = taught_schema(s.world)
         raw = await db.load_settings(s.pool, tenant)
+        # The MERGED document, because that is what the engine reads: a
+        # tenant that half-overrides a threshold pair must show the pair the
+        # bands actually compare against, and a page that walked the raw
+        # document alone would show a dial disagreeing with the calculation
+        # it claims to explain.
+        merged = schema.settings_for(raw)
         out: list[DialOut] = []
         for name in sorted({*schema.declarable, EFFORT_HOURS_SETTING}):
-            held, from_tenant = _at_path(raw, name)
-            from_default = False
-            if not from_tenant:
-                held, from_default = _at_path(schema.defaults, name)
-            source: Literal["tenant", "default", "unset"] = (
-                "tenant" if from_tenant else "default" if from_default else "unset"
-            )
+            held, has = _at_path(merged, name)
+            if not has or held is None:
+                # Nothing servable at this name -- never written, written as
+                # an explicit null, or shadowed by a non-mapping ancestor.
+                # The engine's read through this name finds the same
+                # nothing, so the page states the absence instead of
+                # rendering a repr of it or a default the merge discarded.
+                out.append(DialOut(name=name, display=None, source="unset"))
+                continue
+            tenant_held, tenant_has = _at_path(raw, name)
             out.append(
                 DialOut(
                     name=name,
-                    display=_dial_display(held) if source != "unset" else None,
-                    source=source,
+                    display=_dial_display(held),
+                    # "tenant" means the tenant's document contributed here
+                    # (wholly, or one rung of a merged pair); "default"
+                    # means the schema's copy serves untouched.
+                    source=(
+                        "tenant" if tenant_has and tenant_held is not None else "default"
+                    ),
                 )
             )
         return DialsOut(dials=out)
@@ -1991,15 +2050,26 @@ def _tile_member(
     # A projection: this record's row alone. The summary row stays home --
     # it is computed by the summarise declared over the page (a different
     # definition), and under a single record's row it would read as this
-    # record's contribution, which it is not.
+    # record's contribution, which it is not. Staying home is STATED: a
+    # row silently thinner here than on the tile would read as the tile
+    # having no summary, a claim nobody made.
     match = [s for s in result.subjects if s.id == key]
     base.total = len(match)
+    had_summary = result.summary is not None
     base.result = result.model_copy(update={"subjects": match, "summary": None})
+    notes = []
     if isinstance(result.state, Ok) and not match:
-        base.note = (
+        notes.append(
             "Not on this page. Its from-set, omit gate, sort and limit "
             "decide the rows, and they did not take this record."
         )
+    if had_summary:
+        notes.append(
+            "The page's summary row stays on the tile's own page: it is the "
+            "summarise's number about the whole page, not this record's "
+            "contribution."
+        )
+    base.note = " ".join(notes) or None
     return base
 
 

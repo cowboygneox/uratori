@@ -310,16 +310,22 @@ function leafLine(edge, dials) {
     el('span', { class: 'leaf' }, ' — a tenant dial'),
     held
       ? (held.source === 'unset'
-          // Declarable, defaulted nowhere, set by nobody: a stated absence,
-          // in the finding voice — a definition reading a dial that holds
-          // nothing is exactly what an investigator came to find.
-          ? el('span', { class: 'finding' }, ' — holding no value anywhere')
+          // Nothing servable at this name — never written, an explicit
+          // null, or a clobbered ancestor: a stated absence, in the finding
+          // voice — a definition reading a dial that holds nothing is
+          // exactly what an investigator came to find.
+          ? el('span', { class: 'finding' }, ' — holding no servable value')
           : el('span', { class: 'leaf' }, ', currently ',
               el('span', { class: 'mono' }, held.display),
               held.source === 'tenant' ? ' (set by this tenant)' : ' (the schema default)'))
       : dials === 'failed'
         ? el('span', { class: 'faint' }, ' — its current value could not be read')
-        : null);
+        : dials instanceof Map
+          // The payload answered and this name was not in it: a dial the
+          // schema no longer declares, stated rather than left to read
+          // like the no-tenant case under prose promising values.
+          ? el('span', { class: 'finding' }, ' — not a dial this deployment declares')
+          : null);
 }
 
 // One direct dependency, one hop, never a subtree. The old recursive tree
@@ -882,23 +888,24 @@ function resultBlocks(result) {
   return blocks;
 }
 
-// A series, drawn: one bar per point, heights scaled to the window's own
-// tallest. Positional only -- the wire sends the numbers exactly so a bar
-// can have a width or a height (Subject.value's documented purpose), and no
-// numeral is ever composed from them here. A null point is a gap with its
-// own look: an absence drawn as an absence, never a zero-height bar.
+// A series, drawn: one bar per point, each height a SERVED fraction
+// (series_scale, 0..1 against the window's own peak) times the row height.
+// The scale arrives computed because deriving it here would be a maximum
+// and a share -- the two calculations this file must never make; the only
+// arithmetic below is a fraction times a CSS percentage, which is layout.
+// A null point is a gap with its own look: an absence drawn as an absence,
+// never a zero-height bar.
 function sparkline(window) {
-  const points = window.series;
-  if (!points || !points.length) return el('span', { class: 'faint' }, '—');
-  const held = points.filter((value) => value != null);
-  const peak = held.length ? Math.max(...held) : 0;
+  const scale = window.series_scale;
+  if (!scale || !scale.length) return el('span', { class: 'faint' }, '—');
   return el('span', {
     class: 'spark',
-    title: `${points.length} points, one per ${window.series_by || 'day'}`,
-  }, points.map((value) => {
-    if (value == null) return el('span', { class: 'spark-gap' });
+    title: `${scale.length} points, one per ${window.series_by || 'day'}, `
+      + 'scaled to this window’s own peak',
+  }, scale.map((fraction) => {
+    if (fraction == null) return el('span', { class: 'spark-gap' });
     const bar = el('span', { class: 'spark-bar' });
-    bar.style.height = `${peak > 0 ? Math.max(8, (value / peak) * 100) : 8}%`;
+    bar.style.height = `${fraction * 100}%`;
     return bar;
   }));
 }
@@ -1059,7 +1066,10 @@ async function computedPage(kind, key, figure, banded, after) {
   });
   return {
     ok: true,
-    summary: `${rows.length} of ${body.total} rows — the figure’s own order, oldest first`,
+    // The order clause is the server's sentence (body.order): for a split
+    // figure the row order is dimension-key order, not time, and only the
+    // server knows which this figure is.
+    summary: `${rows.length} of ${body.total} rows — ${body.order}`,
     header: el('tr', {}, el('th', {}, 'row'), el('th', { class: 'num' }, 'value'),
       banded ? el('th', {}, 'band') : null, el('th', {})),
     rows,
@@ -1327,16 +1337,19 @@ async function recordView(kind, key) {
       'No reading is scoped to ', el('span', { class: 'mono' }, kind), '.'));
   } else {
     for (const entry of aboutAnswer.body.readings) {
+      // The address from the entry itself, not the result: an unservable
+      // reading still gets its name and version on the page, or two live
+      // readings would be two identical anonymous sentences.
+      parts.push(el('p', { class: 'faint' },
+        el('span', { class: 'badge reading' }, 'reading'), ' ',
+        el('a', { class: 'mono', href: defHash(entry.name) }, entry.name),
+        el('span', { class: 'mono' }, ` @ ${entry.version}`)));
       if (!entry.result) {
         parts.push(el('p', { class: 'faint' },
           entry.note ?? 'This reading cannot be served.'));
         continue;
       }
       const r = entry.result;
-      parts.push(el('p', { class: 'faint' },
-        el('span', { class: 'badge reading' }, 'reading'), ' ',
-        el('a', { class: 'mono', href: defHash(r.name) }, r.name),
-        el('span', { class: 'mono' }, ` @ ${r.version}`)));
       if (r.state.ok && !r.subjects.length) {
         // Computed, and this record earned no windows: its source figure
         // holds no days for it — a per-record absence the reading's own
@@ -1382,8 +1395,9 @@ async function recordView(kind, key) {
                 ? el('span', { class: 'dim' }, ` × ${row.dimension}`) : null),
             el('td', { class: 'mono num' }, row.display ?? '—')));
           if (entry.more) {
-            // The first rows in subject order ARE this walk's first page,
-            // so the browse below continues rather than repeats.
+            // The walk's default page size is the sample's cap, so its
+            // first page IS the rows above — the browse re-anchors the
+            // reader at the same head before paging on.
             const capRow = el('tr', {}, el('td', { colspan: '3', class: 'faint' },
               `… the first ${entry.rows.length} of ${entry.total} citations — `,
               el('button', {
@@ -1455,7 +1469,9 @@ async function recordView(kind, key) {
     for (const tile of aboutAnswer.body.tiles) {
       parts.push(el('h2', { class: 'subject' },
         el('a', { class: 'mono', href: defHash(tile.bundle) }, tile.bundle), ' ',
-        el('span', { class: 'badge bundle' }, 'bundle')));
+        el('span', { class: 'badge bundle' }, 'bundle'),
+        ' ', el('span', { class: 'dim' }, tile.label)));
+      if (tile.doc) parts.push(el('p', { class: 'faint' }, tile.doc));
       if (tile.note) {
         parts.push(el('div', { class: 'notice' },
           'This tile cannot be served: ', el('span', { class: 'mono' }, tile.note)));
@@ -1487,6 +1503,9 @@ async function recordView(kind, key) {
         }
       }
       parts.push(el('p', { class: 'faint' },
+        // `at` only when the tile was evaluated: an unservable tile has no
+        // instant, and printing one would stamp a clock on a non-answer.
+        tile.at ? ['answered ', el('span', { class: 'mono' }, tile.at), ' — '] : null,
         'tile hash ', el('span', { class: 'mono' }, tile.version),
         ', review-only; every number above cites its own member’s version'));
     }

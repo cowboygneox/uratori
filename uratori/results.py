@@ -141,6 +141,17 @@ class Window(BaseModel):
     that is not a scalar; it exists so a sparkline is a definition's answer
     rather than the client slicing a range into ten and computing ten means."""
 
+    series_scale: list[float | None] | None = None
+    """Each series point as a fraction of this window's own largest point,
+    0..1, computed here so a screen drawing bars multiplies a served
+    fraction by a bar height and composes nothing -- deriving the scale
+    client-side means a maximum and a share, the two calculations a client
+    must not make. Scaled within the window on purpose, and a screen
+    stacking two windows should say so; the raw values ride beside it for a
+    client that owns real axes. All-nought (or non-positive) windows scale
+    to 0.0 per point: a zero drawn at zero height, never invented relief.
+    None exactly when `series` is None."""
+
     series_by: Literal["15 minutes", "hour", "day"] | None = None
     """What one series point spans, when the definition grouped a sub-day
     figure. Absent for a day-keyed source, where a point has always been a
@@ -385,7 +396,13 @@ class Result(BaseModel):
     that unioned present keys would silently narrow itself the day every
     window fell short. `None` for every other kind: statistics are a
     reading's vocabulary, and null here means "does not apply", never
-    "empty"."""
+    "empty".
+
+    The catalogue (`DeclarationOut.statistics` on `/definitions`) speaks the
+    language instead -- `sum` there, `total` here -- because it describes
+    the declaration as written while this list names the fields an answer
+    fills. Two vocabularies for two questions; a client binding columns
+    binds to THIS one."""
 
     banded_on: str | None = None
     """For a banded reading: which statistic the band judges, in the same

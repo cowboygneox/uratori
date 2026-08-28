@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, get_args
 
 import httpx
+from pydantic import BaseModel
 
 from uratori.server.ui import DeclarationKind
 
@@ -153,17 +154,22 @@ async def _teach(http: httpx.AsyncClient) -> None:
     assert put.status_code == 200, put.text
 
 
-def _rides(n: int, courier: str = "c1", tags: list[str] | None = None) -> dict[str, dict[str, Any]]:
-    """n delivered orders, one per day counting back from a fixed date, so a
-    by-day figure holds n rows for the one courier."""
-    from datetime import datetime, timedelta
+def _rides(
+    n: int, courier: str = "c1", tags: list[str] | None = None, prefix: str = "r"
+) -> dict[str, dict[str, Any]]:
+    """n delivered orders, one per day counting back from yesterday, so a
+    by-day figure holds n rows for the one courier. Counted back from *now*
+    rather than a fixed date, because the reading tests window against the
+    clock: a fixed anchor is a test that starts failing the month the
+    windows drift past it."""
+    from datetime import UTC, datetime, timedelta
 
-    end = datetime(2026, 8, 20, 12, 0)
+    end = datetime.now(tz=UTC) - timedelta(days=1)
     out = {}
     for i in range(n):
         at = end - timedelta(days=i)
-        out[f"r{i}"] = {
-            "ref": f"R-{i:03}",
+        out[f"{prefix}{i}"] = {
+            "ref": f"{prefix.upper()}-{i:03}",
             "courier_id": courier,
             "status": "delivered",
             "picked_up_at": (at - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -182,6 +188,33 @@ async def _about(http: httpx.AsyncClient, kind: str, key: str) -> dict[str, Any]
     got = await http.get(f"/ui/api/tenants/t1/about/{kind}/{key}")
     assert got.status_code == 200, got.text
     return got.json()
+
+
+async def _walk(
+    http: httpx.AsyncClient,
+    path: str,
+    *,
+    limit: int,
+    rows_of: Any,
+    total: int,
+) -> list[str]:
+    """Walk a keyset-paged route to exhaustion, asserting the shared page
+    contract as it goes: the true total on every page, and termination."""
+    walked: list[str] = []
+    after = ""
+    for _ in range(total + 2):
+        page = await http.get(
+            path, params={"limit": limit, **({"after": after} if after else {})}
+        )
+        assert page.status_code == 200, page.text
+        body = page.json()
+        assert body["total"] == total, "the total holds on every page"
+        ids = rows_of(body)
+        walked += ids
+        if not body["more"]:
+            break
+        after = ids[-1]
+    return walked
 
 
 # ---------------------------------------------- the statistics a reading --
@@ -209,6 +242,22 @@ async def test_a_reading_names_its_statistics_and_the_one_the_band_judges(
         )
         assert result["banded_on"] == "worst", "the band names worst, not the default mean"
 
+        # The load-bearing half of "declared, not derived": a window whose
+        # every statistic is withheld still travels the full declared list.
+        # A one-day window holds at most one ride against a floor of two, so
+        # every display map here is empty -- and a column set unioned from
+        # present keys would collapse to nothing.
+        thin = (
+            await http.get(
+                "/ui/api/tenants/t1/results/shop_courier.typical_ride?trailing=1"
+            )
+        ).json()
+        assert thin["statistics"] == ["mean", "worst"]
+        for subject in thin["subjects"]:
+            for window in subject["windows"]:
+                assert window["unmet"], "the one-day window must fall short"
+                assert window["display"] == {}, "withheld means every statistic"
+
         # A figure's answer carries neither: statistics are a reading's
         # vocabulary, and a null here is 'does not apply', never 'empty'.
         figure = (await http.get("/ui/api/tenants/t1/results/shop_courier.carrying")).json()
@@ -222,13 +271,23 @@ async def test_a_sum_statistic_travels_under_its_wire_name(pg_dsn: str) -> None:
     the display map never uses would dash every row."""
     async with serve(pg_dsn) as http:
         source = PARITY_SOURCE + """
-# All riding time, totalled.
+# All riding time, totalled, banded on the total.
 reading shop_courier.ride_total(range):
     display "{shop_courier} total riding"
+    band low on sum against limits.ride
     depends:
         rides = shop_courier.ride_times in range
     calculate:
         sum(rides)
+
+# The band's unwritten default: it judges the mean.
+reading shop_courier.usual_ride(range):
+    display "{shop_courier} usual ride"
+    band low against limits.ride
+    depends:
+        rides = shop_courier.ride_times in range
+    calculate:
+        mean(rides)
 """
         put = await http.put("/schema", json=PARITY_SCHEMA)
         assert put.status_code == 200, put.text
@@ -238,9 +297,22 @@ reading shop_courier.ride_total(range):
 
         result = (await http.get("/ui/api/tenants/t1/results/shop_courier.ride_total")).json()
         assert result["statistics"] == ["total"]
-        for subject in result["subjects"]:
-            for window in subject["windows"]:
-                assert set(window["display"]) <= {"total"}
+        assert result["banded_on"] == "total", (
+            "a band written `on sum` names the wire's `total` column -- the "
+            "language's word would head a column the display map never fills"
+        )
+        held = [
+            window["display"]
+            for subject in result["subjects"]
+            for window in subject["windows"]
+            if window["display"]
+        ]
+        assert held, "at least one window must actually carry a total"
+        for display in held:
+            assert set(display) == {"total"}
+
+        usual = (await http.get("/ui/api/tenants/t1/results/shop_courier.usual_ride")).json()
+        assert usual["banded_on"] == "mean", "the unwritten band target is the mean"
 
 
 # ------------------------------------------------- a record's tiles etc. --
@@ -258,17 +330,7 @@ async def test_a_record_serves_the_readings_scoped_to_its_kind(pg_dsn: str) -> N
             http,
             {
                 "shop_courier": {"c1": {"name": "Aki"}, "c2": {"name": "Bo"}},
-                "shop_order": {**_rides(3), **_rides(2, "c2")},
-            },
-        )
-        # _rides(2, 'c2') reuses r0/r1 keys -- rewrite with distinct keys.
-        await _push(
-            http,
-            {
-                "shop_order": {
-                    f"b{i}": row
-                    for i, row in enumerate(_rides(2, "c2").values())
-                }
+                "shop_order": {**_rides(3), **_rides(2, "c2", prefix="b")},
             },
         )
 
@@ -302,9 +364,20 @@ async def test_a_record_serves_the_tiles_its_kind_appears_on(pg_dsn: str) -> Non
     page-level summarise states that it is not a per-record number."""
     async with serve(pg_dsn) as http:
         await _teach(http)
+        # TWO couriers, so a narrowing that quietly served everybody's rows
+        # would fail here rather than pass by there being nobody else; and
+        # one order still riding, so the board's flag machinery is exercised
+        # by a row that actually earned its sentence.
         await _push(
             http,
-            {"shop_courier": {"c1": {"name": "Aki"}}, "shop_order": _rides(3)},
+            {
+                "shop_courier": {"c1": {"name": "Aki"}, "c2": {"name": "Bo"}},
+                "shop_order": {
+                    **_rides(3),
+                    **_rides(2, "c2", prefix="b"),
+                    "o0": {"ref": "A-0", "courier_id": "c1", "status": "riding"},
+                },
+            },
         )
 
         about = await _about(http, "shop_courier", "c1")
@@ -322,14 +395,18 @@ async def test_a_record_serves_the_tiles_its_kind_appears_on(pg_dsn: str) -> Non
         assert typical["kind"] == "reading"
         assert typical["result"]["name"] == "shop_courier.typical_ride"
         assert typical["result"]["version"], "the member's own citation"
-        assert [s["id"] for s in typical["result"]["subjects"]] == ["c1"]
+        assert [s["id"] for s in typical["result"]["subjects"]] == ["c1"], (
+            "this courier's windows alone -- Bo's stay on the tile's own page"
+        )
         spans = [w["span"] for w in typical["result"]["subjects"][0]["windows"]]
         assert spans == ["30", "7"], (
             "the tile's own declared windows, not the serving default"
         )
 
         carrying = members["carrying"]
-        assert [s["id"] for s in carrying["result"]["subjects"]] == ["c1"]
+        assert [s["id"] for s in carrying["result"]["subjects"]] == ["c1"], (
+            "this courier's row alone -- the figure holds Bo's too"
+        )
 
         board = members["board"]
         assert board["result"] is None and board["note"], (
@@ -342,15 +419,25 @@ async def test_a_record_serves_the_tiles_its_kind_appears_on(pg_dsn: str) -> Non
         )
 
         # The order's page sees the same tile from the other side: the board
-        # member narrows to this record's row, the courier members state
-        # whose records they are about.
-        order = await _about(http, "shop_order", "r0")
+        # member narrows to this record's row -- flags intact -- and the
+        # courier members state whose records they are about.
+        order = await _about(http, "shop_order", "o0")
         card = {t["bundle"]: t for t in order["tiles"]}["shop_courier.card"]
         members = {m["slot"]: m for m in card["members"]}
         assert members["board"]["result"] is not None
         rows = members["board"]["result"]["subjects"]
-        assert [s["id"] for s in rows] == ["r0"], "this record's row alone"
-        assert rows[0]["row"]["flags"] == [], "a delivered order earned no flag"
+        assert [s["id"] for s in rows] == ["o0"], "this record's row alone"
+        assert [f["label"] for f in rows[0]["row"]["flags"]] == ["Riding"], (
+            "the row keeps the sentence it earned on the page"
+        )
+        assert members["board"]["result"]["summary"] is None, (
+            "the page-level summary row stays home: under one record's row "
+            "it would read as this record's contribution, which it is not"
+        )
+        assert members["board"]["note"], (
+            "and staying home is stated, never silent -- the note says where "
+            "the summary row lives"
+        )
         assert members["typical"]["result"] is None and members["typical"]["note"]
         assert members["carrying"]["result"] is None and members["carrying"]["note"]
 
@@ -392,33 +479,48 @@ async def test_computed_rows_page_in_row_order_without_drop_or_double(
     catch -- and every page carries the same true total."""
     async with serve(pg_dsn) as http:
         await _teach(http)
+        # A second courier, so a route that dropped its `subject=` narrowing
+        # would return somebody else's rows here instead of passing because
+        # nobody else exists.
         await _push(
             http,
-            {"shop_courier": {"c1": {"name": "Aki"}}, "shop_order": _rides(7)},
+            {
+                "shop_courier": {"c1": {"name": "Aki"}, "c2": {"name": "Bo"}},
+                "shop_order": {**_rides(7), **_rides(4, "c2", prefix="b")},
+            },
         )
 
         full = (await http.get("/ui/api/tenants/t1/results/shop_courier.ride_times")).json()
         expected = [s["id"] for s in full["subjects"] if s["id"].split("@", 1)[0] == "c1"]
         assert len(expected) == 7
 
-        walked: list[str] = []
-        after = ""
-        for _ in range(10):
-            page = await http.get(
-                "/ui/api/tenants/t1/computed/shop_courier.ride_times/shop_courier/c1",
-                params={"limit": 3, **({"after": after} if after else {})},
-            )
-            assert page.status_code == 200, page.text
-            body = page.json()
-            assert body["total"] == 7, "the total holds on every page"
-            rows = body["result"]["subjects"]
-            walked += [s["id"] for s in rows]
-            if not body["more"]:
-                break
-            after = rows[-1]["id"]
+        walked = await _walk(
+            http,
+            "/ui/api/tenants/t1/computed/shop_courier.ride_times/shop_courier/c1",
+            limit=3,
+            rows_of=lambda body: [s["id"] for s in body["result"]["subjects"]],
+            total=7,
+        )
         assert walked == expected, "no page boundary drops or doubles a row"
 
-        # Rendering identical to the figure's own page, row for row.
+        # The exact-boundary case: a limit that divides the total must end
+        # cleanly, not offer one more page holding nothing.
+        last = await http.get(
+            "/ui/api/tenants/t1/computed/shop_courier.ride_times/shop_courier/c1",
+            params={"limit": 7},
+        )
+        body = last.json()
+        assert len(body["result"]["subjects"]) == 7 and body["more"] is False, (
+            "a page exactly at the end offers no empty next page"
+        )
+        past = await http.get(
+            "/ui/api/tenants/t1/computed/shop_courier.ride_times/shop_courier/c1",
+            params={"limit": 3, "after": expected[-1]},
+        )
+        assert past.json()["result"]["subjects"] == [] and past.json()["more"] is False
+
+        # Rendering identical to the figure's own page, row for row -- and
+        # the page states whose order the rows are in.
         by_id = {s["id"]: s for s in full["subjects"]}
         page_one = (
             await http.get(
@@ -426,8 +528,49 @@ async def test_computed_rows_page_in_row_order_without_drop_or_double(
                 params={"limit": 3},
             )
         ).json()
+        assert page_one["order"], "the order is the server's to state, in words"
         for subject in page_one["result"]["subjects"]:
             assert subject == by_id[subject["id"]]
+
+
+async def test_the_paged_doors_refuse_what_the_overview_would_have(
+    pg_dsn: str,
+) -> None:
+    """The paged routes carry the overview's own honesty: an unknown figure
+    or a wrong kind is a 404 with a sentence, and a figure whose stored
+    values may not honestly serve answers 409 with the reason -- never a
+    200 whose empty page reads as 'zero rows', which is the confident
+    absence the whole about surface exists to prevent."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        push = await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {"shop_courier": {"c1": {"name": "Aki"}}},
+                "defer": True,
+            },
+        )
+        assert push.status_code == 200, push.text
+
+        base = "/ui/api/tenants/t1/computed"
+        missing = await http.get(f"{base}/no.such/shop_courier/c1")
+        assert missing.status_code == 404
+        wrong = await http.get(f"{base}/shop_courier.ride_times/shop_order/c1")
+        assert wrong.status_code == 404
+        assert "scoped to" in wrong.json()["detail"]
+
+        # The deferred pass left this tenant never bucketed: the figure's
+        # own page says never-computed, and the paged door must not answer
+        # a confident empty 200 where the overview would state the absence.
+        refused = await http.get(f"{base}/shop_courier.ride_times/shop_courier/c1")
+        assert refused.status_code == 409, refused.text
+
+        cited = await http.get("/ui/api/tenants/t1/cited/no.such/shop_order/c1")
+        assert cited.status_code == 404
+        never = await http.get(
+            "/ui/api/tenants/t1/cited/shop_tag.orders/shop_courier/c1"
+        )
+        assert never.status_code == 404, "shop_tag.orders never cites couriers"
 
 
 async def test_cited_rows_page_in_subject_order_without_drop_or_double(
@@ -439,7 +582,10 @@ async def test_cited_rows_page_in_subject_order_without_drop_or_double(
     page shows'."""
     async with serve(pg_dsn) as http:
         await _teach(http)
-        tags = [f"t{i}" for i in range(5)]
+        # Scrambled on purpose: pushed in an order that is NOT subject order,
+        # so a route that skipped the sort and leaned on arrival order would
+        # fail here instead of passing because the fixture was pre-sorted.
+        tags = ["t3", "t0", "t4", "t1", "t2"]
         await _push(
             http,
             {
@@ -449,20 +595,13 @@ async def test_cited_rows_page_in_subject_order_without_drop_or_double(
             },
         )
 
-        walked: list[str] = []
-        after = ""
-        for _ in range(10):
-            page = await http.get(
-                "/ui/api/tenants/t1/cited/shop_tag.orders/shop_order/r0",
-                params={"limit": 2, **({"after": after} if after else {})},
-            )
-            assert page.status_code == 200, page.text
-            body = page.json()
-            assert body["total"] == 5
-            walked += [row["id"] for row in body["rows"]]
-            if not body["more"]:
-                break
-            after = body["rows"][-1]["id"]
+        walked = await _walk(
+            http,
+            "/ui/api/tenants/t1/cited/shop_tag.orders/shop_order/r0",
+            limit=2,
+            rows_of=lambda body: [row["id"] for row in body["rows"]],
+            total=5,
+        )
         assert walked == sorted(tags), (
             "every tag's row counted this order exactly once, in subject order"
         )
@@ -470,6 +609,16 @@ async def test_cited_rows_page_in_subject_order_without_drop_or_double(
         about = await _about(http, "shop_order", "r0")
         cited = {c["figure"]: c for c in about["cited"]}["shop_tag.orders"]
         assert cited["total"] == 5, "the overview entry states the same total"
+
+        # The walk's default first page IS the overview's capped sample:
+        # same order, same head -- so "browse all" continues the list the
+        # reader was looking at rather than reshuffling it.
+        page_one = (
+            await http.get("/ui/api/tenants/t1/cited/shop_tag.orders/shop_order/r0")
+        ).json()
+        assert [r["id"] for r in page_one["rows"]][: len(cited["rows"])] == [
+            r["id"] for r in cited["rows"]
+        ]
 
 
 async def test_the_activity_log_pages_back_to_the_first_kept_run(pg_dsn: str) -> None:
@@ -479,24 +628,45 @@ async def test_the_activity_log_pages_back_to_the_first_kept_run(pg_dsn: str) ->
         await _teach(http)
         for i in range(5):
             await _push(http, {"shop_courier": {"c1": {"name": f"Aki v{i}"}}})
+        # A do-nothing run, for the default view's paged path below.
+        await _push(http, {"shop_courier": {"c1": {"name": "Aki v4"}}})
 
-        walked: list[int] = []
-        after = ""
-        for _ in range(10):
-            page = await http.get(
-                "/ui/api/tenants/t1/activity",
-                params={"limit": 2, "quiet": "true", **({"after": after} if after else {})},
-            )
-            assert page.status_code == 200, page.text
-            body = page.json()
-            assert body["total"] == 5
-            walked += [run["id"] for run in body["runs"]]
-            if not body["more"]:
-                break
-            after = str(body["runs"][-1]["id"])
-        assert walked == sorted(walked, reverse=True) and len(set(walked)) == 5, (
-            "every kept run exactly once, newest first"
+        async def pages(quiet: bool, limit: int, total: int) -> list[int]:
+            walked: list[int] = []
+            after = ""
+            for _ in range(total + 2):
+                page = await http.get(
+                    "/ui/api/tenants/t1/activity",
+                    params={
+                        "limit": limit,
+                        **({"quiet": "true"} if quiet else {}),
+                        **({"after": after} if after else {}),
+                    },
+                )
+                assert page.status_code == 200, page.text
+                body = page.json()
+                assert body["total"] == total
+                walked += [run["id"] for run in body["runs"]]
+                if not body["more"]:
+                    break
+                after = str(body["runs"][-1]["id"])
+            return walked
+
+        everything = await pages(quiet=True, limit=2, total=6)
+        assert len(everything) == 6, (
+            "every kept run exactly once -- a boundary that doubled a row "
+            "would count seven, one that dropped a row five"
         )
+        assert len(set(everything)) == 6
+        assert everything == sorted(everything, reverse=True), "newest first"
+
+        # The default view hides the quiet run on EVERY page, not just the
+        # first: a cursor that forgot the loud filter would leak it back in
+        # from page two onward.
+        loud = await pages(quiet=False, limit=2, total=5)
+        assert len(loud) == 5 and len(set(loud)) == 5
+        assert set(everything) - set(loud), "the quiet run exists to be hidden"
+        assert (set(everything) - set(loud)).isdisjoint(loud)
 
 
 # ------------------------------------------------------- dials, valued --
@@ -569,6 +739,125 @@ async def test_a_dial_nobody_gave_a_value_is_a_stated_absence(pg_dsn: str) -> No
         assert over["source"] == "unset"
 
 
+async def test_the_dials_page_shows_what_the_engine_reads_not_the_raw_document(
+    pg_dsn: str,
+) -> None:
+    """The dial's value is the MERGED one -- the same `settings_for` merge
+    the engine computes with -- never a walk of the raw tenant document. A
+    tenant that half-overrides a threshold pair ({good: 1} over
+    {good: 2, poor: 5}) is served good 1 · poor 5, and a page that walked
+    the raw document would show `good 1` alone: a dial that disagrees with
+    the calculation it claims to explain."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        await _push(http, {"shop_courier": {"c1": {"name": "Aki"}}})
+        put = await http.put(
+            "/tenants/t1/settings", json={"document": {"limits": {"ride": {"good": 1}}}}
+        )
+        assert put.status_code == 200, put.text
+
+        dials = {d["name"]: d for d in (await http.get("/ui/api/tenants/t1/dials")).json()["dials"]}
+        ride = dials["limits.ride"]
+        assert "1" in ride["display"] and "7200" in ride["display"], (
+            "the merged pair, both rungs -- the engine bands against poor "
+            "7200 whatever the tenant wrote beside good"
+        )
+        assert ride["source"] == "tenant"
+
+
+async def test_a_null_settings_leaf_is_an_absence_not_the_word_none(
+    pg_dsn: str,
+) -> None:
+    """A tenant document may carry an explicit null (the settings body is
+    untyped JSON). The engine's merge treats it as holding nothing, and the
+    dials page must agree -- rendering the Python repr `None` as if it were
+    a chosen value would be an absence dressed as data."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        await _push(http, {"shop_courier": {"c1": {"name": "Aki"}}})
+        put = await http.put(
+            "/tenants/t1/settings",
+            json={"document": {"limits": {"carrying": {"over": None}}}},
+        )
+        assert put.status_code == 200, put.text
+
+        dials = {d["name"]: d for d in (await http.get("/ui/api/tenants/t1/dials")).json()["dials"]}
+        over = dials["limits.carrying.over"]
+        assert over["display"] != "None", "never the repr of an absence"
+        # What the engine actually reads through the merge is what the page
+        # must claim -- computed here from the engine's own merge, so the
+        # test cannot drift from it.
+        from uratori.schema import Schema
+
+        merged = Schema.from_document(PARITY_SCHEMA).settings_for(
+            {"limits": {"carrying": {"over": None}}}
+        )
+        engine_reads = merged["limits"]["carrying"]["over"]
+        if engine_reads is None:
+            assert over["display"] is None and over["source"] == "unset"
+        else:
+            assert over["display"] == str(engine_reads)
+            assert over["source"] in ("tenant", "default")
+
+
+# ------------------------------------------------------ the unservable --
+
+
+LIVE_TAIL = """
+# Orders in hand right now, against the clock.
+reading shop_courier.queue():
+    display "{shop_courier} queue"
+    depends:
+        waiting = shop_order.riding_seconds over (shop_order.carried_by:{shop_courier} & shop_order.open)
+    calculate:
+        count(waiting)
+
+# A tile with a live member.
+bundle shop_courier.live_card:
+    queue = reading shop_courier.queue
+    carrying = figure shop_courier.carrying
+"""
+
+
+async def test_an_unservable_reading_still_has_a_name_on_the_record_page(
+    pg_dsn: str,
+) -> None:
+    """A live reading cannot be served yet; its entry must still carry the
+    address -- name and version -- beside the sentence. Two live readings
+    answering two identical anonymous sentences would leave the reader
+    unable to say WHICH reading is missing, which is the silence this
+    section exists to end."""
+    async with serve(pg_dsn) as http:
+        put = await http.put("/schema", json=PARITY_SCHEMA)
+        assert put.status_code == 200, put.text
+        put = await http.put("/definitions", json={"source": PARITY_SOURCE + LIVE_TAIL})
+        assert put.status_code == 200, put.text
+        await _push(http, {"shop_courier": {"c1": {"name": "Aki"}}, "shop_order": _rides(3)})
+
+        about = await _about(http, "shop_courier", "c1")
+        by_name = {r["name"]: r for r in about["readings"]}
+        assert set(by_name) == {"shop_courier.typical_ride", "shop_courier.queue"}
+        live = by_name["shop_courier.queue"]
+        assert live["result"] is None
+        assert live["note"], "the route's own sentence travels"
+        assert live["version"], "the address is whole even with no rows"
+
+        # The tile with the live member lists too, members and versions
+        # intact, with the sentence on the tile -- absent from the section
+        # it would read as "this record is on no such tile".
+        tiles = {t["bundle"]: t for t in about["tiles"]}
+        assert "shop_courier.live_card" in tiles
+        card = tiles["shop_courier.live_card"]
+        assert card["note"], "why the tile has no rows, said out loud"
+        slots = {m["slot"]: m for m in card["members"]}
+        assert set(slots) == {"queue", "carrying"}
+        assert all(m["version"] for m in card["members"])
+        assert card["at"] is None, (
+            "nothing was evaluated, so there is no instant to stamp -- a "
+            "fresh timestamp on a non-answer would be a fabricated clock"
+        )
+
+
 # ---------------------------------------------------- the structural guard --
 
 
@@ -591,7 +880,12 @@ def _app_source_sans_comments() -> str:
 
 
 def _referenced(source: str, field: str) -> bool:
-    return re.search(rf"\b{re.escape(field)}\b", source) is not None
+    """Whether app.js reads a property of this name -- `.field`, never the
+    bare word, so a field named in the editor's keyword lists or a comment
+    does not count as handled. (That looseness is exactly how the first
+    draft of this guard blessed `series`: the word sat in FIG_WORDS while
+    nothing drew the data.)"""
+    return re.search(rf"\.{re.escape(field)}\b", source) is not None
 
 
 # What the page deliberately does not render, each with the reason. A field
@@ -600,8 +894,8 @@ def _referenced(source: str, field: str) -> bool:
 UNRENDERED: dict[str, str] = {
     "WorldOut.name_fields": "records arrive already named by the server; the map is for API clients",
     "Result.zone": "the windows carry their own zone; the result-level copy is for API clients",
-    "Result.empty": "rendered via the projection/figure empty sentences keyed off subjects",
-    "Subject.value": "positional only -- the page renders display, and draws nothing scaled yet",
+    "Subject.value": "positional only, and the page draws series bars from the served scale, not this scalar",
+    "Window.series": "the page draws the served series_scale; the raw values are for clients with axes of their own",
     "Window.zone": "the frm/to labels are already local; printing the zone per row is noise",
     "Window.trailing": "span+bucket state the window; trailing exists for typed API clients",
     "Window.mean": "rendered through the display map, never the raw scalar",
@@ -617,15 +911,29 @@ UNRENDERED: dict[str, str] = {
     "Evidence.display": "the value is on the row the panel expands under",
     "Evidence.version": "the row's result already cites it",
     "Evidence.source": "the members already name their figure per row",
-    "EvidenceMember.value": "positional only -- the page renders display",
+    "CitedPageOut.figure": "the opener already names the figure; the echo is for API readers of the page",
+    "TenantOut.facts": "the switcher is an address list; per-kind counts live on the Facts tab it switches",
+    "SourceOut.refusal": "the editor shows the refusal the check route serves; the boot copy is the same text",
+    "CheckOut.ok": "the editor branches on the refusal being present, the same fact",
 }
+
+_REQUEST_MODELS = {"CheckIn", "SaveIn", "EditRunIn"}
+"""Bodies the page composes rather than reads: their fields appear in app.js
+as object-literal keys or shorthand, which no property-access match can see,
+and a field the server never reads already fails the server's own tests."""
 
 
 def _wire_models() -> list[type]:
+    """Every response model the /ui page is served: the results-module wire
+    shapes, plus EVERY pydantic model ui.py declares -- enumerated from the
+    module, not hand-listed, so a new route's new model is guarded the
+    moment it exists rather than when somebody remembers this list."""
+    import inspect
+
     from uratori import results
     from uratori.server import ui
 
-    return [
+    served = [
         results.Result,
         results.BundleResult,
         results.BundleMemberResult,
@@ -637,58 +945,34 @@ def _wire_models() -> list[type]:
         results.EvidenceMember,
         results.Ok,
         results.Unavailable,
-        ui.WorldOut,
-        ui.DeclarationOut,
-        ui.BundleSlot,
-        ui.Dependency,
-        ui.TenantsOut,
-        ui.TenantOut,
-        ui.FactKindsOut,
-        ui.KindCount,
-        ui.FactPageOut,
-        ui.FactRecordOut,
-        ui.RunOutLog,
-        ui.ActivityOut,
-        ui.MembershipOut,
-        ui.MembershipBucket,
-        ui.MemberPageOut,
-        ui.MemberRecordOut,
-        ui.MeasuredPageOut,
-        ui.MeasuredRecordOut,
-        ui.RecordOut,
-        ui.FiledOut,
-        ui.RecordMeasureOut,
-        ui.AboutOut,
-        ui.AboutFigureOut,
-        ui.AboutReadingOut,
-        ui.AboutTileOut,
-        ui.TileMemberOut,
-        ui.CitedFigureOut,
-        ui.CitedRowOut,
-        ui.AboutPageOut,
-        ui.ComputedPageOut,
-        ui.CitedPageOut,
-        ui.DialsOut,
-        ui.DialOut,
     ]
+    for _name, model in inspect.getmembers(ui, inspect.isclass):
+        if (
+            issubclass(model, BaseModel)
+            and model.__module__ == ui.__name__
+            and model.__name__ not in _REQUEST_MODELS
+        ):
+            served.append(model)
+    return served
 
 
 def test_every_wire_field_the_ui_is_served_is_rendered_or_argued() -> None:
     """The guard that makes a silent gap a red build: every field on every
-    model the /ui page is served must be referenced by app.js, or carry a
-    written reason in UNRENDERED. This is how `series` went unrendered for
-    two releases -- the wire grew, the page did not, and nothing went red."""
+    model the /ui page is served must be read somewhere in app.js (as a
+    property access), or carry a written reason in UNRENDERED. This is how
+    `series` went unrendered for two releases -- the wire grew, the page did
+    not, and nothing went red.
+
+    A tripwire, not a proof: a field whose name collides with another
+    model's rendered field (or a DOM property) slips through, so a truly
+    novel name is always caught and a shared one sometimes is not. That
+    asymmetry is accepted -- the alternative is a JS parser in the test."""
     source = _app_source_sans_comments()
     missing: list[str] = []
-    stale: list[str] = []
     for model in _wire_models():
         for field in model.model_fields:
             qualified = f"{model.__name__}.{field}"
             if qualified in UNRENDERED:
-                if _referenced(source, field):
-                    # An allowlist entry for a field the page now renders is
-                    # a reason that no longer describes the code.
-                    stale.append(qualified)
                 continue
             if not _referenced(source, field):
                 missing.append(qualified)
@@ -696,10 +980,15 @@ def test_every_wire_field_the_ui_is_served_is_rendered_or_argued() -> None:
         "these wire fields reach the page and nothing renders them -- render "
         f"each, or state why in UNRENDERED: {sorted(missing)}"
     )
-    # A field both rendered and excused is only worth failing over when the
-    # exemption is field-specific: shared names (display, name, kind) are
-    # referenced for other models' sake.
-    del stale
+    # Every allowlist entry must name a real field, or the list rots into
+    # reasons about models that no longer exist.
+    fields = {
+        f"{model.__name__}.{field}"
+        for model in _wire_models()
+        for field in model.model_fields
+    }
+    orphaned = set(UNRENDERED) - fields
+    assert not orphaned, f"UNRENDERED excuses fields that do not exist: {sorted(orphaned)}"
 
 
 def test_every_declaration_kind_has_a_home_on_the_page() -> None:
@@ -735,27 +1024,44 @@ def test_every_result_kind_has_a_renderer() -> None:
         )
 
 
-def test_every_dial_entry_point_reaches_the_page_as_a_setting_edge() -> None:
-    """Settings enter the language in several places -- age predicates, day
-    bucketing zones, band thresholds, figure/projection ladders. Each entry
-    point must surface as a `setting` dependency edge, because the page's
-    dial rendering hangs off those edges: a construct that learns to read a
-    dial without emitting the edge renders the definition with the dial
-    invisible. Enumerated here over the compiled plans' own fields."""
-    from uratori.lang import plan as plans
+async def test_every_dial_entry_point_reaches_the_page_as_a_setting_edge(
+    pg_dsn: str,
+) -> None:
+    """Settings enter the language in several places -- day-bucketing zones,
+    band thresholds on figures and on readings. Each entry point must
+    surface as a `setting` dependency edge in the world payload, because
+    the page's dial rendering hangs off those edges: a construct that
+    learns to read a dial without emitting the edge renders the definition
+    with its dial invisible. Behavioural, over the compiled world -- a
+    field-name check on the plans would pass while the edge emission
+    quietly rotted."""
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        world = (await http.get("/ui/api/world")).json()
+        edges = {
+            d["name"]: {(e["type"], e["name"]) for e in d["rests_on"]}
+            for d in world["declarations"]
+        }
+        assert ("setting", "limits.carrying.over") in edges["shop_courier.carrying"], (
+            "a figure's band dial"
+        )
+        assert ("setting", "limits.ride") in edges["shop_courier.typical_ride"], (
+            "a reading's band dial"
+        )
+        assert ("setting", "tenant.timezone") in edges["shop_order.delivered_by_day"], (
+            "a group's day-bucketing zone"
+        )
+        # And the closure carries them to the tile, whose page shows the
+        # same dial lines through the same moved_by rendering.
+        card = next(
+            d for d in world["declarations"] if d["name"] == "shop_courier.card"
+        )
+        moved = {(e["type"], e["name"]) for e in card["moved_by"]}
+        assert ("setting", "limits.ride") in moved
+        assert ("setting", "limits.carrying.over") in moved
 
-    carriers = {
-        plans.FigurePlan: {"settings", "band_settings"},
-        plans.ReadingPlan: {"settings"},
-        plans.ProjectPlan: {"settings"},
-        plans.SummarisePlan: {"settings"},
-    }
-    for holder, fields in carriers.items():
-        held = {f.name for f in __import__("dataclasses").fields(holder)}
-        for field in fields:
-            assert field in held, f"{holder.__name__} lost {field}"
-    # And the page must join those edges to the tenant's current values:
-    # the dials payload, referenced by name.
+    # The page joins those edges to the tenant's current values through the
+    # dials payload.
     source = _app_source_sans_comments()
     assert "/dials" in source, (
         "the page never fetches the dials payload, so a definition's setting "
