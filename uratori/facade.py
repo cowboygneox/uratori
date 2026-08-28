@@ -115,7 +115,9 @@ class Uratori:
 
         return unsubscribe
 
-    async def _notify(self, tenant: str, outcome: Outcome, results: tuple[Result, ...]) -> None:
+    async def _notify(
+        self, tenant: str, outcome: Outcome, results: tuple[Result | BundleResult, ...]
+    ) -> None:
         """Deliver to every listener, isolating each.
 
         A listener raising must not break the run or starve the listeners after
@@ -246,10 +248,9 @@ class Uratori:
         stamps = self._serve_stamps(document)
         held = await self._store.pointers(tenant)
         refreshed = self._refreshed(stamps, held)
-        if sync:
-            projections = None
-        else:
-            projections = self._reached(outcome.reindexed, touched, stamps, held)
+        projections = (
+            None if sync else self._reached(outcome.reindexed, touched, stamps, held)
+        )
         moved = self._moved(touched, refreshed, projections)
         if serve:
             results = await self._serve(
@@ -318,12 +319,12 @@ class Uratori:
         # the UI's dependency closure draws). Before these stamps existed, a
         # band threshold save updated nothing stored and pushed nothing, and
         # every connected screen kept the old colour until a reload.
-        for plan in lib.figures:
-            dials = set(plan.band_settings)
-            if plan.unit == "effort":
+        for figure_plan in lib.figures:
+            dials = set(figure_plan.band_settings)
+            if figure_plan.unit == "effort":
                 dials.add(EFFORT_HOURS_SETTING)
-            stamps[_serve_key(plan.name)] = Pointer(
-                version=plan.version,
+            stamps[_serve_key(figure_plan.name)] = Pointer(
+                version=figure_plan.version,
                 settings_fingerprint=settings_fingerprint(dict(document), sorted(dials)),
             )
         for reading in lib.readings:
@@ -481,18 +482,22 @@ class Uratori:
         # so each is ensured here for the same reason the projections above
         # are: the pointer table cites a definition version, and the stamp
         # must be able to land on every pass, not only cold ones.
-        for plan in lib.figures:
+        for figure_plan in lib.figures:
             await self._store.ensure_definition(
-                plan.version,
-                plan.name,
+                figure_plan.version,
+                figure_plan.name,
                 "figure",
-                plan.doc,
-                plan.display,
-                declaration_source(lib, plan.name) or "",
-                {"unit": plan.unit, "scope": plan.scope, "depth": plan.depth},
+                figure_plan.doc,
+                figure_plan.display,
+                declaration_source(lib, figure_plan.name) or "",
+                {
+                    "unit": figure_plan.unit,
+                    "scope": figure_plan.scope,
+                    "depth": figure_plan.depth,
+                },
             )
             await self._store.set_pointer(
-                tenant, _serve_key(plan.name), stamps[_serve_key(plan.name)]
+                tenant, _serve_key(figure_plan.name), stamps[_serve_key(figure_plan.name)]
             )
         for reading in lib.readings:
             await self._store.ensure_definition(
