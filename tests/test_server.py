@@ -1202,8 +1202,8 @@ async def test_an_anchored_reading_ends_its_windows_on_the_anchor_day(server: Se
             "anything else means a day leaked across the anchor or fell out "
             "of the window"
         )
-        assert window["days_covered"] == 2
-    assert week["days_requested"] == 7 and short["days_requested"] == 3
+        assert window["buckets_covered"] == 2
+    assert week["buckets_requested"] == 7 and short["buckets_requested"] == 3
 
     # The anchor travels on the answer as provenance: the served instant is
     # the anchor day's last moment in the tenant's calendar, not the wall
@@ -1248,7 +1248,7 @@ async def test_an_unanchored_reading_still_ends_today(server: Server) -> None:
     [window] = result["empty"]["windows"]
     assert window["to"] == today
     assert window["mean"] is None
-    assert window["days_covered"] == 0
+    assert window["buckets_covered"] == 0
 
 
 async def test_an_anchor_before_any_data_is_an_absence_not_a_zero(server: Server) -> None:
@@ -1268,7 +1268,7 @@ async def test_an_anchor_before_any_data_is_an_absence_not_a_zero(server: Server
     [window] = result["empty"]["windows"]
     assert (window["frm"], window["to"]) == ("2019-12-26", "2020-01-01")
     assert window["mean"] is None
-    assert window["days_covered"] == 0
+    assert window["buckets_covered"] == 0
     assert window["unmet"] == ["needs at least 1 value; there are 0"]
 
 
@@ -1302,7 +1302,7 @@ async def test_an_anchor_at_the_calendars_edge_is_an_answer_not_a_500(server: Se
         assert got.status_code == 200, f"{edge}: {got.status_code} {got.text}"
         [window] = got.json()["empty"]["windows"]
         assert window["to"] == edge
-        assert window["days_covered"] == 0
+        assert window["buckets_covered"] == 0
 
 
 async def test_the_calendars_far_edge_answers_west_of_utc_too(server: Server) -> None:
@@ -1320,7 +1320,7 @@ async def test_the_calendars_far_edge_answers_west_of_utc_too(server: Server) ->
     assert got.status_code == 200, f"{got.status_code} {got.text}"
     [window] = got.json()["empty"]["windows"]
     assert window["to"] == "9999-12-31"
-    assert window["days_covered"] == 0
+    assert window["buckets_covered"] == 0
 
     listed = await server.http.get(
         "/tenants/t1/results", params={"at": "9999-12-31", "trailing": 30}
@@ -1338,7 +1338,7 @@ async def test_a_span_past_the_reach_ceiling_is_refused_on_both_routes(server: S
     for params in (
         {"trailing": "1000000"},
         {"trailing": "999991-1000000"},
-        {"trailing": f"{3660 * 24 + 1}h"},
+        {"trailing": "each:1-1000000"},
     ):
         got = await server.http.get(
             "/tenants/t1/results/shop_courier.typical_ride", params=params
@@ -1354,6 +1354,83 @@ async def test_a_span_past_the_reach_ceiling_is_refused_on_both_routes(server: S
         "/tenants/t1/results/shop_courier.typical_ride", params={"trailing": "3660"}
     )
     assert got.status_code == 200, got.text
+
+
+async def test_each_expands_over_http_exactly_as_the_enumerated_spelling(
+    server: Server,
+) -> None:
+    """`?trailing=each:1-3` is three one-bucket windows, nearest first,
+    each with its own statistics and floor -- and byte-identical to the
+    enumerated `1, 2-2, 3-3`, because the sugar expands at the door and
+    nothing downstream can tell the spellings apart. An expansion that
+    overlaps an enumerated span is the duplicate it looks like."""
+    await _teach_rides(server.http)
+
+    sugared = await server.http.get(
+        "/tenants/t1/results/shop_courier.typical_ride",
+        params={"at": "2026-06-30", "trailing": "each:1-3"},
+    )
+    assert sugared.status_code == 200, sugared.text
+    [subject] = sugared.json()["subjects"]
+    windows = subject["windows"]
+    assert [w["span"] for w in windows] == ["1", "2-2", "3-3"]
+    assert [w["to"] for w in windows] == ["2026-06-30", "2026-06-29", "2026-06-28"]
+
+    spelled = await server.http.get(
+        "/tenants/t1/results/shop_courier.typical_ride",
+        params={"at": "2026-06-30", "trailing": ["1", "2-2", "3-3"]},
+    )
+    assert spelled.status_code == 200, spelled.text
+    assert spelled.json()["subjects"] == sugared.json()["subjects"]
+
+    overlapped = await server.http.get(
+        "/tenants/t1/results/shop_courier.typical_ride",
+        params={"trailing": ["2-2", "each:1-3"]},
+    )
+    assert overlapped.status_code == 422, overlapped.text
+    assert "twice" in overlapped.text
+
+
+async def test_a_request_may_not_buy_unbounded_work_through_each(server: Server) -> None:
+    """Two ceilings, and `each` is why the second exists.
+
+    A span's bucket ceiling bounds one window. `each` turns one argument into
+    one window *per bucket*, and the server answers every window for every
+    subject -- so `each:1-3660` sits inside the bucket ceiling as a span while
+    asking for 3,660 answers per subject. That product is what the window
+    ceiling bounds, and nothing else does.
+
+    Both refusals must arrive as 422s *before* the work: `each:1-20000000`
+    once built twenty million one-bucket windows -- gigabytes of tuples on an
+    unauthenticated route -- and only then found something to complain about.
+    """
+    await _teach_rides(server.http)
+
+    for params, expected in (
+        # Refused by the bucket ceiling, without expanding.
+        ({"trailing": "each:1-20000000"}, "3660"),
+        # Inside the bucket ceiling, refused by the window ceiling.
+        ({"trailing": "each:1-3660"}, "366"),
+        # The product across a list, every token of which is legal alone.
+        ({"trailing": ["each:1-366", "each:1-10"]}, "366"),
+    ):
+        got = await server.http.get(
+            "/tenants/t1/results/shop_courier.typical_ride", params=params
+        )
+        assert got.status_code == 422, f"{params}: {got.status_code} {got.text[:200]}"
+        assert expected in got.text, got.text
+
+        listed = await server.http.get("/tenants/t1/results", params=params)
+        assert listed.status_code == 422, f"{params}: {listed.status_code}"
+
+    # The boundary itself still answers, so the ceiling is a ceiling and not
+    # a ban on `each`.
+    ok = await server.http.get(
+        "/tenants/t1/results/shop_courier.typical_ride",
+        params={"trailing": "each:1-366"},
+    )
+    assert ok.status_code == 200, ok.text
+    assert len(ok.json()["subjects"][0]["windows"]) == 366
 
 
 async def test_a_malformed_window_token_is_a_422_never_a_coercion(server: Server) -> None:
@@ -1397,7 +1474,7 @@ async def test_offset_buckets_compose_with_the_anchor_over_http(server: Server) 
         "mode this shape exists to prevent"
     )
     assert (far["frm"], far["to"]) == ("2026-06-25", "2026-06-27")
-    assert far["mean"] is None and far["days_covered"] == 0
+    assert far["mean"] is None and far["buckets_covered"] == 0
 
 
 async def test_a_duplicate_span_in_one_request_is_a_422(server: Server) -> None:
@@ -1416,13 +1493,13 @@ async def test_a_duplicate_span_in_one_request_is_a_422(server: Server) -> None:
 QUARTER_RIDES_SOURCE = (
     RIDES_SOURCE
     + """
-group shop_order.delivered_by_quarter from (courier_id, delivered_at by 15 minutes in tenant.timezone)
+group shop_order.delivered_by_hour from (courier_id, delivered_at by hour in tenant.timezone)
 
-# Every delivery's ride time, quarter-hour by quarter-hour.
-figure shop_courier.ride_quarters:
-    display "{shop_courier} ride quarters"
+# Every delivery's ride time, hour by hour.
+figure shop_courier.ride_hours:
+    display "{shop_courier} ride hours"
     depends:
-        done = shop_order.delivered_by_quarter:{shop_courier}
+        done = shop_order.delivered_by_hour:{shop_courier}
     calculate:
         list(shop_order.riding_seconds over done)
 
@@ -1430,7 +1507,7 @@ figure shop_courier.ride_quarters:
 reading shop_courier.recent_ride(range):
     display "{value}"
     depends:
-        rides = shop_courier.ride_quarters in range
+        rides = shop_courier.ride_hours in range
     calculate:
         mean(rides)
 """
@@ -1440,11 +1517,12 @@ reading shop_courier.recent_ride(range):
 async def test_an_hour_span_serves_over_http_with_an_honest_wire_shape(
     server: Server,
 ) -> None:
-    """The sub-day half of the wire contract, end to end: `?trailing=1-48h`
-    anchored on 2026-06-30 covers that local day and the one before, hour
-    bucket by hour bucket -- r2 (local 2026-06-30) is in, r1 (local
-    2026-06-28) is out -- and the window says what it is: hour buckets,
-    label bounds, `trailing` null."""
+    """The sub-day half of the wire contract, end to end: the figure's
+    group declares `by hour`, so `?trailing=48` anchored on 2026-06-30
+    covers that local day and the one before, hour bucket by hour bucket --
+    r2 (local 2026-06-30) is in, r1 (local 2026-06-28) is out -- and the
+    window says what it is: hour buckets, label bounds, `trailing` null
+    because only a day sequence's trailing span is a count of days."""
     world = COURIER_WORLD.to_document()
     world["bucket_settings"] = ["tenant.timezone"]
     world["defaults"] = {
@@ -1462,7 +1540,7 @@ async def test_an_hour_span_serves_over_http_with_an_honest_wire_shape(
 
     got = await server.http.get(
         "/tenants/t1/results/shop_courier.recent_ride",
-        params={"at": "2026-06-30", "trailing": "1-48h"},
+        params={"at": "2026-06-30", "trailing": "1-48"},
     )
     assert got.status_code == 200, got.text
     [subject] = got.json()["subjects"]
@@ -1477,18 +1555,19 @@ async def test_an_hour_span_serves_over_http_with_an_honest_wire_shape(
     )
 
 
-async def test_a_sub_day_span_over_day_storage_is_refused_naming_the_grain(
+async def test_a_unit_suffixed_window_token_is_refused_toward_the_group_clause(
     server: Server,
 ) -> None:
-    """An hour bucket over a figure stored by day has nothing to slice; the
-    422 names the figure's storage so the fix -- write days, or regrade --
-    is in the caller's hands. Never silent rounding to days."""
+    """The v0.12 tokens are retired, not reinterpreted: `1-48h` becoming 48
+    buckets would silently re-scale a bookmarked span. The 422 points at
+    the group clause, where the unit now lives, on both routes."""
     await _teach_rides(server.http)
     got = await server.http.get(
         "/tenants/t1/results/shop_courier.typical_ride", params={"trailing": "1-48h"}
     )
     assert got.status_code == 422, f"{got.status_code} {got.text}"
-    assert "stored by day" in got.text, got.text
+    assert "retired" in got.text, got.text
+    assert "group clause" in got.text, got.text
 
     listed = await server.http.get("/tenants/t1/results", params={"trailing": "1-48h"})
     assert listed.status_code == 422, f"{listed.status_code} {listed.text}"

@@ -25,23 +25,23 @@ from ..lang.settings import band_value, seconds_per
 
 @dataclass(frozen=True)
 class Sample:
-    """The values a reading is about, and how much of the range they cover.
+    """The values a reading is about, and how much of the window they cover.
 
-    `days_covered` is a separate claim from the sample size and is reported
-    separately: "the queue took no tickets" and "we were not collecting" are
-    opposite findings that produce the same empty list. It stays a claim about
-    *days* whatever the stored grain, because "how much of the window has
-    evidence" is a question about the calendar the reader sees, not about how
-    finely the store slices it.
+    `buckets_covered` is a separate claim from the sample size and is
+    reported separately: "the queue took no tickets" and "we were not
+    collecting" are opposite findings that produce the same empty list. It
+    is a claim about *buckets of the figure's own sequence* -- days of a day
+    figure, months of a month figure, first-Mondays of a selective one --
+    because that sequence is what the window's positions walked.
 
-    `points` is the series: one labelled value per bucket of the served grain,
-    holes included.
+    `points` is the series: one labelled value per covered bucket, holes
+    included.
     """
 
     values: tuple[float, ...]
     points: tuple[tuple[str, float | None], ...]
-    days_covered: int
-    days_requested: int
+    buckets_covered: int
+    buckets_requested: int
 
 
 def statistics_of(plan: ReadingPlan, sample: Sample) -> dict[str, float | None]:
@@ -177,200 +177,50 @@ def level_of(
     return "over" if value <= poor else "warn"
 
 
-def sample_from_days(
-    days: Sequence[tuple[str, float | list[float | None] | None]],
-    frm: str,
-    to: str,
+def sample_over(
+    stored: Sequence[tuple[str, float | list[float | None] | None]],
+    labels: Sequence[str],
 ) -> Sample:
-    """Turn stored day values into a sample.
+    """Turn stored bucket values into a sample over the covered labels.
 
-    Reads **both** stored shapes. A `list` figure keeps every value for the day
-    and a `count` figure keeps one scalar, and v1's serve path silently dropped
-    the second -- so every volume figure was stored, versioned and unreadable,
-    with the checker and the reader agreeing so no request ever came back wrong.
+    `labels` is the span resolved: every bucket the window covers, oldest
+    first, whether the sequence is days, months or a sparse run of first
+    Mondays -- the store's own labels, because a stored bucket *is* a
+    position in its figure's declared sequence and nothing is regrouped on
+    the way out. `stored` is the rows whose labels the window covers.
+
+    Reads **both** stored shapes. A `list` figure keeps every value for the
+    bucket and a `count` figure keeps one scalar, and v1's serve path
+    silently dropped the second -- so every volume figure was stored,
+    versioned and unreadable, with the checker and the reader agreeing so no
+    request ever came back wrong.
+
+    A bucket's point follows the shape: a list bucket's point is the mean of
+    its records (the one summary a per-bucket sparkline can carry), a scalar
+    bucket's point is the scalar. A bucket that stored nothing -- or an
+    empty list -- is a hole, never a nought: a month nobody merged in is not
+    a month somebody merged nothing in zero seconds.
     """
     values: list[float] = []
-    per_day: dict[str, float | None] = {}
+    per_bucket: dict[str, float | None] = {}
     covered = 0
-    for day, stored in days:
-        if isinstance(stored, list):
-            got = [v for v in stored if v is not None]
+    for label, held in stored:
+        if isinstance(held, list):
+            got = [v for v in held if v is not None]
             values.extend(got)
-            per_day[day] = statistics.fmean(got) if got else None
+            per_bucket[label] = statistics.fmean(got) if got else None
             if got:
                 covered += 1
-        elif isinstance(stored, (int, float)):
-            values.append(float(stored))
-            per_day[day] = float(stored)
+        elif isinstance(held, (int, float)):
+            values.append(float(held))
+            per_bucket[label] = float(held)
             covered += 1
         else:
-            per_day[day] = None
-
-    requested = _days_between(frm, to)
-    ordered = _fill(frm, to, per_day)
-    return Sample(
-        values=tuple(values),
-        points=tuple(ordered),
-        days_covered=covered,
-        days_requested=requested,
-    )
-
-
-def sample_from_buckets(
-    buckets: Sequence[tuple[str, float | list[float | None] | None]],
-    frm: str,
-    to: str,
-    by: str | None,
-    series_to: str | None = None,
-) -> Sample:
-    """Turn sub-day bucket values into a sample, with the series grouped to `by`.
-
-    Grouping touches **only the series**. The scalar statistics run over the
-    raw stored values whatever the grain is -- a mean of the group means would
-    weight each hour equally instead of each record, which is the mean-of-means
-    trap wearing a new grain.
-
-    A group's point follows the day series' own rule at the new grain: the
-    mean of a `list` figure's records, the sum of a `count` figure's buckets --
-    the number a `by day` index would have stored, so the two grains cannot be
-    two answers to one question. A group whose buckets are all absent is a
-    hole, never a nought.
-
-    Labels are local time, so a group is a label prefix: the calendar was
-    decided when the bucket was written.
-
-    `series_to` is the last series label of a **sub-day-unit window**: such a
-    window's `to` names its newest bucket at the window's own unit (an hour),
-    while the series may be grouped finer (quarter-hours), so the series must
-    run through the end of that bucket rather than stopping at its first
-    label. Absent, the series ends at `to` -- the day-window behaviour,
-    unchanged.
-    """
-    values: list[float] = []
-    listed: dict[str, list[float]] = {}
-    counted: dict[str, float] = {}
-    days: set[str] = set()
-
-    for label, stored in buckets:
-        if isinstance(stored, list):
-            got = [v for v in stored if v is not None]
-            if got:
-                values.extend(got)
-                days.add(label[:10])
-                if by is not None:
-                    listed.setdefault(_group_of(label, by), []).extend(got)
-        elif isinstance(stored, (int, float)):
-            values.append(float(stored))
-            days.add(label[:10])
-            if by is not None:
-                group = _group_of(label, by)
-                counted[group] = counted.get(group, 0.0) + float(stored)
-
-    points: list[tuple[str, float | None]] = []
-    if by is not None:
-        for label in _labels_between(frm, series_to if series_to is not None else to, by):
-            if label in listed:
-                points.append((label, statistics.fmean(listed[label])))
-            elif label in counted:
-                points.append((label, counted[label]))
-            else:
-                points.append((label, None))
+            per_bucket[label] = None
 
     return Sample(
         values=tuple(values),
-        points=tuple(points),
-        days_covered=len(days),
-        days_requested=_days_between(frm, to),
+        points=tuple((label, per_bucket.get(label)) for label in labels),
+        buckets_covered=covered,
+        buckets_requested=len(labels),
     )
-
-
-def _group_of(label: str, by: str) -> str:
-    """Which group a bucket label belongs to: prefix truncation, no clocks."""
-    if by == "day":
-        return label[:10]
-    if by == "hour":
-        return label[:13] + ":00"
-    if by == "15 minutes":
-        minute = int(label[14:16])
-        return f"{label[:14]}{minute - minute % 15:02d}"
-    return label
-
-
-def _labels_between(frm: str, to: str, by: str) -> list[str]:
-    """Every group label of the range, in order, so holes are visible.
-
-    Every local day carries the same label set whatever the clocks did: the
-    fall-back day's repeated labels merged at write time, and the
-    spring-forward day's missing hour simply stays a run of holes -- which is
-    true, since those wall-clock minutes never happened.
-
-    Sub-day *bounds* -- a bucket-span window in hours or minutes -- step
-    through the same label space from the first label to the last, rather
-    than expanding to whole days: the window's series covers exactly the
-    window's buckets. A `by day` grain never meets sub-day bounds, because a
-    day point does not fit inside a sub-day window and the request is
-    refused before sampling.
-    """
-    from datetime import date, datetime, timedelta
-
-    steps = {"hour": 60, "15 minutes": 15, "minute": 1}
-    out: list[str] = []
-    if "T" in frm:
-        step = steps[by]
-        moment = datetime.fromisoformat(frm)
-        end_moment = datetime.fromisoformat(to)
-        while moment <= end_moment:
-            out.append(f"{moment.date().isoformat()}T{moment.hour:02d}:{moment.minute:02d}")
-            if moment > datetime.max - timedelta(minutes=step):
-                # The calendar's own last labels: the step beyond them that
-                # the loop condition would catch overflows before the
-                # condition ever runs -- `_fill`'s guard, at the finer grain.
-                break
-            moment += timedelta(minutes=step)
-        return out
-    day = date.fromisoformat(frm)
-    end = date.fromisoformat(to)
-    while day <= end:
-        if by == "day":
-            out.append(day.isoformat())
-        else:
-            step = steps[by]
-            for minutes in range(0, 1440, step):
-                out.append(f"{day.isoformat()}T{minutes // 60:02d}:{minutes % 60:02d}")
-        if day == date.max:
-            # A range may legitimately end on the calendar's last day -- an
-            # anchored request at 9999-12-31 -- and the step beyond it
-            # overflows before the loop condition runs. `_fill` has carried
-            # this guard since the anchor landed; this loop needed it too,
-            # which is where the fixed traceback moved to.
-            break
-        day += timedelta(days=1)
-    return out
-
-
-def _days_between(frm: str, to: str) -> int:
-    """Calendar days the bounds touch, whether they are days or labels."""
-    from datetime import date
-
-    start = date.fromisoformat(frm[:10])
-    end = date.fromisoformat(to[:10])
-    return (end - start).days + 1
-
-
-def _fill(frm: str, to: str, per_day: Mapping[str, float | None]) -> list[tuple[str, float | None]]:
-    from datetime import date, timedelta
-
-    out: list[tuple[str, float | None]] = []
-    day = date.fromisoformat(frm)
-    end = date.fromisoformat(to)
-    while day <= end:
-        key = day.isoformat()
-        out.append((key, per_day.get(key)))
-        if day == date.max:
-            # A window may legitimately end on the calendar's last day --
-            # 9999-12-31 is a well-formed anchor -- and the step beyond it
-            # that this loop's condition would catch overflows before the
-            # condition ever runs.
-            break
-        day += timedelta(days=1)
-    return out

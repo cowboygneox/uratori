@@ -98,37 +98,60 @@ Availability = Annotated[Ok | Unavailable, Field(discriminator="ok")]
 
 
 class Window(BaseModel):
-    """One window of a reading: a span of stored buckets, resolved by the server.
+    """One window of a reading: a span of positions in the source figure's
+    own bucket sequence, resolved by the server.
 
-    `span` and `bucket` are the question and `frm`/`to` are the answer, and
-    both travel: "buckets 31-60" depends on when the tenant's midnight was,
-    which a client cannot know. The bounds are the first (oldest) and last
-    (newest) bucket labels the span resolved to -- ISO days for day buckets,
-    local bucket labels (`2026-08-25T14:00`) for sub-day ones.
+    `span` and `bucket` are the question and the bounds are the answer, and
+    both travel: "buckets 31-60" depends on when the tenant's midnight was
+    and what the figure's group declared, neither of which a client can
+    know. Dates appear in answers, never in questions -- the request said
+    `31-60`, and this says which concrete buckets that resolved to.
     """
 
     span: str
-    """The bucket span asked for -- the canonical spelling's span half:
-    `"30"` (the last 30 buckets, bucket 1 being the one the anchor falls
-    in), `"31-60"` (the 30 before them). The unit deliberately lives in
-    `bucket`, not here: read the pair, since `span` alone conflates 48 days
-    with 48 hours. What was *asked*, beside what was covered -- an offset
-    bucket wearing a label that reads like a trailing span is the failure
-    mode this field exists to prevent."""
+    """The bucket span asked for -- the canonical spelling: `"30"` (the last
+    30 buckets, bucket 1 being the one the anchor falls in), `"31-60"` (the
+    30 before them). Positions in the sequence `bucket` names, and nothing
+    else. What was *asked*, beside what was covered -- an offset bucket
+    wearing a label that reads like a trailing span is the failure mode
+    this field exists to prevent."""
 
-    bucket: Literal["day", "hour", "minute"] = "day"
-    """What one bucket of the span is. Days unless the request said
-    otherwise, always -- never the source figure's storage grain, which would
-    let a regrade silently re-scale every bookmarked span."""
+    bucket: str = "day"
+    """What one bucket of the span is: the rule the source figure's group
+    clause declared -- `day`, `minute`, `15 minutes`, `hour`, `week`,
+    `month`, `quarter`, or a selective rule's own text (`first monday of
+    month`). Declared and hashed there, never chosen by the request: an
+    argument may narrow which buckets take part and may never change what
+    a number means."""
 
     trailing: int | None = None
     """The span as a plain trailing-days count, kept for what it has always
-    meant: present exactly when the span *is* the last N days (`span: "30"`,
-    day buckets), `null` for an offset or sub-day span rather than a number
-    that would read as one."""
+    meant: present exactly when the span *is* the last N days (`span: "30"`
+    over a day-grained figure), `null` for an offset span or any coarser or
+    finer sequence rather than a number that would read as one."""
 
-    frm: str
-    to: str
+    frm: str | None = None
+    to: str | None = None
+    """The first (oldest) and last (newest) bucket labels the span resolved
+    to, in the sequence's own vocabulary: ISO days, `2026-08` months,
+    `2026-Q3` quarters, `2026-W35` weeks, `2026-08-25T14:00` sub-day
+    buckets. For a selective rule the edges alone cannot say which sparse
+    days were covered -- `buckets` carries the full list there.
+
+    Null when the span resolved to no bucket, which happens only where the
+    calendar runs out -- an anchor in year 1, or a span reaching past it.
+    An absence, not an empty string: `""` in a date field is a value that
+    renders and sorts, and there is no bucket here to name."""
+
+    buckets: list[str] | None = None
+    """Every bucket label the span covered, oldest first -- present exactly
+    when the sequence is a selective rule (`first monday of month`), whose
+    covered buckets are not contiguous: `frm`/`to` edges would claim every
+    day between six first-Mondays, most of which no bucket covers. Null for
+    the contiguous rules, where the edges say it all and repeating up to
+    3,660 day labels per window would tax every response for the sparse
+    case's honesty."""
+
     zone: str | None = None
 
     mean: float | None = None
@@ -172,14 +195,6 @@ class Window(BaseModel):
     scalar statistics are: formatting a duration is a division. Signed, so a
     fall reads as one. None exactly where `delta` is None."""
 
-    series_by: Literal["15 minutes", "hour", "day"] | None = None
-    """What one series point spans, when the definition grouped a sub-day
-    figure. Absent for a day-keyed source, where a point has always been a
-    day. On the wire so a series of 168 points says what it is, rather than
-    leaving the reader to divide -- and a closed union rather than a string,
-    so a new grain is a compile error in a typed client instead of a silently
-    unhandled word."""
-
     display: dict[str, str] = Field(default_factory=dict)
     """Each statistic above, rendered.
 
@@ -196,12 +211,21 @@ class Window(BaseModel):
 
     sample: int = 0
     """How many values took part. For a count figure this is *buckets that
-    contributed* (days, for a day-keyed one), not records -- a different number
-    of similar magnitude, which is why it is named rather than left to be
-    inferred."""
+    contributed* (days, for a day-grained one), not records -- a different
+    number of similar magnitude, which is why it is named rather than left
+    to be inferred."""
 
-    days_covered: int = 0
-    days_requested: int = 0
+    buckets_covered: int = 0
+    buckets_requested: int = 0
+    """How much of the window has evidence, in buckets of the figure's own
+    sequence: `buckets_requested` is how many buckets the span resolved to
+    -- the span's width for a contiguous rule (clamped at the calendar's
+    edge), the buckets that exist for a selective one (a `fifth monday`
+    sequence skips months without one) -- and `buckets_covered` how many of
+    those hold a stored value. Separate claims from `sample`, because "the
+    queue took no tickets" and "we were not collecting" produce the same
+    empty list."""
+
     level: Level = "unknown"
     unmet: list[str] = Field(default_factory=list)
     """Which requirement fell short, in words. A suppressed mean is otherwise an

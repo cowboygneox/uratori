@@ -86,52 +86,40 @@ class FactDecl:
 
 # ---------------------------------------------------------------- index --
 
-Truncation: TypeAlias = Literal["day", "minute", "15 minutes"]
+Truncation: TypeAlias = Literal[
+    "minute", "15 minutes", "hour", "day", "week", "month", "quarter"
+]
 """`mergedAt by day` -- how a raw value is reduced before it becomes a key.
 
-Three grains, and the restraint is still the point: a truncation decides how
-many values a figure has and which one an event lands in, so each new one is a
-product decision about grain rather than a convenience. `week` and `month` are
-deliberately absent -- a span over days can produce either, and storing the
-coarser grain as well would be two answers to one question. That argument
-points downward too: `hour` is absent because a range over quarter-hours
-produces it, so it is a *series grouping* at read time rather than a stored
-grain. Other minute counts wait for a definition to ask, exactly as
-`percentile` does.
+The one place calendar vocabulary is welcome, because it is a declaration:
+a truncation decides how many values a figure has and which one an event
+lands in -- it changes what a number *means* -- and the language's law is
+that only a declaration, hashed into a version, may do that. An argument
+(`over 1-6`) is positions in the sequence this grain declares, and nothing
+else.
 
-A sub-day label is local time truncated to the grain -- `2026-08-25T14:30` --
-in the calendar the definition names, exactly as a day key is the local date.
-When the clocks go back the repeated hour's two passes share their labels and
-their records share a bucket, which is the honest answer about a quarter-hour
-that occurred twice; keying by UTC instead would put every local midnight
-mid-bucket, a constant error to avoid a twice-a-year merge.
+Seven grains, sub-day through quarter. A coarser figure beside a finer one
+-- monthly deliveries beside daily deliveries -- is **two declarations**:
+two names, two explanations, two hashes, each computed directly from the
+records (a month bucket holds every record of the month, not a rollup of
+day buckets), so each is citable on its own and neither is a hidden
+re-slicing of the other. An earlier edition refused `week` and `month`
+here on the ground that a range over days produces either; that argument
+was aimed at *unnamed* read-time truncation -- one name quietly serving
+two grains -- and declaring the coarser grain under its own name is the
+opposite of that. Other minute counts wait for a definition to ask,
+exactly as `percentile` does.
+
+A sub-day label is local time truncated to the grain -- `2026-08-25T14:30`
+-- in the calendar the definition names, exactly as a day key is the local
+date, a month key the local month (`2026-08`), a quarter `2026-Q3` and a
+week the ISO week (`2026-W35`). When the clocks go back the repeated
+hour's two passes share their labels and their records share a bucket,
+which is the honest answer about a quarter-hour that occurred twice;
+keying by UTC instead would put every local midnight mid-bucket, a
+constant error to avoid a twice-a-year merge.
 """
 
-GroupGrain: TypeAlias = Literal["15 minutes", "hour", "day"]
-"""`series(m) by hour` -- the grain a series' points are grouped to.
-
-Grouping is a claim the reading makes, not a convenience the caller picks: an
-hourly series and a daily one differ in what every point *means*, so the grain
-is written in the definition and hashed into its version. It exists only on
-`series` because the scalar statistics run over the window's raw values
-whatever the grain is -- a grain written on `mean` would either do nothing or
-turn it into a mean of group means, weighting each hour equally instead of
-each record.
-
-**A minute-resolution series is deliberately absent, though the minute is a
-storable grain.** Over a sparse figure a minute group holds one record, so the
-point *is* the record -- ten thousand of them on the wire is the raw
-collection rule 2 exists to withhold, at a size (10,080 points per week per
-subject) that every socket connect and sync push would pay. The finest a
-series says is the quarter-hour.
-
-Because bucket labels are local time, grouping is label truncation: the
-calendar was decided when the bucket was written, and no zone arithmetic
-happens at read time. A series finer than the store would have to invent
-values the store never kept, and dropping `minute` from this union is what
-makes that unwritable rather than refused: the finest series grain equals the
-coarsest sub-day stored grain.
-"""
 
 @dataclass(frozen=True)
 class Through:
@@ -169,6 +157,20 @@ class IndexField:
     field: str
     through: Through | None = None
     truncate: Truncation | None = None
+    select: str | None = None
+    """`by first monday of month` -- a *selective* calendar rule, canonical
+    text. Where a truncation is total (every instant has a day and a month),
+    an ordinal weekday-of-month rule is deliberately partial: an instant on
+    the first Monday of its month buckets under that day's date, and every
+    other instant lands in **no bucket** -- the filter falls out of the
+    function being undefined there, the same doctrine as `is set`. The
+    stored buckets are sparse day labels, one per month at most (a fifth
+    Monday exists in some months only), and a reading's window walks them
+    as the sequence they are: `over 1-6` is the last six first-Mondays.
+
+    Mutually exclusive with `truncate`; hashed as its own key, so every
+    spec written before the family existed keeps its version."""
+
     zone: str | None = None
     """`by day in tenant.timezone` -- whose calendar decides which day.
 
@@ -924,17 +926,17 @@ a question nothing has asked.
 class Statistic:
     fn: StatisticFn
     set: str
-    by: GroupGrain | None = None
-    """The series grouping, on `series` alone -- see `GroupGrain`.
-
-    Required over a sub-day source, so the payload a series commits to is
-    visible in the definition; refused over a day-keyed one, where a bare
-    series already is the day series and a second spelling of one thing is a
-    first place for two to disagree. Hashed absent-unless-declared, so every
-    reading written before grains existed keeps its version.
-    """
-
     line: int = 0
+    """A series' points are one per bucket of the source figure's own
+    sequence -- the grain its group declared -- so there is nothing here to
+    configure. `series(...) by <grain>` existed while coarser grains were
+    not declarable; now that an hourly view of quarter-hour events is its
+    own hour-grouped figure, a read-time regrouping would be a second,
+    unnamed spelling of that declaration -- and under integer windows its
+    edge points could straddle the window, claiming time the span does not
+    cover. A minute-grain figure refuses `series` outright: a minute bucket
+    of a sparse figure holds one record, so the point *is* the record --
+    the raw collection the payload exists to withhold."""
 
 
 @dataclass(frozen=True)
@@ -1355,13 +1357,17 @@ class BundleMember:
     kind: Literal["figure", "reading", "projection", "summarise"]
     name: str
     windows: tuple[WindowSpec, ...] | None = None
-    """`over 7, 14, 30` or `over 1-30, 31-60` (`in hours` for a sub-day
-    span) -- which bucket spans the reading serves. Only a *windowed*
-    reading may carry one, mirroring the language's rule that the argument
-    list and the source form encode liveness twice, loudly: a live member is
-    named bare the way a live reading declares `()`. Absent on a windowed
-    reading, the serving default decides -- the same default an unqualified
-    request to the results surface gets."""
+    """`over 7, 14, 30`, `over 1-30, 31-60`, `over each 1-12` -- which
+    bucket spans the reading serves: bare positions in the source figure's
+    own sequence, whatever grain its group declared, because an argument
+    may never say what a bucket is. `each a-b` expands at parse time to the
+    one-bucket windows `a-a ... b-b`, indistinguishable downstream from the
+    enumerated spelling. Only a *windowed* reading may carry a list,
+    mirroring the language's rule that the argument list and the source
+    form encode liveness twice, loudly: a live member is named bare the way
+    a live reading declares `()`. Absent on a windowed reading, the serving
+    default decides -- the same default an unqualified request to the
+    results surface gets."""
 
     line: int = 0
 

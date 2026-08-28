@@ -22,17 +22,18 @@ from uratori.engine.buckets import (
     end_of_day_ms,
     label_in,
     measure_of,
+    ordinal_weekday_day,
     part_of,
     read_number,
     read_path,
+    selected_day,
 )
 from uratori.engine.evaluate import Parts, Readers, evaluate, same_value
 from uratori.engine.project import holds, ordered, summarise
 from uratori.engine.read import (
     Sample,
     level_of,
-    sample_from_buckets,
-    sample_from_days,
+    sample_over,
     series_of,
     statistics_of,
     unmet_of,
@@ -509,19 +510,19 @@ def test_the_serve_path_reads_both_stored_shapes() -> None:
     scalar. Dropping the scalar branch made every volume figure stored,
     versioned and unreadable -- with the checker and the reader agreeing, so no
     request ever came back wrong."""
-    listed = sample_from_days([("2025-08-01", [10.0, 20.0])], "2025-08-01", "2025-08-01")
+    listed = sample_over([("2025-08-01", [10.0, 20.0])], ["2025-08-01"])
     assert listed.values == (10.0, 20.0)
-    assert listed.days_covered == 1
+    assert listed.buckets_covered == 1
 
-    scalar = sample_from_days([("2025-08-01", 4.0)], "2025-08-01", "2025-08-01")
+    scalar = sample_over([("2025-08-01", 4.0)], ["2025-08-01"])
     assert scalar.values == (4.0,), "a count figure's stored scalar was dropped"
-    assert scalar.days_covered == 1
+    assert scalar.buckets_covered == 1
 
 
 def test_a_sum_of_nothing_is_nought_and_a_mean_of_nothing_is_unknown() -> None:
     """Deliberate asymmetry. A queue that took no tickets took no tickets; an
     average of no values is a claim nobody can make."""
-    empty = Sample(values=(), points=(), days_covered=0, days_requested=7)
+    empty = Sample(values=(), points=(), buckets_covered=0, buckets_requested=7)
 
     speed = READINGS.reading("team_person.speed")
     shipped = READINGS.reading("team_person.shipped")
@@ -536,11 +537,11 @@ def test_a_requirement_names_what_fell_short_rather_than_only_that_it_did() -> N
     lives in a constant nobody can see from the board."""
     plan = READINGS.reading("team_person.speed")
     assert plan is not None
-    short = Sample(values=(1.0,), points=(), days_covered=1, days_requested=7)
+    short = Sample(values=(1.0,), points=(), buckets_covered=1, buckets_requested=7)
     unmet = unmet_of(plan, short)
     assert unmet and "3" in unmet[0] and "1" in unmet[0]
 
-    enough = Sample(values=(1.0, 2.0, 3.0), points=(), days_covered=3, days_requested=7)
+    enough = Sample(values=(1.0, 2.0, 3.0), points=(), buckets_covered=3, buckets_requested=7)
     assert unmet_of(plan, enough) == []
 
 
@@ -551,11 +552,11 @@ def test_one_value_renders_and_only_an_empty_window_is_withheld_with_a_reason() 
     plan = READINGS.reading("team_person.pace")
     assert plan is not None
 
-    one = Sample(values=(5.0,), points=(), days_covered=1, days_requested=7)
+    one = Sample(values=(5.0,), points=(), buckets_covered=1, buckets_requested=7)
     assert unmet_of(plan, one) == []
     assert statistics_of(plan, one)["mean"] == 5.0
 
-    empty = Sample(values=(), points=(), days_covered=0, days_requested=7)
+    empty = Sample(values=(), points=(), buckets_covered=0, buckets_requested=7)
     unmet = unmet_of(plan, empty)
     # The full sentence, because "at least 1 value" is also a substring of the
     # plural and would pass against "at least 1 values".
@@ -776,7 +777,7 @@ reading team_person.quarter_throughput(range):
         m = team_person.quarter_volume in range
     calculate:
         sum(m)
-        series(m) by hour
+        series(m)
 
 # d
 reading team_person.quarter_pace(range):
@@ -787,7 +788,7 @@ reading team_person.quarter_pace(range):
         at least 3 values in m
     calculate:
         mean(m)
-        series(m) by hour
+        series(m)
 
 # d
 reading team_person.quarter_typical(range):
@@ -797,23 +798,126 @@ reading team_person.quarter_typical(range):
     calculate:
         median(m)
 
-# d
-reading team_person.quarter_daily(range):
-    display "x"
-    depends:
-        m = team_person.quarter_volume in range
-    calculate:
-        sum(m)
-        series(m) by day
+group work_issue.by_month from (assignee_account_id through team_person.accounts.account_id, completed_at by month in tenant.timezone)
+group work_issue.by_calendar_quarter from (assignee_account_id through team_person.accounts.account_id, completed_at by quarter in tenant.timezone)
+group work_issue.by_hour from (assignee_account_id through team_person.accounts.account_id, completed_at by hour in tenant.timezone)
+group work_issue.by_week from (assignee_account_id through team_person.accounts.account_id, completed_at by week in tenant.timezone)
+group work_issue.by_first_monday from (assignee_account_id through team_person.accounts.account_id, completed_at by first monday of month in tenant.timezone)
+group work_issue.by_fifth_monday from (assignee_account_id through team_person.accounts.account_id, completed_at by fifth monday of month in tenant.timezone)
 
 # d
-reading team_person.quarter_fine(range):
+figure team_person.weekly_lead:
     display "x"
     depends:
-        m = team_person.quarter_volume in range
+        mine = work_issue.by_week:{team_person}
+    calculate:
+        list(work_issue.lead over mine)
+
+# d
+reading team_person.weekly_pace(range):
+    display "x"
+    depends:
+        m = team_person.weekly_lead in range
+    calculate:
+        median(m)
+
+# d
+figure team_person.monthly_volume:
+    display "x"
+    depends:
+        mine = work_issue.by_month:{team_person}
+    calculate:
+        count(mine)
+
+# d
+figure team_person.monthly_lead:
+    display "x"
+    depends:
+        mine = work_issue.by_month:{team_person}
+    calculate:
+        list(work_issue.lead over mine)
+
+# d
+figure team_person.quarterly_volume:
+    display "x"
+    depends:
+        mine = work_issue.by_calendar_quarter:{team_person}
+    calculate:
+        count(mine)
+
+# d
+figure team_person.hourly_lead:
+    display "x"
+    depends:
+        mine = work_issue.by_hour:{team_person}
+    calculate:
+        list(work_issue.lead over mine)
+
+# d
+figure team_person.first_monday_lead:
+    display "x"
+    depends:
+        mine = work_issue.by_first_monday:{team_person}
+    calculate:
+        list(work_issue.lead over mine)
+
+# d
+figure team_person.fifth_monday_volume:
+    display "x"
+    depends:
+        mine = work_issue.by_fifth_monday:{team_person}
+    calculate:
+        count(mine)
+
+# d
+reading team_person.monthly_shipped(range):
+    display "x"
+    depends:
+        m = team_person.monthly_volume in range
     calculate:
         sum(m)
-        series(m) by 15 minutes
+        series(m)
+
+# d
+reading team_person.monthly_pace(range):
+    display "x"
+    depends:
+        m = team_person.monthly_lead in range
+    calculate:
+        mean(m)
+
+# d
+reading team_person.quarterly_shipped(range):
+    display "x"
+    depends:
+        m = team_person.quarterly_volume in range
+    calculate:
+        sum(m)
+
+# d
+reading team_person.hourly_typical(range):
+    display "x"
+    depends:
+        m = team_person.hourly_lead in range
+    calculate:
+        median(m)
+
+# d
+reading team_person.first_monday_pace(range):
+    display "x"
+    depends:
+        m = team_person.first_monday_lead in range
+    calculate:
+        median(m)
+        series(m)
+
+# d
+reading team_person.fifth_monday_shipped(range):
+    display "x"
+    depends:
+        m = team_person.fifth_monday_volume in range
+    calculate:
+        sum(m)
 
 # d
 figure team_person.minute_lead:
@@ -834,152 +938,399 @@ reading team_person.minute_typical(range):
 )
 
 
-def test_a_grouped_series_sums_counts_and_a_hole_stays_a_hole() -> None:
-    """An hour nobody merged in is not an hour somebody merged nothing in --
-    summing absences to nought would draw a floor that never happened, which is
-    the same lie per hour that the day series already refuses per day."""
-    buckets = [
-        ("2025-08-01T00:15", 2.0),
-        ("2025-08-01T00:30", 3.0),
-        ("2025-08-01T01:00", 1.0),
-    ]
-    sample = sample_from_buckets(buckets, "2025-08-01", "2025-08-01", by="hour")
-    series = series_of(sample)
-    assert len(series) == 24
-    assert series[0] == 5.0, "two quarters of one hour did not add up"
-    assert series[1] == 1.0
-    assert series[2:] == [None] * 22, "an empty hour was invented as a value"
-    assert sample.values == (2.0, 3.0, 1.0)
-    assert sample.days_covered == 1
+def test_a_series_point_is_the_stored_bucket_and_a_hole_stays_a_hole() -> None:
+    """A series is one point per bucket of the figure's own sequence, holes
+    included: a quarter-hour nobody merged in is not a quarter-hour somebody
+    merged nothing in -- inventing a nought would draw a floor that never
+    happened."""
+    labels = ["2025-08-01T00:15", "2025-08-01T00:30", "2025-08-01T00:45"]
+    sample = sample_over(
+        [("2025-08-01T00:15", 2.0), ("2025-08-01T00:45", 1.0)], labels
+    )
+    assert series_of(sample) == [2.0, None, 1.0]
+    assert sample.values == (2.0, 1.0)
+    assert sample.buckets_covered == 2
+    assert sample.buckets_requested == 3
 
 
-def test_grouping_changes_the_series_and_never_the_statistics() -> None:
-    """The scalar statistics run over the raw stored values whatever the series
-    grain is. A mean of the group means would weight each hour equally instead
-    of each record -- 37.5 here -- which is the mean-of-means trap wearing a new
-    grain."""
-    buckets = [
-        ("2025-08-01T09:00", [10.0, 20.0]),
-        ("2025-08-01T10:15", [60.0]),
-    ]
-    sample = sample_from_buckets(buckets, "2025-08-01", "2025-08-01", by="hour")
+def test_a_list_buckets_point_is_its_records_mean_and_the_statistics_pool() -> None:
+    """The scalar statistics run over the window's raw records; a bucket's
+    series point is the mean of its own. A mean of the points would weight
+    each month equally instead of each record -- 37.5 here -- the
+    mean-of-means trap wearing a calendar."""
+    sample = sample_over(
+        [("2025-07", [10.0, 20.0]), ("2025-08", [60.0])], ["2025-07", "2025-08"]
+    )
     plan = READINGS.reading("team_person.speed")
     assert plan is not None
     assert statistics_of(plan, sample)["mean"] == 30.0
-
-    series = series_of(sample)
-    assert series[9] == 15.0, "an hour's point is the mean of its own records"
-    assert series[10] == 60.0
+    assert series_of(sample) == [15.0, 60.0]
 
 
-def test_quarters_grouped_by_day_agree_with_what_a_day_figure_would_have_stored() -> None:
-    """One count, added up -- a day's point over quarter-hour buckets must equal
-    the count a `by day` index would have written, or the two grains are two
-    answers to one question."""
-    buckets = [
-        ("2025-08-01T09:15", 2.0),
-        ("2025-08-01T23:45", 1.0),
-        ("2025-08-03T00:00", 4.0),
+# ------------------------------------------------------ resolving sequences --
+
+
+def test_a_month_span_resolves_to_calendar_months_across_the_year_edge() -> None:
+    from uratori.engine.buckets import resolve_span
+    from uratori.windows import WindowSpec
+
+    at = end_of_day_ms("2026-02-10", "UTC")
+    assert resolve_span(at, "UTC", WindowSpec(1, 4), "month") == [
+        "2025-11",
+        "2025-12",
+        "2026-01",
+        "2026-02",
     ]
-    sample = sample_from_buckets(buckets, "2025-08-01", "2025-08-03", by="day")
-    assert series_of(sample) == [3.0, None, 4.0]
-    assert sample.days_covered == 2
-    assert sample.days_requested == 3
+    assert resolve_span(at, "UTC", WindowSpec(3, 4), "month") == ["2025-11", "2025-12"]
 
 
-def test_a_native_grain_series_lands_each_bucket_in_its_own_slot() -> None:
-    """Equal is the boundary of "no finer than the store": a quarter-hour
-    series over a quarter-hour figure is one point per bucket, at the position
-    its label says -- 09:15 is slot 37 of a day's 96."""
-    sample = sample_from_buckets(
-        [("2025-08-01T09:15", 2.0)], "2025-08-01", "2025-08-01", by="15 minutes"
+def test_a_quarter_span_walks_calendar_quarters_across_the_year_edge() -> None:
+    from uratori.engine.buckets import resolve_span
+    from uratori.windows import WindowSpec
+
+    at = end_of_day_ms("2026-02-10", "UTC")
+    assert resolve_span(at, "UTC", WindowSpec(1, 4), "quarter") == [
+        "2025-Q2",
+        "2025-Q3",
+        "2025-Q4",
+        "2026-Q1",
+    ]
+
+
+def test_a_week_span_is_iso_weeks_year_53_included() -> None:
+    """A week label carries the **ISO** year, which is not always the calendar
+    year of the week's Monday -- so a New Year anchor must not tear the
+    sequence.
+
+    2027-01-01 alone cannot show this: its week's Monday is 2026-12-28, whose
+    calendar year already equals its ISO year, so a resolver using either
+    answers `2026-W53` and the test passes on a coincidence. 2025-12-31 is the
+    case that distinguishes them -- its week's Monday is 2025-12-29, calendar
+    year 2025 but ISO year **2026** -- so a calendar-year label would say
+    `2025-W01`, a week fifty-one places out of order.
+    """
+    from uratori.engine.buckets import resolve_span
+    from uratori.windows import WindowSpec
+
+    at = end_of_day_ms("2027-01-01", "UTC")
+    assert resolve_span(at, "UTC", WindowSpec(1, 2), "week") == [
+        "2026-W52",
+        "2026-W53",
+    ], "a 53-week year has a W53, and the sequence must reach it"
+
+    edge = end_of_day_ms("2025-12-31", "UTC")
+    assert resolve_span(edge, "UTC", WindowSpec(1, 2), "week") == [
+        "2025-W52",
+        "2026-W01",
+    ], (
+        "the anchor week's Monday is 2025-12-29 -- calendar year 2025, ISO "
+        "year 2026. A calendar-year label would file it as 2025-W01 and sort "
+        "it before the week it follows"
     )
-    series = series_of(sample)
-    assert len(series) == 96
-    assert series[9 * 4 + 1] == 2.0
-    assert sum(1 for point in series if point is not None) == 1
 
 
-def test_a_sub_day_sample_with_no_series_still_carries_its_values() -> None:
-    """A sub-day reading that declares no series has nothing to group, and the
-    scalar statistics must not notice the difference: the values and the day
-    coverage are the same either way."""
-    buckets = [("2025-08-01T09:15", 2.0), ("2025-08-02T10:00", 3.0)]
-    sample = sample_from_buckets(buckets, "2025-08-01", "2025-08-03", by=None)
-    assert sample.values == (2.0, 3.0)
-    assert sample.days_covered == 2
-    assert sample.days_requested == 3
-    assert series_of(sample) == []
+def test_the_anchor_month_is_the_zones_month_not_utcs() -> None:
+    """2026-09-01T02:00Z is still 31 August in Los Angeles: bucket 1 of a
+    month span must be 2026-08 there, and 2026-09 in UTC -- the control that
+    catches a resolver doing zone arithmetic on the wrong side."""
+    from uratori.engine.buckets import resolve_span
+    from uratori.windows import WindowSpec
+
+    at_ms = 1_787_536_800_000.0  # 2026-09-01T02:00:00Z... pinned below
+    from datetime import UTC, datetime
+
+    at_ms = datetime(2026, 9, 1, 2, 0, tzinfo=UTC).timestamp() * 1000.0
+    assert resolve_span(at_ms, "America/Los_Angeles", WindowSpec(1, 1), "month") == ["2026-08"]
+    assert resolve_span(at_ms, None, WindowSpec(1, 1), "month") == ["2026-09"]
 
 
-def test_every_local_day_carries_the_same_labels_whatever_the_clocks_did() -> None:
-    """The fall-back day's repeated labels merged at write time and the
-    spring-forward day's missing hour is a run of holes, so a grouped series
-    never gains or loses slots to DST -- a day is 24 hourly points, always."""
-    fall_back = sample_from_buckets(
-        [("2025-11-02T01:30", 5.0)], "2025-11-02", "2025-11-02", by="hour"
+def test_first_monday_positions_walk_the_calendars_sparse_sequence() -> None:
+    """Bucket 1 is the most recent first-Monday at or before the anchor --
+    the anchor's own day when it *is* one -- and the positions step back one
+    first-Monday per month, sparse days and all."""
+    from uratori.engine.buckets import resolve_span
+    from uratori.windows import WindowSpec
+
+    rule = "first monday of month"
+    at = end_of_day_ms("2026-08-28", "UTC")
+    assert resolve_span(at, "UTC", WindowSpec(1, 3), rule) == [
+        "2026-06-01",
+        "2026-07-06",
+        "2026-08-03",
+    ]
+    # On the day itself it is bucket 1; the day before, the previous month's.
+    assert resolve_span(end_of_day_ms("2026-08-03", "UTC"), "UTC", WindowSpec(1, 1), rule) == [
+        "2026-08-03"
+    ]
+    assert resolve_span(end_of_day_ms("2026-08-02", "UTC"), "UTC", WindowSpec(1, 1), rule) == [
+        "2026-07-06"
+    ]
+
+
+def test_fifth_mondays_skip_months_without_one_rather_than_inventing_buckets() -> None:
+    """The sequence is the calendar's own: months with no fifth Monday
+    contribute no position, so the last three fifth-Mondays before September
+    2026 span five months -- and a month that has one but no data is a hole
+    in the window, never a skipped position."""
+    from uratori.engine.buckets import resolve_span
+    from uratori.windows import WindowSpec
+
+    at = end_of_day_ms("2026-09-01", "UTC")
+    assert resolve_span(at, "UTC", WindowSpec(1, 3), "fifth monday of month") == [
+        "2026-03-30",
+        "2026-06-29",
+        "2026-08-31",
+    ]
+    assert resolve_span(at, "UTC", WindowSpec(2, 4), "fifth monday of month") == [
+        "2025-12-29",
+        "2026-03-30",
+        "2026-06-29",
+    ]
+
+
+def test_an_hour_span_counts_labels_across_fall_back_not_elapsed_hours() -> None:
+    """Stored labels live in wall-clock space and the fall-back hour's two
+    passes merged at write time, so a span steps back through labels: three
+    hour buckets ending at 01:00 on the fall-back day are 01:00, 00:00 and
+    23:00 -- whatever the elapsed time says."""
+    from uratori.engine.buckets import resolve_span
+    from uratori.windows import WindowSpec
+
+    zone = "America/Los_Angeles"
+    # 2025-11-02T09:30Z is 01:30 PST, the second pass through 01:00 local.
+    at = 1_762_075_800_000.0
+    assert label_in(at, zone, "15 minutes") == "2025-11-02T01:30"
+    assert resolve_span(at, zone, WindowSpec(1, 3), "hour") == [
+        "2025-11-01T23:00",
+        "2025-11-02T00:00",
+        "2025-11-02T01:00",
+    ]
+
+
+def test_a_span_clamps_at_the_calendars_edge_rather_than_overflowing() -> None:
+    from uratori.engine.buckets import resolve_span
+    from uratori.windows import WindowSpec
+
+    labels = resolve_span(
+        end_of_day_ms("0001-01-03", "UTC"), "UTC", WindowSpec(2, 10), "day"
     )
-    assert len(series_of(fall_back)) == 24
-    assert series_of(fall_back)[1] == 5.0
+    assert (labels[0], labels[-1]) == ("0001-01-01", "0001-01-02")
+    labels = resolve_span(
+        end_of_day_ms("0001-01-01", "UTC"), "UTC", WindowSpec(1, 5), "hour"
+    )
+    assert labels[-1] == "0001-01-01T23:00"
+    labels = resolve_span(
+        end_of_day_ms("0001-01-01", "UTC"), "UTC", WindowSpec(1, 1000), "hour"
+    )
+    assert (labels[0], labels[-1]) == ("0001-01-01T00:00", "0001-01-01T23:00")
+    labels = resolve_span(
+        end_of_day_ms("0001-02-15", "UTC"), "UTC", WindowSpec(1, 30), "month"
+    )
+    assert (labels[0], labels[-1]) == ("0001-01", "0001-02")
 
-    spring = sample_from_buckets([], "2026-03-08", "2026-03-08", by="hour")
-    assert len(series_of(spring)) == 24
+
+def test_every_stored_label_files_under_the_month_its_own_day_is_in() -> None:
+    """The write-time property the trio hangs off: an instant's month label
+    is the month of its *zoned day*, its quarter is that month's quarter and
+    its ISO week holds that day -- one calendar application, at the day, so
+    a month figure and a day figure can never disagree about one event.
+    Probed across DST transitions, midnights and year edges; the UTC-vs-zone
+    boundary case is the control that fails a resolver applying zones
+    anywhere else."""
+    from datetime import UTC, datetime
+
+    probes = []
+    for spec in (
+        (2026, 1, 1, 0, 0),
+        (2025, 12, 31, 23, 59),
+        (2026, 3, 8, 10, 30),  # US spring-forward day
+        (2025, 11, 2, 9, 30),  # US fall-back day, the repeated hour
+        (2026, 6, 30, 23, 45),
+        (2026, 7, 1, 0, 15),
+        (2026, 9, 1, 2, 0),
+    ):
+        probes.append(datetime(*spec, tzinfo=UTC).timestamp() * 1000.0)
+    for zone in (None, "America/Los_Angeles", "Pacific/Kiritimati", "Asia/Beirut"):
+        for at in probes:
+            day = label_in(at, zone, "day")
+            month = label_in(at, zone, "month")
+            quarter = label_in(at, zone, "quarter")
+            week = label_in(at, zone, "week")
+            assert month == day[:7], (zone, day)
+            assert quarter == f"{day[:4]}-Q{(int(day[5:7]) - 1) // 3 + 1}", (zone, day)
+            from datetime import date
+
+            iso = date.fromisoformat(day).isocalendar()
+            assert week == f"{iso.year:04d}-W{iso.week:02d}", (zone, day)
+    # The control: at 2026-09-01T02:00Z the LA month and the UTC month
+    # genuinely differ, so a month rule reading the wrong calendar cannot
+    # pass the loop above by coincidence.
+    boundary = datetime(2026, 9, 1, 2, 0, tzinfo=UTC).timestamp() * 1000.0
+    assert label_in(boundary, "America/Los_Angeles", "month") == "2026-08"
+    assert label_in(boundary, None, "month") == "2026-09"
 
 
-async def test_a_bucket_on_the_windows_final_day_is_served_not_lexicographically_lost() -> None:
-    """Every label on the window's last day -- "2025-08-24T04:45" -- sorts
-    *after* the bare day "2025-08-24", so day-string bounds would silently drop
-    the current day from every sub-day window: a board that reports the team
-    has shipped nothing all morning, every morning."""
+def test_a_record_lands_in_its_first_monday_bucket_or_in_none_at_all() -> None:
+    """The selective rule is partial and the partiality is the filter: a
+    record completed on the first Monday buckets under that day, and a
+    record on any other day is in no bucket -- there is no narrowing step a
+    cheap path could skip, because off-rule the function is undefined."""
+    la = {"tenant": {"timezone": "America/Los_Angeles"}}
+    on_monday = {"assignee_account_id": "a1", "completed_at": "2026-08-03T18:30:00-07:00"}
+    mondays = GRAINED.indexes["work_issue.by_first_monday"]
+    assert buckets_of(mondays, on_monday, la, _resolve, NOW) == ["person-of-a1@2026-08-03"]
+    off_monday = {"assignee_account_id": "a1", "completed_at": "2026-08-04T18:30:00-07:00"}
+    assert buckets_of(mondays, off_monday, la, _resolve, NOW) == []
+    # The zone decides which day -- and therefore whether the rule holds at
+    # all: 2026-08-04T02:00Z is still Monday the 3rd in Los Angeles.
+    edge = {"assignee_account_id": "a1", "completed_at": "2026-08-04T02:00:00Z"}
+    assert buckets_of(mondays, edge, la, _resolve, NOW) == ["person-of-a1@2026-08-03"]
+    utc = {"tenant": {"timezone": "UTC"}}
+    assert buckets_of(mondays, edge, utc, _resolve, NOW) == []
+
+
+def test_a_coarse_bucket_holds_the_records_of_its_own_period_directly() -> None:
+    """**A month bucket is every record of the month, never a rollup of day
+    buckets.** This is the claim the whole coarse-grain design rests on: two
+    grains are two declarations, each computed from the records, so each is
+    citable on its own rather than one being a re-slicing of the other.
+
+    Every other coarse-grain test hand-seeds storage and then reads it back,
+    which proves the read paths agree given equal storage -- a write path
+    that only bucketed some of the records would sail straight through all of
+    them. This one drives raw records into `buckets_of`, the single place a
+    record's buckets are decided.
+
+    Be precise about what "directly" means here, because the source does the
+    opposite of one reading of it: `label_in` derives a month, quarter or week
+    label from the record's own *local day*, deliberately, so a month figure
+    and a day figure can never disagree about which month an event was in. The
+    claim under test is not that the label avoids the day -- it is that the
+    month bucket is filled by **the records themselves**, one pass over each,
+    rather than by rolling up what a day *figure* already computed. A rollup
+    would inherit the day figure's population, and any record the day rule
+    dropped would silently vanish from the month.
+
+    So the load-bearing assertion is the coverage one: every record lands in
+    exactly one bucket of every total rule, none dropped and none invented.
+    That is what catches a narrowing `_keys_for`, and it is the only test in
+    the suite that does. The month and quarter lists beneath it pin the
+    calendar arithmetic at the edges; the day-rule comparison at the end is
+    the agreement `label_in` promises, restated where a reader of this test
+    will look for it.
+    """
+    la = {"tenant": {"timezone": "America/Los_Angeles"}}
+    # Deliberately spread across month, quarter and year edges, and across a
+    # DST boundary, in a zone whose day differs from UTC's for part of each.
+    stamps = (
+        "2026-01-01T00:30:00-08:00",
+        "2026-01-31T23:30:00-08:00",
+        "2026-02-01T00:30:00-08:00",
+        "2026-03-08T03:30:00-07:00",
+        "2026-03-31T23:00:00-07:00",
+        "2026-04-01T00:00:00-07:00",
+        "2026-06-30T23:59:00-07:00",
+        "2026-07-01T00:01:00-07:00",
+        "2026-12-31T23:30:00-08:00",
+        "2027-01-01T00:30:00-08:00",
+    )
+    records = [{"assignee_account_id": "a1", "completed_at": stamp} for stamp in stamps]
+
+    by_rule = {
+        rule: [
+            buckets_of(GRAINED.indexes[index], record, la, _resolve, NOW)
+            for record in records
+        ]
+        for rule, index in (
+            ("day", "work_issue.by_day"),
+            ("month", "work_issue.by_month"),
+            ("quarter", "work_issue.by_calendar_quarter"),
+        )
+    }
+
+    # Every total rule files every record exactly once. A coarse rule that
+    # dropped a record -- or that only knew about records some other rule had
+    # already bucketed -- fails here, and that is the narrowing rule 4
+    # forbids.
+    for rule, filed in by_rule.items():
+        assert [len(b) for b in filed] == [1] * len(records), (
+            f"{rule} left a record in no bucket, or in two"
+        )
+
+    # The coarse label is the record's own period. Spelled out per record
+    # rather than computed, so a wrong month at one edge names itself instead
+    # of being reproduced by the same arithmetic on both sides.
+    months = [b[0].split("@", 1)[1] for b in by_rule["month"]]
+    assert months == [
+        "2026-01", "2026-01", "2026-02", "2026-03", "2026-03",
+        "2026-04", "2026-06", "2026-07", "2026-12", "2027-01",
+    ]
+    quarters = [b[0].split("@", 1)[1] for b in by_rule["quarter"]]
+    assert quarters == [
+        "2026-Q1", "2026-Q1", "2026-Q1", "2026-Q1", "2026-Q1",
+        "2026-Q2", "2026-Q2", "2026-Q3", "2026-Q4", "2027-Q1",
+    ]
+
+    # The agreement `label_in` promises, restated here: a month figure and a
+    # day figure can never disagree about which month an event was in,
+    # because both read the same zoned day. Not a control for the assertions
+    # above -- it is the same relation from the other side -- but the
+    # property a reader of a two-grain board depends on.
+    days = [b[0].split("@", 1)[1] for b in by_rule["day"]]
+    assert [d[:7] for d in days] == months
+    assert [f"{d[:4]}-Q{(int(d[5:7]) - 1) // 3 + 1}" for d in days] == quarters
+
+
+# --------------------------------------------------------- serving sequences --
+
+
+async def _figure_store(figure, index_name, rows):  # type: ignore[no-untyped-def]
     store = MemoryEngineStore()
+    stamp = fingerprint(dict(DEFAULTS), list(figure.settings))
+    await store.set_pointer(
+        "t1", figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
+    )
+    await store.set_buckets("t1", index_name, "w1", ["seed"])
+    for subject, value in rows:
+        await store.save("t1", figure.name, figure.version, subject, value, (), "P One")
+    return store
+
+
+async def test_a_sub_day_figures_windows_are_positions_in_its_own_sequence() -> None:
+    """`over 1-96` on a quarter-hour figure is the last ninety-six stored
+    quarter-hours -- a day of them -- both edges inclusive: the bucket at
+    position 96 is in, the one behind it is out, and the labels on the
+    window say exactly which buckets those were."""
     figure = GRAINED.figure("team_person.quarter_volume")
     reading = GRAINED.reading("team_person.quarter_throughput")
     assert figure is not None and reading is not None
-
-    tenant = "t1"
-    stamp = fingerprint(dict(DEFAULTS), list(figure.settings))
-    await store.set_pointer(
-        tenant, figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
+    store = await _figure_store(
+        figure,
+        "work_issue.by_quarter",
+        (
+            ("p1@2025-08-24T05:00", 2.0),  # the anchor bucket itself: position 1
+            ("p1@2025-08-24T04:45", 3.0),  # position 2
+            ("p1@2025-08-23T05:15", 5.0),  # position 96, the far edge: in
+            ("p1@2025-08-23T05:00", 9.0),  # position 97: out
+        ),
     )
-    await store.set_buckets(tenant, "work_issue.by_quarter", "w1", ["p1@2025-08-24T04:45"])
-    # The hand-written labels below are only honest if they are what the write
-    # path produces -- pin one against `label_in` so the two cannot drift.
-    assert label_in(1_756_035_900_000.0, "America/Los_Angeles", "15 minutes") == (
-        "2025-08-24T04:45"  # 2025-08-24T11:45Z
-    )
-    for subject, value in (
-        ("p1@2025-08-24T04:45", 2.0),  # the current LA day, mid-morning
-        ("p1@2025-08-24T23:45", 4.0),  # the final quarter of the final day
-        ("p1@2025-08-20T10:00", 3.0),  # mid-window
-        ("p1@2025-08-18T00:00", 1.0),  # the first quarter of the first day
-        ("p1@2025-08-17T23:45", 8.0),  # the quarter before the window opens
-        ("p1@2025-08-10T09:00", 7.0),  # well before the window; must not leak in
-    ):
-        await store.save(tenant, figure.name, figure.version, subject, value, (), "P One")
-
-    at = 1_756_036_800_000.0  # 2025-08-24T12:00Z, 05:00 in Los Angeles
-    result = await serve_reading(store, GRAINED, tenant, reading, DEFAULTS, [7], at_ms=at)
-
+    at = 1_756_036_800_000.0  # 2025-08-24T12:00Z, exactly 05:00 in Los Angeles
+    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, ["1-96"], at_ms=at)
     assert isinstance(result.state, Ok)
-    assert len(result.subjects) == 1
-    window = result.subjects[0].windows[0]
-    assert (window.frm, window.to) == ("2025-08-18", "2025-08-24")
+    [window] = result.subjects[0].windows
+    assert (window.frm, window.to) == ("2025-08-23T05:15", "2025-08-24T05:00")
+    assert (window.span, window.bucket, window.trailing) == ("96", "15 minutes", None)
     assert window.total == 10.0, "a bucket at a window edge was dropped or leaked"
-    assert window.series_by == "hour"
-    assert window.series is not None and len(window.series) == 168
-    assert window.series[6 * 24 + 4] == 2.0  # 04:00 on the final day
-    assert window.series[6 * 24 + 23] == 4.0  # 23:00 on the final day
-    assert window.series[2 * 24 + 10] == 3.0  # 10:00 on 2025-08-20
-    assert window.series[0] == 1.0  # 00:00 on the first day
-    assert sum(1 for point in window.series if point is not None) == 4
+    assert window.series is not None and len(window.series) == 96
+    assert window.series[0] == 5.0 and window.series[-1] == 2.0 and window.series[-2] == 3.0
+    assert window.buckets_requested == 96 and window.buckets_covered == 3
 
 
-async def test_a_failed_floor_withholds_the_grouped_series_with_everything_else() -> None:
+async def test_a_failed_floor_withholds_the_series_with_everything_else() -> None:
     """Every statistic is withheld together, and the series is a statistic: a
     sparkline drawn beside a suppressed mean would be the outlier's shape
     published under a heading that says the sample was too small to say
-    anything -- and a grain shipped beside a null series would claim a shape
-    that was never sent."""
+    anything."""
     store = MemoryEngineStore()
     figure = GRAINED.figure("team_person.quarter_lead")
     reading = GRAINED.reading("team_person.quarter_pace")
@@ -1003,7 +1354,236 @@ async def test_a_failed_floor_withholds_the_grouped_series_with_everything_else(
     assert window.unmet, "two values against a floor of three should have fallen short"
     assert window.mean is None
     assert window.series is None
-    assert window.series_by is None, "a grain travelled beside a series that did not"
+
+
+async def test_a_month_window_pools_the_months_own_buckets() -> None:
+    """`over 6` on a month figure is the last six calendar months, bucket 1
+    the anchor's own month-so-far: the sum pools exactly those buckets, the
+    edges travel as month labels, and the series is one point per month with
+    honest holes."""
+    figure = GRAINED.figure("team_person.monthly_volume")
+    reading = GRAINED.reading("team_person.monthly_shipped")
+    assert figure is not None and reading is not None
+    store = await _figure_store(
+        figure,
+        "work_issue.by_month",
+        (
+            ("p1@2026-08", 2.0),
+            ("p1@2026-07", 3.0),
+            ("p1@2026-02", 9.0),  # one month beyond the span: out
+        ),
+    )
+    result = await serve_reading(
+        store, GRAINED, "t1", reading, DEFAULTS, [6], at_day="2026-08-15"
+    )
+    assert isinstance(result.state, Ok)
+    [window] = result.subjects[0].windows
+    assert (window.frm, window.to) == ("2026-03", "2026-08")
+    assert (window.span, window.bucket, window.trailing) == ("6", "month", None)
+    assert window.total == 5.0
+    assert window.series == [None, None, None, None, 3.0, 2.0]
+    assert window.buckets_requested == 6 and window.buckets_covered == 2
+    assert window.buckets is None, "a contiguous rule needs no bucket list; the edges say it"
+
+
+async def test_each_serves_one_window_per_bucket_with_every_rule_per_window() -> None:
+    """`each:1-3` on a month reading is three one-month windows, nearest
+    first, each floored and answered on its own -- August's mean, July's
+    honest shortfall, June's mean -- and it serves identically to the
+    enumerated spelling, which is all `each` is."""
+    figure = GRAINED.figure("team_person.monthly_lead")
+    reading = GRAINED.reading("team_person.monthly_pace")
+    assert figure is not None and reading is not None
+    store = await _figure_store(
+        figure,
+        "work_issue.by_month",
+        (
+            ("p1@2026-08", [86_400.0]),
+            ("p1@2026-06", [86_400.0, 172_800.0]),
+        ),
+    )
+    sugared = await serve_reading(
+        store, GRAINED, "t1", reading, DEFAULTS, ["each:1-3"], at_day="2026-08-15"
+    )
+    august, july, june = sugared.subjects[0].windows
+    # Bucket 1's one-bucket window spells canonically as the trailing "1".
+    assert [w.span for w in (august, july, june)] == ["1", "2-2", "3-3"]
+    assert (august.frm, august.to) == ("2026-08", "2026-08")
+    assert august.mean == 86_400.0
+    assert july.mean is None and july.unmet, "an empty month must fall short on its own"
+    assert june.mean == 129_600.0
+
+    spelled = await serve_reading(
+        store, GRAINED, "t1", reading, DEFAULTS, ["1", "2-2", "3-3"], at_day="2026-08-15"
+    )
+    assert sugared.subjects[0].windows == spelled.subjects[0].windows
+
+    # The pooled control: `over 3` is ONE window over the same buckets, so
+    # the distinction each exists for is visible in the answer.
+    pooled = await serve_reading(
+        store, GRAINED, "t1", reading, DEFAULTS, [3], at_day="2026-08-15"
+    )
+    [window] = pooled.subjects[0].windows
+    assert window.mean == 115_200.0, "the pooled mean runs over all three records"
+
+
+async def test_a_quarter_window_walks_calendar_quarters_across_the_year() -> None:
+    figure = GRAINED.figure("team_person.quarterly_volume")
+    reading = GRAINED.reading("team_person.quarterly_shipped")
+    assert figure is not None and reading is not None
+    store = await _figure_store(
+        figure,
+        "work_issue.by_calendar_quarter",
+        (
+            ("p1@2026-Q1", 1.0),  # position 1 at a February anchor: out of 2-3
+            ("p1@2025-Q4", 2.0),
+            ("p1@2025-Q3", 4.0),
+            ("p1@2025-Q2", 8.0),  # position 4: out
+        ),
+    )
+    result = await serve_reading(
+        store, GRAINED, "t1", reading, DEFAULTS, ["2-3"], at_day="2026-02-10"
+    )
+    [window] = result.subjects[0].windows
+    assert (window.frm, window.to) == ("2025-Q3", "2025-Q4")
+    assert (window.span, window.bucket) == ("2-3", "quarter")
+    assert window.total == 6.0
+
+
+async def test_an_hour_figure_serves_the_last_hours_of_its_own_sequence() -> None:
+    """The hour grain end to end: `over 4` is the last four stored hours in
+    the tenant's calendar -- a value in the anchor hour is in, one four
+    hours back is in at the edge, one five hours back is out."""
+    figure = GRAINED.figure("team_person.hourly_lead")
+    reading = GRAINED.reading("team_person.hourly_typical")
+    assert figure is not None and reading is not None
+    store = await _figure_store(
+        figure,
+        "work_issue.by_hour",
+        (
+            ("p1@2025-08-24T05:00", [100.0]),  # the anchor hour: in
+            ("p1@2025-08-24T02:00", [300.0]),  # position 4, the far edge: in
+            ("p1@2025-08-24T01:00", [900.0]),  # position 5: out
+        ),
+    )
+    at = 1_756_036_800_000.0  # 05:00 in Los Angeles
+    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, [4], at_ms=at)
+    [window] = result.subjects[0].windows
+    assert (window.frm, window.to) == ("2025-08-24T02:00", "2025-08-24T05:00")
+    assert (window.span, window.bucket, window.trailing) == ("4", "hour", None)
+    assert window.median == 200.0
+
+
+async def test_a_sparse_window_carries_its_buckets_because_edges_cannot() -> None:
+    """Six first-Mondays span half a year of dates, and the days between
+    them are not covered: the window carries the full bucket list -- the
+    honest wire shape for a sequence whose members are not contiguous --
+    and a stored day that is not on the rule's sequence stays out even when
+    it sits between the edges."""
+    figure = GRAINED.figure("team_person.first_monday_lead")
+    reading = GRAINED.reading("team_person.first_monday_pace")
+    assert figure is not None and reading is not None
+    store = await _figure_store(
+        figure,
+        "work_issue.by_first_monday",
+        (
+            ("p1@2026-08-03", [100.0]),
+            ("p1@2026-06-01", [300.0]),
+            ("p1@2026-05-05", [999.0]),  # between the edges, off the sequence: out
+            ("p1@2026-02-02", [777.0]),  # position 7: out
+        ),
+    )
+    result = await serve_reading(
+        store, GRAINED, "t1", reading, DEFAULTS, [6], at_day="2026-08-28"
+    )
+    [window] = result.subjects[0].windows
+    assert window.bucket == "first monday of month"
+    assert window.buckets == [
+        "2026-03-02",
+        "2026-04-06",
+        "2026-05-04",
+        "2026-06-01",
+        "2026-07-06",
+        "2026-08-03",
+    ]
+    assert (window.frm, window.to) == ("2026-03-02", "2026-08-03")
+    assert window.median == 200.0, "an off-sequence or out-of-span day leaked into the sample"
+    assert window.series == [None, None, None, 300.0, None, 100.0]
+    assert window.buckets_requested == 6 and window.buckets_covered == 2
+
+
+async def test_fifth_monday_windows_pool_only_the_buckets_that_exist() -> None:
+    figure = GRAINED.figure("team_person.fifth_monday_volume")
+    reading = GRAINED.reading("team_person.fifth_monday_shipped")
+    assert figure is not None and reading is not None
+    store = await _figure_store(
+        figure,
+        "work_issue.by_fifth_monday",
+        (
+            ("p1@2026-08-31", 2.0),
+            ("p1@2026-06-29", 3.0),
+        ),
+    )
+    result = await serve_reading(
+        store, GRAINED, "t1", reading, DEFAULTS, [3], at_day="2026-09-01"
+    )
+    [window] = result.subjects[0].windows
+    assert window.buckets == ["2026-03-30", "2026-06-29", "2026-08-31"]
+    assert window.total == 5.0
+    assert window.buckets_requested == 3, (
+        "three positions spanning five months: months without a fifth "
+        "Monday are not positions"
+    )
+
+
+async def test_a_month_figure_agrees_with_the_day_figure_over_the_same_days() -> None:
+    """The equivalence that makes the trio trustworthy: a month window's
+    statistic over the month figure equals the same statistic over the day
+    figure's days, when the two figures hold the same records -- because a
+    month bucket is the month's records, not a second arithmetic. The
+    control narrows the day window by one day and must disagree."""
+    day_figure = READINGS.figure("team_person.per_day")
+    day_reading = READINGS.reading("team_person.pace")
+    month_figure = GRAINED.figure("team_person.monthly_lead")
+    month_reading = GRAINED.reading("team_person.monthly_pace")
+    assert day_figure is not None and day_reading is not None
+    assert month_figure is not None and month_reading is not None
+
+    day_store = await _figure_store(
+        day_figure,
+        "work_issue.by_day",
+        (
+            ("p1@2026-03-01", [10.0]),
+            ("p1@2026-05-15", [20.0, 40.0]),
+            ("p1@2026-08-28", [30.0]),
+        ),
+    )
+    month_store = await _figure_store(
+        month_figure,
+        "work_issue.by_month",
+        (
+            ("p1@2026-03", [10.0]),
+            ("p1@2026-05", [20.0, 40.0]),
+            ("p1@2026-08", [30.0]),
+        ),
+    )
+
+    months = await serve_reading(
+        month_store, GRAINED, "t1", month_reading, DEFAULTS, [6], at_day="2026-08-28"
+    )
+    # 2026-03-01 .. 2026-08-28 inclusive is 181 days.
+    days = await serve_reading(
+        day_store, READINGS, "t1", day_reading, DEFAULTS, [181], at_day="2026-08-28"
+    )
+    assert months.subjects[0].windows[0].mean == days.subjects[0].windows[0].mean == 25.0
+
+    control = await serve_reading(
+        day_store, READINGS, "t1", day_reading, DEFAULTS, [180], at_day="2026-08-28"
+    )
+    assert control.subjects[0].windows[0].mean == 30.0, (
+        "the control window drops 1 March; agreeing anyway would mean the "
+        "equivalence test cannot fail"
+    )
 
 
 def test_an_anchor_resolves_to_its_days_last_moment_in_the_zone() -> None:
@@ -1058,6 +1638,18 @@ def test_the_calendars_own_edges_answer_rather_than_overflow() -> None:
     assert day_range(early, "UTC", 30) == ("0001-01-01", "0001-01-05")
 
 
+def test_the_far_calendar_edge_answers_west_of_utc() -> None:
+    """9999-12-31's last local millisecond in New York lands in year 10000
+    by UTC's clock; the anchor must clamp to something `datetime` can carry
+    while still filing under the anchor's own local day."""
+    zone = "America/New_York"
+    at = end_of_day_ms("9999-12-31", zone)
+    assert day_in(at, zone) == "9999-12-31"
+    from datetime import UTC, datetime
+
+    datetime.fromtimestamp(at / 1000.0, tz=UTC)  # must not raise
+
+
 async def test_an_anchor_day_ends_the_windows_in_the_readings_own_zone() -> None:
     """`at_day` is an argument: it moves which stored days take part and
     touches nothing else. The windows must end on the anchor day *in the
@@ -1093,8 +1685,8 @@ async def test_an_anchor_day_ends_the_windows_in_the_readings_own_zone() -> None
     window = result.subjects[0].windows[0]
     assert (window.frm, window.to) == ("2025-08-18", "2025-08-24")
     assert window.mean == 3.0, "a day beyond the anchor leaked into the sample"
-    assert window.days_covered == 2
-    assert window.days_requested == 7
+    assert window.buckets_covered == 2
+    assert window.buckets_requested == 7
     # The served `at` is the anchor day's last moment in Los Angeles --
     # compared as an instant, not as a rendering, so a correct change of ISO
     # spelling stays green and a wall-clock `at` fails.
@@ -1151,12 +1743,11 @@ async def test_a_declared_floor_and_band_apply_unchanged_under_an_anchor() -> No
     assert short.version == met.version, "an anchor moved a version hash"
 
 
-async def test_a_sub_day_reading_under_an_anchor_keeps_its_final_quarters() -> None:
-    """The anchored window's last day is a caller's day, not today, and the
-    sub-day fetch bounds have to stretch to its final label all the same: a
-    bucket at 23:45 of the anchor day belongs in, the first quarter of the
-    next day stays out, and the grouped series still spans the whole window
-    hour by hour."""
+async def test_a_sub_day_reading_under_an_anchor_ends_in_the_anchor_days_last_bucket() -> None:
+    """`?at=` resolves to the day's final moment, so bucket 1 of a
+    quarter-hour figure's window is the anchor day's 23:45 bucket -- the
+    last quarters OF THAT DAY, not of whenever the request ran. A quarter
+    from the next local day must stay out."""
     store = MemoryEngineStore()
     figure = GRAINED.figure("team_person.quarter_volume")
     reading = GRAINED.reading("team_person.quarter_throughput")
@@ -1169,9 +1760,10 @@ async def test_a_sub_day_reading_under_an_anchor_keeps_its_final_quarters() -> N
     )
     await store.set_buckets(tenant, "work_issue.by_quarter", "w1", ["p1@2025-08-24T23:45"])
     for subject, value in (
-        ("p1@2025-08-24T23:45", 4.0),  # the final quarter of the anchor day
-        ("p1@2025-08-25T00:00", 9.0),  # the first quarter after it; must not leak
-        ("p1@2025-08-20T10:00", 3.0),  # mid-window
+        ("p1@2025-08-24T23:45", 4.0),  # the anchor day's final quarter: bucket 1
+        ("p1@2025-08-24T22:15", 3.0),  # bucket 7, the far edge: in
+        ("p1@2025-08-24T22:00", 8.0),  # bucket 8: out
+        ("p1@2025-08-25T00:00", 9.0),  # the next local day: out
     ):
         await store.save(tenant, figure.name, figure.version, subject, value, (), "P One")
 
@@ -1181,11 +1773,10 @@ async def test_a_sub_day_reading_under_an_anchor_keeps_its_final_quarters() -> N
 
     assert isinstance(result.state, Ok)
     window = result.subjects[0].windows[0]
-    assert (window.frm, window.to) == ("2025-08-18", "2025-08-24")
+    assert (window.frm, window.to) == ("2025-08-24T22:15", "2025-08-24T23:45")
     assert window.total == 7.0, "a quarter at the anchored window's edge leaked or fell out"
-    assert window.series is not None and len(window.series) == 168
-    assert window.series[6 * 24 + 23] == 4.0  # 23:00 on the anchor day
-    assert window.series[2 * 24 + 10] == 3.0  # 10:00 on 2025-08-20
+    assert window.series is not None and len(window.series) == 7
+    assert window.series[0] == 3.0 and window.series[-1] == 4.0
 
 
 # ------------------------------------------------------------ bucket spans --
@@ -1251,7 +1842,7 @@ async def test_offset_buckets_partition_the_days_with_no_overlap_and_no_gap() ->
     assert far.mean == 60.0, "the far bucket must hold the 19th and the 21st alone"
     assert (near.span, near.bucket, near.trailing) == ("3", "day", 3)
     assert (far.span, far.bucket, far.trailing) == ("4-6", "day", None)
-    assert far.days_requested == 3
+    assert far.buckets_requested == 3
 
 
 async def test_a_bare_number_and_its_explicit_span_are_one_window() -> None:
@@ -1303,207 +1894,46 @@ async def test_the_floor_and_band_hold_per_bucket_not_per_request() -> None:
     assert far.level == "unknown"
 
 
-async def test_an_hour_span_slices_hours_not_whole_days() -> None:
-    """The driving case: a median over the last four hours of a quarter-hour
-    figure. A value from one hour ago is in; a value from the same local day
-    but before the span's oldest hour must be out -- a day window cannot make
-    that cut, which is what the unit exists for."""
-    figure = GRAINED.figure("team_person.quarter_lead")
-    reading = GRAINED.reading("team_person.quarter_typical")
-    assert figure is not None and reading is not None
-    store = await _quarter_store(
-        figure,
-        (
-            ("p1@2025-08-24T04:45", [100.0]),  # one hour ago: inside
-            ("p1@2025-08-24T05:15", [500.0]),  # the anchor hour's later quarter:
-            # inside -- and only via hour truncation, since the label sorts
-            # after the bucket's own "T05:00"
-            ("p1@2025-08-24T02:00", [300.0]),  # the span's oldest hour: inside
-            ("p1@2025-08-24T01:45", [900.0]),  # same local day, older: OUT
-            ("p1@2025-08-23T06:15", [700.0]),  # yesterday: OUT
-        ),
-    )
-    at = 1_756_036_800_000.0  # 2025-08-24T12:00Z, 05:00 in Los Angeles
-    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, ["1-4h"], at_ms=at)
-    [window] = result.subjects[0].windows
-    assert (window.frm, window.to) == ("2025-08-24T02:00", "2025-08-24T05:00")
-    assert (window.span, window.bucket) == ("4", "hour")
-    assert window.trailing is None, "an hour span is not a count of trailing days"
-    assert window.median == 300.0, (
-        "the median must run over exactly the three in-span values; more "
-        "means a same-day value leaked in through day arithmetic, less means "
-        "the anchor hour's later quarter fell out of its own bucket"
-    )
-    assert window.days_requested == 1 and window.days_covered == 1
-
-
-async def test_bare_numbers_stay_days_whatever_the_grain() -> None:
-    """The re-scale trap, pinned: over a quarter-hour figure a bare `2` is
-    two *days*, never two grain units. Were bare numbers denominated in the
-    figure's grain, regrading a figure would silently re-scale every
-    bookmarked URL and bundle -- this test is what would catch that design
-    arriving. The 01:00 bucket sits 28 hours before the anchor: outside two
-    of any sub-day unit anyone might denominate in, inside two days."""
+async def test_a_bare_number_is_positions_in_the_figures_own_sequence() -> None:
+    """The pinned model: a bucket is an integer in order, so a bare `2` over
+    a quarter-hour figure is the last TWO QUARTER-HOURS -- never two days.
+    The unit lives in the group clause, hashed; regrading the figure is a
+    new declaration with a new hash, so the old worry (a regrade silently
+    re-scaling bookmarked spans under one citation) cannot arise."""
     figure = GRAINED.figure("team_person.quarter_volume")
     reading = GRAINED.reading("team_person.quarter_throughput")
     assert figure is not None and reading is not None
     store = await _quarter_store(
         figure,
         (
-            ("p1@2025-08-24T04:45", 2.0),  # today
-            ("p1@2025-08-23T01:00", 3.0),  # yesterday, 28h before the anchor
-            ("p1@2025-08-22T23:45", 5.0),  # two local days back: OUT of `2`
+            ("p1@2025-08-24T05:00", 2.0),  # the anchor quarter: in
+            ("p1@2025-08-24T04:45", 3.0),  # position 2: in
+            ("p1@2025-08-24T04:30", 5.0),  # position 3: out
         ),
     )
-    at = 1_756_036_800_000.0  # 05:00 in Los Angeles
+    at = 1_756_036_800_000.0  # exactly 05:00 in Los Angeles
     result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, [2], at_ms=at)
     [window] = result.subjects[0].windows
-    assert (window.frm, window.to) == ("2025-08-23", "2025-08-24")
-    assert (window.span, window.bucket, window.trailing) == ("2", "day", 2)
-    assert window.total == 5.0, "a bare 2 must cover two whole local days"
+    assert (window.frm, window.to) == ("2025-08-24T04:45", "2025-08-24T05:00")
+    assert (window.span, window.bucket, window.trailing) == ("2", "15 minutes", None)
+    assert window.total == 5.0, "a bare 2 must cover exactly two stored buckets"
 
 
-async def test_a_sub_day_span_over_day_storage_is_refused_naming_the_grain() -> None:
-    """Hour buckets over a day-keyed figure have nothing to slice; the
-    refusal names the storage so the fix is in the caller's hands. Silent
-    rounding to days would serve a plausible window nobody asked for."""
+async def test_unit_suffixed_window_tokens_are_refused_at_the_serving_door() -> None:
+    """The v0.12 tokens are retired, not reinterpreted: `1-48h` parsing as
+    48 buckets would silently re-scale the question. The refusal points at
+    the declarations, where the unit now lives."""
     from uratori.windows import WindowError
 
     figure = READINGS.figure("team_person.per_day")
     reading = READINGS.reading("team_person.pace")
     assert figure is not None and reading is not None
     store = await _day_reading_store(figure, ())
-    with pytest.raises(WindowError, match="stored by day"):
-        await serve_reading(
-            store, READINGS, "t1", reading, DEFAULTS, ["1-48h"], at_day="2025-08-24"
-        )
-    with pytest.raises(WindowError, match="stored by 15 minutes"):
-        # Minutes cannot slice quarter-hour storage either: a minute bucket
-        # would split a stored bucket.
-        quarter = GRAINED.reading("team_person.quarter_typical")
-        assert quarter is not None
-        await serve_reading(
-            MemoryEngineStore(), GRAINED, "t1", quarter, DEFAULTS, ["1-90m"]
-        )
-
-
-async def test_a_day_series_does_not_fit_inside_an_hour_span() -> None:
-    """`quarter_daily` declares series(...) by day; served over `1-4h` the
-    day point would claim twenty hours the span does not cover. Refused with
-    the reason, never served partially covered."""
-    from uratori.windows import WindowError
-
-    reading = GRAINED.reading("team_person.quarter_daily")
-    assert reading is not None
-    with pytest.raises(WindowError, match="does not fit"):
-        await serve_reading(MemoryEngineStore(), GRAINED, "t1", reading, DEFAULTS, ["1-4h"])
-
-
-async def test_an_hour_spans_series_covers_exactly_its_buckets() -> None:
-    """Series points inside a sub-day span run from the span's oldest bucket
-    through the end of its newest -- four hourly points for `1-4h`, sixteen
-    quarter-hour points for the same span under a finer series grain -- and
-    a bucket outside the span must not appear as a point."""
-    figure = GRAINED.figure("team_person.quarter_volume")
-    throughput = GRAINED.reading("team_person.quarter_throughput")
-    fine = GRAINED.reading("team_person.quarter_fine")
-    assert figure is not None and throughput is not None and fine is not None
-    store = await _quarter_store(
-        figure,
-        (
-            ("p1@2025-08-24T04:45", 2.0),
-            ("p1@2025-08-24T02:15", 3.0),
-            ("p1@2025-08-24T01:45", 9.0),  # outside the span
-        ),
-    )
-    at = 1_756_036_800_000.0  # 05:00 in Los Angeles
-
-    result = await serve_reading(store, GRAINED, "t1", throughput, DEFAULTS, ["1-4h"], at_ms=at)
-    [window] = result.subjects[0].windows
-    assert window.series == [3.0, None, 2.0, None], (
-        "hours 02,03,04,05 of the anchor day: 02:15 in the first point, "
-        "04:45 in the third, the anchor hour empty -- and 01:45 nowhere"
-    )
-    assert window.total == 5.0
-
-    finer = await serve_reading(store, GRAINED, "t1", fine, DEFAULTS, ["1-4h"], at_ms=at)
-    [window] = finer.subjects[0].windows
-    assert window.series is not None
-    assert len(window.series) == 16, (
-        "a quarter-hour series over four hour buckets is sixteen points, "
-        "through the END of the newest bucket -- not stopping at its label"
-    )
-    assert window.series[1] == 3.0  # 02:15
-    assert window.series[11] == 2.0  # 04:45
-
-
-def test_an_hour_span_counts_labels_across_fall_back_not_elapsed_hours() -> None:
-    """Stored labels live in wall-clock space and the fall-back hour's two
-    passes merged at write time, so a span steps back through labels: three
-    hour buckets ending at 01:00 on the fall-back day are 01:00, 00:00 and
-    23:00 -- whatever the elapsed time says."""
-    from uratori.engine.buckets import bucket_span
-    from uratori.windows import WindowSpec
-
-    zone = "America/Los_Angeles"
-    # 2025-11-02T09:30Z is 01:30 PST, the second pass through 01:00 local.
-    at = 1_762_075_800_000.0
-    assert label_in(at, zone, "15 minutes") == "2025-11-02T01:30"
-    assert bucket_span(at, zone, WindowSpec(first=1, last=3, unit="hour")) == (
-        "2025-11-01T23:00",
-        "2025-11-02T01:00",
-    )
-
-
-def test_a_span_clamps_at_the_calendars_edge_rather_than_overflowing() -> None:
-    from uratori.engine.buckets import bucket_span
-    from uratori.windows import WindowSpec
-
-    frm, to = bucket_span(
-        end_of_day_ms("0001-01-03", "UTC"), "UTC", WindowSpec(first=2, last=10, unit="day")
-    )
-    assert (frm, to) == ("0001-01-01", "0001-01-02")
-    frm, to = bucket_span(
-        end_of_day_ms("0001-01-01", "UTC"), "UTC", WindowSpec(first=1, last=5, unit="hour")
-    )
-    assert to == "0001-01-01T23:00"
-
-
-def test_the_far_calendar_edge_answers_west_of_utc() -> None:
-    """9999-12-31's last local millisecond in New York lands in year 10000
-    by UTC's clock; the anchor must clamp to something `datetime` can carry
-    while still filing under the anchor's own local day."""
-    zone = "America/New_York"
-    at = end_of_day_ms("9999-12-31", zone)
-    assert day_in(at, zone) == "9999-12-31"
-    from datetime import UTC, datetime
-
-    datetime.fromtimestamp(at / 1000.0, tz=UTC)  # must not raise
-
-
-async def test_a_sub_day_span_under_a_day_anchor_ends_in_the_anchor_days_last_bucket() -> None:
-    """The anchor generalises: `?at=` resolves to the day's final moment, so
-    bucket 1 of an hour span is the anchor day's 23:00 bucket -- the last
-    four hours OF THAT DAY, not of whenever the request ran. A quarter from
-    the next local day must stay out."""
-    figure = GRAINED.figure("team_person.quarter_lead")
-    reading = GRAINED.reading("team_person.quarter_typical")
-    assert figure is not None and reading is not None
-    store = await _quarter_store(
-        figure,
-        (
-            ("p1@2025-08-24T23:45", [100.0]),  # the anchor day's final quarter: in
-            ("p1@2025-08-24T20:00", [300.0]),  # the span's oldest hour: in
-            ("p1@2025-08-24T19:45", [900.0]),  # an hour too early: out
-            ("p1@2025-08-25T00:00", [700.0]),  # the next local day: out
-        ),
-    )
-    result = await serve_reading(
-        store, GRAINED, "t1", reading, DEFAULTS, ["1-4h"], at_day="2025-08-24"
-    )
-    [window] = result.subjects[0].windows
-    assert (window.frm, window.to) == ("2025-08-24T20:00", "2025-08-24T23:00")
-    assert window.median == 200.0
+    for token in ("1-48h", "1-90m", "30d"):
+        with pytest.raises(WindowError, match="retired"):
+            await serve_reading(
+                store, READINGS, "t1", reading, DEFAULTS, [token], at_day="2025-08-24"
+            )
 
 
 async def test_a_calendar_edge_anchor_answers_at_every_grain_and_span_shape() -> None:
@@ -1527,16 +1957,61 @@ async def test_a_calendar_edge_anchor_answers_at_every_grain_and_span_shape() ->
     throughput = GRAINED.reading("team_person.quarter_throughput")
     assert quarter_figure is not None and throughput is not None
     grained_store = await _quarter_store(quarter_figure, ())
-    for windows in (["1-4h"], [7]):
+    for windows in (["2-4"], [7]):
         result = await serve_reading(
             grained_store, GRAINED, "t1", throughput, DEFAULTS, windows, at_day="9999-12-31"
         )
         assert result.empty is not None
-        assert result.empty.windows[0].to.startswith("9999-12-31")
+        far = result.empty.windows[0].to
+        assert far is not None and far.startswith("9999-12-31")
+
+    # Third time in the same place. `ordinal_weekday_day` found its candidate
+    # by adding days to the first of the month, so December 9999 -- whose
+    # fifth Monday would be 10000-01-03 -- raised OverflowError instead of
+    # answering "no such day". OverflowError is an ArithmeticError, which no
+    # route catches, so a wire-reachable anchor produced a 500 rather than an
+    # empty window. The write path hit the same line through `selected_day`,
+    # so a record stamped that month crashed a pass.
+    assert ordinal_weekday_day(9999, 12, 5, 0) is None, (
+        "December 9999 has four Mondays, so the answer is None -- not a raise"
+    )
+    ordinal_reading = GRAINED.reading("team_person.fifth_monday_shipped")
+    ordinal_figure = GRAINED.figure("team_person.fifth_monday_volume")
+    assert ordinal_reading is not None and ordinal_figure is not None
+    ordinal_store = await _figure_store(ordinal_figure, "work_issue.by_fifth_monday", ())
+    answer = await serve_reading(
+        ordinal_store, GRAINED, "t1", ordinal_reading, DEFAULTS, [3], at_day="9999-12-31"
+    )
+    assert answer.empty is not None
+    assert answer.empty.windows[0].bucket == "fifth monday of month"
 
 
-async def test_a_minute_span_serves_minute_storage_bucket_for_bucket() -> None:
-    """The finest unit, end to end: `1-90m` over a minute-grain figure is the
+def _far_edge_ms() -> float:
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    return _dt(9999, 12, 31, 12, tzinfo=_UTC).timestamp() * 1000.0
+
+
+async def test_a_record_stamped_at_the_calendar_edge_buckets_without_crashing() -> None:
+    """The same overflow on the *write* path: `selected_day` asks
+    `ordinal_weekday_day` about the record's own month, so a fact timestamped
+    in December 9999 crashed the pass that filed it -- before any window was
+    ever asked for. It must simply land in no bucket, which is what a
+    selective rule means for a day that is not the rule's day."""
+    for rule in (
+        "first monday of month",
+        "fifth monday of month",
+        "fifth sunday of month",
+        "fifth tuesday of month",
+        "fifth saturday of month",
+    ):
+        assert selected_day(_far_edge_ms(), "UTC", rule) is None, rule
+        assert selected_day(_far_edge_ms(), None, rule) is None, rule
+
+
+async def test_a_minute_figure_serves_its_minutes_bucket_for_bucket() -> None:
+    """The finest grain, end to end: `90` over a minute-grain figure is the
     last ninety stored minutes, both edges inclusive -- the 03:31 bucket is
     bucket 90 and in, the 03:29 bucket is out."""
     figure = GRAINED.figure("team_person.minute_lead")
@@ -1556,24 +2031,11 @@ async def test_a_minute_span_serves_minute_storage_bucket_for_bucket() -> None:
         await store.save("t1", figure.name, figure.version, subject, values, (), "P One")
 
     at = 1_756_036_800_000.0  # 05:00 in Los Angeles
-    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, ["1-90m"], at_ms=at)
+    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, [90], at_ms=at)
     [window] = result.subjects[0].windows
     assert (window.frm, window.to) == ("2025-08-24T03:31", "2025-08-24T05:00")
     assert (window.span, window.bucket, window.trailing) == ("90", "minute", None)
     assert window.median == 200.0
-
-
-def test_a_sub_day_span_clamps_at_the_calendars_floor_rather_than_overflowing() -> None:
-    """Enough hour buckets back from the calendar's first day walk out of
-    `datetime`'s range; the span opens where the calendar begins, the same
-    answer the day branch gives, instead of an OverflowError worn as a 500."""
-    from uratori.engine.buckets import bucket_span
-    from uratori.windows import WindowSpec
-
-    frm, to = bucket_span(
-        end_of_day_ms("0001-01-01", "UTC"), "UTC", WindowSpec(first=1, last=1000, unit="hour")
-    )
-    assert (frm, to) == ("0001-01-01T00:00", "0001-01-01T23:00")
 
 
 async def test_a_duplicate_span_in_one_request_is_refused_across_spellings() -> None:
@@ -1618,3 +2080,113 @@ async def test_the_fetch_reaches_no_further_than_the_spans_it_serves() -> None:
         "the fetch walked past the span's newest day toward the anchor -- "
         "the whole offset paid to serve a ten-day window"
     )
+
+
+async def test_the_serving_door_refuses_a_reach_past_the_horizon_too() -> None:
+    """Two ceilings guard a span, and only one of them fires at the request
+    door for a coarse rule.
+
+    `MAX_BUCKETS` catches anything past 3,660 positions whatever the rule, so
+    it is what refuses a runaway day span. But 3,000 monthly buckets is two
+    and a half centuries and sits comfortably *inside* it -- only the
+    rule-aware reach ceiling knows that, and only the figure's declaration
+    knows the rule. `check.py` claims "one shared implementation, so the
+    tile's build error and the route's 422 speak the same words"; until this
+    test the route half could be deleted whole and the suite stayed green,
+    because every other reach test routes through the compile-time twin.
+    """
+    from uratori.windows import WindowError
+
+    figure = GRAINED.figure("team_person.monthly_lead")
+    reading = GRAINED.reading("team_person.monthly_pace")
+    assert figure is not None and reading is not None
+    store = await _figure_store(figure, "work_issue.by_month", (("p1@2026-08", [86_400.0]),))
+
+    with pytest.raises(WindowError) as refused:
+        await serve_reading(
+            store, GRAINED, "t1", reading, DEFAULTS, ["3000"], at_day="2026-08-15"
+        )
+    assert "3660" in str(refused.value)
+    assert "month" in str(refused.value), (
+        "the refusal must name the rule it converted through, or the number "
+        "reads as arbitrary against a span of three thousand"
+    )
+
+    # Inside the horizon, the same span shape answers -- so this is the
+    # ceiling talking and not the coarse rule being refused outright.
+    answer = await serve_reading(
+        store, GRAINED, "t1", reading, DEFAULTS, ["118"], at_day="2026-08-15"
+    )
+    assert answer.subjects[0].windows[0].span == "118"
+
+
+async def test_a_week_window_walks_iso_weeks_across_the_year_edge() -> None:
+    """The week rule, served end to end -- the one grain that had resolution
+    and label tests but no figure behind them anywhere.
+
+    The anchor is the last day of 2025, whose ISO week is `2026-W01`: bucket 1
+    carries a label a calendar year ahead of the anchor's own year, which is
+    the shape a week sequence has to get right and the one a naive
+    `{day.year}-W{week}` gets wrong.
+    """
+    figure = GRAINED.figure("team_person.weekly_lead")
+    reading = GRAINED.reading("team_person.weekly_pace")
+    assert figure is not None and reading is not None
+    store = await _figure_store(
+        figure,
+        "work_issue.by_week",
+        (
+            ("p1@2026-W01", [86_400.0]),
+            ("p1@2025-W52", [172_800.0]),
+        ),
+    )
+
+    answer = await serve_reading(
+        store, GRAINED, "t1", reading, DEFAULTS, ["each:1-2"], at_day="2025-12-31"
+    )
+    this_week, last_week = answer.subjects[0].windows
+    assert (this_week.bucket, this_week.frm, this_week.to) == ("week", "2026-W01", "2026-W01")
+    assert this_week.median == 86_400.0
+    assert (last_week.frm, last_week.to) == ("2025-W52", "2025-W52")
+    assert last_week.median == 172_800.0
+    # `trailing` stays null: this is not a count of days, and a "2" here
+    # would read as one on any screen keying off it.
+    assert this_week.trailing is None
+    # And the contiguous rule carries no bucket list -- the edges say it all.
+    assert this_week.buckets is None
+
+
+async def test_a_span_that_resolves_to_no_bucket_says_so_rather_than_empty_strings() -> None:
+    """Where the calendar runs out there is no bucket to name, and the window
+    must say that rather than carry `""` in a date field.
+
+    An empty string is a value: it renders, it sorts, and on the page it went
+    through a template literal that turned `null` into the word "null" -- a
+    date-shaped nothing where rule 3 wants a stated absence. Reachable only at
+    year 1, but this is the field a reader trusts to say which buckets an
+    answer covered.
+    """
+    figure = GRAINED.figure("team_person.monthly_lead")
+    reading = GRAINED.reading("team_person.monthly_pace")
+    assert figure is not None and reading is not None
+    store = await _figure_store(figure, "work_issue.by_month", (("p1@2026-08", [86_400.0]),))
+
+    answer = await serve_reading(
+        store, GRAINED, "t1", reading, DEFAULTS, ["2-5"], at_day="0001-01-15"
+    )
+    window = (answer.empty or answer.subjects[0]).windows[0]
+    assert window.frm is None and window.to is None, (
+        'no bucket resolved, so there is no label to report -- "" would be a '
+        "value where this is an absence"
+    )
+    assert window.buckets_requested == 0
+    assert window.buckets_covered == 0
+
+    # The control: one month later there *is* a bucket, and the edges are it.
+    # Without this the assertion above would also pass on a resolver that had
+    # simply stopped resolving anything.
+    reachable = await serve_reading(
+        store, GRAINED, "t1", reading, DEFAULTS, ["1-2"], at_day="0001-03-15"
+    )
+    edges = (reachable.empty or reachable.subjects[0]).windows[0]
+    assert (edges.frm, edges.to) == ("0001-02", "0001-03")

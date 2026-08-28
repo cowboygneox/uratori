@@ -169,7 +169,7 @@ a real constraint on naming, better stated than discovered.
 | `filter` | which records pass a test | one bucket |
 | `measure` | a quantity read off one record | nothing |
 | `figure` | one value per subject | values |
-| `reading` | a statistic over stored days, or over records right now | nothing |
+| `reading` | a statistic over stored buckets, or over records right now | nothing |
 | `projection` | one row per record | nothing |
 | `summarise` | one row about a whole population | nothing |
 | `bundle` | which answers travel together in one request | nothing -- it composes |
@@ -413,33 +413,66 @@ makes the dependency derivable, so turning it re-buckets automatically rather
 than on the day somebody remembers. A bare `by day` means UTC, and that is a
 choice a definition makes rather than a default it falls into -- two figures
 on one card, one cut by UTC days and one by the tenant's, would be two rows
-headed "30d" measuring two different months.
+headed "30" measuring two different months.
 
-Two sub-day grains exist beside the day: `by minute` and `by 15 minutes`. A
-sub-day label is local time truncated to the grain -- `2026-08-25T14:30` --
-in the calendar the definition names, exactly as a day key is the local date.
-Because the calendar is applied when the bucket is written, grouping a label
-into its hour or its day at read time is prefix truncation: no zone
-arithmetic happens on a read, and a grouped point can never disagree with the
-day a `by day` group would have filed the same event under. When the clocks
-go back, the repeated hour's two passes share their labels and their records
-share a bucket -- the honest answer about a quarter-hour that occurred twice;
-keying by UTC instead would put every local midnight mid-bucket in most of
-the world's zones, a constant error to avoid a twice-a-year merge. The
-spring-forward hour stays a run of holes, which is true -- those wall-clock
-minutes never happened.
+### The bucket rules
 
-**The stored grain is the finest the definition claims, and every coarser
-view is derived at read time.** `week` and `month` are deliberately absent as
-truncations: a range over days can produce either, and storing the coarser
-grain as well would be two answers to one question. That argument points
-downward too -- `hour` is refused as a truncation because a range over
-quarter-hours produces it, so it exists only as a [series
-grouping](#statistics). Other minute counts wait for a definition to ask,
-exactly as `percentile` does. The grain is in the version hash the way every
-group and filter spec is: minutes and quarter-hours store values that mean
-different things, and reusing them across the change would file a quarter's count under
-a minute's key.
+The `by` clause is **the one place calendar vocabulary belongs**, because it
+is a declaration: the rule decides how many values a figure has and which
+bucket an event lands in -- it decides what a stored number *means* -- and
+only a declaration, hashed into a version, may do that. A
+[reading's](#windowed-over-a-figures-stored-buckets) window argument is then
+just integer positions in whatever sequence was declared here.
+
+Seven grains, sub-day through quarter:
+
+```
+by minute        2026-08-25T14:30      by week     2026-W35  (ISO weeks)
+by 15 minutes    2026-08-25T14:30      by month    2026-08
+by hour          2026-08-25T14:00      by quarter  2026-Q3   (calendar quarters)
+by day           2026-08-25
+```
+
+A label is the *local* instant reduced to the grain, in the calendar the
+definition names: the zone is applied once, to find the local time, and a
+coarser label is calendar arithmetic on the local day -- so a month figure
+and a day figure over one event can never disagree about which month the
+event's day was in. When the clocks go back, the repeated hour's two passes
+share their labels and their records share a bucket -- the honest answer
+about a quarter-hour that occurred twice; keying by UTC instead would put
+every local midnight mid-bucket in most of the world's zones, a constant
+error to avoid a twice-a-year merge. The spring-forward hour stays a run of
+holes, which is true -- those wall-clock minutes never happened. Other
+minute counts than 15 wait for a definition to ask, exactly as `percentile`
+does.
+
+**A coarser view is its own declaration.** Monthly deliveries beside daily
+deliveries is two groups and two figures -- two names, two explanations, two
+hashes -- and each buckets the records *directly*: a month bucket holds
+every record of the month, never a rollup of day buckets. An earlier edition
+refused `week` and `month` here on the ground that a range over days can
+produce either; that argument was aimed at *unnamed* read-time truncation --
+one figure quietly serving two grains, with nothing written saying which a
+number was -- and declaring the coarser grain under its own name is the
+opposite: each grain is a written, versioned question, and a reader can cite
+either. The grain is in the version hash the way every group and filter spec
+is: months and days store values that mean different things, and reusing
+them across the change would file a month's count under a day's key.
+
+The **selective rules** are the same family, deliberately partial:
+
+```
+group shop_order.first_monday_drops from (courier_id, delivered_at by first monday of month in tenant.timezone)
+```
+
+`by <ordinal> <weekday> of month` -- `first` through `fifth`, `monday`
+through `sunday` -- buckets an instant under its own day *when that day is
+the rule's day of its month*, and under **nothing at all** otherwise. The
+filter falls out of the function being undefined off-rule, the same doctrine
+as `is set`: there is no separate narrowing step a cheap path could skip.
+The stored buckets are sparse day labels, one per month at most -- a fifth
+Monday exists in some months only, and those months simply contribute no
+bucket to the sequence.
 
 Whether the second part is a time bucket or a dimension decides what the
 figure over the group must declare -- see [time-keyed
@@ -721,8 +754,8 @@ The rules around it:
 
 ### Time-keyed figures
 
-A figure whose scope group ends in a `by day`, `by minute` or `by 15 minutes`
-part stores one value per subject *per bucket*:
+A figure whose scope group ends in a time bucket part -- any of the seven
+grains, or a selective rule -- stores one value per subject *per bucket*:
 
 ```
 # How long each change merged that day had been open.
@@ -819,7 +852,7 @@ the same claim: this number has a written definition and you can cite it.
 
 There are two kinds, told apart by what `depends` binds.
 
-### Windowed: over stored days
+### Windowed: over a figure's stored buckets
 
 ```
 # How long this person's changes took to merge.
@@ -839,25 +872,107 @@ reading team_person.to_merge(range):
 ```
 
 `<figure> in range` summarises a **time-keyed** figure's stored values over a
-window of days. The source is not a set expression on purpose: the figure
-already decided the population at write time, so the only narrowing left is
-temporal, and offering set arithmetic here would let a definition re-litigate
-membership at read time using values instead of ids.
+window of its buckets. The source is not a set expression on purpose: the
+figure already decided the population at write time, so the only narrowing
+left is temporal, and offering set arithmetic here would let a definition
+re-litigate membership at read time using values instead of ids.
 
 The rule that keeps a reading a definition rather than a function: **an
 argument may narrow the population and may never change the calculation.**
 `range` -- the only argument a reading can take -- picks which stored
 buckets take part; the statistics, the minimum sample and the band decide
-what the number *means*, so they are written here and hashed here. At
-serving time a range is a **span of buckets** counted back from the anchor
-(`30` for the trailing thirty days, `31-60` for the thirty before them,
-`1-48h` for the last forty-eight hours of a sub-day figure -- see the HTTP
-API's window parameter and a bundle member's `over` list), and the engine
-resolves each span to the concrete buckets it covered against the tenant's
-calendar and reports them on the answer, so "the last 30 days" is never the
-client's guess. Every declared rule applies per span unchanged: the floor
-withholds a thin span's statistics, the band bands each span, the series
-returns each span's own points.
+what the number *means*, so they are written here and hashed here.
+
+At serving time a range is a **span of integer positions in the source
+figure's own bucket sequence**, counted back from the anchor -- bucket 1 is
+the bucket the anchor falls in, both ends inclusive. The sequence is
+whatever the figure's group declared: `over 30` on a day-grained figure is
+the trailing thirty days, on a month-grained one the last thirty months,
+on a `first monday of month` one the last thirty first-Mondays. The
+argument grammar is integers and nothing else -- **no units, no dates, no
+calendar words** -- because the bucket rule changes what the number means,
+and by the law above an argument may never do that. (Unit-suffixed spans
+-- `1-48h`, `over ... in hours` -- shipped briefly and were retired: the
+same reading meant two different things under two spellings of one
+request. They now refuse with directions to the group clause.) Dates
+appear in **answers**, never in questions: the engine resolves each span
+to the concrete buckets it covered against the tenant's calendar and
+reports them on the window -- edges for a contiguous rule, the full bucket
+list for a sparse one -- so "the last 6 months" is never the client's
+guess.
+
+The span forms, at the HTTP door and in a bundle member's `over` list
+alike:
+
+- `30` -- the trailing span, buckets 1-30 pooled into **one window**;
+- `31-60` -- an offset span, the thirty before them, still one window;
+- `each 1-12` (HTTP: `each:1-12`), or the bare `each 12`, which means
+  `each 1-12` exactly as `12` means `1-12` -- sugar for the twelve one-bucket
+  windows `1, 2-2, ..., 12-12`, **one window per bucket in order** (the
+  nearest is spelled `1`, since a span starting at bucket 1 canonicalises
+  to its bare bound), so a
+  per-bucket comparison -- this month against each of the eleven before it
+  -- is not twelve enumerated spans. It expands at the door: the sugared
+  and enumerated spellings are indistinguishable downstream, duplicate
+  check and hash included.
+
+Every declared rule applies per window unchanged: the floor withholds a
+thin window's statistics with the reasons named, the band bands each
+window, the series returns each window's own points.
+
+### The worked example: day, month, quarter
+
+The driving shape is one event stream cut at three calendar grains -- an
+order lands in its day, its month and its quarter -- and each cut is its
+own declaration:
+
+```
+group shop_order.drops_by_day     from (courier_id, delivered_at by day in tenant.timezone)
+group shop_order.drops_by_month   from (courier_id, delivered_at by month in tenant.timezone)
+group shop_order.drops_by_quarter from (courier_id, delivered_at by quarter in tenant.timezone)
+
+# Deliveries per courier per day.
+figure shop_courier.daily_drops:
+    display "{shop_courier} deliveries that day"
+    depends:
+        done = shop_order.drops_by_day:{shop_courier}
+    calculate:
+        count(done)
+
+# Deliveries per courier per calendar month -- the month's own records,
+# not a rollup of days.
+figure shop_courier.monthly_drops:
+    display "{shop_courier} deliveries that month"
+    depends:
+        done = shop_order.drops_by_month:{shop_courier}
+    calculate:
+        count(done)
+
+# Deliveries per courier per calendar quarter.
+figure shop_courier.quarterly_drops:
+    display "{shop_courier} deliveries that quarter"
+    depends:
+        done = shop_order.drops_by_quarter:{shop_courier}
+    calculate:
+        count(done)
+
+# The month-by-month picture a goals screen compares against.
+reading shop_courier.drops_by_month(range):
+    display "{shop_courier} deliveries, month by month"
+    depends:
+        months = shop_courier.monthly_drops in range
+    calculate:
+        sum(months)
+        series(months)
+```
+
+`?trailing=30` on the day reading is the last thirty days;
+`?trailing=each:1-12` on the month reading is a year of month windows, each
+summed, floored and banded on its own; `?trailing=each:1-4` on the quarter
+reading is the last four quarters, year straddles handled by the calendar
+because the labels are the calendar's (`2025-Q4`, `2026-Q1`). The three
+figures agree by construction about which bucket an order is in, because
+every label is derived from the same zoned day.
 
 The source figure must share the reading's scope, be time-keyed, and store a
 number -- an effort figure is refused (the reading path renders count or
@@ -913,39 +1028,29 @@ is not checkable by anybody not already reading the code. Each line of
 `calculate` is one statistic over one bound set.
 
 - **`sum` is why a count figure can be read at all.** The distribution
-  statistics are refused over daily counts, because a mean of them is a mean
-  per *day* wearing a label that says per record -- a plausible number of
-  roughly the right magnitude, which is the worst kind of wrong. A sum of
-  nothing is nought, and nought renders; a mean of nothing is unknown.
+  statistics are refused over stored counts, because a mean of them is a
+  mean per *bucket* wearing a label that says per record -- a plausible
+  number of roughly the right magnitude, which is the worst kind of wrong.
+  A sum of nothing is nought, and nought renders; a mean of nothing is
+  unknown.
 - **`count` is live-only**: a windowed reading already reports its sample,
   and for a count figure the two are *different numbers* -- the sample is
   the buckets that contributed, not records.
-- **`series`** returns the per-point values rather than a scalar. It exists so
-  a sparkline is a definition's answer rather than the client slicing a range
-  into ten and computing ten means.
-- **`series(...) by <grain>`** groups a sub-day figure's buckets --
-  `15 minutes`, `hour` or `day`. The grain is declared and hashed rather than
-  chosen by the caller, because an hourly series and a daily one differ in
-  what every point *means*. It attaches to `series` alone: the scalar
-  statistics run over the window's raw values whatever the grain is, so a
-  grain on `mean` would either do nothing or make it a mean of group means,
-  weighting each hour equally instead of each record. Over a sub-day source
-  the grain is **required** -- a bare series over ninety days of quarter-hours
-  is 8,640 points under a line that reads like any other sparkline, and that
-  payload choice belongs in the definition. Over a day-keyed source it is
-  **refused** -- a bare series already is the day series, and a second
-  spelling of one thing is a first place for two to disagree. One reading
-  declares one series -- two grains are two readings. A grouped point follows
-  the day series' own rule at the new grain: the mean of a `list` figure's
-  records, the sum of a `count` figure's buckets -- which is also why grouping
-  is defined only for counts and list figures: any other stored scalar would
-  have to be *summed* across buckets, and four quarter-hours at 0.5 becoming
-  an hour at 2.0 is arithmetic no definition claims. A **minute** series is
-  deliberately absent though the minute is a storable grain: over a sparse
-  figure a minute group holds one record, so the point *is* the record -- the
-  raw collection the payload exists to withhold -- and refusing the word is
-  also what makes a finer-than-stored series unwritable, since the finest
-  series grain equals the coarsest sub-day stored grain.
+- **`series`** returns the per-point values rather than a scalar, **one
+  point per bucket of the figure's own sequence** -- days of a day figure,
+  months of a month figure, first-Mondays of a selective one. It exists so
+  a sparkline is a definition's answer rather than the client slicing a
+  range into ten and computing ten means. A bucket's point follows the
+  bucket's shape: a `list` bucket's point is the mean of its own records,
+  a `count` bucket's point is the count. A bucket that stored nothing is a
+  hole, never a nought. One reading declares one series. (An earlier
+  `series(...) by <grain>` clause regrouped stored buckets on the way out
+  -- read-time truncation under the reading's name; with the coarser
+  grains declarable, the coarser view is its own figure and the clause is
+  retired, with directions.) A **minute-grain figure refuses `series`
+  outright**: over a sparse figure a minute bucket holds one record, so
+  the point *is* the record -- the raw collection the payload exists to
+  withhold.
 - **`delta`** is the change into each bucket of the range: one cell per
   bucket, in the same order and count as a series, so the two draw against
   one axis. n buckets produce n-1 changes, and the cell that has none is the
@@ -973,9 +1078,13 @@ is not checkable by anybody not already reading the code. Each line of
   heading promising a trend), twice in one reading (a response carries one),
   and under a **band** -- a band compares one number and a delta is one cell
   per bucket, so every row would band unknown for ever, which reads as
-  missing data rather than as a broken definition. There are deliberately no
-  stride or offset variants; each would be a second spelling of a question
-  nothing has asked.
+  missing data rather than as a broken definition. It is refused over a figure keyed by
+  **minute or 15 minutes**, for the reason a minute-grain series is: a
+  delta's cells *are* its source's buckets, and it has no grain to group
+  them to, so ninety days of quarter-hours would be 8,640 cells on the wire
+  -- the raw collection the payload exists to withhold. There are
+  deliberately no stride or offset variants either; each would be a second
+  spelling of a question nothing has asked.
 
   `delta` is what closed this language's oldest gap. A trend had been listed
   as missing for as long as there were readings, on the reasoning that the
@@ -1424,24 +1533,32 @@ substantive, a screen may bind to positions -- so `over 30, 60` and
 
 - **`<slot> = reading <name> [over 7, 14, 30]`** -- the bucket spans to
   serve the reading over, unwritten meaning the serving default. A span is
-  counted back from the anchor, bucket 1 being the bucket the request is
-  anchored in: `over 30` is the trailing thirty days and `over 1-30, 31-60`
-  is this month beside last month, exact and non-overlapping. Spans are
-  **days unless written otherwise** -- `over 1-48 in hours` (or `in
-  minutes`) for a sub-day span, refused at compile time when the unit
-  cannot slice the source figure's storage grain, or when the reading's
-  declared series grain does not fit inside the span. Bare numbers are
-  deliberately *not* denominated in the source's grain: regrading a figure
-  from days to quarter-hours must not silently re-scale every tile by 96x.
-  Only a *windowed* reading may carry the list; a live one is named bare,
-  mirroring the language's rule that the argument list and the source form
-  encode liveness twice, loudly -- written `over 7` a live member would
-  accept a window, ignore it, and answer today under a heading saying seven
-  days. A duplicate span is refused as the typo it is -- compared
-  canonically, so `over 30, 1-30` is the same question twice. (Honesty
-  note: a bare live member compiles, and until live readings are servable a
-  tile naming one answers the same not-yet refusal the reading's own route
-  gives -- whole, never one member short.)
+  integer positions in the source figure's own sequence, counted back from
+  the anchor, bucket 1 being the bucket the request is anchored in:
+  `over 30` is the trailing thirty buckets, `over 1-30, 31-60` two exact,
+  non-overlapping windows, and `over each 1-12` a window per bucket --
+  twelve one-bucket windows, in order, exactly the sugar the HTTP
+  parameter's `each:1-12` is. **No units ride on the spans** (`in hours`
+  shipped briefly and was retired): what a bucket is lives in the figure's
+  group clause, hashed, so a tile serving a month figure walks months
+  because the *figure* says so, never because the tile does. The same
+  ceilings the request doors apply are applied here, at compile time, so a
+  tile cannot commit to a request the server would refuse on every load: a
+  span covers at most 3660 buckets and reaches at most 3660 days back
+  through the figure's own rule (121 positions is six days of hours and
+  thirty years of quarters), and one member asks for at most 366 windows --
+  `over each 1-3660` is inside the span ceiling and is still 3,660 answers
+  per subject. Only a *windowed* reading
+  may carry the list; a live one is named bare, mirroring the language's
+  rule that the argument list and the source form encode liveness twice,
+  loudly -- written `over 7` a live member would accept a window, ignore
+  it, and answer today under a heading saying seven days. A duplicate span
+  is refused as the typo it is -- compared canonically, so `over 30, 1-30`
+  is the same question twice, and an `each` expansion collides with the
+  enumerated windows it stands for. (Honesty note: a bare live member
+  compiles, and until live readings are servable a tile naming one answers
+  the same not-yet refusal the reading's own route gives -- whole, never
+  one member short.)
 - **`<slot> = figure <name>`** -- its current value per subject. The same two shapes
   the bulk results surface declines to push are refused here at compile
   time: a **time-keyed** figure member would drag every stored bucket of
@@ -1656,11 +1773,17 @@ The ones most worth recognising, in the checker's own words:
 - *"reading ... summarises stored values, so it must declare (range)"* /
   *"reading ... measures records as they stand, so it takes no arguments"* --
   the windowed/live distinction, encoded twice on purpose.
-- *"...is not time-keyed -- the group that fans it out must end in a `by
-  day`, `by minute` or `by 15 minutes` part..."* -- only a time-keyed figure
-  has a range to read over.
-- *"the figure under ... stores a count, so mean(...) is a mean per day
+- *"...is not time-keyed -- the group that fans it out must end in a time
+  bucket part (`by day`, `by month`, `by first monday of month`, ...)"* --
+  only a time-keyed figure has a sequence to read over.
+- *"the figure under ... stores a count, so mean(...) is a mean per *day*
   wearing a label that says per record"* -- only `sum` over counts.
+- *"`series(...) by <grain>` was retired. A coarser view is its own
+  declaration..."* -- the read-time regrouping, refused toward an
+  hour-or-coarser group under its own name.
+- *"...takes a series over a figure keyed by the minute, and a series'
+  points are the stored buckets..."* -- the point would be the record, the
+  raw collection the payload exists to withhold.
 - *"...calculates both a sum and a distribution"* -- two numbers a reader can
   divide produce a third no definition claims.
 - *"...takes a delta, and it measures records as they stand"* -- a delta is

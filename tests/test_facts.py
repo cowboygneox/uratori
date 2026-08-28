@@ -176,6 +176,17 @@ def test_an_unknown_type_lists_the_vocabulary() -> None:
     )
 
 
+def test_a_selective_rule_needs_a_moment_like_any_time_bucket() -> None:
+    """`by first monday of month` reads an instant to find its day; over a
+    text field it would silently bucket nothing, so the declared world
+    refuses it exactly as it refuses `by day` over a text."""
+    refuses(
+        FACTS
+        + "\ngroup shop_order.odd from (courier_id, status by first monday of month)\n",
+        "needs a moment",
+    )
+
+
 def test_a_scalar_list_is_not_declarable() -> None:
     # No construct can read one: a predicate compares one field against one
     # literal and cannot test membership. A declared-but-unreadable field

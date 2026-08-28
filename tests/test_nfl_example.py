@@ -997,7 +997,9 @@ def test_the_showcase_keeps_the_constructs_the_readme_promises() -> None:
         "combine:",  # figures on figures
         "band:",  # a figure's thresholds
         "requires:",  # a reading's floor
-        "series(slots) by hour",  # the grouped sub-day series
+        "by hour in tenant.timezone",  # the hour grain, declared where grains live
+        "by month in tenant.timezone",  # the calendar trio's middle grain
+        "by quarter in tenant.timezone",  # and its coarse end
         "band high against pace.restDays",  # a reading's band
         "from nfl_game.finished & nfl_game.playoff",  # a set-expression population
         "omit when",  # the row-level gate

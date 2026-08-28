@@ -431,13 +431,21 @@ class PostgresEngineStore:
         """Time-keyed values whose bucket label falls inside a range.
 
         The comparison is on the text after the separator, which works because
-        every label is fixed-width local ISO time -- `2026-08-23`, or
-        `2026-08-23T14:30` at a sub-day grain -- and those sort
-        lexicographically -- which is the reason the truncation produces a
-        label rather than an epoch. The caller supplies bounds in the stored grain's own
-        shape: bare days for a day figure, `T00:00`/`T23:59` suffixes for a
-        sub-day one, since every label on a day sorts after the bare day
-        string.
+        a bucket label is fixed-width *within one rule* and those sort
+        lexicographically -- which is the reason a bucket rule produces a
+        label rather than an epoch. Sorting only has to hold within a rule,
+        because a figure is grouped by exactly one: `2026-08-23` and
+        `2026-08-23T14:30` order correctly among their own kind, and so do
+        `2026-08` months, `2026-Q3` quarters and `2026-W35` weeks, which do
+        not have to order against each other and never meet.
+
+        The caller supplies the concrete first and last labels the span
+        resolved to (`serve.py` passes the min and max of that list), so this
+        needs no knowledge of the rule at all. It used to be handed
+        `T00:00`/`T23:59` suffixes for a sub-day figure, a convention that
+        only ever worked because sub-day labels shared the day's prefix; a
+        month or quarter label has no such trick, and exact bounds retire the
+        need for one.
         """
         rows = await self._pool.fetch(
             """

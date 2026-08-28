@@ -39,8 +39,8 @@ def sample(*points: tuple[str, float | None]) -> Sample:
     return Sample(
         values=tuple(v for _, v in points if v is not None),
         points=points,
-        days_covered=sum(1 for _, v in points if v is not None),
-        days_requested=len(points),
+        buckets_covered=sum(1 for _, v in points if v is not None),
+        buckets_requested=len(points),
     )
 
 

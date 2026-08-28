@@ -21,8 +21,7 @@ from typing import Literal, NoReturn, assert_never
 from ..schema import Schema
 from ..windows import (
     WindowSpec,
-    refuse_series_in_window,
-    refuse_unit_over_grain,
+    refuse_reach,
     window_token,
 )
 from .ast import (
@@ -67,11 +66,9 @@ from .ast import (
     SetOp,
     SetRef,
     Setting,
-    Statistic,
     Sum,
     SummariseDecl,
     Text,
-    Truncation,
     ValueDecl,
 )
 from .hash import version_of
@@ -358,7 +355,7 @@ class _Checker:
                 )
             if part.zone is not None and part.zone not in self._schema.bucket_settings:
                 raise CheckError(
-                    f'{word} {d.name} buckets by {part.truncate} in "{part.zone}", which is not a setting '
+                    f'{word} {d.name} buckets by {part.truncate or part.select} in "{part.zone}", which is not a setting '
                     f"a {word} may name. Those are: {', '.join(self._schema.bucket_settings)}. "
                     "Moving one re-buckets a tenant's whole history, which is why the list is "
                     "short.",
@@ -398,11 +395,11 @@ class _Checker:
             node, _ = found
             if part.through is not None:
                 self._record_field(part.through.kind, part.through.path, what, d.line)
-            if part.truncate is not None and node.type != "moment":
+            if (part.truncate is not None or part.select is not None) and node.type != "moment":
                 raise CheckError(
-                    f"{what} buckets {part.field} by {part.truncate}, and {part.field} "
-                    f"is a {node.type}. A time bucket truncates an instant, so it needs "
-                    "a moment.",
+                    f"{what} buckets {part.field} by {part.truncate or part.select}, and "
+                    f"{part.field} is a {node.type}. A time bucket reads an instant, so "
+                    "it needs a moment.",
                     d.line,
                 )
         spec = d.spec
@@ -869,7 +866,7 @@ class _Checker:
 
     def _scope_index(
         self, d: FigureDecl, sets: dict[str, SetExpr], scope: str
-    ) -> tuple[str | None, Truncation | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None]:
         """Exactly one group must fan the figure out, and this works out which.
 
         A rollup has none, and that is legitimate -- its subjects come from the
@@ -913,15 +910,15 @@ class _Checker:
                 f"through {first.through.kind}.",
                 d.line,
             )
-        if first.truncate is not None:
+        if first.truncate is not None or first.select is not None:
             raise CheckError(
-                f"{name} truncates its first part to a {first.truncate}, so it fans "
-                f"{d.name} out by date rather than by {scope}. A day has no roster and no "
-                "name.",
+                f"{name} buckets its first part by {first.truncate or first.select}, so it "
+                f"fans {d.name} out by date rather than by {scope}. A bucket of time has "
+                "no roster and no name.",
                 d.line,
             )
 
-        grain: Truncation | None = None
+        grain: str | None = None
         dimension_part: str | None = None
         if len(parts) > 1:
             if len(parts) > 2:
@@ -931,12 +928,12 @@ class _Checker:
                     d.line,
                 )
             tail = parts[1]
-            if tail.truncate is not None:
-                grain = tail.truncate
+            if tail.truncate is not None or tail.select is not None:
+                grain = tail.truncate or tail.select
                 if d.across is not None:
                     raise CheckError(
-                        f"figure {d.name} is split across {d.across}, but {name} truncates "
-                        f"its second part to a {tail.truncate}. A bucket of time is not a "
+                        f"figure {d.name} is split across {d.across}, but {name} buckets "
+                        f"its second part by {grain}. A bucket of time is not a "
                         "dimension: it has no roster and no name, and whether a figure is "
                         "time-keyed is what decides if a reading may roll it up over a "
                         "range.",
@@ -1294,8 +1291,8 @@ class _Checker:
         if source.grain is None:
             raise CheckError(
                 f"{source.name} is not time-keyed -- the group that fans it out must end in "
-                "a `by day`, `by minute` or `by 15 minutes` part for there to be a range to "
-                "read over.",
+                "a time bucket part (`by day`, `by month`, `by first monday of month`, ...) "
+                "for there to be a sequence to read over.",
                 d.line,
             )
         if source.scope != scope:
@@ -1502,16 +1499,26 @@ class _Checker:
                 if series_declared > 1:
                     raise CheckError(
                         f"reading {d.name} declares two series. A response carries one, so "
-                        "the second would be whichever the serve path kept, silently. Two "
-                        "grains are two readings.",
+                        "the second would be whichever the serve path kept, silently.",
                         stat.line,
                     )
-                self._series_grain(d, stat, live, source)
-            elif stat.by is not None:  # pragma: no cover - the parser refuses first
-                raise CheckError(
-                    f"only a series takes a grain, and {stat.fn}({stat.set}) is not one.",
-                    stat.line,
-                )
+                if live:
+                    raise CheckError(
+                        f"reading {d.name} declares a series, but a live reading measures "
+                        "records as they stand -- there are no stored buckets to be the "
+                        "points.",
+                        stat.line,
+                    )
+                if grain == "minute":
+                    raise CheckError(
+                        f"reading {d.name} takes a series over a figure keyed by the "
+                        "minute, and a series' points are the stored buckets: over a "
+                        "sparse figure a minute bucket holds one record, so the point "
+                        "*is* the record -- the raw collection the payload exists to "
+                        "withhold. Group the figure by a coarser rule under its own "
+                        "name, and read that.",
+                        stat.line,
+                    )
             seen.add(stat.fn)
         if "sum" in seen and seen & {"mean", "median", "worst"}:
             raise CheckError(
@@ -1524,57 +1531,6 @@ class _Checker:
                 raise CheckError(
                     f'requires names "{r.set}", which is not a set defined in depends.', r.line
                 )
-
-    def _series_grain(
-        self, d: ReadingDecl, stat: Statistic, live: bool, source: FigurePlan | None
-    ) -> None:
-        """What a series may group to, decided by what is stored underneath.
-
-        Over a day-keyed source a bare series already is the day series; over
-        a sub-day one the grain must be said out loud, because it is the
-        payload the definition commits to. Finer-than-stored is unwritable
-        rather than refused: the finest series grain the parser accepts equals
-        the coarsest sub-day stored grain.
-        """
-        grain = source.grain if source is not None else None
-        if stat.by is None:
-            if grain in ("minute", "15 minutes"):
-                raise CheckError(
-                    f"reading {d.name} takes a series over a figure keyed by {grain}, so it "
-                    "must say the grain its points group to -- `series(...) by hour`, for "
-                    "example. A bare series over a sub-day figure is a payload choice "
-                    "nobody can see from the definition: ninety days of quarter-hours is "
-                    "8,640 points under a line that reads like any other sparkline.",
-                    stat.line,
-                )
-            return
-        if live:
-            raise CheckError(
-                f"reading {d.name} groups a series by {stat.by}, but a live reading "
-                "measures records as they stand -- there are no stored buckets to group.",
-                stat.line,
-            )
-        if grain == "day":
-            raise CheckError(
-                f"reading {d.name} groups a series by {stat.by}, but its figure is already "
-                "day-keyed and a bare series is the day series. A second spelling of one "
-                "thing is a first place for the two to disagree.",
-                stat.line,
-            )
-        assert source is not None  # a windowed reading's source is always grained
-        # A grouped point must be a number some `by day` index could have
-        # stored: the sum of a count's buckets, the mean of a list's records.
-        # Any other scalar -- a share, a span of days -- would be *summed*
-        # across buckets, and four quarter-hours at 0.5 becoming an hour at 2.0
-        # is arithmetic no definition claims.
-        if source.unit != "count" and not isinstance(source.calculate, ListOf):
-            raise CheckError(
-                f"reading {d.name} groups a series over {source.name}, which stores a "
-                f"{source.unit} per bucket. A grouped point would have to add those "
-                "buckets up, and a sum of shares or spans is a number no definition "
-                "claims. Grouping is defined for counts and for list figures.",
-                stat.line,
-            )
 
     def _reading_unit(
         self, source: FigureUnit, d: ReadingDecl
@@ -2078,21 +2034,17 @@ class _Checker:
                     m.line,
                 )
             if m.windows is not None and reading.source is not None:
-                # The same two refusals the serving path makes at request
-                # time, made here at compile time where the member's window
-                # list is written down: a span whose unit cannot slice the
-                # source's storage, and a series point that does not fit
-                # inside the span. One shared implementation, so the tile's
-                # build error and the route's 422 speak the same words.
+                # The refusal the serving path makes at request time, made
+                # here at compile time where the member's window list is
+                # written down: a span whose reach exceeds the ceiling under
+                # the source's own bucket rule. One shared implementation,
+                # so the tile's build error and the route's 422 speak the
+                # same words -- and rule-aware, because 121 positions is
+                # under a week of hours and thirty years of quarters.
                 source = _find(self.figures, reading.source)
-                grain = (source.grain if source is not None else None) or "day"
-                series_by = next(
-                    (s.by for s in reading.calculate if s.fn == "series"), None
-                )
+                rule = (source.grain if source is not None else None) or "day"
                 for spec in m.windows:
-                    refusal = refuse_unit_over_grain(spec, grain, reading.source)
-                    if refusal is None:
-                        refusal = refuse_series_in_window(spec, series_by, m.name)
+                    refusal = refuse_reach(spec, rule)
                     if refusal is not None:
                         raise CheckError(f"bundle {d.name}: {refusal}", m.line)
             return BundleMemberPlan(
@@ -2619,6 +2571,10 @@ def _field_hash(part: IndexField) -> object:
             else None
         ),
         "truncate": part.truncate,
+        # Absent-unless-declared, like every optional key `canonical` drops:
+        # a selective rule is new vocabulary, and every spec written before
+        # it existed must keep its version.
+        "select": part.select,
         "zone": part.zone,
     }
 
@@ -2745,11 +2701,10 @@ def _versioned_reading(
         "scope": plan.scope,
         "mode": plan.mode,
         "unit": plan.unit,
-        # A grain is a third element only when declared, so every reading
-        # written before series grains existed keeps its historic version.
-        "calculate": [
-            [s.fn, s.set] if s.by is None else [s.fn, s.set, s.by] for s in plan.calculate
-        ],
+        # Two elements, exactly the shape a grainless statistic has always
+        # hashed as -- `series(...) by <grain>` is retired, and the readings
+        # that never wrote one keep their historic versions.
+        "calculate": [[s.fn, s.set] for s in plan.calculate],
         "requires": [[r.count, r.set] for r in plan.requires] or None,
         "band": (
             {

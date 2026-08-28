@@ -25,7 +25,7 @@ from uratori.lang.check import CheckError
 from uratori.lang.lex import SyntaxError_
 from uratori.results import BundleResult
 from uratori.store.base import FactRow
-from uratori.windows import WindowSpec
+from uratori.windows import WindowSpec, expand_window_arg
 
 from .test_lang import BASE
 from .world import compile_source
@@ -93,7 +93,7 @@ reading team_person.merge_daily(range):
         m = team_person.merge_quarters in range
     calculate:
         sum(m)
-        series(m) by day
+        series(m)
 
 group code_change.merged_by_minute from (authorAccountId through team_person.accounts.accountId, mergedAt by minute in tenant.timezone)
 
@@ -315,12 +315,55 @@ def test_a_reversed_span_and_a_span_past_the_ceiling_are_refused() -> None:
             "    pace = reading team_person.to_merge over 60-31\n"
         )
     assert "31-60" in caught.value.message
-    with pytest.raises(SyntaxError_) as caught:
+
+    # Two ceilings, and a member can hit either. The bucket ceiling is the
+    # parser's, because it needs no rule: a million positions is a million
+    # windows under `each` and a million labels to resolve whatever a bucket
+    # turns out to be, so it is refused where the list is read.
+    with pytest.raises(SyntaxError_) as buckets:
         compile_source(
             BASE + MEMBERS + "\n# d\nbundle team_person.card:\n"
             "    pace = reading team_person.to_merge over 1000000\n"
         )
-    assert "3660" in caught.value.message
+    assert "3660" in buckets.value.message
+
+    # The reach ceiling is the checker's, because only it knows the source
+    # figure's rule -- and it is what catches a span the bucket ceiling waves
+    # through: 3,000 monthly buckets is two and a half centuries, well inside
+    # 3,660 positions and nowhere near a board's question. For a day-grained
+    # figure the two coincide by construction, which is why this needs a
+    # coarse rule to demonstrate at all.
+    monthly = MEMBERS + """
+group code_change.merged_by_month from (authorAccountId through team_person.accounts.accountId, mergedAt by month in tenant.timezone)
+
+# Time to merge, month by month.
+figure team_person.merge_months:
+    display "{team_person} merge months"
+    depends:
+        merged = code_change.merged_by_month:{team_person}
+    calculate:
+        list(code_change.open_seconds over merged)
+
+# The typical merge, month by month.
+reading team_person.month_pace(range):
+    display "{team_person} month pace"
+    depends:
+        m = team_person.merge_months in range
+    calculate:
+        median(m)
+"""
+    with pytest.raises(CheckError) as reach:
+        compile_source(
+            BASE + monthly + "\n# d\nbundle team_person.card:\n"
+            "    pace = reading team_person.month_pace over 3000\n"
+        )
+    assert "3660" in str(reach.value)
+    # The same span over the same rule, just inside: proof the refusal is the
+    # ceiling and not the coarse rule being rejected outright.
+    compile_source(
+        BASE + monthly + "\n# d\nbundle team_person.card:\n"
+        "    pace = reading team_person.month_pace over 118\n"
+    )
 
 
 def test_a_duplicate_window_is_refused_as_the_typo_it_is() -> None:
@@ -921,9 +964,9 @@ def test_slot_names_are_structural_and_move_the_hash() -> None:
 
 
 def test_span_spellings_that_ask_one_question_hash_identically() -> None:
-    """`over 30`, `over 1-30` and `over 30 in days` are one window; a hash
-    that told them apart would move a tile's version under a rewording."""
-    spellings = ["over 7, 14, 30", "over 1-7, 1-14, 1-30", "over 7, 14, 30 in days"]
+    """`over 30` and `over 1-30` are one window; a hash that told them
+    apart would move a tile's version under a rewording."""
+    spellings = ["over 7, 14, 30", "over 1-7, 1-14, 1-30"]
     versions = {
         compile_ok(CARD.replace("over 7, 14, 30", spelling))
         .bundle("team_person.card")
@@ -948,36 +991,191 @@ def test_a_duplicate_span_is_refused_across_spellings() -> None:
     assert 'names "30" twice' in caught.value.message
 
 
-def test_an_hour_span_needs_sub_day_storage_and_says_so_at_compile_time() -> None:
-    """The member's window list is checked against the reading's source
-    grain when the tile compiles: hours over the quarter-hour figure pass,
-    hours over the day-keyed one are refused naming the storage -- the same
-    words the HTTP door uses at request time."""
+def test_a_window_list_is_bare_positions_in_the_figures_own_sequence() -> None:
+    """A member's spans walk whatever sequence the reading's figure
+    declared: 48 over the quarter-hour figure is 48 quarter-hours, no unit
+    written anywhere, because the unit lives in the group clause and an
+    argument may never restate it."""
     lib = compile_ok(
-        "\n# The last two days, hour by hour.\n"
+        "\n# The last twelve hours, quarter by quarter.\n"
         "bundle team_person.pace_card:\n"
-        "    fresh = reading team_person.recent_pace over 1-48 in hours\n"
+        "    fresh = reading team_person.recent_pace over 1-48\n"
     )
     plan = lib.bundle("team_person.pace_card")
     assert plan is not None
-    assert plan.members[0].windows == (WindowSpec(first=1, last=48, unit="hour"),)
+    assert plan.members[0].windows == (WindowSpec(first=1, last=48),)
 
-    refuses(
-        "\n# Hours over day storage.\n"
-        "bundle team_person.card:\n"
-        "    pace = reading team_person.to_merge over 1-48 in hours\n",
-        "stored by day",
+
+def test_a_window_unit_is_refused_toward_the_group_clause() -> None:
+    """The v0.12 `in hours` clause is retired, not ignored: honouring it
+    would be a unit on an argument, and ignoring it would silently re-scale
+    the tile. The refusal points at where the unit now lives."""
+    for unit in ("hours", "minutes", "days", "weeks"):
+        with pytest.raises(SyntaxError_) as caught:
+            compile_source(
+                BASE + MEMBERS + "\n# A card with a unit on the argument.\n"
+                "bundle team_person.card:\n"
+                f"    pace = reading team_person.to_merge over 1-48 in {unit}\n"
+            )
+        assert "retired" in caught.value.message, unit
+        assert "group clause" in caught.value.message, unit
+
+
+def test_each_expands_to_one_bucket_windows_and_hashes_as_them() -> None:
+    """`over each 1-4` is sugar for `over 1-1, 2-2, 3-3, 4-4`: same specs,
+    same order, same bundle hash -- a screen binding to positions sees one
+    window per bucket either way, and the two spellings cannot drift."""
+    sugared = compile_ok(
+        "\n# A month per slot.\n"
+        "bundle team_person.spread_card:\n"
+        "    spread = reading team_person.to_merge over each 1-4\n"
+    )
+    spelled = compile_ok(
+        "\n# A month per slot.\n"
+        "bundle team_person.spread_card:\n"
+        "    spread = reading team_person.to_merge over 1-1, 2-2, 3-3, 4-4\n"
+    )
+    a = sugared.bundle("team_person.spread_card")
+    b = spelled.bundle("team_person.spread_card")
+    assert a is not None and b is not None
+    assert a.members[0].windows == tuple(WindowSpec(first=k, last=k) for k in (1, 2, 3, 4))
+    assert a.members[0].windows == b.members[0].windows
+    assert a.version == b.version
+
+
+def test_each_may_sit_beside_plain_spans_and_still_catches_duplicates() -> None:
+    lib = compile_ok(
+        "\n# The pooled month beside its weeks.\n"
+        "bundle team_person.mixed_card:\n"
+        "    mixed = reading team_person.to_merge over 30, each 2-3\n"
+    )
+    plan = lib.bundle("team_person.mixed_card")
+    assert plan is not None
+    assert plan.members[0].windows == (
+        WindowSpec(first=1, last=30),
+        WindowSpec(first=2, last=2),
+        WindowSpec(first=3, last=3),
     )
 
-
-def test_an_unknown_window_unit_is_refused() -> None:
     with pytest.raises(SyntaxError_) as caught:
         compile_source(
-            BASE + MEMBERS + "\n# A card in fortnights.\n"
+            BASE + MEMBERS + "\n# An each overlapping an enumerated span.\n"
             "bundle team_person.card:\n"
-            "    pace = reading team_person.to_merge over 2 in weeks\n"
+            "    pace = reading team_person.to_merge over 2-2, each 1-3\n"
         )
-    assert "minutes" in caught.value.message and "hours" in caught.value.message
+    assert 'names "2-2" twice' in caught.value.message
+
+
+def test_a_bare_bound_after_each_is_one_to_n_at_both_doors() -> None:
+    """`over 12` means `1-12`, so `over each 12` means twelve one-bucket
+    windows -- not the single bucket 12, which is `each 12-12` and still
+    says so. The bare form read as one window was silent: an author asking
+    for a column per bucket got one column and no error.
+
+    And the HTTP spelling must agree, or a tile and the request mirroring it
+    disagree about a spelling neither author chose -- the query parameter's
+    regex demanded the dash the bundle clause did not."""
+    lib = compile_ok(
+        "\n# A bucket per column, four back.\n"
+        "bundle team_person.one_card:\n"
+        "    just = reading team_person.to_merge over each 4\n"
+    )
+    plan = lib.bundle("team_person.one_card")
+    assert plan is not None
+    assert plan.members[0].windows == tuple(
+        WindowSpec(first=k, last=k) for k in (1, 2, 3, 4)
+    )
+    assert expand_window_arg("each:4") == plan.members[0].windows
+
+    single = compile_ok(
+        "\n# The one bucket four back, spelled as the span it is.\n"
+        "bundle team_person.single_card:\n"
+        "    just = reading team_person.to_merge over each 4-4\n"
+    )
+    only = single.bundle("team_person.single_card")
+    assert only is not None
+    assert only.members[0].windows == (WindowSpec(first=4, last=4),)
+
+
+def test_a_members_window_list_is_bounded_the_way_a_request_is() -> None:
+    """A tile may not commit at compile time to a request the server would
+    refuse at serve time: `over each 1-3660` is 3,660 windows per subject,
+    past the same ceiling the HTTP door applies. Refused where the list is
+    written down, so the author learns it on `PUT /definitions` rather than
+    the board learning it on every load.
+
+    Parsing it must also stay cheap: the duplicate check used to be a linear
+    scan of the windows built so far, which made one `over` clause quadratic
+    -- minutes of CPU inside the route, reached before any ceiling could
+    refuse it.
+    """
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(
+            BASE + MEMBERS + "\n# A card asking for a decade of buckets.\n"
+            "bundle team_person.card:\n"
+            "    pace = reading team_person.to_merge over each 1-3660\n"
+        )
+    assert "366" in caught.value.message
+
+    # Just inside, and the expansion is exactly its buckets -- so the ceiling
+    # is a ceiling, not a ban on `each` at width.
+    lib = compile_ok(
+        "\n# A year of buckets, one slot.\n"
+        "bundle team_person.year_card:\n"
+        "    pace = reading team_person.to_merge over each 1-366\n"
+    )
+    plan = lib.bundle("team_person.year_card")
+    assert plan is not None and plan.members[0].windows is not None
+    assert len(plan.members[0].windows) == 366
+
+
+def test_the_reach_ceiling_reads_the_figures_own_bucket_rule() -> None:
+    """121 positions is a day and a quarter of quarter-hours and over a
+    decade of months: the ceiling converts through the rule the figure
+    declared, so a
+    coarse sequence cannot smuggle a longer walk in under a smaller-looking
+    span -- decided when the tile compiles, in the serving door's words."""
+    monthly = (
+        "\ngroup code_change.merged_by_month from (authorAccountId through team_person.accounts.accountId, mergedAt by month in tenant.timezone)\n"
+        "\n# Merges per month.\n"
+        "figure team_person.merges_monthly:\n"
+        '    display "{team_person} merges that month"\n'
+        "    depends:\n"
+        "        mine = code_change.merged_by_month:{team_person}\n"
+        "    calculate:\n"
+        "        count(mine)\n"
+        "\n# The monthly pace.\n"
+        "reading team_person.monthly_pace(range):\n"
+        '    display "{team_person} monthly"\n'
+        "    depends:\n"
+        "        m = team_person.merges_monthly in range\n"
+        "    calculate:\n"
+        "        sum(m)\n"
+    )
+    lib = compile_ok(
+        monthly
+        + "\n# Ten years of months, pooled.\n"
+        "bundle team_person.decade_card:\n"
+        "    pace = reading team_person.monthly_pace over 1-118\n"
+    )
+    assert lib.bundle("team_person.decade_card") is not None
+
+    refuses(
+        monthly
+        + "\n# Over a decade of months.\n"
+        "bundle team_person.decade_card:\n"
+        "    pace = reading team_person.monthly_pace over 1-121\n",
+        "ceiling",
+    )
+
+    # The control: the same 121 positions over the quarter-hour figure are
+    # a couple of days and compile.
+    lib = compile_ok(
+        "\n# A day and a bit of quarter-hours.\n"
+        "bundle team_person.fine_card:\n"
+        "    fresh = reading team_person.recent_pace over 1-121\n"
+    )
+    assert lib.bundle("team_person.fine_card") is not None
 
 
 async def test_slots_travel_on_the_wire_and_rename_nothing() -> None:
@@ -1029,40 +1227,6 @@ async def test_two_slots_serve_one_reading_over_different_spans() -> None:
     assert window.mean == 3600.0, (
         "the prior span must hold yesterday's one-hour ride alone; 5400 "
         "means today's ride leaked across the offset"
-    )
-
-
-def test_a_series_that_does_not_fit_the_span_is_a_compile_error_in_a_bundle() -> None:
-    """`merge_daily` declares series(...) by day; a tile serving it over
-    hour spans would ship day points claiming time the span does not cover.
-    Refused when the tile compiles -- the same words the request door uses
-    -- rather than compiling green and raising on every serve."""
-    refuses(
-        "\n# A day series inside hour buckets.\n"
-        "bundle team_person.card:\n"
-        "    daily = reading team_person.merge_daily over 1-48 in hours\n",
-        "does not fit",
-    )
-
-
-def test_a_minute_span_needs_minute_storage_and_compiles_over_it() -> None:
-    """`in minutes` is the finest unit: legal over minute storage, refused
-    over quarter-hour storage where a minute bucket would split a stored
-    one -- both decided when the tile compiles."""
-    lib = compile_ok(
-        "\n# The last ninety minutes.\n"
-        "bundle team_person.minute_card:\n"
-        "    fresh = reading team_person.minute_pace over 1-90 in minutes\n"
-    )
-    plan = lib.bundle("team_person.minute_card")
-    assert plan is not None
-    assert plan.members[0].windows == (WindowSpec(first=1, last=90, unit="minute"),)
-
-    refuses(
-        "\n# Minutes over quarter-hour storage.\n"
-        "bundle team_person.card:\n"
-        "    fresh = reading team_person.recent_pace over 1-90 in minutes\n",
-        "stored by 15 minutes",
     )
 
 

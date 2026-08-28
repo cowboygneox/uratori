@@ -7,6 +7,7 @@ works in ids, which is what makes a figure's declared dependencies true.
 from __future__ import annotations
 
 import re
+from calendar import monthrange
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
@@ -184,7 +185,7 @@ def day_in(epoch_ms: float, zone: str | None) -> str:
     return moment.date().isoformat()
 
 
-_GRAIN_MINUTES: dict[str, int] = {"minute": 1, "15 minutes": 15}
+_GRAIN_MINUTES: dict[str, int] = {"minute": 1, "15 minutes": 15, "hour": 60}
 
 
 def label_in(epoch_ms: float, zone: str | None, grain: str) -> str:
@@ -203,11 +204,41 @@ def label_in(epoch_ms: float, zone: str | None, grain: str) -> str:
     """
     if grain == "day":
         return day_in(epoch_ms, zone)
+    if grain in ("week", "month", "quarter"):
+        # A coarse label is the *local day's* week, month or quarter: the
+        # zone is applied once, to find the day, and the rest is calendar
+        # arithmetic -- so a month figure and a day figure over one event
+        # can never disagree about which month the event's day was in.
+        local_day = date.fromisoformat(day_in(epoch_ms, zone))
+        if grain == "week":
+            return _week_label(local_day)
+        if grain == "month":
+            return _month_label(local_day.year, local_day.month)
+        return _quarter_label(local_day.year, local_day.month)
     moment = datetime.fromtimestamp(epoch_ms / 1000.0, tz=UTC)
     if zone is not None:
         moment = moment.astimezone(_zone(zone))
     step = _GRAIN_MINUTES[grain]
+    if step == 60:
+        return f"{moment.date().isoformat()}T{moment.hour:02d}:00"
     return f"{moment.date().isoformat()}T{moment.hour:02d}:{moment.minute - moment.minute % step:02d}"
+
+
+def selected_day(epoch_ms: float, zone: str | None, rule: str) -> str | None:
+    """The day an instant buckets under for a selective rule, or None.
+
+    `first monday of month` files an instant on the first Monday of its
+    (zoned) month under that day's date -- and every other instant under
+    nothing at all. The partiality *is* the filter: it falls out of the
+    function being undefined off-rule, the same doctrine as `is set`, so
+    there is no separate narrowing step a cheap path could skip.
+    """
+    ordinal = ordinal_rule_of(rule)
+    assert ordinal is not None, f'"{rule}" is not a selective rule'
+    local_day = day_in(epoch_ms, zone)
+    which, weekday = ordinal
+    match = ordinal_weekday_day(int(local_day[:4]), int(local_day[5:7]), which, weekday)
+    return local_day if match == local_day else None
 
 
 def end_of_day_ms(day: str, zone: str | None) -> float:
@@ -288,55 +319,198 @@ def day_range(at_ms: float, zone: str | None, days: int) -> tuple[str, str]:
     return (end_date - timedelta(days=back)).isoformat(), end
 
 
-def bucket_span(at_ms: float, zone: str | None, spec: WindowSpec) -> tuple[str, str]:
-    """A span of buckets resolved to its first (oldest) and last (newest)
-    stored labels, counted back from the anchor in the tenant's calendar.
+# ------------------------------------------------------ bucket sequences --
+#
+# A bucket rule names an ordered sequence of buckets; a window spec is a span
+# of positions in it, bucket 1 being the bucket the anchor instant falls in.
+# Every rule comes from one place -- the group clause of the figure being
+# read, hashed into its version. The total grains (`minute`, `15 minutes`,
+# `hour`, `day`, `week`, `month`, `quarter`) file every instant somewhere;
+# the ordinal weekday-of-month family (`first monday of month`) is
+# *selective*, sparse day buckets one per month at most. There is no
+# read-time rule and no reading-level clause to declare one: a coarser view
+# is its own figure under its own name, so nothing here re-slices what
+# another rule stored.
+#
+# Resolving a span is calendar arithmetic on the anchor's *local day*: the
+# zone is applied once, to find that day, and the rest is the calendar's --
+# so the sequence a window walks is spelled exactly as `label_in` spelled
+# the buckets when it wrote them, and a span can never name a label the
+# store could not hold.
 
-    Bucket 1 is the bucket the anchor instant falls in -- for days, the
-    anchor day, exactly as `day_range` has always counted, so `1-N` in days
-    is `day_range(at, zone, N)` by construction and the two cannot drift.
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+_ORDINALS = ("first", "second", "third", "fourth", "fifth")
+
+
+def ordinal_rule_of(rule: str) -> tuple[int, int] | None:
+    """`"first monday of month"` -> (1, 0) -- ordinal 1..5, weekday 0=Monday.
+
+    None for anything that is not an ordinal weekday-of-month rule. The rule
+    travels as its own declaration text so every surface -- hash, wire, UI --
+    spells it exactly one way.
+    """
+    words = rule.split(" ")
+    if len(words) != 4 or words[2] != "of" or words[3] != "month":
+        return None
+    if words[0] not in _ORDINALS or words[1] not in _WEEKDAYS:
+        return None
+    return _ORDINALS.index(words[0]) + 1, _WEEKDAYS.index(words[1])
+
+
+def ordinal_weekday_day(year: int, month: int, ordinal: int, weekday: int) -> str | None:
+    """The date of e.g. the first Monday of a month, or None when the month
+    has no such day (a fifth Monday exists in some months only).
+
+    Counted as a day *of the month*, never by adding days to the first: the
+    fifth weekday of December 9999 lands in January 10000, and building that
+    date to then reject it raises `OverflowError` -- an `ArithmeticError`,
+    which the routes do not catch, so it reaches the client as a 500 rather
+    than as the "no such day" this returns. `?at=9999-12-31` is an accepted
+    anchor and `end_of_day_ms` has a branch for exactly it, so the far edge
+    of the calendar is a place this function is genuinely asked about; a
+    record stamped in that month reaches it through `selected_day` on the
+    write path too.
+    """
+    day_of_month = 1 + (weekday - date(year, month, 1).weekday()) % 7 + (ordinal - 1) * 7
+    if day_of_month > monthrange(year, month)[1]:
+        return None
+    return date(year, month, day_of_month).isoformat()
+
+
+def _month_of(label: str) -> tuple[int, int]:
+    return int(label[:4]), int(label[5:7])
+
+
+def _month_label(year: int, month: int) -> str:
+    return f"{year:04d}-{month:02d}"
+
+
+def _quarter_label(year: int, month: int) -> str:
+    return f"{year:04d}-Q{(month - 1) // 3 + 1}"
+
+
+def _week_label(day: date) -> str:
+    iso = day.isocalendar()
+    return f"{iso.year:04d}-W{iso.week:02d}"
+
+
+def resolve_span(at_ms: float, zone: str | None, spec: WindowSpec, rule: str) -> list[str]:
+    """A span of positions resolved to the concrete bucket labels it covers,
+    oldest first, counted back from the anchor in the tenant's calendar.
+
+    Bucket 1 is the bucket the anchor instant falls in -- the anchor day,
+    the anchor month, the most recent first-Monday at or before the anchor
+    -- so `1-N` over days covers exactly what the trailing window always
+    has. The list is the answer's evidence: it travels (as edges, or whole
+    for a sparse rule) so "buckets 31-60" is never the client's guess.
 
     Sub-day buckets step back through **label space**: local wall-clock
     arithmetic on the bucket label, ignoring transitions, because that is
-    the calendar the store's labels live in -- every local day carries the
-    same label set whatever the clocks did (`_labels_between`'s rule). The
-    fall-back hour's two passes already merged into one label at write
-    time, and the spring-forward hour's labels name buckets that hold
-    nothing; counting them as positions keeps "48 hour-buckets" meaning the
-    same wall-clock stretch on every day of the year.
+    the calendar the store's labels live in. The fall-back hour's two
+    passes merged into one label at write time, and the spring-forward
+    hour's labels name buckets that hold nothing; counting them as
+    positions keeps "48 hour-buckets" meaning the same wall-clock stretch
+    on every day of the year.
 
-    Both edges clamp at the calendar's own beginning rather than raising,
-    for `day_range`'s reason: "the span opens where the calendar begins" is
-    an honest answer where an OverflowError is a 500.
+    Every edge clamps at the calendar's own beginning rather than raising:
+    "the span opens where the calendar begins" is an honest answer where an
+    OverflowError is a 500. A clamped span simply covers fewer buckets.
     """
-    if spec.unit == "day":
-        end_date = date.fromisoformat(day_in(at_ms, zone))
-        newest = end_date - timedelta(days=min(spec.first - 1, (end_date - date.min).days))
+    anchor_day = date.fromisoformat(day_in(at_ms, zone))
+
+    if rule == "day":
+        newest = anchor_day - timedelta(days=min(spec.first - 1, (anchor_day - date.min).days))
         oldest = newest - timedelta(days=min(spec.last - spec.first, (newest - date.min).days))
-        return oldest.isoformat(), newest.isoformat()
+        out: list[str] = []
+        day = oldest
+        while day <= newest:
+            out.append(day.isoformat())
+            if day == date.max:  # pragma: no cover - newest is <= anchor day
+                break
+            day += timedelta(days=1)
+        return out
 
-    moment = datetime.fromtimestamp(at_ms / 1000.0, tz=UTC)
-    if zone is not None:
-        moment = moment.astimezone(_zone(zone))
-    step = 60 if spec.unit == "hour" else 1
-    anchor_bucket = moment.replace(
-        minute=moment.minute - moment.minute % step if step != 60 else 0,
-        second=0,
-        microsecond=0,
-        tzinfo=None,
-    )
-    floor = datetime.min
-    newest_dt = anchor_bucket - min(
-        timedelta(minutes=step * (spec.first - 1)), anchor_bucket - floor
-    )
-    oldest_dt = newest_dt - min(
-        timedelta(minutes=step * (spec.last - spec.first)), newest_dt - floor
-    )
+    if rule == "week":
+        anchor_monday = anchor_day - timedelta(days=anchor_day.weekday())
+        weeks: list[str] = []
+        for k in range(spec.last, spec.first - 1, -1):
+            back = timedelta(days=7 * (k - 1))
+            if anchor_monday - date.min < back:
+                continue
+            weeks.append(_week_label(anchor_monday - back))
+        return weeks
 
-    def _label(dt: datetime) -> str:
-        return f"{dt.date().isoformat()}T{dt.hour:02d}:{dt.minute:02d}"
+    if rule in ("month", "quarter"):
+        step = 1 if rule == "month" else 3
+        year, month = anchor_day.year, anchor_day.month
+        if rule == "quarter":
+            # Normalise the anchor to its quarter's first month, so the loop
+            # below steps between quarters rather than between arbitrary
+            # months inside them. A no-op for the label as written -- stepping
+            # three months from any month of a quarter lands in the
+            # corresponding month of the target quarter, which carries the
+            # same label -- and kept because it makes the stepping mean what
+            # it says: the sequence is quarters, not months counted by three.
+            month = ((month - 1) // 3) * 3 + 1
+        labels: list[str] = []
+        for k in range(spec.last, spec.first - 1, -1):
+            months_back = (k - 1) * step
+            y, m = year, month - months_back
+            y += (m - 1) // 12
+            m = (m - 1) % 12 + 1
+            if y < 1:
+                continue
+            labels.append(_month_label(y, m) if rule == "month" else _quarter_label(y, m))
+        return labels
 
-    return _label(oldest_dt), _label(newest_dt)
+    ordinal = ordinal_rule_of(rule)
+    if ordinal is not None:
+        # The sequence is the calendar's own: every month's matching day, in
+        # order, months without one (a fifth Monday) contributing no bucket.
+        # Enumerated from the calendar rather than from the data, because a
+        # month whose bucket holds nothing is a hole in the window, never a
+        # skipped position -- skipping it would quietly narrow the window.
+        which, weekday = ordinal
+        found: list[str] = []
+        year, month = anchor_day.year, anchor_day.month
+        while len(found) < spec.last and year >= 1:
+            candidate = ordinal_weekday_day(year, month, which, weekday)
+            if candidate is not None and candidate <= anchor_day.isoformat():
+                found.append(candidate)
+            month -= 1
+            if month == 0:
+                year, month = year - 1, 12
+        covered = found[spec.first - 1 : spec.last]
+        return list(reversed(covered))
+
+    if rule in ("hour", "15 minutes", "minute"):
+        moment = datetime.fromtimestamp(at_ms / 1000.0, tz=UTC)
+        if zone is not None:
+            moment = moment.astimezone(_zone(zone))
+        step = {"hour": 60, "15 minutes": 15, "minute": 1}[rule]
+        anchor_bucket = moment.replace(
+            minute=moment.minute - moment.minute % step if step != 60 else 0,
+            second=0,
+            microsecond=0,
+            tzinfo=None,
+        )
+        floor = datetime.min
+        newest_dt = anchor_bucket - min(
+            timedelta(minutes=step * (spec.first - 1)), anchor_bucket - floor
+        )
+        oldest_dt = newest_dt - min(
+            timedelta(minutes=step * (spec.last - spec.first)), newest_dt - floor
+        )
+        labels_out: list[str] = []
+        cursor = oldest_dt
+        while cursor <= newest_dt:
+            labels_out.append(f"{cursor.date().isoformat()}T{cursor.hour:02d}:{cursor.minute:02d}")
+            if cursor > datetime.max - timedelta(minutes=step):  # pragma: no cover
+                break
+            cursor += timedelta(minutes=step)
+        return labels_out
+
+    raise ValueError(f'"{rule}" is not a bucket rule')
 
 
 # ------------------------------------------------------------ bucketing --
@@ -439,15 +613,24 @@ def _keys_for(
         if not raw:
             return []
 
-    if part.truncate is not None:
+    if part.truncate is not None or part.select is not None:
         zone = _setting(settings, part.zone) if part.zone is not None else None
+        zone_name = str(zone) if zone is not None else None
         out: list[str] = []
         for value in raw:
             moment = parse_instant(value)
-            if moment is not None:
-                out.append(
-                    label_in(moment, str(zone) if zone is not None else None, part.truncate)
-                )
+            if moment is None:
+                continue
+            if part.select is not None:
+                # A selective rule is partial: an instant off the rule's day
+                # is in no bucket, and that absence is the declaration's own
+                # filter rather than a narrowing step.
+                day = selected_day(moment, zone_name, part.select)
+                if day is not None:
+                    out.append(day)
+            else:
+                assert part.truncate is not None  # exactly one of the two is set
+                out.append(label_in(moment, zone_name, part.truncate))
         return sorted(set(out))
 
     return raw

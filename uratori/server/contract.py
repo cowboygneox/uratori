@@ -104,7 +104,14 @@ class DeclarationOut(BaseModel):
     split, so no separate flag repeats it."""
 
     mode: Literal["window", "live"] | None = None
-    grain: Literal["day", "minute", "15 minutes"] | None = None
+    grain: str | None = None
+    """The bucket rule of a time-keyed figure's sequence -- a stored grain
+    (`minute`, `15 minutes`, `hour`, `day`, `week`, `month`, `quarter`) or
+    a selective rule's canonical text (`first monday of month`). A string
+    rather than a closed union because the ordinal weekday family is a
+    rule with two parameters, and the value is the declaration's own
+    spelling either way."""
+
     across: str | None = None
     banded: bool | None = None
     over: str | None = None

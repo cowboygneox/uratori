@@ -172,9 +172,12 @@ an opener carries no previous kickoff, because an off-season is not a bye
 week.
 
 **Scoring rhythm** (`nfl_team.scoring_rhythm`) is the sub-day grain:
-scoring plays with a verified wall clock, stored into quarter-hours of the
-tenant's own calendar, then grouped into hours at read time --
-`series(slots) by hour`. Ask for a window and watch the league's afternoon.
+scoring plays with a verified wall clock, stored into quarter-hours and,
+under its own name, into hours of the tenant's own calendar -- two
+declarations, two hashes, each bucketing the plays directly. The reading
+walks the hour figure's sequence, so `?trailing=1-48` is two days of
+hours and each series point is one of them. Ask for a window and watch
+the league's afternoon.
 
 **Careers** (`nfl_player.tds_versus`, `nfl_player.tds_by_season`,
 `nfl_player.touchdowns`) are `across` twice and a rollup: the same

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal
+from typing import Any
 
 from ..lang.ast import Count, Extreme, ListOf, SetExpr, SetIndex, SetOp, SetRef
 from ..lang.ast import Sum as LangSum
@@ -48,17 +48,17 @@ from ..store import EngineStore, FactSource, StoredValue
 from ..windows import (
     WindowError,
     WindowSpec,
-    as_window_spec,
-    refuse_series_in_window,
-    refuse_unit_over_grain,
+    expand_window_args,
+    refuse_reach,
     span_text,
     window_token,
 )
 from .buckets import (
     SEPARATOR,
-    bucket_span,
     end_of_day_ms,
     measure_of,
+    ordinal_rule_of,
+    resolve_span,
     subject_of,
     tail_of,
 )
@@ -72,8 +72,7 @@ from .read import (
     Sample,
     delta_of,
     level_of,
-    sample_from_buckets,
-    sample_from_days,
+    sample_over,
     series_of,
     statistics_of,
     unmet_of,
@@ -581,31 +580,33 @@ async def serve_reading(
 ) -> Result:
     """One request serves several windows from a single fetch.
 
-    A window is a **span of buckets** counted back from the anchor -- the
-    trailing `30`, or the offset `31-60`, days unless the spec says finer --
-    and it is an *argument*: it narrows which stored buckets take part and
-    may never change the calculation. Every declared rule applies per span
-    unchanged: the floor withholds a thin span's statistics with the reasons
-    named, the band bands each span, the series returns each span's own
-    points.
+    A window is a **span of positions in the source figure's own bucket
+    sequence**, counted back from the anchor -- the trailing `30`, the
+    offset `31-60`, or the per-bucket run `each:1-12` -- and it is an
+    *argument*: it narrows which stored buckets take part and may never
+    change the calculation. What one bucket is -- a day, a month, the first
+    Monday of each month -- is the figure's group clause, declared and
+    hashed there. Every declared rule applies per span unchanged: the floor
+    withholds a thin span's statistics with the reasons named, the band
+    bands each span, the series returns each span's own points.
 
-    The fetch is anchored on the **oldest** span's start. Anchoring on the
-    newest silently turns the month into a fortnight and reports a plausible
-    mean for it, which is the shape of every bug this codebase has spent a
-    day on.
+    `at_day` is a caller's anchor date: bucket 1 becomes the bucket that
+    local day's end falls in instead of now. It is an *argument*, never
+    part of the version -- and the buckets it resolved to travel back on
+    the result's `at` and each window's bounds as provenance. Resolved here
+    rather than by the caller, because "the end of that day" only means
+    something in the reading's own zone, and only this function knows it.
 
-    `at_day` is a caller's anchor date: bucket 1 becomes the bucket ending
-    that local day instead of now. It is an *argument*, never part of the
-    version -- and the anchor it resolved to travels back on the result's
-    `at` and each window's bounds as provenance. Resolved here rather than
-    by the caller, because "the end of that day" only means something in the
-    reading's own zone, and only this function knows it.
-
-    A spec whose unit cannot slice the source's storage -- hours over a
-    figure stored by day -- raises `WindowError`, which the HTTP door wears
-    as a 422: the fix (write days, or regrade the figure) is the caller's.
+    A spec past the reach ceiling raises `WindowError`, which the HTTP door
+    wears as a 422: a malformed argument is the caller's to fix.
     """
-    specs = [as_window_spec(w) for w in windows]
+    # `expand_window_args`, not a comprehension over `expand_window_arg`: the
+    # window-count ceiling lives in the plural form, and this is a door too --
+    # the facade's own `answer(trailing=[...])`, which an embedding host calls
+    # directly. It was the one door of four where `make_window_spec` and
+    # `refuse_reach` were enforced and the count was not, which is the kind of
+    # asymmetry that reads as deliberate and is not.
+    specs = list(expand_window_args(windows))
     seen_tokens: set[str] = set()
     for spec in specs:
         token = window_token(spec)
@@ -615,7 +616,8 @@ async def serve_reading(
             # span is a walk over stored points -- a repeatable parameter
             # with no duplicate check is a cost multiplier the reach
             # ceiling cannot see. Canonical tokens, so `30` and `1-30`
-            # collide the way they hash.
+            # collide the way they hash -- and an `each` expansion collides
+            # with the enumerated windows it is sugar for.
             raise WindowError(
                 f'the window list names "{token}" twice. One request serves each '
                 "window once."
@@ -631,84 +633,42 @@ async def serve_reading(
         at = end_of_day_ms(at_day, zone)
     else:
         at = at_ms if at_ms is not None else now_ms()
-    grain = source.grain
-    series_by = next((s.by for s in plan.calculate if s.fn == "series"), None)
+    rule = source.grain or "day"
     for spec in specs:
-        refusal = refuse_unit_over_grain(spec, grain or "day", source.name)
-        if refusal is None:
-            refusal = refuse_series_in_window(spec, series_by, plan.name)
+        refusal = refuse_reach(spec, rule)
         if refusal is not None:
             raise WindowError(refusal)
-    resolved = [(spec, *bucket_span(at, zone, spec)) for spec in specs]
+    resolved = [(spec, resolve_span(at, zone, spec, rule)) for spec in specs]
 
-    frm = min(w_frm[:10] for _, w_frm, _ in resolved)
-    # The upper bound is the *newest resolved* bucket's day, not the anchor
-    # day: an offset span (`391-400`) ends far behind the anchor, and
-    # fetching up to the anchor anyway would walk the whole offset -- the
-    # very cost the reach ceiling exists to bound -- to serve a ten-day
-    # window.
-    to = max(w_to[:10] for _, _, w_to in resolved)
-    # A sub-day label on the window's final day -- "2026-08-25T14:30" -- sorts
-    # *after* the bare day "2026-08-25", so day-string bounds would silently
-    # drop the current day from every sub-day window: a board reporting the
-    # team has shipped nothing all morning, every morning. "T23:59" is the
-    # largest label a day can carry at any grain.
-    fetch_frm, fetch_to = (frm, to) if grain == "day" else (frm + "T00:00", to + "T23:59")
-
-    def _at_unit(label: str, spec: WindowSpec) -> str:
-        """A stored label, truncated to the span's own bucket width, so a
-        quarter-hour bucket lands in the hour that contains it."""
-        if spec.unit == "hour":
-            return label[:13] + ":00"
-        return label
-
-    def _series_to(w_to: str, spec: WindowSpec) -> str | None:
-        """The last series label inside a sub-day span's newest bucket: the
-        span's `to` names the bucket at the span's unit, and a series grouped
-        finer must run through the bucket's end, not stop at its first label."""
-        if spec.unit == "day" or series_by is None:
-            return None
-        from datetime import datetime, timedelta
-
-        unit_minutes = 60 if spec.unit == "hour" else 1
-        by_minutes = {"15 minutes": 15, "hour": 60}.get(series_by, unit_minutes)
-        moment = datetime.fromisoformat(w_to) + timedelta(minutes=unit_minutes - by_minutes)
-        return f"{moment.date().isoformat()}T{moment.hour:02d}:{moment.minute:02d}"
-
-    def _sample(inside: list[tuple[str, Value]], w_frm: str, w_to: str, spec: WindowSpec) -> Sample:
-        if grain == "day":
-            return sample_from_days(inside, w_frm, w_to)  # type: ignore[arg-type]
-        return sample_from_buckets(
-            inside, w_frm, w_to, series_by, series_to=_series_to(w_to, spec)  # type: ignore[arg-type]
-        )
+    # One fetch serves every window, bounded by the oldest and newest
+    # covered labels across all of them: an offset span (`391-400`) ends far
+    # behind the anchor, and fetching up to the anchor anyway would walk the
+    # whole offset -- the very cost the reach ceiling exists to bound -- to
+    # serve a ten-day window. Stored labels *are* sequence labels (nothing
+    # is regrouped on a read), so the bounds are labels and the store's
+    # range scan needs no translation.
+    all_labels = [label for _, labels in resolved for label in labels]
 
     subjects: list[Subject] = []
-    if isinstance(state, Ok):
+    if isinstance(state, Ok) and all_labels:
         rows = await store.values_in_range(
-            tenant, source.name, source.version, fetch_frm, fetch_to
+            tenant, source.name, source.version, min(all_labels), max(all_labels)
         )
         by_subject: dict[str, list[tuple[str, Value]]] = {}
         names: dict[str, str] = {}
         for stored in rows:
             base = subject_of(stored.subject)
-            day = stored.subject.split(SEPARATOR, 1)[1]
-            by_subject.setdefault(base, []).append((day, stored.value))
+            label = stored.subject.split(SEPARATOR, 1)[1]
+            by_subject.setdefault(base, []).append((label, stored.value))
             names.setdefault(base, stored.label)
 
-        for base, days in sorted(by_subject.items()):
+        for base, held in sorted(by_subject.items()):
             served: list[Window] = []
-            for spec, w_frm, w_to in resolved:
-                # For day buckets the day prefix of a label is its local day
-                # whatever the grain, so one comparison serves both key
-                # shapes; a sub-day span compares at its own bucket width.
-                if spec.unit == "day":
-                    inside = [(d, v) for d, v in days if w_frm <= d[:10] <= w_to]
-                else:
-                    inside = [(d, v) for d, v in days if w_frm <= _at_unit(d, spec) <= w_to]
-                sample = _sample(inside, w_frm, w_to, spec)
-                served.append(
-                    _window(plan, sample, spec, w_frm, w_to, zone, settings, series_by)
-                )
+            for spec, labels in resolved:
+                covered = set(labels)
+                inside = [(d, v) for d, v in held if d in covered]
+                sample = sample_over(inside, labels)  # type: ignore[arg-type]
+                served.append(_window(plan, sample, spec, labels, rule, zone, settings))
             subjects.append(
                 Subject(
                     id=base,
@@ -722,17 +682,8 @@ async def serve_reading(
         id="",
         name="",
         windows=[
-            _window(
-                plan,
-                _sample([], w_frm, w_to, spec),
-                spec,
-                w_frm,
-                w_to,
-                zone,
-                settings,
-                series_by,
-            )
-            for spec, w_frm, w_to in resolved
+            _window(plan, sample_over([], labels), spec, labels, rule, zone, settings)
+            for spec, labels in resolved
         ],
     )
 
@@ -778,11 +729,10 @@ def _window(
     plan: ReadingPlan,
     sample: Sample,
     spec: WindowSpec,
-    frm: str,
-    to: str,
+    labels: Sequence[str],
+    rule: str,
     zone: str | None,
     settings: Mapping[str, Any],
-    series_by: str | None,
 ) -> Window:
     unmet = unmet_of(plan, sample)
     stats: dict[str, float | None] = statistics_of(plan, sample)
@@ -817,14 +767,24 @@ def _window(
     }
     return Window(
         span=span_text(spec),
-        bucket=spec.unit,
+        bucket=rule,
         # `trailing` keeps meaning exactly what it always has -- the last N
         # days -- and is absent for any span that is not that: an offset
-        # bucket wearing a trailing-looking number is the lie this field
-        # must not tell.
-        trailing=spec.last if spec.unit == "day" and spec.first == 1 else None,
-        frm=frm,
-        to=to,
+        # bucket, or a month span, wearing a trailing-looking number is the
+        # lie this field must not tell.
+        trailing=spec.last if rule == "day" and spec.first == 1 else None,
+        # None, never "", when the span resolved to no bucket at all -- which
+        # happens only where the calendar runs out (an anchor in year 1, a
+        # span reaching past it). An empty string in a date field is a value
+        # that renders and sorts, and "no bucket" is an absence: rule 3's
+        # distinction, at the one edge that produces it.
+        frm=labels[0] if labels else None,
+        to=labels[-1] if labels else None,
+        # A selective rule's covered buckets are not contiguous, so the
+        # edges alone would claim days no bucket covers: the full list is
+        # the honest shape, and only there -- for contiguous rules it would
+        # repeat what the edges already say, per window, per subject.
+        buckets=list(labels) if ordinal_rule_of(rule) is not None else None,
         zone=zone,
         mean=stats.get("mean"),
         median=stats.get("median"),
@@ -842,11 +802,10 @@ def _window(
             else None
         ),
         series_scale=_series_scale(points) if points is not None else None,
-        series_by=_series_grain(series_by) if wants_series and not unmet else None,
         display=rendered,
         sample=len(sample.values),
-        days_covered=sample.days_covered,
-        days_requested=sample.days_requested,
+        buckets_covered=sample.buckets_covered,
+        buckets_requested=sample.buckets_requested,
         level="unknown" if unmet else _level_word_from(level_of(plan, stats, settings)),
         unmet=unmet,
     )
@@ -977,20 +936,6 @@ def _flag(rendered: RenderedFlag) -> Any:
         action=rendered.action,
         severity="attention" if rendered.severity == "attention" else "info",
     )
-
-
-_SERIES_GRAINS: frozenset[str] = frozenset({"15 minutes", "hour", "day"})
-
-
-def _series_grain(by: str | None) -> Literal["15 minutes", "hour", "day"] | None:
-    """Checked against the closed set rather than cast, the `_unit` bargain:
-    a grain off the list is a bug in the planner, and this says so instead of
-    passing it through to a typed client that cannot handle the word."""
-    if by is None:
-        return None
-    if by not in _SERIES_GRAINS:
-        raise ValueError(f"{by} is not a series grain this contract can carry")
-    return by  # type: ignore[return-value]
 
 
 _UNITS: frozenset[str] = frozenset(
