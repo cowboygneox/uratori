@@ -64,7 +64,7 @@ your app ──facts──▶ uratori ──Results──▶ your screens
 - **Definitions** (`.fig`) declare what to compute: *groups* bucket records
   by a field, *filters* narrow them to whatever passes a test, *measures*
   read quantities off them, *figures* are stored per-subject values
-  recomputed incrementally as facts move, *readings* summarise stored days,
+  recomputed incrementally as facts move, *readings* summarise stored buckets,
   *projections* assemble live rows at the instant they are asked.
 - **Results** are one envelope for every answer, with the definition's version
   (a content hash: the citation) and the evidence behind it. An absence is

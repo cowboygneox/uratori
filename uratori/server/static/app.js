@@ -860,11 +860,17 @@ function resultBlocks(result) {
         el('tr', {}, el('th', {}, 'window'), statHeads(),
           el('th', {}, 'sample'), el('th', {}, 'coverage')),
         (subject.windows || []).map((window) => el('tr', {},
-          // The span with its bucket unit -- `30d`, `31-60d`, `1-48h` --
-          // never `trailing`, which is null for any span that is not a
-          // plain trailing-days count.
-          el('td', { class: 'mono' }, `${window.span}${{ day: 'd', hour: 'h', minute: 'm' }[window.bucket] || ''}`, ' ',
-            el('span', { class: 'faint' }, `${window.frm} → ${window.to}`)),
+          // The span is bare positions in the figure's own sequence, and
+          // `bucket` says what one position is -- `30 × day`, `1-6 × month`,
+          // `6 × first monday of month` -- never `trailing`, which is null
+          // for any span that is not a plain trailing-days count. A sparse
+          // rule's window carries `buckets`, the concrete days the span
+          // resolved to, because its edges alone would claim days no bucket
+          // covers -- so those are what the evidence line shows.
+          el('td', { class: 'mono' }, `${window.span}`, ' ',
+            el('span', { class: 'dim' }, `× ${window.bucket}`), ' ',
+            el('span', { class: 'faint' },
+              window.buckets ? window.buckets.join(', ') : `${window.frm} → ${window.to}`)),
           window.unmet.length
             // Every statistic is withheld together, so one cell spans the
             // columns with the reason -- the columns still exist (the
@@ -882,7 +888,10 @@ function resultBlocks(result) {
                 result.banded && !stats.includes(bandOn) ? bandCell(window) : null,
               ],
           el('td', { class: 'mono' }, String(window.sample)),
-          el('td', { class: 'mono dim' }, `${window.days_covered}/${window.days_requested}d`)))));
+          // Coverage in buckets of the figure's own sequence: how many of
+          // the span's positions hold a stored value.
+          el('td', { class: 'mono dim' },
+            `${window.buckets_covered}/${window.buckets_requested}`)))));
     }
   }
   return blocks;
@@ -900,7 +909,7 @@ function sparkline(window) {
   if (!scale || !scale.length) return el('span', { class: 'faint' }, '—');
   return el('span', {
     class: 'spark',
-    title: `${scale.length} points, one per ${window.series_by || 'day'}, `
+    title: `${scale.length} points, one per ${window.bucket}, `
       + 'scaled to this window’s own peak',
   }, scale.map((fraction) => {
     if (fraction == null) return el('span', { class: 'spark-gap' });

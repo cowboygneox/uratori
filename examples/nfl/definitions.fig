@@ -522,6 +522,14 @@ figure nfl_team_season.rate:
 group nfl_stat_line.by_player from player_id
 group nfl_stat_line.player_by_day from (player_id, kickoff by day in tenant.timezone)
 
+# The same lines at month and quarter grain: the day/month/quarter trio,
+# each its own declaration bucketing the records directly -- a month bucket
+# holds every stat line of the month, not a rollup of day buckets -- so
+# each grain is citable on its own and a window over any of them is just
+# `over 1-6` counted back through that grain's sequence.
+group nfl_stat_line.player_by_month from (player_id, kickoff by month in tenant.timezone)
+group nfl_stat_line.player_by_quarter from (player_id, kickoff by quarter in tenant.timezone)
+
 # A pair group: each stat line filed under (player, opponent franchise) --
 # the second part is a dimension, and the figure over it says so.
 group nfl_stat_line.versus from (player_id, opponent through nfl_team.abbrs.abbr)
@@ -609,6 +617,29 @@ figure nfl_player.yards_by_day:
     calculate:
         sum(nfl_stat_line.scrimmage over played)
 
+# Scrimmage yards per calendar month: the trio's middle grain, summed from
+# the month's own stat lines. `over each 1-12` on the reading below is a
+# year of these, one window per month, each banded and floored on its own.
+figure nfl_player.yards_by_month:
+    display "{nfl_player} yards that month"
+
+    depends:
+        played = nfl_stat_line.player_by_month:{nfl_player}
+
+    calculate:
+        sum(nfl_stat_line.scrimmage over played)
+
+# Scrimmage yards per calendar quarter -- the coarse end of the trio,
+# quarters in the tenant's own calendar, year straddles included.
+figure nfl_player.yards_by_quarter:
+    display "{nfl_player} yards that quarter"
+
+    depends:
+        played = nfl_stat_line.player_by_quarter:{nfl_player}
+
+    calculate:
+        sum(nfl_stat_line.scrimmage over played)
+
 # --------------------------------------------------- every single play --
 
 # Every snap is a fact, filed under the offence that ran it. The loader
@@ -631,6 +662,13 @@ group nfl_play.in_season from season
 # what genuinely has a clock -- the season totals live on the scoring
 # reading, not here.
 group nfl_play.scoring_slots from (scored_by through nfl_team.abbrs.abbr, clock_time by 15 minutes in tenant.timezone)
+
+# The same verified clocks, filed into hours: a coarser view of scoring is
+# its own declaration, with its own name and hash, computed straight from
+# the plays -- never a re-grouping of the quarter-hour buckets on the way
+# out. A reading's window walks whichever of these two sequences its
+# figure declared.
+group nfl_play.scoring_hours from (scored_by through nfl_team.abbrs.abbr, clock_time by hour in tenant.timezone)
 
 # Giveaways filed under whoever actually lost the ball -- on a muffed punt
 # that is the returner, not the team whose punt it was.
@@ -718,6 +756,19 @@ figure nfl_team.scoring_clock:
 
     calculate:
         sum(nfl_play.points over slots)
+
+# Points per hour of the day: the same plays as the quarter-hour figure,
+# declared at the coarser grain under their own name -- so an hourly
+# timeline and a quarter-hour one are two citable answers to two written
+# questions, not one figure re-sliced on the way out.
+figure nfl_team.scoring_by_hour:
+    display "{nfl_team} points in that hour"
+
+    depends:
+        hours = nfl_play.scoring_hours:{nfl_team}
+
+    calculate:
+        sum(nfl_play.points over hours)
 
 # League-wide offensive snaps in one season -- the eras page's scale
 # column: forty-odd thousand plays a year, every one a citable fact.
@@ -868,19 +919,20 @@ reading nfl_team.rest(range):
         median(spans)
         worst(spans)
 
-# When the scoring happened, on the clock: the window's quarter-hour points
-# grouped into hours, a timeline at hour grain, covering the plays whose
-# clocks the loader could verify. The grain is declared and hashed -- an
-# hourly series and a daily one differ in what every point means.
+# When the scoring happened, on the clock: a timeline at hour grain,
+# covering the plays whose clocks the loader could verify. The points are
+# the hour figure's own buckets -- the grain is declared and hashed on the
+# figure's group, and a window here (`over 1-48`) is forty-eight of those
+# hours, counted back from the anchor.
 reading nfl_team.scoring_rhythm(range):
     display "{nfl_team} scoring, hour by hour"
 
     depends:
-        slots = nfl_team.scoring_clock in range
+        slots = nfl_team.scoring_by_hour in range
 
     calculate:
         sum(slots)
-        series(slots) by hour
+        series(slots)
 
 # A player's production over the window, with the series that shows the
 # shape of a career -- the monster week, the bye week and the lost season
@@ -894,6 +946,19 @@ reading nfl_player.production(range):
     calculate:
         sum(days)
         series(days)
+
+# The month-grain half of the production pair: the same yards, one bucket
+# per calendar month, so `over each 1-12` serves a year of month windows --
+# a per-month comparison with each month's own sum and series point.
+reading nfl_player.production_by_month(range):
+    display "{nfl_player} scrimmage yards, month by month"
+
+    depends:
+        months = nfl_player.yards_by_month in range
+
+    calculate:
+        sum(months)
+        series(months)
 
 # ---------------------------------------------------------- projections --
 

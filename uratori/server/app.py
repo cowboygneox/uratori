@@ -46,7 +46,7 @@ from ..lang.plan import CompiledFactField, Library
 from ..results import BundleResult, Evidence, Result
 from ..store.postgres import PostgresFactStore
 from ..verify import FactError
-from ..windows import WindowError, WindowSpec, as_window_spec
+from ..windows import WindowError, WindowSpec, expand_window_arg
 from . import db
 from . import ui as builtin_ui
 from .contract import (
@@ -462,17 +462,19 @@ def create_app(
     def windows_of(trailing: list[str] | None) -> list[WindowSpec] | None:
         """The window parameter, validated or refused as a 422.
 
-        Each value is a bucket span: `30` (the last 30 days, unchanged from
-        when this parameter was an integer), `31-60` (the 30 before them),
-        or with a unit suffix `1-48h` / `1-90m`. Malformed specs are 422s,
-        never coerced -- a coerced window is a plausible population nobody
-        asked for. The unit-versus-grain check happens deeper, where the
-        reading's source is known, and surfaces as the same 422.
+        Each value is a span of positions in the reading's own bucket
+        sequence: `30` (the last 30 buckets, bucket 1 the anchor bucket),
+        `31-60` (the 30 before them), or `each:1-12` (one window per
+        bucket, expanded here so the sugar and the enumerated spelling are
+        one request). Malformed specs are 422s, never coerced -- a coerced
+        window is a plausible population nobody asked for. The reach check
+        happens deeper, where the reading's bucket rule is known, and
+        surfaces as the same 422.
         """
         if trailing is None:
             return None
         try:
-            return [as_window_spec(token) for token in trailing]
+            return [spec for token in trailing for spec in expand_window_arg(token)]
         except WindowError as refusal:
             raise HTTPException(status_code=422, detail=str(refusal)) from refusal
 
@@ -865,7 +867,9 @@ def _entry_of(asked: SubscribeEntry) -> Entry | None:
     try:
         return Entry(
             name=asked.name,
-            windows=tuple(as_window_spec(token) for token in asked.trailing),
+            windows=tuple(
+                spec for token in asked.trailing for spec in expand_window_arg(token)
+            ),
         )
     except WindowError:
         return None
@@ -908,7 +912,7 @@ def _refuse_entry(library: Library, asked: SubscribeEntry) -> str | None:
             )
         try:
             for token in asked.trailing:
-                as_window_spec(token)
+                expand_window_arg(token)
         except WindowError as refusal:
             return str(refusal)
     return None
@@ -937,7 +941,7 @@ def _library_out(library: Library) -> LibraryOut:
         kind: str | None = None,
         id_space: str | None = None,
         mode: Literal["window", "live"] | None = None,
-        grain: Literal["day", "minute", "15 minutes"] | None = None,
+        grain: str | None = None,
         across: str | None = None,
         banded: bool | None = None,
         over: str | None = None,
@@ -1109,7 +1113,12 @@ def _library_out(library: Library) -> LibraryOut:
                 id_space=i.id_space,
                 display=i.label,
                 grain=next(
-                    (part.truncate for part in parts if part.truncate is not None), None
+                    (
+                        part.truncate or part.select
+                        for part in parts
+                        if part.truncate is not None or part.select is not None
+                    ),
+                    None,
                 ),
                 fields=[part.field for part in parts],
                 through=sorted(

@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Literal
 
-from ..windows import WindowError, WindowSpec, WindowUnit, make_window_spec, window_token
+from ..windows import WindowError, WindowSpec, make_window_spec, window_token
 from .ast import (
     AbsenceTest,
     Arith,
@@ -45,7 +45,6 @@ from .ast import (
     FieldMeasure,
     FigureDecl,
     FlagDecl,
-    GroupGrain,
     IndexBy,
     IndexDecl,
     IndexField,
@@ -556,6 +555,7 @@ class _Parser:
         path = self._name("a field to bucket by")
         through: Through | None = None
         truncate: Truncation | None = None
+        select: str | None = None
         zone: str | None = None
 
         if self._at_word("through"):
@@ -571,41 +571,71 @@ class _Parser:
 
         if self._at_word("by"):
             self._next()
-            truncate = self._truncation()
+            truncate, select = self._bucket_rule()
             if self._at_word("in"):
                 self._next()
                 zone = self._name("the setting naming the calendar, e.g. tenant.timezone")
 
-        return IndexField(field=path, through=through, truncate=truncate, zone=zone)
+        return IndexField(field=path, through=through, truncate=truncate, select=select, zone=zone)
 
-    def _truncation(self) -> Truncation:
-        """`by day`, `by minute` or `by 15 minutes` -- the stored grains.
+    _GRAINS: tuple[str, ...] = ("minute", "hour", "day", "week", "month", "quarter")
+    _ORDINALS: tuple[str, ...] = ("first", "second", "third", "fourth", "fifth")
+    _WEEKDAYS: tuple[str, ...] = (
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    )
 
-        Everything else is refused by name. `week` and `month` because a range
-        over days produces either; `hour` because a range over quarter-hours
-        does -- coarser grains are groupings at read time, and storing one
-        beside the buckets it is made of would be two answers to one question.
-        Other minute counts wait for a definition to ask.
+    def _bucket_rule(self) -> tuple[Truncation | None, str | None]:
+        """The bucket rule after `by`: a grain, or a selective calendar rule.
+
+        Grains -- `minute`, `15 minutes`, `hour`, `day`, `week`, `month`,
+        `quarter` -- truncate an instant to a calendar bucket. This is the
+        one place calendar vocabulary belongs: the rule decides how many
+        values a figure has and which bucket an event lands in, so it is a
+        declaration, hashed -- and a reading's `over 1-6` is then just six
+        positions in whatever sequence was declared here. A coarser figure
+        beside a finer one is two declarations with two names and two
+        hashes, each computed directly from the records.
+
+        Selective rules -- `first monday of month` through `fifth sunday of
+        month` -- pick a sparse day per month and are deliberately partial:
+        an instant not on that day is in no bucket, the way a record with no
+        value is in no `is set` bucket. Other minute counts than 15 wait for
+        a definition to ask, exactly as `percentile` does.
         """
         if self._is("number"):
             count = self._next().value
             self._keyword("minutes")
             if count != "15":
                 raise self._error(
-                    f'"{count} minutes" is not a truncation. The stored grains are "day", '
-                    '"minute" and "15 minutes": a truncation decides how many values a '
+                    f'"{count} minutes" is not a bucket rule. The sub-day grains are '
+                    '"minute", "15 minutes" and "hour": a rule decides how many values a '
                     "figure has, so each one is a decision about grain rather than a "
                     "convenience, and no definition has asked for this one."
                 )
-            return "15 minutes"
-        word = self._name('a truncation: "day", "minute" or "15 minutes"')
-        if word in ("day", "minute"):
-            return word  # type: ignore[return-value]
+            return "15 minutes", None
+        word = self._name(
+            'a bucket rule: a grain ("day", "month", ...) or an ordinal weekday '
+            '("first monday of month")'
+        )
+        if word in self._GRAINS:
+            return word, None  # type: ignore[return-value]
+        if word in self._ORDINALS:
+            weekday = self._name('a weekday: "monday" through "sunday"')
+            if weekday not in self._WEEKDAYS:
+                raise self._error(
+                    f'"{weekday}" is not a weekday. An ordinal rule is written '
+                    '"first monday of month" -- first..fifth, monday..sunday.'
+                )
+            self._keyword("of")
+            self._keyword("month")
+            return None, f"{word} {weekday} of month"
         raise self._error(
-            f'"{word}" is not a truncation. The stored grains are "day", "minute" and '
-            '"15 minutes". Coarser spans -- an hour, a week, a month -- are produced by '
-            "reading a range over the stored buckets; storing them as well would be two "
-            "answers to one question."
+            f'"{word}" is not a bucket rule. The grains are "minute", "15 minutes", '
+            '"hour", "day", "week", "month" and "quarter"; a selective rule is an '
+            'ordinal weekday, "first monday of month" through "fifth sunday of month". '
+            "The rule lives here, in the declaration, because it decides what a "
+            "stored value means -- a reading's window is then bare positions in "
+            "this sequence."
         )
 
     def _index_where(self) -> IndexBy:
@@ -1278,45 +1308,19 @@ class _Parser:
             self._punct("(")
             target = self._name("a set defined in depends")
             self._punct(")")
-            by: GroupGrain | None = None
             if self._at_word("by"):
-                if fn != "series":
-                    raise self._error(
-                        f"only a series takes a grain. {fn}(...) runs over the window's raw "
-                        "values whatever the series grain is, so a grain written on it "
-                        "would be a declaration that does nothing."
-                    )
-                self._next()
-                by = self._group_grain()
-            out.append(Statistic(fn=fn, set=target, by=by, line=line))  # type: ignore[arg-type]
+                raise self._error(
+                    "a series' points are one per bucket of the figure's own sequence -- "
+                    "the grain its group declared -- so `series(...) by <grain>` was "
+                    "retired. A coarser view is its own declaration: group the figure "
+                    "`by hour` (or `by day`, `by month`, ...) under its own name, and "
+                    "read that."
+                )
+            out.append(Statistic(fn=fn, set=target, line=line))  # type: ignore[arg-type]
             self._end_of_line()
             self._skip_newlines()
         self._expect("dedent", "the end of the calculate block")
         return out
-
-    def _group_grain(self) -> GroupGrain:
-        if self._is("number"):
-            count = self._next().value
-            self._keyword("minutes")
-            if count != "15":
-                raise self._error(
-                    f'"{count} minutes" is not a series grain. Those are "15 minutes", '
-                    '"hour" and "day".'
-                )
-            return "15 minutes"
-        word = self._name('a series grain: "15 minutes", "hour" or "day"')
-        if word in ("hour", "day"):
-            return word  # type: ignore[return-value]
-        if word == "minute":
-            raise self._error(
-                "a series may not answer at minute resolution, though the minute is a "
-                "storable grain. Over a sparse figure a minute group holds one record, so "
-                "the point is the record -- the raw collection the payload exists to "
-                'withhold. The finest series grain is "15 minutes".'
-            )
-        raise self._error(
-            f'"{word}" is not a series grain. Those are "15 minutes", "hour" and "day".'
-        )
 
     # -------------------------------------------------------- projection --
 
@@ -1768,59 +1772,75 @@ class _Parser:
         return BundleMember(slot=slot, kind=member_kind, name=name, windows=windows, line=line)
 
     def _window_specs(self, line: int) -> tuple[WindowSpec, ...]:
-        """`over 7, 14, 30` / `over 1-30, 31-60` / `over 1-48 in hours`.
+        """`over 7, 14, 30` / `over 1-30, 31-60` / `over each 1-12`.
 
-        Each entry is a span of buckets counted back from the anchor; the
-        optional `in <unit>` clause follows the list and denominates every
-        span in it -- modelled on `band ... in <unit>`, and for the same
-        reason: bare numbers are *days*, always, never the source figure's
-        grain, because a regrade must not silently re-scale a tile."""
-        bounds: list[tuple[int, int]] = []
+        Each entry is a span of positions in the reading's own bucket
+        sequence, counted back from the anchor -- bare integers and nothing
+        else, because what a bucket *is* lives in the source figure's group
+        clause, hashed, and an argument may never change what a number
+        means. (`in hours` rode here briefly and was retired with the rest
+        of the unit-suffixed argument tokens.) `each a-b` expands to the
+        one-bucket windows `a-a ... b-b`, one window per bucket in order,
+        so a per-bucket comparison is not twelve enumerated spans.
+        """
+        bounds: list[tuple[int, int, bool]] = []
         while True:
+            each = False
+            if self._at_word("each"):
+                self._next()
+                each = True
             first = self._window_bound(line)
             last = first
             if self._at_op("-"):
                 self._next()
                 last = self._window_bound(line)
-                bounds.append((first, last))
+                bounds.append((first, last, each))
             else:
-                bounds.append((1, first))
+                bounds.append((first if each else 1, last, each))
             if self._at_op(","):
                 self._next()
                 continue
             break
 
-        unit: WindowUnit = "day"
         if self._at_word("in"):
-            self._next()
-            worded = self._name('a bucket unit: "minutes", "hours" or "days"')
-            units: dict[str, WindowUnit] = {"minutes": "minute", "hours": "hour", "days": "day"}
-            if worded not in units:
-                raise self._error(
-                    f'"{worded}" is not a bucket unit. Spans are written in "minutes", '
-                    '"hours" or "days" -- days when unwritten, always.',
-                    line,
-                )
-            unit = units[worded]
+            raise self._error(
+                "a window list is bare positions -- `in hours` (and every unit on an "
+                "argument) was retired. What one bucket is lives in the source "
+                "figure's group clause (`by hour`, `by month`, ...), where it is "
+                "hashed; the spans here walk that sequence.",
+                line,
+            )
 
         out: list[WindowSpec] = []
-        for first, last in bounds:
+        for first, last, each in bounds:
             try:
-                spec = make_window_spec(first, last, unit)
+                specs = (
+                    [
+                        WindowSpec(first=k, last=k)
+                        for k in range(
+                            make_window_spec(first, last).first,
+                            make_window_spec(first, last).last + 1,
+                        )
+                    ]
+                    if each
+                    else [make_window_spec(first, last)]
+                )
             except WindowError as refusal:
                 raise self._error(str(refusal), line) from refusal
-            if spec in out:
-                # The same shape of mistake as a duplicate member: the window
-                # would serve twice, and a screen binding to window positions
-                # would show a duplicated column from a typo. Compared as
-                # canonical specs, so `over 30, 1-30` is caught as the same
-                # question twice.
-                raise self._error(
-                    f'the window list names "{window_token(spec)}" twice. One request '
-                    "serves each window once.",
-                    line,
-                )
-            out.append(spec)
+            for spec in specs:
+                if spec in out:
+                    # The same shape of mistake as a duplicate member: the window
+                    # would serve twice, and a screen binding to window positions
+                    # would show a duplicated column from a typo. Compared as
+                    # canonical specs, so `over 30, 1-30` -- and an `each` span
+                    # overlapping an enumerated one -- is caught as the same
+                    # question twice.
+                    raise self._error(
+                        f'the window list names "{window_token(spec)}" twice. One request '
+                        "serves each window once.",
+                        line,
+                    )
+                out.append(spec)
         return tuple(out)
 
     def _window_bound(self, line: int) -> int:

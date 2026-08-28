@@ -64,7 +64,7 @@ from ..results import (
 )
 from ..schema import EFFORT_HOURS_SETTING, Schema
 from ..store.postgres import PostgresEngineStore
-from ..windows import WindowError, as_window_spec, window_token
+from ..windows import WindowError, expand_window_arg, window_token
 from . import db
 from .runtime import (
     State,
@@ -1760,7 +1760,11 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         world, library = ready(s)
         facade = facade_for(s, world, library)
         try:
-            specs = [as_window_spec(token) for token in trailing] if trailing else None
+            specs = (
+                [spec for token in trailing for spec in expand_window_arg(token)]
+                if trailing
+                else None
+            )
             answer = await facade.answer(
                 tenant,
                 name,

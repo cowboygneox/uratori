@@ -544,36 +544,46 @@ a tile is not servable yet anywhere (its by-name route answers `501`) and
 one member's gap must not fail the whole first paint.
 
 `trailing` is a repeatable query parameter selecting the windows readings
-are served over. Each value is a **span of buckets counted back from the
-anchor**, bucket 1 being the bucket the request is anchored in:
+are served over. Each value is a **span of integer positions in the source
+figure's own bucket sequence**, counted back from the anchor, bucket 1
+being the bucket the request is anchored in. What one bucket *is* -- a
+day, an hour, a month, the first Monday of each month -- is the figure's
+group clause, declared and hashed there; the argument carries **no units
+and no dates**, because the bucket rule changes what the number means and
+an argument may never do that. (The retired unit suffixes -- `1-48h`,
+`90m`, `30d` -- are a `422` pointing at the group clause, never silently
+reinterpreted as bare positions.)
 
-- `?trailing=30` -- the last 30 days, exactly as when this parameter was a
-  bare integer. The default is 30, 14 and 7.
-- `?trailing=1-30&trailing=31-60` -- this month beside last month: exact,
-  non-overlapping offset buckets, each independently getting the reading's
-  statistics, sample floor, band and resolved dates.
-- `?trailing=1-48h` / `?trailing=1-90m` -- a sub-day span, in hours or
-  minutes (`d` is the explicit-days suffix, an alias of the bare form, the
-  way a bundle member may write `in days`). Bare numbers are **days,
-  always** -- never the source figure's storage grain, which would let a
-  regrade silently re-scale every bookmarked URL -- so anything finer says
-  so with the suffix. The same span twice in one request is a `422`: one
-  request serves each window once, exactly as a bundle's window list
-  refuses its duplicates. A sub-day
-  span must slice whole stored buckets: hours over a figure stored by day
-  (or minutes over quarter-hour storage) are a `422` naming the figure's
-  grain, on this route and the by-name one alike -- refused whole rather
-  than served with that reading quietly absent. A span whose series grain
-  does not fit inside it (a `by day` sparkline in an hour window) is the
-  same `422`.
+- `?trailing=30` -- the last 30 buckets: thirty days of a day figure,
+  thirty months of a month figure. The default is 30, 14 and 7.
+- `?trailing=1-30&trailing=31-60` -- two exact, non-overlapping offset
+  windows, each independently getting the reading's statistics, sample
+  floor, band and resolved buckets.
+- `?trailing=each:1-12` -- one window **per bucket**: sugar for the twelve
+  one-bucket windows `1, 2-2, ..., 12-12`, expanded at the door so the
+  sugared and enumerated spellings are one request -- a year of month
+  windows on a month figure, each summed, floored and banded on its own.
 
-A malformed span (`0-30`, `60-31`, `7.5`, junk) is a `422`, never coerced --
-and a bound of `0` is refused with the convention spelled out, because
-`0-30, 31-60` reads natural and would silently make the first bucket 31
-days wide. Spans may reach at most 3660 days back (ten years of daily
-buckets): every bucket is a stored point the server may walk per subject,
-and a board wanting a decade of history is a definition conversation, not a
-request parameter.
+The same span twice in one request is a `422`: one request serves each
+window once, exactly as a bundle's window list refuses its duplicates --
+and an `each` expansion collides with the enumerated windows it stands
+for. A malformed span (`0-30`, `60-31`, `7.5`, junk) is a `422`, never
+coerced -- and a bound of `0` is refused with the convention spelled out,
+because `0-30, 31-60` reads natural and would silently make the first
+bucket one wider. Spans may reach at most 3660 days back (ten years of
+daily buckets), converting through the figure's own rule -- 121 positions
+is five days of quarter-hours and over a decade of quarters: every bucket
+is a stored point the server may walk per subject, and a board wanting a
+decade of history is a definition conversation, not a request parameter.
+
+Each served window answers with the buckets the span resolved to -- the
+question stays integers, the answer carries the dates: `bucket` names the
+figure's rule, `frm`/`to` are the oldest and newest covered bucket labels
+(`2026-03` .. `2026-08` for months), `buckets` lists every covered label
+for a selective rule (six first-Mondays are not a contiguous stretch, so
+edges alone would claim days no bucket covers), and
+`buckets_covered`/`buckets_requested` say how much of the window holds
+evidence.
 
 `at` anchors those windows on a chosen day instead of today: an ISO date
 (`?at=2026-06-30&trailing=30` is "the 30 days ending June 30"), resolved by
@@ -585,7 +595,7 @@ is a `422` -- including a bare epoch number, which is refused rather than
 guessed at as a timestamp. Any absolute range at day granularity is
 reachable this way: `at` is the end date and `trailing` the span. An anchor
 before a tenant's data is not an error: `subjects` is empty and the `empty`
-prototype's windows carry `days_covered: 0` with their requirements unmet,
+prototype's windows carry `buckets_covered: 0` with their requirements unmet,
 the same absence answer an empty board serves. On this bulk route the
 anchor reaches the window readings only -- a figure or projection is a
 point-in-time answer with no window to move, and each result's own `at`
@@ -862,24 +872,26 @@ join.
 
 ### `Window` (readings)
 
-One window: a span of stored buckets, resolved by the server. `span` and
-`bucket` are the question and `frm`/`to` are the answer, and both travel:
-"buckets 31-60" depends on when the tenant's midnight was, which a client
-cannot know. Note the spelling -- the field is `frm`.
+One window: a span of positions in the source figure's own bucket
+sequence, resolved by the server. `span` and `bucket` are the question and
+the bucket labels are the answer, and both travel: "buckets 31-60" depends
+on when the tenant's midnight was and what the figure's group declared,
+neither of which a client can know. Dates ride in answers, never in
+questions. Note the spelling -- the field is `frm`.
 
 | Field | Meaning |
 |---|---|
-| `span` | The bucket span asked for, in the canonical spelling's span half: `"30"` (the last 30 buckets, bucket 1 being the anchor bucket), `"31-60"` (the 30 before them). The unit deliberately lives in `bucket`, not here -- read the pair; a client keying on `span` alone would conflate `48` days with `48` hours. |
-| `bucket` | What one bucket of the span is: `"day"`, `"hour"` or `"minute"`. Days unless the request said otherwise, always. |
-| `trailing` | The span as a plain trailing-days count, kept meaning what it always has: present exactly when the span *is* the last N days, `null` for an offset or sub-day span -- an offset bucket wearing a trailing-looking number is the lie this field refuses to tell. |
-| `frm`, `to` | The first (oldest) and last (newest) bucket labels the span resolved to -- ISO days for day buckets, local bucket labels (`2026-08-25T14:00`) for sub-day ones. |
+| `span` | The bucket span asked for, in the canonical spelling: `"30"` (the last 30 buckets, bucket 1 being the anchor bucket), `"31-60"` (the 30 before them). Positions in the sequence `bucket` names -- read the pair; a client keying on `span` alone would conflate 48 days with 48 hours. |
+| `bucket` | What one bucket of the span is: the rule the figure's group declared -- `"day"`, `"minute"`, `"15 minutes"`, `"hour"`, `"week"`, `"month"`, `"quarter"`, or a selective rule's own text (`"first monday of month"`). |
+| `trailing` | The span as a plain trailing-days count, kept meaning what it always has: present exactly when the span *is* the last N days of a day-grained figure, `null` for an offset span or any other sequence -- an offset bucket wearing a trailing-looking number is the lie this field refuses to tell. |
+| `frm`, `to` | The first (oldest) and last (newest) bucket labels the span resolved to, in the sequence's own vocabulary: ISO days, `2026-08` months, `2026-Q3` quarters, `2026-W35` weeks, `2026-08-25T14:00` sub-day buckets. |
+| `buckets` | Every covered bucket label, oldest first -- present exactly for a selective rule, whose covered days are not contiguous: edges alone would claim days no bucket covers. `null` for the contiguous rules, where the edges say it all. |
 | `zone` | The calendar it resolved in. |
 | `mean`, `median`, `worst`, `total`, `count` | The statistics the reading declares; each is a number or `null`. A definition's `sum` arrives on the wire as `total` -- the rename happens here, nowhere else. |
-| `series` | Per-point values, when the definition asked for them -- the one non-scalar statistic, and it exists so a sparkline is a definition's answer rather than the client slicing a range and computing ten means. |
-| `series_by` | What one series point spans -- `"15 minutes"`, `"hour"` or `"day"` -- when the definition grouped a sub-day figure. Absent (`null`) for a day-keyed source, where a point has always been a day. |
+| `series` | Per-point values, when the definition asked for them -- one point per covered bucket, holes `null`. The one non-scalar statistic; it exists so a sparkline is a definition's answer rather than the client slicing a range and computing ten means. |
 | `display` | Each statistic above, rendered, keyed by statistic name. Rendered on the server because rendering a duration is a division, and a division is a calculation. |
-| `sample` | How many values took part. For a count figure this is *days that contributed*, not records -- a different number of similar magnitude, which is why it is named rather than left to be inferred. |
-| `days_covered`, `days_requested` | How many calendar days of the window hold data, against how many it touches -- a claim about days whatever the bucket unit. |
+| `sample` | How many values took part. For a count figure this is *buckets that contributed*, not records -- a different number of similar magnitude, which is why it is named rather than left to be inferred. |
+| `buckets_covered`, `buckets_requested` | How many of the span's buckets hold a stored value, against how many the span resolved to -- for a selective rule the buckets that exist, which no arithmetic on `span` can reproduce. |
 | `level` | The window's band word. |
 | `unmet` | Which declared requirement fell short, in words -- so a suppressed mean is a dash with a stated reason rather than an undifferentiated one. |
 

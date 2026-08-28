@@ -2331,74 +2331,130 @@ figure team_person.merge_minutes:
 
 
 def test_a_grain_nobody_asked_for_is_refused_by_name() -> None:
-    """A truncation decides how many values a figure has, so each one is a
-    product decision rather than a convenience -- the same restraint that keeps
-    `week` and `month` out."""
+    """A bucket rule decides how many values a figure has, so each one is a
+    product decision rather than a convenience -- the calendar grains are a
+    closed list, and five-minute buckets are not on it."""
     with pytest.raises(SyntaxError_) as caught:
         compile_source(
             BASE
             + "group code_change.by_five from (authorAccountId, mergedAt by 5 minutes)\n"
         )
-    assert "not a truncation" in caught.value.message
+    assert "not a bucket rule" in caught.value.message
 
     with pytest.raises(SyntaxError_):
-        compile_source(BASE + "group code_change.by_week from (authorAccountId, mergedAt by week)\n")
+        compile_source(BASE + "group code_change.by_ten from (authorAccountId, mergedAt by fortnight)\n")
 
 
-def test_hour_is_a_grouping_at_read_and_not_a_stored_grain() -> None:
-    """Storing hours beside the quarter-hours they are made of would be two
-    answers to one question -- the argument that keeps `week` and `month` out,
-    pointed downward."""
-    with pytest.raises(SyntaxError_) as caught:
-        compile_source(
-            BASE + "group code_change.by_hour from (authorAccountId, mergedAt by hour)\n"
-        )
-    assert "not a truncation" in caught.value.message
-
-    # The control: the same word is welcome as a series grouping.
+def test_the_calendar_grains_are_declarable_and_are_the_figures_sequence() -> None:
+    """`by hour`, `by week`, `by month` and `by quarter` are stored grains
+    beside `by day`: the one place calendar vocabulary belongs, because the
+    rule decides what a stored value means and is hashed here. A coarser
+    figure beside a finer one is two declarations with two names -- never
+    one figure re-sliced at read time -- and a reading's integer window
+    walks whichever sequence its figure declared."""
     lib = compile_ok(
-        QUARTER
-        + """
+        """
+group code_change.merged_by_hour from (authorAccountId through team_person.accounts.accountId, mergedAt by hour in tenant.timezone)
+group code_change.merged_by_week from (authorAccountId through team_person.accounts.accountId, mergedAt by week in tenant.timezone)
+group code_change.merged_by_month from (authorAccountId through team_person.accounts.accountId, mergedAt by month in tenant.timezone)
+group code_change.merged_by_calendar_quarter from (authorAccountId through team_person.accounts.accountId, mergedAt by quarter in tenant.timezone)
+
 # d
-reading team_person.throughput(range):
+figure team_person.merges_hourly:
     display "x"
     depends:
-        m = team_person.merge_rate in range
+        mine = code_change.merged_by_hour:{team_person}
     calculate:
-        sum(m)
-        series(m) by hour
+        count(mine)
+
+# d
+figure team_person.merges_weekly:
+    display "x"
+    depends:
+        mine = code_change.merged_by_week:{team_person}
+    calculate:
+        count(mine)
+
+# d
+figure team_person.merges_monthly:
+    display "x"
+    depends:
+        mine = code_change.merged_by_month:{team_person}
+    calculate:
+        count(mine)
+
+# d
+figure team_person.merges_quarterly:
+    display "x"
+    depends:
+        mine = code_change.merged_by_calendar_quarter:{team_person}
+    calculate:
+        count(mine)
 """
     )
-    plan = lib.reading("team_person.throughput")
-    assert plan is not None
-    assert [(s.fn, s.by) for s in plan.calculate] == [("sum", None), ("series", "hour")]
+    for name, grain in (
+        ("team_person.merges_hourly", "hour"),
+        ("team_person.merges_weekly", "week"),
+        ("team_person.merges_monthly", "month"),
+        ("team_person.merges_quarterly", "quarter"),
+    ):
+        plan = lib.figure(name)
+        assert plan is not None and plan.grain == grain, name
 
 
-def test_a_series_over_a_sub_day_figure_must_say_its_grain() -> None:
-    """A bare series over a sub-day figure is a payload choice nobody can see
-    from the definition: ninety days of quarter-hours is 8,640 points under a
-    line that reads like any other sparkline."""
-    refuses(
-        QUARTER
-        + """
+def test_an_ordinal_weekday_rule_parses_and_is_the_figures_sequence() -> None:
+    """`by first monday of month` is the selective family: sparse day
+    buckets, one per month at most, and the figure's grain is the rule's
+    own text so a window over it walks first-Mondays."""
+    lib = compile_ok(
+        """
+group code_change.merged_first_mondays from (authorAccountId through team_person.accounts.accountId, mergedAt by first monday of month in tenant.timezone)
+
 # d
-reading team_person.throughput(range):
+figure team_person.first_monday_merges:
     display "x"
     depends:
-        m = team_person.merge_rate in range
+        mine = code_change.merged_first_mondays:{team_person}
     calculate:
-        series(m)
-""",
-        "say the grain",
+        count(mine)
+"""
+    )
+    plan = lib.figure("team_person.first_monday_merges")
+    assert plan is not None and plan.grain == "first monday of month"
+
+
+def test_an_ordinal_rule_is_spelled_exactly_or_refused_with_directions() -> None:
+    for wrong in (
+        "by first friday of year",
+        "by first tuesday month",
+        "by first blursday of month",
+        "by sixth monday of month",
+    ):
+        with pytest.raises(SyntaxError_):
+            compile_source(
+                BASE
+                + f"group code_change.odd from (authorAccountId, mergedAt {wrong})\n"
+            )
+
+
+def test_an_ordinal_rules_zone_must_be_a_bucket_setting() -> None:
+    """The selective rules sit exactly where the grains sit: `in <setting>`
+    names whose calendar decides which month a day belongs to, and turning
+    that dial re-buckets history -- so only a bucket setting may sit there.
+    (The moment requirement is checked against a declared world in
+    test_facts.)"""
+    refuses(
+        "group code_change.odd from (authorAccountId, mergedAt by first monday of month in nowhere.zone)\n",
+        "not a setting",
     )
 
 
-def test_a_minute_series_is_the_raw_records_and_the_word_is_refused() -> None:
-    """Over a sparse figure a minute group holds one record, so the point *is*
-    the record -- the raw collection the payload exists to withhold. Refusing
-    the word in the parser is also what makes a finer-than-stored series
-    unwritable rather than refused: the finest series grain equals the
-    coarsest sub-day stored grain."""
+def test_a_series_grouping_is_retired_toward_a_coarser_declaration() -> None:
+    """`series(...) by hour` regrouped stored buckets on the way out --
+    read-time truncation under the reading's name. The coarser view is now
+    its own hour-grained figure, so the clause refuses with directions, and
+    a bare series is one point per stored bucket, sub-day sources
+    included."""
     with pytest.raises(SyntaxError_) as caught:
         compile_source(
             BASE
@@ -2410,33 +2466,14 @@ reading team_person.throughput(range):
     depends:
         m = team_person.merge_rate in range
     calculate:
-        series(m) by minute
+        series(m) by hour
 """
         )
-    assert "minute resolution" in caught.value.message
+    assert "retired" in caught.value.message
+    assert "by hour" in caught.value.message
 
-    # The other spellings nobody asked for refuse too, by name.
-    for grain in ("5 minutes", "week"):
-        with pytest.raises(SyntaxError_):
-            compile_source(
-                BASE
-                + QUARTER
-                + f"""
-# d
-reading team_person.throughput(range):
-    display "x"
-    depends:
-        m = team_person.merge_rate in range
-    calculate:
-        series(m) by {grain}
-"""
-            )
-
-
-def test_the_control_a_series_at_the_stored_grain_compiles() -> None:
-    """Equal is the boundary of "no finer than the store", and refusing it
-    would leave a quarter-hour figure with no native-resolution series at
-    all."""
+    # The control: the bare series compiles over the quarter-hour figure,
+    # and its points are that figure's own buckets.
     lib = compile_ok(
         QUARTER
         + """
@@ -2446,30 +2483,57 @@ reading team_person.throughput(range):
     depends:
         m = team_person.merge_rate in range
     calculate:
-        series(m) by 15 minutes
+        series(m)
 """
     )
     plan = lib.reading("team_person.throughput")
     assert plan is not None
-    assert [(s.fn, s.by) for s in plan.calculate] == [("series", "15 minutes")]
+    assert [s.fn for s in plan.calculate] == ["series"]
 
 
-def test_a_day_keyed_figure_refuses_a_series_grain() -> None:
-    """Over a day-keyed source a bare series already is the day series, and a
-    second spelling of one thing is a first place for the two to disagree."""
-    refuses(
-        """
+def test_a_minute_grain_figure_refuses_a_series() -> None:
+    """Over a sparse figure a minute bucket holds one record, so the point
+    *is* the record -- the raw collection the payload exists to withhold.
+    The scalar statistics stay legal: they pool the window's values."""
+    minute_figure = """
+group code_change.merged_by_minute from (authorAccountId through team_person.accounts.accountId, mergedAt by minute in tenant.timezone)
+
 # d
-reading team_person.to_merge_daily(range):
+figure team_person.merges_by_minute:
     display "x"
     depends:
-        m = team_person.time_to_merge in range
+        mine = code_change.merged_by_minute:{team_person}
     calculate:
-        mean(m)
-        series(m) by day
+        count(mine)
+"""
+    refuses(
+        minute_figure
+        + """
+# d
+reading team_person.minute_rate(range):
+    display "x"
+    depends:
+        m = team_person.merges_by_minute in range
+    calculate:
+        series(m)
 """,
-        "already",
+        "the record",
     )
+
+    # The control: the same reading without the series compiles.
+    lib = compile_ok(
+        minute_figure
+        + """
+# d
+reading team_person.minute_rate(range):
+    display "x"
+    depends:
+        m = team_person.merges_by_minute in range
+    calculate:
+        sum(m)
+"""
+    )
+    assert lib.reading("team_person.minute_rate") is not None
 
 
 def test_only_a_series_takes_a_grain() -> None:
@@ -2505,31 +2569,19 @@ reading team_person.throughput(range):
     depends:
         m = team_person.merge_rate in range
     calculate:
-        series(m) by hour
-        series(m) by day
+        series(m)
+        series(m)
 """,
         "two series",
     )
 
 
-def test_a_live_reading_has_no_buckets_to_group() -> None:
+def test_a_live_reading_has_no_buckets_to_be_the_points() -> None:
+    """A series' points are the stored buckets of a figure's sequence, and a
+    live reading has neither figure nor sequence -- so the statistic is
+    refused whole, not just a grain on it. (It once compiled bare, meaning
+    nothing anything could serve.)"""
     refuses(
-        """
-# d
-reading team_person.queue():
-    display "x"
-    depends:
-        w = code_review_request.waiting_seconds over (code_review_request.asked_of:{team_person} & code_review_request.pending)
-    calculate:
-        count(w)
-        series(w) by hour
-""",
-        "live",
-    )
-
-    # The control: the same reading with a bare series compiles -- the refusal
-    # is about the grain, not about series over live sources.
-    lib = compile_ok(
         """
 # d
 reading team_person.queue():
@@ -2539,58 +2591,24 @@ reading team_person.queue():
     calculate:
         count(w)
         series(w)
+""",
+        "live",
+    )
+
+    # The control: the same reading without the series compiles -- the
+    # refusal is about the series, not about live readings.
+    lib = compile_ok(
+        """
+# d
+reading team_person.queue():
+    display "x"
+    depends:
+        w = code_review_request.waiting_seconds over (code_review_request.asked_of:{team_person} & code_review_request.pending)
+    calculate:
+        count(w)
 """
     )
     assert lib.reading("team_person.queue") is not None
-
-
-def test_a_grouped_point_over_a_share_would_sum_shares() -> None:
-    """Four quarter-hours at 0.5 becoming an hour at 2.0 is arithmetic no
-    definition claims: a grouped point must be a number some `by day` index
-    could have stored -- the sum of a count's buckets, the mean of a list's
-    records -- and a share per bucket is neither."""
-    share_figure = (
-        QUARTER
-        + """
-# d
-figure team_person.quarter_share:
-    display "x"
-    unit share
-    depends:
-        mine = code_change.merged_by_quarter:{team_person}
-    calculate:
-        count(mine) / 4
-"""
-    )
-    refuses(
-        share_figure
-        + """
-# d
-reading team_person.load(range):
-    display "x"
-    depends:
-        m = team_person.quarter_share in range
-    calculate:
-        series(m) by hour
-""",
-        "no definition claims",
-    )
-
-    # The control: the same grouping over the count figure beneath it is the
-    # legitimate case.
-    lib = compile_ok(
-        share_figure
-        + """
-# d
-reading team_person.load(range):
-    display "x"
-    depends:
-        m = team_person.merge_rate in range
-    calculate:
-        series(m) by hour
-"""
-    )
-    assert lib.reading("team_person.load") is not None
 
 
 def test_a_time_keyed_figure_cannot_be_read_as_a_single_value() -> None:
@@ -2640,29 +2658,56 @@ def test_the_stored_grain_is_in_the_version_hash() -> None:
     assert minute.version != quarter.version
 
 
-def test_the_series_grain_is_in_the_readings_version() -> None:
-    """A series of hourly sums and a series of daily sums are different claims
-    under one name; a version that cannot tell them apart would let the
-    sparkline change shape while citing the same definition."""
-
-    def reading_with(by: str) -> str:
+def test_a_changed_bucket_rule_moves_the_figures_version() -> None:
+    """The bucket rule changes what a stored number means -- a month of
+    merges filed under a day's key is a 30x error citing one hash -- so
+    day, month and first-monday cuts of one group are three versions."""
+    def figure_with(rule: str) -> str:
         return (
-            QUARTER
+            BASE
             + f"""
+group code_change.cut from (authorAccountId through team_person.accounts.accountId, mergedAt by {rule} in tenant.timezone)
+
 # d
-reading team_person.throughput(range):
+figure team_person.cut_count:
     display "x"
     depends:
-        m = team_person.merge_rate in range
+        mine = code_change.cut:{{team_person}}
     calculate:
-        series(m) by {by}
+        count(mine)
 """
         )
 
-    hourly = compile_source(BASE + reading_with("hour")).reading("team_person.throughput")
-    daily = compile_source(BASE + reading_with("day")).reading("team_person.throughput")
-    assert hourly is not None and daily is not None
-    assert hourly.version != daily.version
+    versions = {}
+    for rule in ("day", "month", "quarter", "first monday of month", "second monday of month"):
+        plan = compile_source(figure_with(rule)).figure("team_person.cut_count")
+        assert plan is not None, rule
+        versions[rule] = plan.version
+    assert len(set(versions.values())) == len(versions), versions
+
+
+def test_the_retirement_does_not_move_a_day_readings_version() -> None:
+    """The invariant the retirement must hold: a reading that never wrote a
+    series grain or a window unit hashes exactly as it did -- its statistics
+    hash as [fn, set] pairs with nothing riding along -- so every stored
+    citation under the old grammar survives the grammar's narrowing."""
+    lib = compile_ok(
+        """
+# d
+reading team_person.to_merge(range):
+    display "x"
+    depends:
+        merged = team_person.time_to_merge in range
+    calculate:
+        mean(merged)
+"""
+    )
+    plan = lib.reading("team_person.to_merge")
+    assert plan is not None
+    # Pinned to the value the pre-retirement compiler (v0.15.0) produced for
+    # this exact definition. If this moves, stored history re-cites for a
+    # change that claimed to touch only the argument grammar.
+    assert plan.version == "5f36aa77bc08"
 
 
 def test_a_keyed_as_kinds_projection_may_filter_through_its_own_index() -> None:

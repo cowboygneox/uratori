@@ -184,9 +184,12 @@ they are plumbing, not numbers a reader meets.
   figure built *on* a figure (the `combine` block), banding the count against
   a settings dial.
 - **Readings** summarise a time-keyed figure over windows -- spans of
-  stored buckets counted back from the anchor: "orders delivered over the
-  last 30 days" (`30`), or the thirty before them (`31-60`), each span
-  independently statisticked, floored and banded.
+  integer positions in the figure's own bucket sequence, counted back from
+  the anchor: "orders delivered over the last 30 days" (`30` on a
+  day-grained figure), the thirty before them (`31-60`), or a year of
+  month windows (`each:1-12` on a month-grained one), each span
+  independently statisticked, floored and banded. What one bucket is lives
+  in the figure's group clause, never in the argument.
 - **Projections** assemble live rows at the instant they are asked -- a
   worklist, with per-row values, sentences and a server-decided order.
 - **Summaries** (`summarise ... over ...`) put a projection's population into

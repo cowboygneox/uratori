@@ -28,7 +28,6 @@ from .ast import (
     SetExpr,
     SortDecl,
     Statistic,
-    Truncation,
 )
 
 Value: TypeAlias = float | str | list[float | None] | None
@@ -147,12 +146,16 @@ class FigurePlan:
     """
 
     band_settings: tuple[str, ...] = ()
-    grain: Truncation | None = None
-    """The time grain of the scope index's tail part, when it has one -- `day`,
-    `minute` or `15 minutes`. A grained figure has one value per subject per
-    bucket rather than one per subject, so it cannot be served by subject and a
-    reading over a range is what a screen asks for. Not in the version hash
-    directly: the index spec that carries it already is."""
+    grain: str | None = None
+    """The bucket rule of the scope index's tail part, when it has one -- a
+    stored grain (`minute` through `quarter`) or a selective rule's canonical
+    text (`first monday of month`). This is the ordered sequence a reading's
+    integer windows walk: `over 1-6` over a month-grained figure is the last
+    six months, bucket 1 the month the anchor falls in. A grained figure has
+    one value per subject per bucket rather than one per subject, so it
+    cannot be served by subject and a reading over a range is what a screen
+    asks for. Not in the version hash directly: the index spec that carries
+    it already is."""
 
     dimension_part: str | None = None
     depth: int = 0
