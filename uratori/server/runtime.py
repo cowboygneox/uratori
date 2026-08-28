@@ -19,10 +19,9 @@ import asyncpg
 from fastapi import HTTPException, Request
 
 from ..engine.activity import shown_changes
-from ..facade import RunReport, Uratori
+from ..facade import DEFAULT_TRAILING, RunReport, Uratori
 from ..lang.check import WorldConflict, compile_source
 from ..lang.plan import Library
-from ..results import Result
 from ..schema import Schema
 from ..store.postgres import PostgresEngineStore, PostgresFactStore
 from . import db
@@ -186,10 +185,17 @@ def run_out(
     *,
     written: int,
     deleted: int,
+    include_results: bool = True,
 ) -> RunOut:
     # The sample is rendered against the tenant's own dials as they stand
     # now -- an effort formatted with the wrong working day is a wrong
     # sentence frozen into the caller's activity log for ever.
+    #
+    # `include_results=False` is the `serve: false` caller: the pass may
+    # still have evaluated results (the server's own socket subscribers need
+    # them), but the caller asked for the moved names instead of the
+    # payloads, and handing both would make the lean request pay the fat
+    # response.
     document = world.schema.settings_for(settings)
     return RunOut(
         written=written,
@@ -210,22 +216,52 @@ def run_out(
             )
             for c in shown_changes(list(report.outcome.changes), library, document)
         ],
-        results=list(report.results),
+        results=list(report.results) if include_results else [],
+        moved=sorted(report.moved),
     )
 
 
 def facade_for(s: State, world: World, library: Library) -> Uratori:
-    facade = Uratori(
+    # No listener is wired here any more, deliberately: the facade's listener
+    # hook carries the default-argument results and nothing else, and a
+    # subscription entry is answered at ITS OWN arguments -- which needs the
+    # facade and the pass's moved set together. `push_pass` is that delivery,
+    # called by every route that runs a pass; the listener hook remains the
+    # embedding host's mechanism.
+    return Uratori(
         schema=world.schema,
         library=library,
         store=PostgresEngineStore(s.pool),
         facts=PostgresFactStore(s.pool),
     )
 
-    # The socket is fed through the same hook an embedding host gets, so
-    # a listener bug is caught by whichever of the two hits it first.
-    async def push(tenant: str, _outcome: Any, results: tuple[Result, ...]) -> None:
-        await s.hub.publish(tenant, results)
 
-    facade.subscribe(push)
-    return facade
+async def push_pass(
+    s: State,
+    tenant: str,
+    facade: Uratori,
+    settings: dict[str, Any],
+    report: RunReport,
+) -> None:
+    """Deliver one pass to the socket, both interests at once.
+
+    Firehose subscribers get the pass's own re-served answers -- the same
+    objects the HTTP response carries. Entry subscribers get each
+    watched-and-moved entry, evaluated once per distinct entry at the entry's
+    own arguments. Called inside the tenant's pass lock by every route that
+    runs a pass, so two passes cannot interleave their deliveries out of
+    order.
+    """
+    await s.hub.publish(tenant, report.results)
+
+    from .hub import Entry
+
+    async def evaluate(entry: Entry) -> Any:
+        return await facade.answer(
+            tenant,
+            entry.name,
+            settings,
+            trailing=entry.windows if entry.windows is not None else DEFAULT_TRAILING,
+        )
+
+    await s.hub.serve_entries(tenant, report.moved, evaluate)

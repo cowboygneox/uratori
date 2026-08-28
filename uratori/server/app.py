@@ -48,6 +48,7 @@ from . import db
 from . import ui as builtin_ui
 from .contract import (
     Ack,
+    AnyResult,
     DeclarationOut,
     DefinitionsIn,
     Envelope,
@@ -61,15 +62,17 @@ from .contract import (
     SchemaIn,
     SettingsIn,
     Subscribe,
+    SubscribeEntry,
     TenantRemoved,
     schema_out,
 )
-from .hub import Client
+from .hub import Client, Entry
 from .runtime import (
     State,
     World,
     compile_for_teach,
     facade_for,
+    push_pass,
     ready,
     record_pass,
     run_out,
@@ -383,12 +386,19 @@ def create_app(
                 return out
             settings = await db.load_settings(s.pool, tenant)
             full = body.full or await db.deferred(s.pool, tenant)
+            # `serve: false` skips evaluating the full default results ONLY
+            # when no firehose subscriber needs them anyway: the caller may
+            # own its own delivery, but the server's socket owns its own
+            # subscribers, and their paint must not depend on which HTTP
+            # client happened to trigger the pass.
+            serve = body.serve or s.hub.wants_everything(tenant)
             report = await facade.run(
                 tenant,
                 settings,
                 written=moved,
                 deleted={k: list(v) for k, v in body.deletes.items()},
                 full=full,
+                serve=serve,
             )
             if full:
                 # Settled after the pass actually ran: a debt cleared up
@@ -401,8 +411,10 @@ def create_app(
                 settings,
                 written=written,
                 deleted=sum(len(v) for v in body.deletes.values()),
+                include_results=body.serve,
             )
             await record_pass(s, tenant, "facts", full=full, out=out)
+            await push_pass(s, tenant, facade, settings, report)
         return out
 
     @app.post("/tenants/{tenant}/runs", response_model=RunOut, dependencies=[auth])
@@ -410,14 +422,25 @@ def create_app(
         """A pass with no new facts: pick up a settings change, a redeployed
         definition, or (with `full`) rebuild everything from what is stored."""
         world, library = ready(s)
+        facade = facade_for(s, world, library)
         async with s.lock_for(tenant):
             settings = await db.load_settings(s.pool, tenant)
             full = body.full or await db.deferred(s.pool, tenant)
-            report = await facade_for(s, world, library).run(tenant, settings, full=full)
+            serve = body.serve or s.hub.wants_everything(tenant)
+            report = await facade.run(tenant, settings, full=full, serve=serve)
             if full:
                 await db.clear_deferred(s.pool, tenant)
-            out = run_out(report, world, library, settings, written=0, deleted=0)
+            out = run_out(
+                report,
+                world,
+                library,
+                settings,
+                written=0,
+                deleted=0,
+                include_results=body.serve,
+            )
             await record_pass(s, tenant, "run", full=full, out=out)
+            await push_pass(s, tenant, facade, settings, report)
         return out
 
     # ------------------------------------------------------------ results --
@@ -470,13 +493,19 @@ def create_app(
         except ValueError:
             raise refusal from None
 
-    @app.get("/tenants/{tenant}/results", response_model=list[Result], dependencies=[auth])
+    # Bundles serve here too since the push made them a first-paint surface
+    # -- except on an anchored read, where the facade leaves them off for the
+    # same reason `answer` refuses `at` on a bundle by name (`results`'s own
+    # docstring carries the full argument).
+    @app.get(
+        "/tenants/{tenant}/results", response_model=list[AnyResult], dependencies=[auth]
+    )
     async def get_results(
         tenant: str,
         s: S,
         trailing: Annotated[list[str] | None, Query()] = None,
         at: Annotated[str | None, Query()] = None,
-    ) -> list[Result]:
+    ) -> list[Result | BundleResult]:
         world, library = ready(s)
         facade = facade_for(s, world, library)
         try:
@@ -499,8 +528,7 @@ def create_app(
     # A bundle answers here too, as a `BundleResult` -- the wrapper carrying
     # its members' ordinary Results in declaration order. `kind` is the
     # discriminator between the two shapes, so a typed client branches on a
-    # field rather than sniffing. Bundles are deliberately absent from the
-    # bulk route above: every member already serves there under its own name.
+    # field rather than sniffing.
     @app.get(
         "/tenants/{tenant}/results/{name}",
         response_model=Result | BundleResult,
@@ -611,25 +639,115 @@ def create_app(
                 if frame.type == "ping":
                     await s.hub.send(client, Envelope(type="pong"))
                     continue
-                if frame.tenant is None:
+                if frame.type == "unsubscribe":
+                    # By the same identity subscribe added, or everything when
+                    # the frame names nothing -- a client going quiet on
+                    # purpose. An identity that never parses never matched an
+                    # added entry either, so it is simply not there to remove.
+                    if frame.entries is None:
+                        client.firehose = False
+                        client.entries.clear()
+                        continue
+                    for asked in frame.entries:
+                        entry = _entry_of(asked)
+                        if entry is not None:
+                            client.entries.pop(entry.key(), None)
+                    continue
+                tenant = frame.tenant or client.tenant_id
+                if tenant is None:
                     await s.hub.send(
                         client, Envelope(type="error", message="subscribe names a tenant")
                     )
                     continue
-                client.tenant_id = frame.tenant
-                # First paint: the current answer for everything, so a client
-                # never renders from a partial world while waiting for a pass.
+                if tenant != client.tenant_id:
+                    # A tenant switch resets the interest wholesale: entries
+                    # made while watching one board silently following
+                    # another is exactly the cross-board leak a reset makes
+                    # impossible by construction.
+                    client.tenant_id = tenant
+                    client.firehose = False
+                    client.entries.clear()
                 world = s.world
-                if world is not None and world.library is not None:
-                    facade = facade_for(s, world, world.library)
-                    results = await facade.results(
-                        frame.tenant, await db.load_settings(s.pool, frame.tenant)
-                    )
-                    for result in results:
+                if frame.entries is None:
+                    # The original contract, unchanged: everything, at the
+                    # serving defaults -- the current answers now, every
+                    # re-served answer thereafter.
+                    client.firehose = True
+                    if world is not None and world.library is not None:
+                        facade = facade_for(s, world, world.library)
+                        results = await facade.results(
+                            tenant, await db.load_settings(s.pool, tenant)
+                        )
+                        for result in results:
+                            await s.hub.send(
+                                client,
+                                Envelope(type="result", tenant=tenant, result=result),
+                            )
+                    continue
+                # Named entries: each is a standing GET. Fetch now (the same
+                # answer the route would serve for these arguments), follow on
+                # every pass that impacts it. Refusals are per entry, by name,
+                # in the API's own vocabulary; the valid entries beside a
+                # refused one proceed -- a whole frame dropped over one typo
+                # would leave a screen half-subscribed with nothing saying so.
+                if world is None or world.library is None:
+                    for asked in frame.entries:
                         await s.hub.send(
                             client,
-                            Envelope(type="result", tenant=frame.tenant, result=result),
+                            Envelope(
+                                type="error",
+                                tenant=tenant,
+                                name=asked.name,
+                                message="No definitions have been loaded yet",
+                            ),
                         )
+                    continue
+                facade = facade_for(s, world, world.library)
+                settings = await db.load_settings(s.pool, tenant)
+                for asked in frame.entries:
+                    refusal = _refuse_entry(world.library, asked)
+                    if refusal is not None:
+                        await s.hub.send(
+                            client,
+                            Envelope(
+                                type="error", tenant=tenant, name=asked.name, message=refusal
+                            ),
+                        )
+                        continue
+                    entry = _entry_of(asked)
+                    if entry is None:  # pragma: no cover - _refuse_entry caught it
+                        continue
+                    try:
+                        answer = await facade.answer(
+                            tenant,
+                            entry.name,
+                            settings,
+                            trailing=entry.windows
+                            if entry.windows is not None
+                            else DEFAULT_TRAILING,
+                        )
+                    except (WindowError, ValueError, NotImplementedError) as failure:
+                        # The API's own refusals (a span over the wrong grain,
+                        # a live reading), carried to the entry that asked.
+                        # The entry is NOT added: following something that
+                        # cannot be fetched would push the same error on
+                        # every pass for ever.
+                        await s.hub.send(
+                            client,
+                            Envelope(
+                                type="error",
+                                tenant=tenant,
+                                name=asked.name,
+                                message=str(failure),
+                            ),
+                        )
+                        continue
+                    if answer is None:  # pragma: no cover - _refuse_entry caught it
+                        continue
+                    client.entries[entry.key()] = entry
+                    await s.hub.send(
+                        client, Envelope(type="result", tenant=tenant, result=answer)
+                    )
         except WebSocketDisconnect:
             pass
         finally:
@@ -694,6 +812,53 @@ def _parse(raw: str) -> Subscribe | None:
         return Subscribe.model_validate_json(raw)
     except ValueError:
         return None
+
+
+def _entry_of(asked: SubscribeEntry) -> Entry | None:
+    """The entry as the hub holds it: windows parsed to specs, or None when
+    the spelling does not parse -- the caller has already refused (or is
+    removing, where an unparseable identity matches nothing)."""
+    if asked.trailing is None:
+        return Entry(name=asked.name, windows=None)
+    try:
+        return Entry(
+            name=asked.name,
+            windows=tuple(as_window_spec(token) for token in asked.trailing),
+        )
+    except WindowError:
+        return None
+
+
+def _refuse_entry(library: Library, asked: SubscribeEntry) -> str | None:
+    """The refusals a subscribe frame can earn per entry, before any fetch --
+    the same vocabulary the HTTP routes answer with, so a client sees one
+    validation language on both surfaces.
+
+    Serve-time refusals (a span whose unit cannot slice the reading's
+    storage, a live reading) surface from the fetch itself; this is only what
+    the frame alone can be wrong about."""
+    known = (
+        library.figure(asked.name) is not None
+        or library.reading(asked.name) is not None
+        or library.projection(asked.name) is not None
+        or library.summary(asked.name) is not None
+        or library.bundle(asked.name) is not None
+    )
+    if not known:
+        return f"No definition called {asked.name}"
+    if asked.trailing:
+        if library.bundle(asked.name) is not None:
+            return (
+                f"{asked.name} is a bundle: its windows are declared in the "
+                "definition, so a subscription names it bare -- an entry that "
+                "could move them would be a different tile under the same hash."
+            )
+        try:
+            for token in asked.trailing:
+                as_window_spec(token)
+        except WindowError as refusal:
+            return str(refusal)
+    return None
 
 
 def _library_out(library: Library) -> LibraryOut:

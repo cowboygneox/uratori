@@ -13,12 +13,17 @@ came through.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ..results import Result
+from ..results import BundleResult, Result
 from ..schema import Schema
+
+AnyResult = Annotated[Result | BundleResult, Field(discriminator="kind")]
+"""What an answering surface carries: a definition's `Result`, or a bundle's
+wrapper of them. Discriminated on `kind` -- the field both shapes already
+declare -- so a typed client branches on data rather than sniffing shapes."""
 
 
 class SchemaIn(BaseModel):
@@ -247,9 +252,19 @@ class FactsIn(BaseModel):
     `full`: defer skips the pass, full forces the biggest one, and either
     honoured would silently ignore the other."""
 
+    serve: bool = True
+    """Whether the response carries the re-served answers. `false` is for the
+    caller that owns its own delivery -- a host holding per-client
+    subscriptions -- which reads `moved` off the response and fetches exactly
+    the watched names, by name, at each watcher's own arguments. The server's
+    own socket subscribers are unaffected: their delivery is the server's
+    job, not this caller's."""
+
 
 class RunIn(BaseModel):
     full: bool = False
+    serve: bool = True
+    """See `FactsIn.serve`; the same lever on the fact-less pass."""
 
 
 class ShownChange(BaseModel):
@@ -280,11 +295,19 @@ class RunOut(BaseModel):
     rebuilt: list[str]
     covered: list[str]
     shown: list[ShownChange]
-    results: list[Result]
+    results: list[AnyResult]
     """The re-served answers for everything the pass moved (and every
-    projection, always -- the clock is one of their inputs). The same objects
-    `GET /tenants/{t}/results` returns and the websocket pushes; there is no
-    run-only shape to drift."""
+    projection, always -- the clock is one of their inputs), impacted bundles
+    included. The same objects `GET /tenants/{t}/results` returns and the
+    websocket pushes; there is no run-only shape to drift. Empty when the
+    request said `serve: false` -- the caller asked for `moved` instead."""
+
+    moved: list[str] = Field(default_factory=list)
+    """Every definition whose served answer this pass may have changed --
+    bundles included, computed without evaluating anything. What a
+    subscribing host intersects with its clients' interest before fetching
+    by name; carried on every response, not only `serve: false` ones, so a
+    caller can cross-check the results against the claim."""
 
 
 class Health(BaseModel):
@@ -308,19 +331,45 @@ class TenantRemoved(BaseModel):
     values_removed: int
 
 
+class SubscribeEntry(BaseModel):
+    """One named calculation a client wants to fetch and follow: a standing
+    GET, with the arguments the HTTP API takes. `trailing` is the window list
+    exactly as `GET /tenants/{t}/results/{name}` accepts it, meaningful for a
+    windowed reading and refused for a bundle (whose windows are declared in
+    its definition). Entry identity -- for unsubscribe, and for delivering one
+    evaluation to every client that asked the same question -- is the name
+    plus the canonical spelling of the windows."""
+
+    name: str
+    trailing: list[str] | None = None
+
+
 class Subscribe(BaseModel):
     """What a websocket client sends. Declared so the socket is a contract in
     both directions -- an inbound shape that exists only in the server's parser
-    is a shape every client guesses at."""
+    is a shape every client guesses at.
 
-    type: Literal["subscribe", "ping"]
+    `subscribe` with no `entries` keeps its original meaning -- everything,
+    at the serving defaults -- so a client written before subscriptions
+    existed still paints and follows. With `entries`, each is answered
+    immediately (the fetch) and re-answered whenever a pass impacts it (the
+    follow), at the entry's own arguments; entries accumulate across frames,
+    and `unsubscribe` removes by the same identity -- or everything, when it
+    names none."""
+
+    type: Literal["subscribe", "unsubscribe", "ping"]
     tenant: str | None = None
+    entries: list[SubscribeEntry] | None = None
 
 
 class Envelope(BaseModel):
-    """What the websocket sends. The payload is a `Result`, unchanged."""
+    """What the websocket sends. The payload is a `Result` or a bundle's
+    `BundleResult`, unchanged -- the same object the routes serve. `name` is
+    set on an error about one subscription entry, so a client can tell "your
+    entry was refused" apart from a frame-level complaint."""
 
     type: Literal["result", "error", "pong"]
     tenant: str | None = None
-    result: Result | None = None
+    result: AnyResult | None = None
+    name: str | None = None
     message: str | None = None
