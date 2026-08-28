@@ -1498,9 +1498,14 @@ substantive, a screen may bind to positions -- so `over 30, 60` and
   parameter's `each:1-12` is. **No units ride on the spans** (`in hours`
   shipped briefly and was retired): what a bucket is lives in the figure's
   group clause, hashed, so a tile serving a month figure walks months
-  because the *figure* says so, never because the tile does. The reach
-  ceiling is checked at compile time through that rule -- 121 positions is
-  a week of hours and over a decade of quarters. Only a *windowed* reading
+  because the *figure* says so, never because the tile does. The same
+  ceilings the request doors apply are applied here, at compile time, so a
+  tile cannot commit to a request the server would refuse on every load: a
+  span covers at most 3660 buckets and reaches at most 3660 days back
+  through the figure's own rule (121 positions is a week of hours and over
+  a decade of quarters), and one member asks for at most 366 windows --
+  `over each 1-3660` is inside the span ceiling and is still 3,660 answers
+  per subject. Only a *windowed* reading
   may carry the list; a live one is named bare, mirroring the language's
   rule that the argument list and the source form encode liveness twice,
   loudly -- written `over 7` a live member would accept a window, ignore

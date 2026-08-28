@@ -12,7 +12,13 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Literal
 
-from ..windows import WindowError, WindowSpec, make_window_spec, window_token
+from ..windows import (
+    WindowError,
+    WindowSpec,
+    make_window_spec,
+    refuse_window_count,
+    window_token,
+)
 from .ast import (
     AbsenceTest,
     Arith,
@@ -1812,23 +1818,26 @@ class _Parser:
             )
 
         out: list[WindowSpec] = []
+        # A set beside the list purely for the duplicate check: `each 1-3660`
+        # is 3,660 windows, and a linear scan per window makes parsing one
+        # `over` clause quadratic -- minutes of CPU inside `PUT /definitions`,
+        # before the checker's own ceilings ever get a look.
+        seen: set[WindowSpec] = set()
         for first, last, each in bounds:
             try:
+                # Built once and validated first: `make_window_spec` carries the
+                # bucket ceiling, so an oversized span is refused before it is
+                # expanded into a window apiece.
+                bounded = make_window_spec(first, last)
                 specs = (
-                    [
-                        WindowSpec(first=k, last=k)
-                        for k in range(
-                            make_window_spec(first, last).first,
-                            make_window_spec(first, last).last + 1,
-                        )
-                    ]
+                    [WindowSpec(first=k, last=k) for k in range(bounded.first, bounded.last + 1)]
                     if each
-                    else [make_window_spec(first, last)]
+                    else [bounded]
                 )
             except WindowError as refusal:
                 raise self._error(str(refusal), line) from refusal
             for spec in specs:
-                if spec in out:
+                if spec in seen:
                     # The same shape of mistake as a duplicate member: the window
                     # would serve twice, and a screen binding to window positions
                     # would show a duplicated column from a typo. Compared as
@@ -1840,7 +1849,14 @@ class _Parser:
                         "serves each window once.",
                         line,
                     )
+                seen.add(spec)
                 out.append(spec)
+        # The same ceiling the request doors apply, applied where the list is
+        # written down, so a tile cannot commit at compile time to a request
+        # the server would refuse at serve time.
+        too_many = refuse_window_count(len(out))
+        if too_many is not None:
+            raise self._error(too_many, line)
         return tuple(out)
 
     def _window_bound(self, line: int) -> int:

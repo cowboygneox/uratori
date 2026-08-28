@@ -570,11 +570,28 @@ and an `each` expansion collides with the enumerated windows it stands
 for. A malformed span (`0-30`, `60-31`, `7.5`, junk) is a `422`, never
 coerced -- and a bound of `0` is refused with the convention spelled out,
 because `0-30, 31-60` reads natural and would silently make the first
-bucket one wider. Spans may reach at most 3660 days back (ten years of
-daily buckets), converting through the figure's own rule -- 121 positions
-is five days of quarter-hours and over a decade of quarters: every bucket
-is a stored point the server may walk per subject, and a board wanting a
-decade of history is a definition conversation, not a request parameter.
+bucket one wider.
+
+Two ceilings bound what one request may buy, both `422`s:
+
+- **A span covers at most 3660 buckets** (ten years of daily buckets),
+  whatever the rule. Every bucket is a stored point the server walks per
+  subject and a label it resolves, so the count is the cost. This is
+  checked before a span is expanded or resolved, so the refusal never
+  costs what it refuses.
+- **A span may reach at most 3660 days back**, converting through the
+  figure's own rule: 121 positions is over a decade of quarters, and 3660
+  monthly buckets would be three centuries. The bucket ceiling cannot see
+  this, because only the figure's declaration knows what a position is
+  worth. (A `fifth monday of month` bucket converts at a quarter's width,
+  not a month's: most months have no fifth Monday, so its buckets sit ~87
+  days apart.)
+- **One request asks for at most 366 windows** (a year of daily buckets).
+  A span's ceiling bounds one window; `each` turns one argument into one
+  window *per bucket*, and the server answers every window for every
+  subject, so `each:1-3660` is inside the bucket ceiling as a span while
+  asking for 3,660 answers per subject. A per-bucket comparison wider than
+  a year is a chart a definition should declare, not a request parameter.
 
 Each served window answers with the buckets the span resolved to -- the
 question stays integers, the answer carries the dates: `bucket` names the

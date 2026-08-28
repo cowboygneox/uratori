@@ -46,7 +46,7 @@ from ..lang.plan import CompiledFactField, Library
 from ..results import BundleResult, Evidence, Result
 from ..store.postgres import PostgresFactStore
 from ..verify import FactError
-from ..windows import WindowError, WindowSpec, expand_window_arg
+from ..windows import WindowError, WindowSpec, expand_window_args
 from . import db
 from . import ui as builtin_ui
 from .contract import (
@@ -474,7 +474,7 @@ def create_app(
         if trailing is None:
             return None
         try:
-            return [spec for token in trailing for spec in expand_window_arg(token)]
+            return list(expand_window_args(trailing))
         except WindowError as refusal:
             raise HTTPException(status_code=422, detail=str(refusal)) from refusal
 
@@ -867,9 +867,7 @@ def _entry_of(asked: SubscribeEntry) -> Entry | None:
     try:
         return Entry(
             name=asked.name,
-            windows=tuple(
-                spec for token in asked.trailing for spec in expand_window_arg(token)
-            ),
+            windows=expand_window_args(asked.trailing),
         )
     except WindowError:
         return None
@@ -911,8 +909,7 @@ def _refuse_entry(library: Library, asked: SubscribeEntry) -> str | None:
                 "windows. Subscribe to it bare."
             )
         try:
-            for token in asked.trailing:
-                expand_window_arg(token)
+            expand_window_args(asked.trailing)
         except WindowError as refusal:
             return str(refusal)
     return None

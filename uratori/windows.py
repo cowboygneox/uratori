@@ -32,17 +32,48 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+MAX_BUCKETS = 3660
+"""How many buckets one span may cover -- ten years of daily buckets.
+
+**The bound on the walk, and the only one that holds whatever the rule is.**
+Every bucket of a span is a stored point the server may walk per subject, and
+resolving a span now materialises its labels, so the count *is* the cost.
+This is checked in `make_window_spec`, at construction, because that is the
+one gate every door goes through -- and because the expansions downstream of
+it (`each`, and the label list a span resolves to) are linear in exactly this
+number.
+
+`MAX_REACH_DAYS` below is a second, calendar-aware bound and not a substitute
+for this one: expressed in days, it is *looser* for a fine sequence in
+precisely the way it claims to be tighter. 5,270,400 minute-buckets convert
+to 3,660 days and sail through it, having asked the server for five million
+labels. A bound on the walk has to count the walk.
+"""
+
 MAX_REACH_DAYS = 3660
 """How far back, in days, any span may reach -- ten years of daily buckets.
 
-The bound exists because the reach is the cost: every bucket of the span is a
-stored point the server may walk per subject, and `?trailing=1000000` used to
-walk ~739k per-day points per subject before answering an empty window. Ten
-years is far beyond any dashboard's horizon; a board that genuinely wants a
-decade of history is a definition/product conversation, not a request
-parameter. One bound, expressed as reach in *days* whatever the bucket rule,
-so a finer sequence cannot smuggle the same walk in under a smaller-looking
-number -- each rule converts through its own widest bucket (`BUCKET_DAYS`).
+Where `MAX_BUCKETS` bounds the *work*, this bounds the *horizon*, and a coarse
+sequence is why it is still needed: 3,660 monthly buckets is three centuries,
+well inside the bucket ceiling and far outside any board's question. Ten years
+is far beyond any dashboard's horizon; a board that genuinely wants a decade of
+history is a definition/product conversation, not a request parameter. Each
+rule converts through its own widest bucket (`BUCKET_DAYS`).
+
+Checked where the spec meets the rule rather than at construction, because
+only the reading's declaration knows which sequence the positions walk.
+"""
+
+MAX_WINDOWS = 366
+"""How many windows one request may ask for -- a year of daily buckets.
+
+A separate bound because `each` turns one argument into one window *per
+bucket*, and the cost is windows x subjects: `each 1-3660` is inside the
+bucket ceiling as a span and yet asks for 3,660 answers per subject, which is
+a different question from `1-3660`'s single pooled one. A per-bucket
+comparison wider than a year -- this month beside each of the previous
+eleven, the worked example -- is a chart a definition should declare, not a
+request parameter.
 """
 
 BUCKET_DAYS: dict[str, float] = {
@@ -57,9 +88,20 @@ BUCKET_DAYS: dict[str, float] = {
 """How many days one bucket of each calendar rule can span, at widest.
 
 The reach ceiling multiplies through this, so `over 1-120` over months is
-judged as ten years the way `over 1-3660` over days is. An ordinal
-weekday-of-month rule (`first monday of month`) is one bucket per month at
-most, so any rule not listed here converts at the month's width.
+judged as ten years the way `over 1-3660` over days is.
+"""
+
+FIFTH_BUCKET_DAYS = 92.0
+"""How far one `fifth <weekday> of month` bucket reaches -- a quarter, not a
+month.
+
+The rest of the ordinal family is one bucket per month, so it converts at the
+month's width. A *fifth* weekday is different in kind: it exists only in
+months long enough to hold one, which is about four months in twelve, so its
+buckets sit ~87 days apart on average. Converting it at a month's width made
+the ceiling claim ten years and grant twenty-eight -- 118 fifth-Mondays is
+over 10,000 days. A quarter's width is the honest conversion, and slightly
+conservative against the mean.
 """
 
 
@@ -101,10 +143,15 @@ def window_token(spec: WindowSpec) -> str:
 def reach_days(spec: WindowSpec, rule: str = "day") -> int:
     """How many whole days back the span's far edge can reach, rounded up.
 
-    Rules not in `BUCKET_DAYS` are the ordinal weekday-of-month family --
-    at most one bucket per month, so they convert at the month's width.
+    Rules not in `BUCKET_DAYS` are the ordinal weekday-of-month family: one
+    bucket per month for `first` through `fourth`, and a quarter's width for
+    `fifth`, which most months have none of (`FIFTH_BUCKET_DAYS`).
     """
-    days = spec.last * BUCKET_DAYS.get(rule, BUCKET_DAYS["month"])
+    if rule not in BUCKET_DAYS and rule.startswith("fifth "):
+        width = FIFTH_BUCKET_DAYS
+    else:
+        width = BUCKET_DAYS.get(rule, BUCKET_DAYS["month"])
+    days = spec.last * width
     return -(-int(days * 1440) // 1440)
 
 
@@ -130,7 +177,32 @@ def make_window_spec(first: int, last: int) -> WindowSpec:
             f"bucket {last} is further from the anchor than bucket {first}. "
             f'Write "{last}-{first}".'
         )
+    # Before anything downstream is sized by these numbers. `each` expands to
+    # one window per bucket and a span resolves to one label per bucket, both
+    # linear in `last`, so a ceiling applied after either has already paid for
+    # the span it means to refuse.
+    if last > MAX_BUCKETS:
+        raise WindowError(
+            f'"{span_text(WindowSpec(first=first, last=last))}" covers {last} buckets; the '
+            f"ceiling is {MAX_BUCKETS} (ten years of daily buckets). Every bucket of a span "
+            "is a stored point the server walks per subject, and a board wanting more than "
+            "that is a definition conversation, not a request parameter. What one bucket is "
+            "lives in the source figure's group clause: a coarser rule there asks the same "
+            "question in fewer buckets."
+        )
     return WindowSpec(first=first, last=last)
+
+
+def refuse_window_count(count: int) -> str | None:
+    """Why this many windows in one request is too many, or None."""
+    if count <= MAX_WINDOWS:
+        return None
+    return (
+        f"this request asks for {count} windows; the ceiling is {MAX_WINDOWS} (a year of "
+        "daily buckets). `each a-b` is one window per bucket, and the server answers each "
+        "one per subject, so the cost is windows times subjects. A per-bucket comparison "
+        "wider than a year is a chart a definition should declare, not a request parameter."
+    )
 
 
 def refuse_reach(spec: WindowSpec, rule: str) -> str | None:
@@ -157,7 +229,11 @@ _TOKEN = re.compile(r"([0-9]+)(?:-([0-9]+))?\Z")
 # "not a window" would send somebody looking for a typo.
 _RETIRED_SUFFIX = re.compile(r"[0-9-]+(h|m|d)\Z")
 
-_EACH = re.compile(r"each:([0-9]+)-([0-9]+)\Z")
+# `each:12` as well as `each:1-12`, because the bundle parser reads `over
+# each 12` -- a bare bound after `each` is the single bucket 12, the way a
+# bare bound elsewhere is `1-N`. Two doors onto one sugar had better accept
+# the same spellings, or a tile and the request it mirrors disagree.
+_EACH = re.compile(r"each:([0-9]+)(?:-([0-9]+))?\Z")
 
 
 def as_window_spec(value: int | str | WindowSpec) -> WindowSpec:
@@ -206,21 +282,46 @@ def expand_window_arg(value: int | str | WindowSpec) -> tuple[WindowSpec, ...]:
     if isinstance(value, str):
         matched = _EACH.fullmatch(value.strip())
         if matched is not None:
-            spec = make_window_spec(int(matched.group(1)), int(matched.group(2)))
+            first = int(matched.group(1))
+            last = int(matched.group(2)) if matched.group(2) is not None else first
+            # Validated before expanded: `make_window_spec` carries the bucket
+            # ceiling, so a refused span is refused without first building the
+            # millions of one-bucket windows it asked for.
+            spec = make_window_spec(first, last)
             return tuple(WindowSpec(first=k, last=k) for k in range(spec.first, spec.last + 1))
     return (as_window_spec(value),)
 
 
+def expand_window_args(values: list[str] | tuple[str, ...]) -> tuple[WindowSpec, ...]:
+    """A whole window list, expanded and bounded -- the door every request
+    surface uses, so the HTTP route, the socket's subscribe entries and the
+    UI's own route cannot disagree about what is too much to ask for.
+
+    The count is checked after expansion because `each` is what makes a short
+    argument list a long window list, and before anything is served because
+    the cost is windows times subjects.
+    """
+    out = tuple(spec for value in values for spec in expand_window_arg(value))
+    refusal = refuse_window_count(len(out))
+    if refusal is not None:
+        raise WindowError(refusal)
+    return out
+
+
 __all__ = [
     "BUCKET_DAYS",
+    "MAX_BUCKETS",
     "MAX_REACH_DAYS",
+    "MAX_WINDOWS",
     "WindowError",
     "WindowSpec",
     "as_window_spec",
     "expand_window_arg",
+    "expand_window_args",
     "make_window_spec",
     "reach_days",
     "refuse_reach",
+    "refuse_window_count",
     "span_text",
     "window_token",
 ]

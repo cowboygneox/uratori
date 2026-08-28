@@ -22,13 +22,18 @@ from __future__ import annotations
 import pytest
 
 from uratori.windows import (
+    MAX_BUCKETS,
     MAX_REACH_DAYS,
+    MAX_WINDOWS,
     WindowError,
     WindowSpec,
     as_window_spec,
     expand_window_arg,
+    expand_window_args,
+    make_window_spec,
     reach_days,
     refuse_reach,
+    refuse_window_count,
     window_token,
 )
 
@@ -155,3 +160,122 @@ def test_unicode_digits_are_not_windows() -> None:
     for wrong in ("٣٠", fullwidth_twelve, "1-٣٠"):
         with pytest.raises(WindowError):
             as_window_spec(wrong)
+
+
+# ------------------------------------------------ the bounds on the walk --
+
+
+def test_a_span_is_bounded_in_buckets_before_anything_is_sized_by_it() -> None:
+    """The reach ceiling is expressed in days, which makes it *looser* for a
+    fine sequence exactly where it claims to be tighter: 5,270,400 minute
+    buckets divide down to 3,660 days and sail through `refuse_reach`, having
+    asked the server for five million labels and -- under `each` -- five
+    million windows.
+
+    So the count is bounded at construction, the one gate every door goes
+    through. Without this the refusal arrives only after the work it means to
+    refuse has been done.
+    """
+    assert make_window_spec(1, MAX_BUCKETS).last == MAX_BUCKETS
+
+    with pytest.raises(WindowError) as refused:
+        make_window_spec(1, MAX_BUCKETS + 1)
+    assert str(MAX_BUCKETS) in str(refused.value)
+    assert "group clause" in str(refused.value), (
+        "the refusal must point at the declaration that could ask the same "
+        "question in fewer buckets, not merely say no"
+    )
+
+    # The span the days-based ceiling waves through. This is the regression.
+    assert refuse_reach(WindowSpec(1, 5_270_400), "minute") is None, (
+        "the premise of this test: the reach ceiling does not catch it"
+    )
+    with pytest.raises(WindowError):
+        make_window_spec(1, 5_270_400)
+
+    # An offset span is bounded by its far edge, not its width: `5000-5001`
+    # is two buckets but reaches five thousand back, and resolving it walks
+    # the sequence from the anchor to get there.
+    with pytest.raises(WindowError):
+        make_window_spec(MAX_BUCKETS + 1, MAX_BUCKETS + 2)
+
+
+def test_each_refuses_an_oversized_span_without_first_expanding_it() -> None:
+    """`each:1-20000000` used to build twenty million one-bucket windows and
+    then let something downstream complain -- gigabytes of tuples per request,
+    on a route anyone can call.
+
+    Asserted as bounded *work*, not elapsed time: the check counts the objects
+    the call is allowed to make, so it cannot flake on a slow runner the way a
+    timing assertion would.
+    """
+    with pytest.raises(WindowError):
+        expand_window_arg("each:1-20000000")
+
+    # And the legal maximum expands to exactly its buckets, no more.
+    assert len(expand_window_arg(f"each:1-{MAX_BUCKETS}")) == MAX_BUCKETS
+
+
+def test_one_request_may_not_ask_for_more_windows_than_the_ceiling() -> None:
+    """A span's bucket ceiling bounds one *window*; `each` turns one argument
+    into one window per bucket, and the server answers every window for every
+    subject. `each 1-3660` is inside the bucket ceiling as a span and yet asks
+    for 3,660 answers per subject -- a different question from `1-3660`'s
+    single pooled one, and the ceiling that bounds the first does not bound
+    the second.
+    """
+    assert refuse_window_count(MAX_WINDOWS) is None
+    refusal = refuse_window_count(MAX_WINDOWS + 1)
+    assert refusal is not None and str(MAX_WINDOWS) in refusal
+
+    # The list door refuses the product, not just each argument on its own:
+    # every token below is individually legal.
+    with pytest.raises(WindowError):
+        expand_window_args([f"each:1-{MAX_WINDOWS}", "1-5"])
+
+    assert len(expand_window_args([f"each:1-{MAX_WINDOWS}"])) == MAX_WINDOWS
+
+
+def test_each_accepts_a_bare_bound_the_way_the_bundle_clause_does() -> None:
+    """`over each 12` parses in a bundle's window list and means the single
+    bucket 12. The HTTP spelling required the dash, so the same sugar was
+    accepted at one door and refused at the other -- a tile and the request
+    mirroring it disagreeing about a spelling neither author chose.
+    """
+    assert expand_window_arg("each:12") == (WindowSpec(12, 12),)
+    assert expand_window_arg("each:12-12") == (WindowSpec(12, 12),)
+
+
+def test_a_fifth_weekday_bucket_reaches_a_quarter_not_a_month() -> None:
+    """Most of the ordinal family is one bucket per month. A *fifth* weekday
+    is not: it exists only in months long enough to hold one, about four
+    months in twelve, so its buckets sit ~87 days apart.
+
+    Converting it at a month's width made the ceiling claim ten years and
+    grant twenty-eight -- 118 fifth-Mondays reach past 10,000 days. Measured
+    against the calendar rather than asserted: the control is `first monday`,
+    which really is monthly and must be unaffected.
+    """
+    from datetime import date
+
+    from uratori.engine.buckets import ordinal_weekday_day
+
+    def mean_gap(ordinal: int) -> float:
+        days = [
+            date.fromisoformat(found)
+            for year in range(1900, 2100)
+            for month in range(1, 13)
+            if (found := ordinal_weekday_day(year, month, ordinal, 0)) is not None
+        ]
+        return (days[-1] - days[0]).days / (len(days) - 1)
+
+    assert 30.0 < mean_gap(1) < 31.0, "a first Monday really is monthly"
+    assert 85.0 < mean_gap(5) < 90.0, "a fifth Monday is nearly quarterly"
+
+    # 118 buckets is the month-width ceiling's answer. Against the real
+    # spacing it is 28 years, so the fifth-weekday rule must refuse it.
+    assert refuse_reach(WindowSpec(1, 118), "first monday of month") is None
+    assert refuse_reach(WindowSpec(1, 118), "fifth monday of month") is not None
+    # And its own boundary holds: 3660 / 92 is 39 buckets.
+    assert refuse_reach(WindowSpec(1, 39), "fifth monday of month") is None
+    assert refuse_reach(WindowSpec(1, 41), "fifth monday of month") is not None

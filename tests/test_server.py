@@ -1391,6 +1391,48 @@ async def test_each_expands_over_http_exactly_as_the_enumerated_spelling(
     assert "twice" in overlapped.text
 
 
+async def test_a_request_may_not_buy_unbounded_work_through_each(server: Server) -> None:
+    """Two ceilings, and `each` is why the second exists.
+
+    A span's bucket ceiling bounds one window. `each` turns one argument into
+    one window *per bucket*, and the server answers every window for every
+    subject -- so `each:1-3660` sits inside the bucket ceiling as a span while
+    asking for 3,660 answers per subject. That product is what the window
+    ceiling bounds, and nothing else does.
+
+    Both refusals must arrive as 422s *before* the work: `each:1-20000000`
+    once built twenty million one-bucket windows -- gigabytes of tuples on an
+    unauthenticated route -- and only then found something to complain about.
+    """
+    await _teach_rides(server.http)
+
+    for params, expected in (
+        # Refused by the bucket ceiling, without expanding.
+        ({"trailing": "each:1-20000000"}, "3660"),
+        # Inside the bucket ceiling, refused by the window ceiling.
+        ({"trailing": "each:1-3660"}, "366"),
+        # The product across a list, every token of which is legal alone.
+        ({"trailing": ["each:1-366", "each:1-10"]}, "366"),
+    ):
+        got = await server.http.get(
+            "/tenants/t1/results/shop_courier.typical_ride", params=params
+        )
+        assert got.status_code == 422, f"{params}: {got.status_code} {got.text[:200]}"
+        assert expected in got.text, got.text
+
+        listed = await server.http.get("/tenants/t1/results", params=params)
+        assert listed.status_code == 422, f"{params}: {listed.status_code}"
+
+    # The boundary itself still answers, so the ceiling is a ceiling and not
+    # a ban on `each`.
+    ok = await server.http.get(
+        "/tenants/t1/results/shop_courier.typical_ride",
+        params={"trailing": "each:1-366"},
+    )
+    assert ok.status_code == 200, ok.text
+    assert len(ok.json()["subjects"][0]["windows"]) == 366
+
+
 async def test_a_malformed_window_token_is_a_422_never_a_coercion(server: Server) -> None:
     await _teach_rides(server.http)
     for wrong in ("0", "0-30", "60-31", "7.5", "30x", "1-2-3", "-30", "30-"):

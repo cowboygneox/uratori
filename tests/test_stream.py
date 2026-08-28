@@ -420,6 +420,26 @@ def test_windows_on_a_bundle_entry_are_refused(pg_dsn: str) -> None:
             assert junk["name"] == "shop_courier.typical_ride"
             assert "banana" in junk["message"]
 
+            # The socket is the third door onto the same sugar, and it
+            # expands each entry twice -- once to refuse it, once to build
+            # it -- so an unbounded `each` here bought the expansion twice
+            # over on a connection that has not been asked to pay for
+            # anything. Refused in the same vocabulary as the HTTP route.
+            for token, expected in (("each:1-20000000", "3660"), ("each:1-3660", "366")):
+                socket.send_json(
+                    {
+                        "type": "subscribe",
+                        "tenant": "t1",
+                        "entries": [
+                            {"name": "shop_courier.typical_ride", "trailing": [token]}
+                        ],
+                    }
+                )
+                refusal = socket.receive_json()
+                assert refusal["type"] == "error", refusal
+                assert refusal["name"] == "shop_courier.typical_ride"
+                assert expected in refusal["message"], refusal["message"]
+
 
 def test_a_bundle_entry_fetches_and_follows_its_members_movement(pg_dsn: str) -> None:
     """The tile as a subscription: fetched whole on subscribe, re-served

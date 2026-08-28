@@ -25,7 +25,7 @@ from uratori.lang.check import CheckError
 from uratori.lang.lex import SyntaxError_
 from uratori.results import BundleResult
 from uratori.store.base import FactRow
-from uratori.windows import WindowSpec
+from uratori.windows import WindowSpec, expand_window_arg
 
 from .test_lang import BASE
 from .world import compile_source
@@ -315,14 +315,55 @@ def test_a_reversed_span_and_a_span_past_the_ceiling_are_refused() -> None:
             "    pace = reading team_person.to_merge over 60-31\n"
         )
     assert "31-60" in caught.value.message
-    # The ceiling is rule-aware now, so it is the checker's refusal -- the
-    # parser cannot know what a position is worth in days.
-    with pytest.raises(CheckError) as ceiling:
+
+    # Two ceilings, and a member can hit either. The bucket ceiling is the
+    # parser's, because it needs no rule: a million positions is a million
+    # windows under `each` and a million labels to resolve whatever a bucket
+    # turns out to be, so it is refused where the list is read.
+    with pytest.raises(SyntaxError_) as buckets:
         compile_source(
             BASE + MEMBERS + "\n# d\nbundle team_person.card:\n"
             "    pace = reading team_person.to_merge over 1000000\n"
         )
-    assert "3660" in str(ceiling.value)
+    assert "3660" in buckets.value.message
+
+    # The reach ceiling is the checker's, because only it knows the source
+    # figure's rule -- and it is what catches a span the bucket ceiling waves
+    # through: 3,000 monthly buckets is two and a half centuries, well inside
+    # 3,660 positions and nowhere near a board's question. For a day-grained
+    # figure the two coincide by construction, which is why this needs a
+    # coarse rule to demonstrate at all.
+    monthly = MEMBERS + """
+group code_change.merged_by_month from (authorAccountId through team_person.accounts.accountId, mergedAt by month in tenant.timezone)
+
+# Time to merge, month by month.
+figure team_person.merge_months:
+    display "{team_person} merge months"
+    depends:
+        merged = code_change.merged_by_month:{team_person}
+    calculate:
+        list(code_change.open_seconds over merged)
+
+# The typical merge, month by month.
+reading team_person.month_pace(range):
+    display "{team_person} month pace"
+    depends:
+        m = team_person.merge_months in range
+    calculate:
+        median(m)
+"""
+    with pytest.raises(CheckError) as reach:
+        compile_source(
+            BASE + monthly + "\n# d\nbundle team_person.card:\n"
+            "    pace = reading team_person.month_pace over 3000\n"
+        )
+    assert "3660" in str(reach.value)
+    # The same span over the same rule, just inside: proof the refusal is the
+    # ceiling and not the coarse rule being rejected outright.
+    compile_source(
+        BASE + monthly + "\n# d\nbundle team_person.card:\n"
+        "    pace = reading team_person.month_pace over 118\n"
+    )
 
 
 def test_a_duplicate_window_is_refused_as_the_typo_it_is() -> None:
@@ -1023,6 +1064,55 @@ def test_each_may_sit_beside_plain_spans_and_still_catches_duplicates() -> None:
             "    pace = reading team_person.to_merge over 2-2, each 1-3\n"
         )
     assert 'names "2-2" twice' in caught.value.message
+
+
+def test_a_bare_bound_after_each_means_that_one_bucket_at_both_doors() -> None:
+    """`over each 12` is the single bucket 12, the way a bare bound elsewhere
+    is `1-N` -- and the HTTP spelling must accept `each:12` for the same
+    reading, or a tile and the request mirroring it disagree about a spelling
+    neither author chose. The bundle clause took it and the query parameter's
+    regex demanded the dash, so the two doors answered differently."""
+    lib = compile_ok(
+        "\n# One bucket, twelve back.\n"
+        "bundle team_person.one_card:\n"
+        "    just = reading team_person.to_merge over each 12\n"
+    )
+    plan = lib.bundle("team_person.one_card")
+    assert plan is not None
+    assert plan.members[0].windows == (WindowSpec(first=12, last=12),)
+    assert expand_window_arg("each:12") == plan.members[0].windows
+
+
+def test_a_members_window_list_is_bounded_the_way_a_request_is() -> None:
+    """A tile may not commit at compile time to a request the server would
+    refuse at serve time: `over each 1-3660` is 3,660 windows per subject,
+    past the same ceiling the HTTP door applies. Refused where the list is
+    written down, so the author learns it on `PUT /definitions` rather than
+    the board learning it on every load.
+
+    Parsing it must also stay cheap: the duplicate check used to be a linear
+    scan of the windows built so far, which made one `over` clause quadratic
+    -- minutes of CPU inside the route, reached before any ceiling could
+    refuse it.
+    """
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(
+            BASE + MEMBERS + "\n# A card asking for a decade of buckets.\n"
+            "bundle team_person.card:\n"
+            "    pace = reading team_person.to_merge over each 1-3660\n"
+        )
+    assert "366" in caught.value.message
+
+    # Just inside, and the expansion is exactly its buckets -- so the ceiling
+    # is a ceiling, not a ban on `each` at width.
+    lib = compile_ok(
+        "\n# A year of buckets, one slot.\n"
+        "bundle team_person.year_card:\n"
+        "    pace = reading team_person.to_merge over each 1-366\n"
+    )
+    plan = lib.bundle("team_person.year_card")
+    assert plan is not None and plan.members[0].windows is not None
+    assert len(plan.members[0].windows) == 366
 
 
 def test_the_reach_ceiling_reads_the_figures_own_bucket_rule() -> None:
