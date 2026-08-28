@@ -528,6 +528,86 @@ reading shop_courier.typical_ride(range):
             assert fragment in refused.text, refused.text
 
 
+async def test_the_world_payload_carries_each_declarations_bucket_rule(
+    pg_dsn: str,
+) -> None:
+    """A window argument is bare integers, so the page cannot say what
+    `over 1-6` asked for unless the declaration says what one bucket is.
+    The rule travels for the group that declares it, the figure whose values
+    sit in that sequence, and the reading whose ranges walk it -- and is
+    absent, not guessed, for a declaration with no sequence at all.
+
+    Without this the page would render the same badge-less pane for a
+    month-grained figure and a day-grained one, and a reader comparing
+    `over 30` on each would have no way to see they are thirty months and
+    thirty days.
+    """
+    monthly = COURIER_SOURCE + """
+group shop_order.dropped_by_month from (courier_id, delivered_at by month in tenant.timezone)
+
+group shop_order.dropped_first_monday from (courier_id, delivered_at by first monday of month in tenant.timezone)
+
+# Deliveries per courier per calendar month.
+figure shop_courier.monthly_drops:
+    display "{shop_courier} deliveries that month"
+    depends:
+        done = shop_order.dropped_by_month:{shop_courier}
+    calculate:
+        count(done)
+
+# Deliveries per courier on each month's first Monday.
+figure shop_courier.first_monday_drops:
+    display "{shop_courier} deliveries that first Monday"
+    depends:
+        done = shop_order.dropped_first_monday:{shop_courier}
+    calculate:
+        count(done)
+
+# The month-by-month picture, read over a range of months.
+reading shop_courier.drops_by_month(range):
+    display "{value}"
+    depends:
+        months = shop_courier.monthly_drops in range
+    calculate:
+        sum(months)
+"""
+    world = COURIER_WORLD.to_document()
+    world["bucket_settings"] = ["tenant.timezone"]
+    async with serve(pg_dsn) as http:
+        assert (await http.put("/schema", json=world)).status_code == 200
+        put = await http.put("/definitions", json={"source": monthly})
+        assert put.status_code == 200, put.text
+
+        payload = (await http.get("/ui/api/world")).json()
+        grain = {d["name"]: d["grain"] for d in payload["declarations"]}
+
+        assert grain["shop_order.dropped_by_month"] == "month", (
+            "the group is where the rule is declared and hashed"
+        )
+        assert grain["shop_courier.monthly_drops"] == "month", (
+            "the figure's values sit one per month, and its pane must say so"
+        )
+        assert grain["shop_courier.drops_by_month"] == "month", (
+            "a reading's `over 1-6` walks its source figure's sequence -- six "
+            "months here -- so the reading's own pane must carry it too, "
+            "rather than sending the reader to the figure to find out"
+        )
+        assert grain["shop_order.dropped_first_monday"] == "first monday of month", (
+            "a selective rule travels as its own canonical text, not reduced "
+            "to the day its sparse buckets are labelled with -- `over 1-6` "
+            "over it is six first-Mondays, not six days"
+        )
+        assert grain["shop_courier.first_monday_drops"] == "first monday of month"
+
+        assert grain["shop_order.carried_by"] is None, (
+            "a group filing by courier files by no calendar, and an invented "
+            "grain here would badge a roster as a sequence"
+        )
+        assert grain["shop_courier.load_band"] is None, (
+            "a figure with one value per subject has no sequence to walk"
+        )
+
+
 # ------------------------------------------------------------- posture --
 
 

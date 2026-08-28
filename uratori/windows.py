@@ -207,7 +207,7 @@ def expand_window_arg(value: int | str | WindowSpec) -> tuple[WindowSpec, ...]:
         matched = _EACH.fullmatch(value.strip())
         if matched is not None:
             spec = make_window_spec(int(matched.group(1)), int(matched.group(2)))
-            return (spec,)
+            return tuple(WindowSpec(first=k, last=k) for k in range(spec.first, spec.last + 1))
     return (as_window_spec(value),)
 
 

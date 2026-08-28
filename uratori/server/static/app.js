@@ -393,6 +393,14 @@ async function declarationPane(name, params) {
         el('span', { class: `badge ${declaration.kind}` }, declaration.kind),
         declaration.unit ? el('span', { class: 'badge' }, declaration.unit) : null,
         declaration.mode ? el('span', { class: 'badge' }, declaration.mode) : null,
+        // The bucket rule, on the page rather than only inside the source
+        // block: it is the sequence every window over this declaration
+        // walks, so `over 1-6` means six months here and six days there,
+        // and a reader working out what a span asked for should not have
+        // to parse a group clause to find out which.
+        declaration.grain
+          ? el('span', { class: 'badge' }, `by ${declaration.grain}`)
+          : null,
         world.editable
           ? el('a', { class: 'tb-edit', href: `#/edit/?at=${encodeURIComponent(declaration.name)}` },
               'edit source')

@@ -50,7 +50,13 @@ from ..engine.serve import availability as figure_availability
 from ..facade import DEFAULT_TRAILING
 from ..lang.ast import ByAge, ByComposite, ByField, FigureUnit, IndexBy, IndexField
 from ..lang.lex import DefinitionError, lex
-from ..lang.plan import CompiledFactField, CompiledIndex, CompiledMeasure, Library
+from ..lang.plan import (
+    CompiledFactField,
+    CompiledIndex,
+    CompiledMeasure,
+    FigurePlan,
+    Library,
+)
 from ..lang.source import declaration_prose, declaration_source
 from ..results import (
     Availability,
@@ -142,6 +148,19 @@ class DeclarationOut(BaseModel):
     source: str | None
     unit: str | None = None
     mode: str | None = None
+    grain: str | None = None
+    """The bucket rule of the sequence this declaration's values sit in -- a
+    stored grain (`minute` through `quarter`) or a selective rule's own text
+    (`first monday of month`) -- and None for anything not time-keyed.
+
+    On the page because a window argument is bare integers: `over 1-6` is six
+    months against a month-grained figure and six days against a day-grained
+    one, and nothing else on the page says which. It travels for a group (the
+    clause that declares it), for a time-keyed figure (the sequence its values
+    are stored in) and for a windowed reading (the sequence its own ranges
+    walk, taken from its source figure), so a reader lands on any of the three
+    and gets the same answer."""
+
     fact_kind: str | None = None
     rests_on: list[Dependency]
     moved_by: list[Dependency] = []
@@ -2145,6 +2164,7 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
                 doc=declaration_prose(library, name),
                 source=declaration_source(library, name),
                 fact_kind=index.kind,
+                grain=_spec_grain(index.spec),
                 rests_on=_dedup(edges),
             )
         )
@@ -2190,6 +2210,7 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
                 doc=figure.doc,
                 source=declaration_source(library, figure.name),
                 unit=figure.unit,
+                grain=figure.grain,
                 rests_on=_dedup(edges),
             )
         )
@@ -2212,6 +2233,14 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
                 source=declaration_source(library, reading.name),
                 unit=reading.unit,
                 mode=reading.mode,
+                # A reading's own sequence is its source figure's: the ranges
+                # it is read over are positions in that. A live reading has
+                # no source and no sequence, and reports none.
+                grain=(
+                    source_figure.grain
+                    if (source_figure := _find_figure(library, reading.source)) is not None
+                    else None
+                ),
                 rests_on=_dedup(edges),
             )
         )
@@ -2526,6 +2555,28 @@ def _spec_edges(spec: IndexBy) -> list[Dependency]:
             edges += _part_edges(part)
         return edges
     return []
+
+
+def _spec_grain(spec: IndexBy) -> str | None:
+    """The bucket rule an index declares, or None when it files by something
+    other than time. A composite's rule is its *last* part's, which is the
+    part the checker requires be the time bucket -- the leading parts name
+    the subject, and a rule on one of those is refused before this runs."""
+    parts: tuple[IndexField, ...]
+    if isinstance(spec, ByField):
+        parts = (spec.part,)
+    elif isinstance(spec, ByComposite):
+        parts = tuple(spec.parts)
+    else:
+        return None
+    for part in reversed(parts):
+        if part.truncate is not None or part.select is not None:
+            return part.truncate or part.select
+    return None
+
+
+def _find_figure(library: Library, name: str | None) -> FigurePlan | None:
+    return next((f for f in library.figures if f.name == name), None) if name else None
 
 
 def _part_edges(part: IndexField) -> list[Dependency]:

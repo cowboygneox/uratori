@@ -322,19 +322,20 @@ def day_range(at_ms: float, zone: str | None, days: int) -> tuple[str, str]:
 #
 # A bucket rule names an ordered sequence of buckets; a window spec is a span
 # of positions in it, bucket 1 being the bucket the anchor instant falls in.
-# The rules split by where they come from: the stored grains (`day`,
-# `minute`, `15 minutes`) are what a group clause writes, the calendar
-# coarsenings (`hour`, `week`, `month`, `quarter`) are what a reading's
-# `buckets` clause declares over them, and the ordinal weekday-of-month
-# family (`first monday of month`) is a *selective* stored rule: sparse
-# day buckets, one per month at most.
+# Every rule comes from one place -- the group clause of the figure being
+# read, hashed into its version. The total grains (`minute`, `15 minutes`,
+# `hour`, `day`, `week`, `month`, `quarter`) file every instant somewhere;
+# the ordinal weekday-of-month family (`first monday of month`) is
+# *selective*, sparse day buckets one per month at most. There is no
+# read-time rule and no reading-level clause to declare one: a coarser view
+# is its own figure under its own name, so nothing here re-slices what
+# another rule stored.
 #
-# Coarsening is label arithmetic, never zone arithmetic: the calendar was
-# decided when the bucket was written, so a stored label's month is its
-# prefix, its quarter is arithmetic on that prefix, and its ISO week is
-# calendar arithmetic on the date -- a grouped bucket can never disagree
-# with the bucket a coarser group clause would have filed the same event
-# under.
+# Resolving a span is calendar arithmetic on the anchor's *local day*: the
+# zone is applied once, to find that day, and the rest is the calendar's --
+# so the sequence a window walks is spelled exactly as `label_in` spelled
+# the buckets when it wrote them, and a span can never name a label the
+# store could not hold.
 
 _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 _ORDINALS = ("first", "second", "third", "fourth", "fifth")
