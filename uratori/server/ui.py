@@ -55,7 +55,7 @@ from ..lang.source import declaration_prose, declaration_source
 from ..results import Availability, BundleResult, Evidence, Ok, Result, Subject, Unavailable
 from ..schema import EFFORT_HOURS_SETTING, Schema
 from ..store.postgres import PostgresEngineStore
-from ..windows import WindowError, as_window_spec
+from ..windows import WindowError, as_window_spec, window_token
 from . import db
 from .runtime import (
     State,
@@ -104,6 +104,22 @@ class Dependency(BaseModel):
     name: str
 
 
+class BundleSlot(BaseModel):
+    """One member of a bundle, by the address a client binds to.
+
+    `rests_on` already carries the members as plain edges -- what the trace
+    and the closure need -- but an edge has no slot name, and the slot IS the
+    contract: it is what the definition binds, what the hash covers, and what
+    a screen reads a member at. `windows` are the canonical span tokens
+    (`9`, `31-60`, `48h`) exactly as the hash spells them, or None when the
+    member leaves the serving default to decide."""
+
+    slot: str
+    kind: Literal["figure", "reading", "projection", "summary"]
+    name: str
+    windows: list[str] | None = None
+
+
 class DeclarationOut(BaseModel):
     name: str
     kind: DeclarationKind
@@ -124,6 +140,10 @@ class DeclarationOut(BaseModel):
     the direct edges answer it only after a walk. This is that walk done once,
     server-side, so the page may say "these records and these dials can move
     this figure -- nothing else can" and be entitled to the second half."""
+
+    slots: list[BundleSlot] | None = None
+    """Only for a bundle: the slot-to-member table, in declaration order --
+    the composition the review hash covers, beside the hash itself."""
 
 
 class WorldOut(BaseModel):
@@ -1390,6 +1410,8 @@ def _kind_of_name(library: Library, name: str) -> str | None:
         return "projection"
     if library.summary(name) is not None:
         return "summary"
+    if library.bundle(name) is not None:
+        return "bundle"
     return None
 
 
@@ -1603,6 +1625,38 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
                 doc=summary.doc,
                 source=declaration_source(library, summary.name),
                 rests_on=_dedup(edges),
+            )
+        )
+
+    for bundle in library.bundles:
+        # Each member is a plain edge: the closure walks through it to the
+        # same facts and dials that can move the numbers on the tile, and
+        # the client's used-by index learns that the member is on a tile.
+        # The slots ride separately because an edge has no slot name, and
+        # the slot is the address the definition binds.
+        out.append(
+            DeclarationOut(
+                name=bundle.name,
+                kind="bundle",
+                version=bundle.version,
+                doc=bundle.doc,
+                source=declaration_source(library, bundle.name),
+                rests_on=_dedup(
+                    [Dependency(type=m.kind, name=m.name) for m in bundle.members]
+                ),
+                slots=[
+                    BundleSlot(
+                        slot=member.slot,
+                        kind=member.kind,
+                        name=member.name,
+                        windows=(
+                            None
+                            if member.windows is None
+                            else [window_token(spec) for spec in member.windows]
+                        ),
+                    )
+                    for member in bundle.members
+                ],
             )
         )
 

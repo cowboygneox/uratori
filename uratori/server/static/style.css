@@ -216,6 +216,7 @@ h2.subject {
   white-space: nowrap;
 }
 /* Cool: versioned and servable. */
+.badge.bundle     { color: #c9a6dd; border-color: #55406b; background: rgba(201, 166, 221, 0.07); }
 .badge.figure     { color: #8ab8dd; border-color: #2c4a66; background: rgba(138, 184, 221, 0.07); }
 .badge.reading    { color: #a3a8e6; border-color: #3c4076; background: rgba(163, 168, 230, 0.07); }
 .badge.projection { color: #7cc7ce; border-color: #2b5c61; background: rgba(124, 199, 206, 0.07); }

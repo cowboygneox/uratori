@@ -3455,3 +3455,175 @@ async def test_the_editor_diff_sees_a_recomposed_or_deleted_bundle(pg_dsn: str) 
         assert changes["shop_courier.card"] == ("bundle", "removed"), (
             "a deleted tile must be on the review record of what the save loses"
         )
+
+
+async def test_the_world_payload_lists_a_bundle_with_its_slots(pg_dsn: str) -> None:
+    """A bundle is a declaration like any other, so the catalogue must carry
+    it: its review hash, its prose, its source as written, and -- because a
+    slot is the address a client binds to -- the slot-to-member table in
+    declaration order, window arguments included. A catalogue blind to
+    bundles would leave the one composed surface unverifiable from the UI."""
+    from .test_bundle import SERVE_SOURCE, SERVE_WORLD
+
+    async with serve(pg_dsn) as http:
+        assert (
+            await http.put("/schema", json=SERVE_WORLD.to_document())
+        ).status_code == 200
+        put = await http.put("/definitions", json={"source": SERVE_SOURCE})
+        assert put.status_code == 200, put.text
+
+        world = (await http.get("/ui/api/world")).json()
+        by_name = {d["name"]: d for d in world["declarations"]}
+        assert "shop_courier.card" in by_name, sorted(by_name)
+        card = by_name["shop_courier.card"]
+
+        local = compile_source(SERVE_SOURCE, SERVE_WORLD)
+        plan = local.bundle("shop_courier.card")
+        assert plan is not None
+        assert card["kind"] == "bundle"
+        assert card["version"] == plan.version, (
+            "the hash served is the one the committed artifact carries -- the "
+            "review surface breaks if the two drift"
+        )
+        assert card["doc"] == "The courier tile."
+        assert "typical = reading shop_courier.typical_ride" in card["source"]
+
+        assert [
+            (s["slot"], s["kind"], s["name"], s["windows"]) for s in card["slots"]
+        ] == [
+            ("typical", "reading", "shop_courier.typical_ride", ["9", "1"]),
+            ("carrying", "figure", "shop_courier.carrying", None),
+            ("board", "projection", "shop_order.board", None),
+            ("book", "summary", "shop_order.book", None),
+        ], "slots travel in declaration order, window arguments spelled canonically"
+
+        # The edges make the members reachable and the closure honest: the
+        # trace from the tile must bottom out at the same records and dials
+        # that can move the numbers on it.
+        rests = {(d["type"], d["name"]) for d in card["rests_on"]}
+        assert rests == {
+            ("reading", "shop_courier.typical_ride"),
+            ("figure", "shop_courier.carrying"),
+            ("projection", "shop_order.board"),
+            ("summary", "shop_order.book"),
+        }
+        moved = {(d["type"], d["name"]) for d in card["moved_by"]}
+        assert ("fact", "shop_order") in moved
+        assert ("fact", "shop_courier") in moved
+        assert ("setting", "tenant.timezone") in moved
+
+
+async def test_a_bundle_answers_through_the_ui_route_with_each_members_own_provenance(
+    pg_dsn: str,
+) -> None:
+    """The UI's results route serves the tile exactly as the API does: members
+    under their slots in declaration order, each member's Result citing its
+    own name and version (the bundle hash cites nothing), the summarise member
+    travelling as a population row with no subject rows, and a reading
+    member's windows resolved to the spans the bundle declared."""
+    from datetime import UTC, datetime, timedelta
+
+    from .test_bundle import SERVE_SOURCE, SERVE_WORLD
+
+    async with serve(pg_dsn) as http:
+        assert (
+            await http.put("/schema", json=SERVE_WORLD.to_document())
+        ).status_code == 200
+        put = await http.put("/definitions", json={"source": SERVE_SOURCE})
+        assert put.status_code == 200, put.text
+
+        now = datetime.now(tz=UTC)
+        iso = lambda dt: dt.isoformat()  # noqa: E731
+        pushed = await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_courier": {"c1": {"name": "Aki"}},
+                    "shop_order": {
+                        "r1": {
+                            "ref": "R-1",
+                            "courier_id": "c1",
+                            "status": "delivered",
+                            "picked_up_at": iso(now - timedelta(hours=26)),
+                            "delivered_at": iso(now - timedelta(hours=24)),
+                        },
+                        "r2": {
+                            "ref": "R-2",
+                            "courier_id": "c1",
+                            "status": "delivered",
+                            "picked_up_at": iso(now - timedelta(hours=2)),
+                            "delivered_at": iso(now - timedelta(hours=1)),
+                        },
+                        "r3": {"ref": "R-3", "courier_id": "c1", "status": "riding"},
+                    },
+                }
+            },
+        )
+        assert pushed.status_code == 200, pushed.text
+
+        answer = await http.get("/ui/api/tenants/t1/results/shop_courier.card")
+        assert answer.status_code == 200, answer.text
+        card = answer.json()
+        assert card["kind"] == "bundle"
+
+        local = compile_source(SERVE_SOURCE, SERVE_WORLD)
+        plan = local.bundle("shop_courier.card")
+        assert plan is not None
+        assert card["version"] == plan.version
+
+        assert [
+            (m["slot"], m["result"]["kind"], m["result"]["name"])
+            for m in card["results"]
+        ] == [
+            ("typical", "reading", "shop_courier.typical_ride"),
+            ("carrying", "figure", "shop_courier.carrying"),
+            ("board", "projection", "shop_order.board"),
+            ("book", "summary", "shop_order.book"),
+        ]
+
+        by_slot = {m["slot"]: m["result"] for m in card["results"]}
+        reading_plan = local.reading("shop_courier.typical_ride")
+        figure_plan = local.figure("shop_courier.carrying")
+        assert reading_plan is not None and figure_plan is not None
+        assert by_slot["typical"]["version"] == reading_plan.version, (
+            "a member cites its own version, never the bundle's"
+        )
+        assert by_slot["carrying"]["version"] == figure_plan.version
+
+        [subject] = by_slot["typical"]["subjects"]
+        assert [(w["span"], w["bucket"]) for w in subject["windows"]] == [
+            ("9", "day"),
+            ("1", "day"),
+        ], "the windows are the bundle's own declaration, span by span"
+
+        book = by_slot["book"]
+        assert book["subjects"] == [], (
+            "a summarise member travels without its projection's rows"
+        )
+        assert book["summary"] is not None
+        assert book["summary"]["display"].get("orders") == "3", (
+            "the population row counts every row, not the page the projection's "
+            "limit serves"
+        )
+
+        board = by_slot["board"]
+        assert [s["row"]["display"]["ref"] for s in board["subjects"]] == [
+            "R-1",
+            "R-2",
+        ], "the projection member keeps its own sort and limit"
+
+
+async def test_a_bundle_on_the_wrong_route_gets_a_forwarding_address(
+    pg_dsn: str,
+) -> None:
+    """The membership and measured routes must know the name, or their 404
+    dead-ends the exact reader the drill-down exists for."""
+    async with serve(pg_dsn) as http:
+        await http.put("/schema", json=COURIER_WORLD.to_document())
+        put = await http.put("/definitions", json={"source": BUNDLED_SOURCE})
+        assert put.status_code == 200, put.text
+
+        refused = await http.get("/ui/api/tenants/t1/membership/shop_courier.card")
+        assert refused.status_code == 404
+        assert "bundle" in refused.json()["detail"], refused.text
+        assert "results" in refused.json()["detail"]

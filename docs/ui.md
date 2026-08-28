@@ -29,7 +29,12 @@ product's end users; a host builds its own screens against the
   now (live, like a rollup's parts -- a record corrected since the pass
   visibly disagrees with the stored total, which is true), and a part row
   opens its own citation in place, so the walk runs figure by figure down to
-  the records without leaving the page.
+  the records without leaving the page. A **bundle**'s page adds the slot
+  table -- each address beside its member and any declared window spans --
+  and its current answer is the tile itself: every member rendered under its
+  slot name by the same code that kind gets standalone, each with its own
+  `name @ version` provenance, because the bundle's hash is review-only and
+  cites nothing.
 - **Facts.** Per kind, what the server holds -- a kind the schema declares
   but nobody has pushed appears at zero, because "nothing collected" is a
   finding. Records page by key, search over key and record text, and each row

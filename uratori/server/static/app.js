@@ -187,7 +187,7 @@ async function render() {
 
 // -------------------------------------------------------- definitions --
 
-const KIND_ORDER = ['figure', 'reading', 'projection', 'summary', 'group', 'filter', 'measure', 'fact'];
+const KIND_ORDER = ['bundle', 'figure', 'reading', 'projection', 'summary', 'group', 'filter', 'measure', 'fact'];
 
 function namespaceOf(name) {
   const dot = name.indexOf('.');
@@ -377,11 +377,19 @@ async function declarationPane(name, params) {
         ? el('div', { class: 'tb-doc' }, el('p', { class: 'prose' }, declaration.doc))
         : null,
       el('div', { class: 'tb-cite' },
-        declaration.version
-          ? ['version ', el('span', { class: 'mono' }, declaration.version),
-             ' — the citation every value computed by this text carries']
-          : ['no version of its own — this text is hashed into every ',
-             'definition that reads it, so editing it moves their versions'])),
+        declaration.kind === 'bundle'
+          // A bundle's hash is review-only: it names the composition in the
+          // committed artifact and appears in no number's citation, and a
+          // line calling it "the citation every value carries" would send a
+          // verifier hunting for values that cite it.
+          ? ['review hash ', el('span', { class: 'mono' }, declaration.version),
+             ' — names the composition only; every number inside cites its ',
+             'own member’s version']
+          : declaration.version
+            ? ['version ', el('span', { class: 'mono' }, declaration.version),
+               ' — the citation every value computed by this text carries']
+            : ['no version of its own — this text is hashed into every ',
+               'definition that reads it, so editing it moves their versions'])),
     el('h2', {}, 'As written'),
     declaration.source
       ? el('pre', {}, declaration.source)
@@ -411,11 +419,33 @@ async function declarationPane(name, params) {
   // fact and dial, and repeating them under a second heading would make the
   // two lists read as different answers to one question. For a group or a
   // measure every direct edge is a leaf, so the section vanishes entirely.
-  const structural = declaration.rests_on.filter(
-    (edge) => edge.type !== 'fact' && edge.type !== 'setting');
-  if (structural.length) {
-    parts.push(el('h2', {}, 'Built from'),
-      el('ul', { class: 'tree' }, structural.map((edge) => edgeLine(edge))));
+  // A bundle's structure is its slot table instead: the edges are exactly
+  // the members, and the slot names — the addresses a screen binds to, the
+  // thing the review hash covers — live only on `slots`.
+  if (declaration.kind === 'bundle' && (declaration.slots || []).length) {
+    parts.push(el('h2', {}, 'Slots'),
+      el('table', { class: 'ledger' },
+        el('tr', {}, el('th', {}, 'slot'), el('th', {}, 'member'), el('th', {}, 'windows')),
+        declaration.slots.map((slot) => el('tr', {},
+          el('td', { class: 'mono' }, slot.slot),
+          el('td', {},
+            el('span', { class: `badge ${slot.kind}` }, slot.kind), ' ',
+            el('a', { class: 'mono', href: `#/definitions/${encodeURIComponent(slot.name)}` },
+              slot.name)),
+          // null windows mean the serving default decides — an absence to
+          // state, not an empty cell that reads as "no windows".
+          el('td', { class: 'mono' },
+            slot.windows
+              ? slot.windows.join(', ')
+              : el('span', { class: 'faint' },
+                  slot.kind === 'reading' ? 'serving default' : '—'))))));
+  } else {
+    const structural = declaration.rests_on.filter(
+      (edge) => edge.type !== 'fact' && edge.type !== 'setting');
+    if (structural.length) {
+      parts.push(el('h2', {}, 'Built from'),
+        el('ul', { class: 'tree' }, structural.map((edge) => edgeLine(edge))));
+    }
   }
 
   const dependants = usedBy.get(name) || [];
@@ -631,14 +661,78 @@ async function answerSection(declaration) {
     `tenants/${encodeURIComponent(tenant())}/results/${encodeURIComponent(declaration.name)}`);
   if (!answer.ok) return problem(answer, 'The engine declined to answer:');
   const result = answer.body;
+  if (result.kind === 'bundle') return el('div', {}, bundleBlocks(result));
+  return el('div', {}, resultBlocks(result),
+    el('p', { class: 'faint' },
+      'answered ', el('span', { class: 'mono' }, result.at),
+      ' under version ', el('span', { class: 'mono' }, result.version)));
+}
 
+// A bundle's answer: each member's ordinary Result under its slot name,
+// rendered by the same code the member gets standalone — composition, never
+// a second renderer that could disagree with the first. Provenance is per
+// member (name @ version), because the tile's hash cites nothing.
+function bundleBlocks(result) {
+  const blocks = [];
+  for (const member of result.results) {
+    const r = member.result;
+    blocks.push(el('h2', { class: 'subject' }, member.slot));
+    blocks.push(el('p', { class: 'faint' },
+      el('span', { class: `badge ${r.kind}` }, r.kind), ' ',
+      el('a', { class: 'mono', href: defHash(r.name) }, r.name),
+      el('span', { class: 'mono' }, ` @ ${r.version}`)));
+    blocks.push(resultBlocks(r));
+  }
+  blocks.push(el('p', { class: 'faint' },
+    'answered ', el('span', { class: 'mono' }, result.at),
+    ' — tile hash ', el('span', { class: 'mono' }, result.version),
+    ', review-only; every number above cites its own member’s version'));
+  return blocks;
+}
+
+// One ordinary Result's content, shared by the standalone answer section and
+// every bundle member. Availability first, always: an unavailable member on a
+// tile states its reason exactly as it would alone. Evidence is fetched by
+// the RESULT's own name — inside a bundle the declaration on screen is the
+// tile, and asking the evidence route for the tile's name would 404.
+function resultBlocks(result) {
   if (!result.state.ok) {
-    return el('div', { class: 'notice' },
+    return [el('div', { class: 'notice' },
       'Not available: ', el('span', { class: 'mono' }, result.state.because), ' — ',
-      result.state.detail || 'the server gave no further sentence.');
+      result.state.detail || 'the server gave no further sentence.')];
   }
 
   const blocks = [];
+  if (result.kind === 'projection' || result.kind === 'summary') {
+    // Rows first, then the population row. A summarise member arrives with
+    // NO subject rows and its one row in `summary` — that emptiness is the
+    // shape working as declared, not "computed for nobody".
+    for (const subject of result.subjects) {
+      if (!subject.row) continue;
+      // Each dt/dd pair rides in a div (the dl content model allows it), so
+      // a wrap happens between pairs, never between a label and its value.
+      blocks.push(el('div', { class: 'kv' },
+        el('dl', { class: 'kv' },
+          el('div', { class: 'pair' }, el('dt', {}, 'row'), el('dd', {}, subject.name)),
+          Object.entries(subject.row.display).map(([column, text]) =>
+            el('div', { class: 'pair' }, el('dt', {}, column), el('dd', {}, text)))),
+        subject.row.flags.map((flag) =>
+          el('div', { class: flag.severity === 'attention' ? 'dim' : 'faint' },
+            `⚑ ${flag.label} — ${flag.detail}`))));
+    }
+    if (result.summary) {
+      blocks.push(
+        result.kind === 'summary' ? null : el('h2', {}, 'Summary'),
+        el('dl', { class: 'kv' },
+          Object.entries(result.summary.display).map(([column, text]) =>
+            el('div', { class: 'pair' }, el('dt', {}, column), el('dd', {}, text)))));
+    }
+    if (!result.subjects.length && !result.summary) {
+      blocks.push(el('p', { class: 'faint' }, 'Computed, and there are no rows.'));
+    }
+    return blocks;
+  }
+
   if (result.subjects.length === 0) {
     blocks.push(result.empty
       ? el('p', { class: 'faint' },
@@ -662,7 +756,7 @@ async function answerSection(declaration) {
           el('td', { class: 'mono' }, subject.display ?? '—'),
           result.banded ? el('td', { class: 'mono dim' }, subject.level) : null,
           el('td', {}, el('button', {
-            onclick: () => evidenceRow(row, declaration.name, subject.id),
+            onclick: () => evidenceRow(row, result.name, subject.id),
           }, 'evidence')));
         return row;
       })));
@@ -689,32 +783,8 @@ async function answerSection(declaration) {
           el('td', { class: 'mono' }, String(window.sample)),
           el('td', { class: 'mono dim' }, `${window.days_covered}/${window.days_requested}d`)))));
     }
-  } else {
-    // Projection and summary rows: named, server-rendered cells.
-    for (const subject of result.subjects) {
-      if (!subject.row) continue;
-      // Each dt/dd pair rides in a div (the dl content model allows it), so
-      // a wrap happens between pairs, never between a label and its value.
-      blocks.push(el('div', { class: 'kv' },
-        el('dl', { class: 'kv' },
-          el('div', { class: 'pair' }, el('dt', {}, 'row'), el('dd', {}, subject.name)),
-          Object.entries(subject.row.display).map(([column, text]) =>
-            el('div', { class: 'pair' }, el('dt', {}, column), el('dd', {}, text)))),
-        subject.row.flags.map((flag) =>
-          el('div', { class: flag.severity === 'attention' ? 'dim' : 'faint' },
-            `⚑ ${flag.label} — ${flag.detail}`))));
-    }
-    if (result.summary) {
-      blocks.push(el('h2', {}, 'Summary'),
-        el('dl', { class: 'kv' },
-          Object.entries(result.summary.display).map(([column, text]) =>
-            el('div', { class: 'pair' }, el('dt', {}, column), el('dd', {}, text)))));
-    }
   }
-  blocks.push(el('p', { class: 'faint' },
-    'answered ', el('span', { class: 'mono' }, result.at),
-    ' under version ', el('span', { class: 'mono' }, result.version)));
-  return el('div', {}, blocks);
+  return blocks;
 }
 
 async function evidenceRow(row, figure, subject) {
