@@ -62,7 +62,8 @@ from .buckets import (
     subject_of,
     tail_of,
 )
-from .carry import materialise
+from .carry import CarryReachExceeded
+from .carry import materialise as _fill
 from .engine import (  # the same hashes the pass records, shared deliberately
     _index_version,
     _versions_if_legacy_current,
@@ -634,6 +635,16 @@ async def serve_reading(
         at = end_of_day_ms(at_day, zone)
     else:
         at = at_ms if at_ms is not None else now_ms()
+    # **A caller's `?at=` may narrow what is reported and must never move
+    # what is stored.** Handed an anchor in 2031 the resolver counts back
+    # from there quite correctly, making every month between now and then a
+    # bucket "in the past" -- and a lazy fill would write them all, and they
+    # would stay, because no later pass removes a bucket the anchors still
+    # justify. Months that have not happened would hold confident values for
+    # ever, on the strength of one query string. `at_ms` is not clamped: it
+    # is the embedding host's own clock rather than a request parameter, and
+    # it is what makes "two months pass with no sync" testable at all.
+    fill_at = min(at, now_ms()) if at_day is not None else at
     rule = source.grain or "day"
     for spec in specs:
         refusal = refuse_reach(spec, rule)
@@ -671,18 +682,26 @@ async def serve_reading(
             # Concurrent first-readers race benignly: both compute identical
             # rows, and the insert-or-nothing write lets exactly one of them
             # count as having created each.
-            await materialise(
-                store,
-                source,
-                tenant,
+            try:
+                await _fill(
+                    store,
+                    source,
+                    tenant,
                 {
                     subject_of(key)
                     for key in await store.bucket_keys(tenant, source.scope_index or "")
                 },
-                at_ms=at,
-                zone=zone,
-                trigger="read",
-            )
+                    at_ms=fill_at,
+                    zone=zone,
+                    trigger="read",
+                )
+            except CarryReachExceeded as refused:
+                # The same refusal the window's own reach ceiling gives, and
+                # it wears the same clothes: a `WindowError` the HTTP door
+                # answers 422 with, because the fix is the caller's or the
+                # definition's. Escaping as a bare ValueError made it a 500,
+                # which says the server misbehaved.
+                raise WindowError(str(refused)) from None
         rows = await store.values_in_range(
             tenant, source.name, source.version, min(all_labels), max(all_labels)
         )

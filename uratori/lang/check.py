@@ -564,6 +564,15 @@ class _Checker:
             # single row per site under a coordinate key -- readable by
             # nothing, and visibly empty only to whoever wrote the reading.
             grain = self._grain_of(d)
+        if d.carried and scope_index is None:
+            raise CheckError(
+                f"figure {d.name} is carried forward, and it is built from other figures "
+                "rather than from records. A carry anchors on the buckets somebody changed "
+                "something in, which is a fact about records -- a figure with no group has "
+                "none to anchor on. Left to compile it did nothing at all, while the "
+                "suffix sat in the version hash claiming a behaviour that never ran.",
+                d.line,
+            )
         if d.carried and grain in ("minute", "15 minutes", "hour"):
             raise CheckError(
                 f"figure {d.name} is carried forward at {grain} grain, and a pass cannot "
@@ -1333,6 +1342,18 @@ class _Checker:
                 )
             return "number"
 
+        if isinstance(e, Part) and e.name in combines and self._grain_of(d) is not None:
+            bound = _find(self.figures, combines[e.name][0])
+            if bound is not None and bound.grain is None:
+                raise CheckError(
+                    f'figure {d.name} is keyed by {self._grain_of(d)} and reads "{e.name}" '
+                    f"as a single value, but {bound.name} holds one value per subject. The "
+                    "coordinate read beside it looks the source up under `subject@bucket` "
+                    "and this one under `subject`, so the scalar resolves to nothing at "
+                    "every coordinate and the figure answers an absence for ever.",
+                    e.line,
+                )
+
         if isinstance(e, Part):
             if e.name not in combines:
                 raise CheckError(
@@ -1582,6 +1603,16 @@ class _Checker:
         if isinstance(d.calculate, Sum) and d.calculate.measure is not None:
             m = self.measures[d.calculate.measure]
             return "effort" if m.unit == "effort" else "count"
+        if isinstance(d.calculate, Coord):
+            # A passthrough is the source's own number at a coordinate, so it
+            # is in the source's own unit. Derived like `Part`'s, and for the
+            # same reason: declaring it here is refused as redundant, so a
+            # missed derivation leaves nothing able to say what the number is.
+            binding = d.calculate.name
+            if binding in combines:
+                source: FigurePlan | None = _find(self.figures, combines[binding][0])
+                if source is not None:
+                    return source.unit
         if isinstance(d.calculate, (Sum, Part)):
             # A rollup or a bare read inherits from **the binding it reads**,
             # not from whichever binding happens to carry an inheritable unit.

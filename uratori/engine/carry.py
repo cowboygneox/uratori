@@ -18,18 +18,11 @@ legal here where it is refused for `now - requested_at`.
 
 **One function, three triggers.** A fact landing, a pass extending to the
 present bucket, and a read filling a window it found unmaterialised are all
-meant to produce their rows here. Three code paths writing the same rows
+produce their rows here. Three code paths writing the same rows
 would be three chances to disagree, which is rule 1 -- one calculation
 system -- applied to plumbing rather than to arithmetic. Everything the
 triggers do differently is *which labels they ask for*; what a label answers
 is decided in one place, below.
-
-> **Not yet wired.** None of those three triggers exists yet: there is no
-> `carried forward` in the grammar, so nothing under `uratori/` calls into
-> this module. It is landed ahead of the grammar because the step itself is
-> the part worth pinning first, and because the calendar work it builds on
-> is in flight elsewhere. Read the paragraph above as the contract the
-> triggers will be held to, not as a description of code that runs.
 
 **One assumption, stated because it is load-bearing.** Bucket labels are
 compared as *text* here -- `bisect_right` below, and the `>=` in
@@ -326,13 +319,18 @@ async def materialise(
         for row in await store.values(tenant, plan.name, plan.version)
     }
 
+    # Read once, not once per subject. Inside the loop this was a query per
+    # subject on Postgres and a walk of the whole index each time -- paid on
+    # every pass *and* every read of a carried figure, which is the shape
+    # test_pass_cost.py exists to keep out.
+    anchors_by_base: dict[str, list[str]] = {}
+    for key in await store.bucket_keys(tenant, plan.scope_index):
+        base, sep, label = key.partition(SEPARATOR)
+        if sep:
+            anchors_by_base.setdefault(base, []).append(label)
+
     for base in sorted(set(bases)):
-        anchor_labels = sorted(
-            label
-            for key in await store.bucket_keys(tenant, plan.scope_index)
-            if (parts := key.split(SEPARATOR, 1)) and parts[0] == base and len(parts) == 2
-            for label in (parts[1],)
-        )
+        anchor_labels = sorted(anchors_by_base.get(base, ()))
         if not anchor_labels:
             # Nothing has ever been set for this subject, so there is nothing
             # to carry. An absence, and the pass leaves it that way.
@@ -366,6 +364,29 @@ async def materialise(
 
         sequence = sequence_to_present(anchors[0].label, labels_back, cap=cap)
         wanted = carried_rows(anchors, sequence)
+
+        # **Rows before the first anchor are retired.** Nothing else
+        # revisits a bucket once written, so re-dating the first change from
+        # February to May would leave March and April reporting a target
+        # that was never in force -- indistinguishable from real rows,
+        # because they *were* real until somebody corrected the date.
+        #
+        # Only *before* the earliest anchor, deliberately. Retiring
+        # everything outside this call's sequence looked tidier and was
+        # wrong: the sequence ends at the caller's own present, so a read
+        # filling at today's date would delete the buckets a pass anchored
+        # later had legitimately written, and the two triggers would spend
+        # for ever undoing each other. Nothing before the first anchor can
+        # be justified by any clock, which is what makes that edge safe to
+        # act on and the other edge not.
+        earliest = anchors[0].label
+        for subject, row in list(held.items()):
+            head, sep, label = subject.partition(SEPARATOR)
+            if not sep or head != base or label >= earliest:
+                continue
+            await store.remove(tenant, plan.name, plan.version, subject)
+            held.pop(subject, None)
+            moved.append((subject, row.value, None))
 
         for row in wanted:
             if row.label in anchor_labels:

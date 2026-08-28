@@ -31,7 +31,7 @@ from .buckets import (
     read_path,
     subject_of,
 )
-from .carry import materialise
+from .carry import CarryReachExceeded, materialise
 from .change import Change, Outcome
 from .evaluate import Parts, Readers, evaluate, same_value
 
@@ -252,6 +252,7 @@ class Engine:
         # are the values those just wrote, and carrying from a bucket whose
         # own value is still stale would spread the stale number forward.
         carried: list[str] = []
+        downstream: dict[str, set[str]] = {}
         for plan in lib.figures:
             if not plan.carried or plan.scope_index is None:
                 continue
@@ -260,15 +261,27 @@ class Engine:
                 for key in await self._store.bucket_keys(tenant, plan.scope_index)
             }
             alive = {row.key for row in await self._facts.of_kind(tenant, plan.scope)}
-            rows = await materialise(
-                self._store,
-                plan,
-                tenant,
-                bases & alive,
-                at_ms=now,
-                zone=_zone_of(lib, plan, settings),
-                trigger="pass",
-            )
+            try:
+                rows = await materialise(
+                    self._store,
+                    plan,
+                    tenant,
+                    bases & alive,
+                    at_ms=now,
+                    zone=_zone_of(lib, plan, settings),
+                    trigger="pass",
+                )
+            except CarryReachExceeded as refused:
+                # One figure's first change being older than the reach ceiling
+                # is a fact about that tenant's data, and it must not take the
+                # whole pass down with it. Raised, it aborted every unrelated
+                # figure in the library, wrote no run log, pushed nothing --
+                # and did so identically on every pass after, with no recovery
+                # short of editing the definition or deleting the record.
+                # Logged and skipped: the figure stops extending and says so,
+                # and everything else still runs.
+                log.warning("%s: %s", plan.name, refused)
+                continue
             if rows:
                 carried.append(plan.name)
             for subject, before, after in rows:
@@ -276,13 +289,30 @@ class Engine:
                     Change(
                         figure=plan.name,
                         subject=subject,
-                        kind="moved",
+                        kind="moved" if after is not None else "removed",
                         before=before,
                         after=after,
                         label=await self._label(tenant, plan, subject),
                         display=plan.display,
                     )
                 )
+                # **A carried bucket is a part like any other, so its totals
+                # are stale the moment it lands.** The carry necessarily runs
+                # after the ordinary recomputes -- it reads the anchor values
+                # those just wrote -- so a figure reading a carried source at
+                # `:{bucket}` would otherwise see anchor-only rows and answer
+                # an absence at exactly the carried coordinates, healing on
+                # the *next* pass. That is the worst shape a bug can have:
+                # right in every test that runs twice, and wrong on every
+                # first build.
+                for other in lib.figures:
+                    if plan.name in other.reads:
+                        downstream.setdefault(subject, set()).add(other.name)
+
+        if downstream:
+            # Depth order is `_recompute`'s own, so a total is never computed
+            # before the part it reads -- including a chain of them.
+            changes.extend(await self._recompute(tenant, settings, downstream))
 
         # `covered` is what the host re-dates evidence on, so it must name
         # the kinds this pass *read*, not the kinds the batch happened to
@@ -428,7 +458,12 @@ class Engine:
                     await self._mark(tenant, touch, index, change.member, buckets=moved)
 
             # **A written record can change a figure's value while moving no
-            # bucket**, because a measure reads a field. Typing an estimate into
+            # bucket**, because a measure -- or a declared-field read --
+            # reads a field. Correcting a target from 30m to 25m is the most
+            # ordinary edit an on-change stream gets and moves nothing: same
+            # subject, same month. Missed here it is missed for ever on the
+            # warm path, and a carry then spreads the stale number over every
+            # later bucket. Typing an estimate into
             # Jira moves nothing -- same assignee, still active -- and is the most
             # ordinary thing that can happen to an effort figure. Unconditional,
             # because the store knows a record's old *buckets* and not its old
@@ -436,7 +471,10 @@ class Engine:
             # recompute that reports nothing, and getting it wrong the other way
             # costs a stale number nobody can see.
             for plan in self._library.figures:
-                if not any(self._library.measures[m].kind == kind for m in plan.measures):
+                reads_kind = any(
+                    self._library.measures[m].kind == kind for m in plan.measures
+                ) or kind in _field_kinds(plan)
+                if not reads_kind:
                     continue
                 if plan.scope_index is None:
                     continue

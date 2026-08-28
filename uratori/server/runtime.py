@@ -202,6 +202,7 @@ def run_out(
         deleted=deleted,
         changed=len(report.outcome.changes),
         rebuilt=list(report.outcome.rebuilt),
+        carried=list(report.outcome.carried),
         covered=sorted(report.outcome.covered),
         shown=[
             ShownChange(

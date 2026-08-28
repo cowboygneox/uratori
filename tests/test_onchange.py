@@ -63,6 +63,7 @@ fact setting_change:
 # Work that happened, so there is something to compare a target against.
 fact job:
     site_id as text
+    cost as number
     started_at as moment
     finished_at as moment
 
@@ -170,10 +171,14 @@ figure site.changes bucketed:
 def test_bucketed_and_across_cannot_both_be_declared() -> None:
     """A bucket of time is not a dimension -- it has no roster and no name --
     so a figure claiming both is claiming two different things about one
-    second key."""
-    with pytest.raises((CheckError, Exception)):
-        compile_world(
-            '''
+    second key.
+
+    The message is asserted, not just the refusal: unasserted, this stayed
+    green for a missing `#` comment, a renamed group, or any future rule
+    that happened to fire first.
+    """
+    refuses(
+        '''
 # Both at once.
 figure site.confused bucketed across job:
     display "{site} confused"
@@ -183,8 +188,13 @@ figure site.confused bucketed across job:
 
     calculate:
         count(sets)
-'''
-        )
+''',
+        "A bucket of time is not a dimension",
+        "site.confused",
+    )
+
+    # The control: each alone compiles, so the refusal is about the pair.
+    assert compile_world(GOAL).figure("site.target_month") is not None
 
 
 def test_bucketed_is_not_in_the_version_hash() -> None:
@@ -296,9 +306,9 @@ figure site.confused bucketed:
         sets = setting_change.by_month:{site} & setting_change.target
 
     calculate:
-        latest(job.minutes over sets) carried forward
+        latest(job.cost over sets) carried forward
 ''',
-        "job",
+        "holds setting_change ids",
     )
 
 
@@ -427,6 +437,30 @@ async def _run(source: str, changes: list[tuple[str, str, float, str, str]]):
     return engine
 
 
+async def test_the_latest_record_is_chosen_by_set_at_and_not_by_its_key() -> None:
+    """The ordering field is the group's, and nothing else.
+
+    Every other fixture here numbers its records in the order they happened,
+    so ignoring `set_at` entirely and sorting by key gives the same answer --
+    and a mutation that did exactly that passed the whole suite. Here the
+    keys run backwards against the clock, so the two disagree and only the
+    right one produces 25.
+    """
+    engine = await _run(
+        CARRIED,
+        [
+            ("c9", "2026-02-03T09:00:00Z", 30.0, "Aki", ""),
+            ("c1", "2026-02-20T09:00:00Z", 25.0, "Bo", ""),
+        ],
+    )
+    answer = await engine.answer("t1", "site.target_month")
+    values = {s.id: s.value for s in answer.subjects}
+    assert values.get("s1@2026-02") == 25.0, (
+        "the bucket reported the record with the larger key rather than the "
+        "later set_at"
+    )
+
+
 async def test_the_bucket_reports_the_last_change_made_within_it() -> None:
     """Two changes in one month: the later one is what the month says.
 
@@ -460,6 +494,9 @@ async def test_a_tie_inside_a_bucket_resolves_the_same_way_every_time() -> None:
         ("c1", "2026-02-03T09:00:00Z", 30.0, "Aki", ""),
         ("c2", "2026-02-03T09:00:00Z", 25.0, "Bo", ""),
     ]
+    # Pinned, not merely stable: the later key wins a tie. Left unpinned,
+    # flipping the tie-break direction changes every tenant's stored value
+    # and no test notices.
     first = await _run(CARRIED, stamped)
     second = await _run(CARRIED, list(reversed(stamped)))
     a = {s.id: s.value for s in (await first.answer("t1", "site.target_month")).subjects}
@@ -467,6 +504,7 @@ async def test_a_tie_inside_a_bucket_resolves_the_same_way_every_time() -> None:
     assert a["s1@2026-02"] == b["s1@2026-02"], (
         "the same two records in a different write order gave two answers"
     )
+    assert a["s1@2026-02"] == 25.0, "the tie broke towards the earlier key"
 
 
 async def test_the_evidence_is_the_one_change_the_value_came_from() -> None:
@@ -555,11 +593,23 @@ async def test_a_pass_fills_every_month_from_the_first_change_to_the_present() -
             assert stored.get(label) == value, f"{label} reads {stored.get(label)}"
 
 
-def test_a_bucket_before_the_first_change_is_absent_not_a_nought() -> None:
-    """Restated as its own claim because it is the one a band would get
-    wrong: a nought here is comfortably under every threshold, and would
-    colour January green for a target nobody had set."""
-    assert EXPECTED["s1@2026-01"] is None
+async def test_a_bucket_before_the_first_change_is_absent_not_a_nought() -> None:
+    """The one a band would get wrong: a nought here sits comfortably under
+    every threshold and would colour January green for a target nobody had
+    set.
+
+    (An earlier version of this asserted `EXPECTED["s1@2026-01"] is None` --
+    a dict literal in this file, with no engine involved. It was a comment
+    with an `assert` in front of it.)
+    """
+    engine, store, library, _ = await _carried()
+    stored = await _stored(engine, store, library)
+    assert stored, "nothing was stored at all, so absence proves nothing"
+    assert "s1@2026-01" not in stored, (
+        "January holds a value for a target that had not been set yet"
+    )
+    plan = library.figure("site.target_month")
+    assert await store.value("t1", plan.name, plan.version, "s1@2026-01") is None
 
 
 async def test_materialisation_never_runs_past_the_present_bucket() -> None:
@@ -1033,7 +1083,8 @@ def test_a_coordinate_read_of_an_unsequenced_figure_is_refused() -> None:
     """The mirror: a selector on something with no sequence names a
     coordinate that does not exist."""
     refuses(
-        '''
+        MEDIAN
+        + '''
 # A plain per-site count.
 figure site.changes:
     display "{site} changes"
@@ -1044,18 +1095,22 @@ figure site.changes:
     calculate:
         count(sets)
 
-# Selector over a scalar.
+# Selector over a scalar, beside one that really is sequenced -- so the
+# figure has a sequence and the refusal is about the scalar, not about a
+# missing `bucketed`.
 figure site.nonsense bucketed:
     display "{site} nonsense"
     unit count
 
     combine:
+        a = site.actual_month
         c = site.changes
 
     calculate:
-        c:{bucket} - c:{bucket}
+        a:{bucket} - c:{bucket}
 ''',
-        "bucket",
+        "site.changes",
+        "one value per subject",
     )
 
 
@@ -1101,11 +1156,15 @@ figure site.all_time:
 def test_a_bucket_statistic_may_not_run_over_a_combined_figure() -> None:
     """A statistic over stored values is a statistic over aggregates again,
     one construct along -- the mean-of-means this language refuses a reading
-    for the same reason."""
-    with pytest.raises((CheckError, Exception)):
-        compile_world(
-            MEDIAN
-            + '''
+    for the same reason.
+
+    Written `median(m)` this test was merely ungrammatical, and the parser's
+    "expected `over`" said nothing about the rule. `over` makes it a real
+    attempt at the construct.
+    """
+    refuses(
+        MEDIAN
+        + '''
 # Median of medians.
 figure site.worse bucketed:
     display "{site} worse"
@@ -1114,9 +1173,10 @@ figure site.worse bucketed:
         m = site.actual_month
 
     calculate:
-        median(m)
-'''
-        )
+        median(m over m)
+''',
+        "m",
+    )
 
 
 async def test_a_carried_bucket_cites_the_change_it_carried_from() -> None:
@@ -1153,3 +1213,528 @@ async def test_the_carried_row_is_headed_by_the_subjects_name() -> None:
     plan = library.figure("site.target_month")
     rows = {r.subject: r.label for r in await store.values("t1", plan.name, plan.version)}
     assert rows["s1@2026-07"] == "Northgate"
+
+
+# --------------------------------------- what the first review round found --
+
+
+async def test_editing_a_changes_value_recomputes_without_moving_a_bucket() -> None:
+    """Correcting a typo in a change is the most ordinary edit an on-change
+    stream gets, and it moves no bucket at all: same subject, same month.
+
+    The warm path notices a record whose *fields* moved only for figures that
+    name a measure, and a declared-field read names none. Left out, a
+    corrected target is ignored by every warm pass -- and the carry then
+    spreads the stale number over every later bucket, which is the cardinal
+    sin with a multiplier.
+    """
+    engine, store, library, facts = await _carried()
+    assert (await _stored(engine, store, library))["s1@2026-07"] == 1500.0
+
+    facts.put(
+        "t1",
+        "setting_change",
+        "c2",
+        {
+            "site_id": "s1",
+            "setting": "target_minutes",
+            "value": 1200.0,
+            "set_at": "2026-06-03T09:00:00Z",
+            "set_by": "Bo",
+        },
+    )
+    await engine.run("t1", written={"setting_change": ["c2"]}, at_ms=AT)
+
+    after = await _stored(engine, store, library)
+    assert after["s1@2026-06"] == 1200.0, "the corrected month kept the old value"
+    assert after["s1@2026-07"] == 1200.0, "the carry spread the stale value forward"
+
+
+async def test_a_read_anchored_in_the_future_writes_no_future_buckets() -> None:
+    """`?at=` is a caller's argument, and an argument may narrow what is
+    reported but never change what is stored.
+
+    The lazy fill counts back from the anchor it is given, so an anchor in
+    2031 makes every month between now and then a bucket "in the past" --
+    and they are written, and they stay. Months that have not happened would
+    then hold confident values for ever, which no later pass removes.
+    """
+    from uratori.engine.serve import serve_reading
+
+    _, store, library = await _paced(at=AT)
+    figure = library.figure("site.target_month")
+    before = {r.subject for r in await store.values("t1", figure.name, figure.version)}
+
+    # Through the door a caller actually reaches: `?at=YYYY-MM-DD`, which
+    # the HTTP layer validates for spelling and nothing else.
+    await serve_reading(
+        store,
+        library,
+        "t1",
+        library.reading("site.target_pace"),
+        ONCHANGE.defaults,
+        [3],
+        at_day="2031-06-15",
+    )
+    after = {r.subject for r in await store.values("t1", figure.name, figure.version)}
+    assert after == before, (
+        "a read anchored in the future materialised buckets that have not "
+        f"happened: {sorted(after - before)}"
+    )
+
+
+async def test_moving_the_first_change_later_leaves_no_fabricated_history() -> None:
+    """A change re-dated from February to May must not leave March and April
+    reporting a target that was never in force.
+
+    Nothing revisits buckets before the earliest anchor, so the rows written
+    under the old date simply stay -- and they are indistinguishable from
+    real ones, because they were real until somebody corrected the date.
+    """
+    engine, store, library, facts = await _carried()
+    assert (await _stored(engine, store, library))["s1@2026-03"] == 1800.0
+
+    facts.put(
+        "t1",
+        "setting_change",
+        "c1",
+        {
+            "site_id": "s1",
+            "setting": "target_minutes",
+            "value": 1800.0,
+            "set_at": "2026-05-10T09:00:00Z",
+            "set_by": "Aki",
+        },
+    )
+    await engine.run("t1", written={"setting_change": ["c1"]}, at_ms=AT)
+
+    after = await _stored(engine, store, library)
+    assert "s1@2026-03" not in after, (
+        "March still reports a target that was never in force there"
+    )
+    assert "s1@2026-04" not in after
+    assert after["s1@2026-05"] == 1800.0
+
+
+async def test_a_figure_over_a_carried_one_is_not_a_pass_behind() -> None:
+    """The doc's flagship example, evaluated rather than merely compiled.
+
+    The carry runs after the ordinary recomputes, so a figure reading a
+    carried source at `:{bucket}` sees anchor-only rows and answers an
+    absence at exactly the carried coordinates -- on a first build, for
+    every month the value was carried into. It heals on the next pass, which
+    is the worst shape: right in every test that runs twice.
+    """
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(DELTA_FIGURE)
+    engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
+    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    for key, when, value, who, _ in CHANGES:
+        facts.put(
+            "t1",
+            "setting_change",
+            key,
+            {
+                "site_id": "s1",
+                "setting": "target_minutes",
+                "value": value,
+                "set_at": when,
+                "set_by": who,
+            },
+        )
+    for month in ("03", "04", "07"):
+        facts.put(
+            "t1",
+            "job",
+            f"j{month}",
+            {
+                "site_id": "s1",
+                "started_at": f"2026-{month}-04T09:00:00Z",
+                "finished_at": f"2026-{month}-04T09:40:00Z",
+            },
+        )
+    await engine.run("t1", full=True, at_ms=AT)
+
+    gap = library.figure("site.gap_month")
+    rows = {
+        r.subject: r.value for r in await store.values("t1", gap.name, gap.version)
+    }
+    assert rows.get("s1@2026-03") == 2400.0 - 1800.0, (
+        "a month whose target was carried answered an absence on the first "
+        f"pass: {rows}"
+    )
+    assert rows.get("s1@2026-07") == 2400.0 - 1500.0
+
+
+def test_carried_forward_on_a_figure_with_no_records_of_its_own_is_refused() -> None:
+    """A carry anchors on the buckets that hold *records*, so a figure built
+    from other figures has nothing to anchor on.
+
+    Left to compile it did exactly nothing -- both triggers skip a figure
+    with no scope index -- while the suffix sat in the version hash claiming
+    a behaviour the engine never performed. Declared and silently absent is
+    the worst of the three states.
+    """
+    refuses(
+        MEDIAN
+        + CARRIED
+        + '''
+# Carried, but built on figures.
+figure site.echo_month bucketed:
+    display "{site} echo"
+    unit duration
+
+    combine:
+        goal = site.target_month
+
+    calculate:
+        goal:{bucket} carried forward
+''',
+        "carried forward",
+        "records",
+    )
+
+
+def test_a_coordinate_read_beside_a_scalar_read_is_refused() -> None:
+    """One is looked up under `s1@2026-02` and the other under `s1`, so the
+    scalar resolves to nothing at every coordinate and the figure answers an
+    absence for ever -- a definition that can never produce a number."""
+    refuses(
+        MEDIAN
+        + '''
+# A plain per-site count.
+figure site.changes:
+    display "{site} changes"
+
+    depends:
+        sets = setting_change.at_site:{site}
+
+    calculate:
+        count(sets)
+
+# One of each.
+figure site.mixed bucketed:
+    display "{site} mixed"
+    unit count
+
+    combine:
+        actual = site.actual_month
+        total = site.changes
+
+    calculate:
+        actual:{bucket} - total
+''',
+        "site.changes",
+    )
+
+
+def test_a_coordinate_passthrough_keeps_the_sources_unit() -> None:
+    """`goal:{bucket}` on its own is the source's own number at a
+    coordinate, so it is in the source's own unit.
+
+    Derived rather than declared -- declaring it is refused as redundant --
+    so getting the derivation wrong leaves no way to say what the number is:
+    1800 seconds renders as "1800", which is the "0.6 prints as 60% or 0.6"
+    harm exactly.
+    """
+    lib = compile_world(
+        CARRIED
+        + '''
+# The target, echoed.
+figure site.echo_month bucketed:
+    display "{site} echo"
+
+    combine:
+        goal = site.target_month
+
+    calculate:
+        goal:{bucket}
+'''
+    )
+    plan = lib.figure("site.echo_month")
+    assert plan is not None
+    assert plan.unit == "duration", (
+        "a passthrough lost its source's unit, so the number renders as a "
+        "bare integer with nothing saying what it is"
+    )
+
+
+async def test_a_reach_refusal_does_not_take_the_rest_of_the_pass_down() -> None:
+    """One figure's first change being older than the ceiling is a fact
+    about that tenant's data, not a reason to stop computing everything
+    else.
+
+    Raised, it aborted the whole pass -- no run log, no pushes, nothing
+    recomputed -- and did so identically on every pass after, with no
+    recovery short of editing the definition or deleting the record.
+    """
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    daily = '''
+group setting_change.by_day from (site_id, set_at by day in tenant.timezone)
+
+# A target carried day by day, whose first change is far older than the reach.
+figure site.target_day bucketed:
+    display "{site} daily target"
+    unit duration
+
+    depends:
+        sets = setting_change.by_day:{site} & setting_change.target
+
+    calculate:
+        latest(setting_change.value over sets) carried forward
+
+# An ordinary figure that must keep working.
+figure site.changes:
+    display "{site} changes"
+
+    depends:
+        sets = setting_change.at_site:{site}
+
+    calculate:
+        count(sets)
+'''
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(daily)
+    engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
+    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    facts.put(
+        "t1",
+        "setting_change",
+        "ancient",
+        {
+            "site_id": "s1",
+            "setting": "target_minutes",
+            "value": 1800.0,
+            "set_at": "1998-01-04T09:00:00Z",
+            "set_by": "Aki",
+        },
+    )
+
+    outcome = await engine.execute("t1", full=True, at_ms=AT)
+    assert outcome.carried == (), "the over-reaching figure reported carrying"
+
+    counted = library.figure("site.changes")
+    rows = await store.values("t1", counted.name, counted.version)
+    assert [r.value for r in rows] == [1.0], (
+        "an unrelated figure lost its pass because another figure reached too "
+        "far back"
+    )
+
+
+async def test_two_readers_taking_the_same_empty_snapshot_create_each_row_once() -> None:
+    """A real race, not two calls in sequence.
+
+    The in-memory store never yields at an `await`, so two `materialise`
+    calls gathered together simply run one after the other -- the second
+    sees the first's rows in its own snapshot and never reaches the insert
+    at all. That version of this test stayed green with the
+    insert-or-nothing guard removed entirely. Holding both readers at the
+    snapshot until each has taken it is what makes them contend.
+    """
+    import asyncio
+
+    from uratori.engine.carry import materialise
+
+    _, store, library = await _paced(at=AT)
+    figure = library.figure("site.target_month")
+    later = 1_792_843_200_000.0
+
+    both_have_read = asyncio.Event()
+    arrived = 0
+    real_values = store.values
+    inserts: list[tuple[str, bool]] = []
+    real_insert = store.save_if_absent
+
+    async def values(*a, **k):
+        nonlocal arrived
+        rows = await real_values(*a, **k)
+        arrived += 1
+        if arrived >= 2:
+            both_have_read.set()
+        await both_have_read.wait()
+        return rows
+
+    async def save_if_absent(tenant, name, version, subject, *a, **k):
+        did = await real_insert(tenant, name, version, subject, *a, **k)
+        inserts.append((subject, did))
+        return did
+
+    store.values = values  # type: ignore[method-assign]
+    store.save_if_absent = save_if_absent  # type: ignore[method-assign]
+    try:
+        first, second = await asyncio.gather(
+            materialise(store, figure, "t1", ["s1"], at_ms=later, zone="UTC", trigger="read"),
+            materialise(store, figure, "t1", ["s1"], at_ms=later, zone="UTC", trigger="read"),
+        )
+    finally:
+        store.values = real_values  # type: ignore[method-assign]
+        store.save_if_absent = real_insert  # type: ignore[method-assign]
+
+    assert any(not did for _, did in inserts), (
+        "no insert ever lost, so the two readers never actually contended and "
+        "the guard is untested"
+    )
+    created = [s for s, _, _ in first] + [s for s, _, _ in second]
+    assert len(created) == len(set(created)), (
+        f"a bucket was reported created twice: {sorted(created)}"
+    )
+    assert {"s1@2026-09", "s1@2026-10"} <= set(created)
+
+
+async def test_a_new_carried_bucket_reaches_the_push_surface() -> None:
+    """A bucket materialised by a pass is a movement, and every screen
+    watching the figure has to hear about it.
+
+    Reported nowhere, a subscribed board would sit on last month's value
+    until something unrelated moved -- the failure the change stream exists
+    to prevent, arriving through a write nobody else makes.
+    """
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(CARRIED)
+    engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
+    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    for key, when, value, who, _ in CHANGES:
+        facts.put(
+            "t1",
+            "setting_change",
+            key,
+            {
+                "site_id": "s1",
+                "setting": "target_minutes",
+                "value": value,
+                "set_at": when,
+                "set_by": who,
+            },
+        )
+    report = await engine.run("t1", full=True, at_ms=AT)
+
+    assert "site.target_month" in report.moved, (
+        "a carried figure gained five buckets and told no subscriber"
+    )
+    carried_changes = [
+        c
+        for c in report.outcome.changes
+        if c.figure == "site.target_month"
+        and c.subject in ("s1@2026-07", "s1@2026-08")
+    ]
+    assert carried_changes, "no carried bucket appears in the run's movements"
+    assert report.outcome.carried == ("site.target_month",)
+
+
+def test_carried_forward_moves_the_version_hash() -> None:
+    """The asymmetry with `bucketed` beside it, asserted rather than argued.
+
+    The same records under the same calculation give two buckets without the
+    suffix and seven with it, so a version reused across the change would
+    serve carried numbers from a definition that never claimed any.
+    """
+    plain = CARRIED.replace(" carried forward", "")
+    assert plain != CARRIED
+    without = compile_world(plain).figure("site.target_month")
+    with_carry = compile_world(CARRIED).figure("site.target_month")
+    assert without is not None and with_carry is not None
+    assert without.version != with_carry.version
+
+    # And prose does not move it, for a carried figure like any other.
+    reworded = CARRIED.replace(
+        "# The target in force each month: the latest one set within the month,\n"
+        "# carried across the months where nobody changed it.",
+        "# Whatever the target currently is, month by month.",
+    )
+    assert reworded != CARRIED
+    assert compile_world(reworded).figure("site.target_month").version == with_carry.version
+
+
+async def test_a_coordinate_absent_on_one_side_answers_absence_not_nought() -> None:
+    """The join's own rule, evaluated.
+
+    A month the work happened in but no target was ever set for must answer
+    *nothing*. A nought there is a confident "exactly on target", and the
+    band beside it would colour it comfortable -- and a positional zip would
+    be worse still, pairing every later month with the wrong target.
+    """
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(DELTA_FIGURE)
+    engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
+    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    # The target starts in June; the work starts in March.
+    facts.put(
+        "t1",
+        "setting_change",
+        "c2",
+        {
+            "site_id": "s1",
+            "setting": "target_minutes",
+            "value": 1500.0,
+            "set_at": "2026-06-03T09:00:00Z",
+            "set_by": "Bo",
+        },
+    )
+    for month in ("03", "07"):
+        facts.put(
+            "t1",
+            "job",
+            f"j{month}",
+            {
+                "site_id": "s1",
+                "cost": 1.0,
+                "started_at": f"2026-{month}-04T09:00:00Z",
+                "finished_at": f"2026-{month}-04T09:40:00Z",
+            },
+        )
+    await engine.run("t1", full=True, at_ms=AT)
+
+    gap = library.figure("site.gap_month")
+    rows = {r.subject: r.value for r in await store.values("t1", gap.name, gap.version)}
+    assert rows.get("s1@2026-03") is None, (
+        "a month with no target on either side answered a number: "
+        f"{rows.get('s1@2026-03')}"
+    )
+    assert rows.get("s1@2026-07") == 2400.0 - 1500.0, (
+        "the month that does have both sides was shifted or lost"
+    )
+
+
+async def test_a_bucket_statistic_is_the_median_of_that_buckets_records() -> None:
+    """Evaluated, not merely compiled: swapping `mean` for `median` in the
+    evaluator passed the whole suite, because nothing ever created a job."""
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(MEDIAN)
+    engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
+    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    # 10, 20 and 60 minutes: a median of 20 and a mean of 30, so the two
+    # statistics cannot be confused for one another.
+    for key, ends in (("j1", "09:10"), ("j2", "09:20"), ("j3", "10:00")):
+        facts.put(
+            "t1",
+            "job",
+            key,
+            {
+                "site_id": "s1",
+                "cost": 1.0,
+                "started_at": "2026-03-04T09:00:00Z",
+                "finished_at": f"2026-03-04T{ends}:00Z",
+            },
+        )
+    await engine.run("t1", full=True, at_ms=AT)
+
+    plan = library.figure("site.actual_month")
+    rows = {r.subject: r.value for r in await store.values("t1", plan.name, plan.version)}
+    assert rows["s1@2026-03"] == 20 * 60.0, (
+        f"expected the median of the bucket's own records, got {rows['s1@2026-03']}"
+    )
+    assert "s1@2026-04" not in rows, "a month with no jobs invented a statistic"

@@ -6,14 +6,14 @@ here is a claim about the step: where it starts, which direction it runs, what
 a later change does to the buckets before it, and what each row cites.
 
 The separation is deliberate. The three triggers (a fact landing, a pass
-extending, a read filling) are *meant* to share this one function, so a rule
-proved here is proved for all three at once -- which is the only reason
-three triggers are allowed to exist at all.
+extending, a read filling) share this one function, so a rule proved here is
+proved for all three at once -- which is the only reason three triggers are
+allowed to exist at all.
 
-None of those triggers exists yet: there is no `carried forward` in the
-grammar, so nothing under `uratori/` calls into this module. These are the
-step's own rules, pinned ahead of the wiring; the integration tests that
-prove the three triggers write byte-identical rows are owed and not here.
+These are the step's own rules, in isolation. The integration tests -- that
+all three triggers write byte-identical rows, that a retroactive edit
+rewrites forward and no further, that nothing reaches past the present
+bucket -- live in `test_onchange.py`, against a real engine.
 """
 
 from __future__ import annotations

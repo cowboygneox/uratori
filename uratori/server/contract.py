@@ -300,6 +300,18 @@ class RunOut(BaseModel):
     deleted: int
     changed: int
     rebuilt: list[str]
+    carried: list[str] = []
+    """Carried figures this pass extended to the present bucket.
+
+    Named rather than counted so "the pass ran and moved nothing" stays a
+    different finding from "the pass never reached this figure" -- which,
+    for a construct whose whole job is to fill buckets nobody wrote records
+    into, is otherwise impossible to tell apart from outside. A lazy fill on
+    a read is the other trigger and never appears here.
+
+    Defaulted, so a client written before carried figures existed reads a
+    run report unchanged."""
+
     covered: list[str]
     shown: list[ShownChange]
     results: list[AnyResult]

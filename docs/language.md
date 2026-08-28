@@ -986,7 +986,11 @@ three**, so the rows are byte-identical whichever asked:
   is recomputed from that bucket *forward*. Buckets before it are untouched:
   a change entered late but dated in April rewrites April onward and leaves
   March exactly as it was. History is never rewritten by a later arrival --
-  which is precisely the property that makes these rows safe to store.
+  which is precisely the property that makes these rows safe to store. The
+  one exception is a bucket the anchors no longer justify at all: re-date
+  the *first* change from February to May and the rows before May are
+  retired, because nothing carried into them any more and they would
+  otherwise report a value that was never in force.
 - **A pass.** Every pass extends every carried figure to the bucket
   containing the pass's own instant. The pass is the event that notices time;
   the clock never is one.
@@ -997,14 +1001,25 @@ three**, so the rows are byte-identical whichever asked:
   insert-or-nothing write decides which one counts as having created each.
 
 Three code paths writing these rows would be three chances to disagree, and
-every row would look plausible. The run log names the figures a pass carried,
-so "the pass ran and moved nothing" stays a different finding from "the pass
-never reached this figure".
+every row would look plausible. A pass's **run report** names the figures it
+carried, so "the pass ran and moved nothing" stays a different finding from
+"the pass never reached this figure" -- which, for a construct whose whole
+job is filling buckets nobody wrote records into, is otherwise impossible to
+tell apart from outside. (The persisted activity log does not keep it yet;
+the report on the response does.)
 
-**Materialisation never runs past the present bucket**, whatever asks. The
-sequence is resolved by the same resolver a window's `over 1-6` uses, counted
-back from the anchor instant, so it cannot name a future bucket -- and a
-change dated next month materialises nothing until next month.
+**Materialisation never runs past the present bucket**, whatever asks --
+including a caller's `?at=`, which may narrow what is *reported* and never
+moves what is stored. The sequence is resolved by the same resolver a
+window's `over 1-6` uses, counted back from the present, so it cannot name a
+future bucket, and a change dated next month is carried into nothing until
+next month. (The bucket the future-dated change itself lands in is an
+ordinary anchor and is computed like any other; what the carry declines to
+do is fill the months between.)
+
+`carried forward` needs records to anchor on, so it is refused on a figure
+built from other figures: there is no group, no bucket somebody changed
+something in, and nothing for the carry to start from.
 
 **A carried grain finer than a pass can honour is refused.** Extension is the
 pass noticing time, so a figure owing a new bucket every minute would get one
