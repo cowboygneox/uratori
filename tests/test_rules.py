@@ -22,9 +22,11 @@ from uratori.engine.buckets import (
     end_of_day_ms,
     label_in,
     measure_of,
+    ordinal_weekday_day,
     part_of,
     read_number,
     read_path,
+    selected_day,
 )
 from uratori.engine.evaluate import Parts, Readers, evaluate, same_value
 from uratori.engine.project import holds, ordered, summarise
@@ -1833,6 +1835,50 @@ async def test_a_calendar_edge_anchor_answers_at_every_grain_and_span_shape() ->
         )
         assert result.empty is not None
         assert result.empty.windows[0].to.startswith("9999-12-31")
+
+    # Third time in the same place. `ordinal_weekday_day` found its candidate
+    # by adding days to the first of the month, so December 9999 -- whose
+    # fifth Monday would be 10000-01-03 -- raised OverflowError instead of
+    # answering "no such day". OverflowError is an ArithmeticError, which no
+    # route catches, so a wire-reachable anchor produced a 500 rather than an
+    # empty window. The write path hit the same line through `selected_day`,
+    # so a record stamped that month crashed a pass.
+    assert ordinal_weekday_day(9999, 12, 5, 0) is None, (
+        "December 9999 has four Mondays, so the answer is None -- not a raise"
+    )
+    ordinal_reading = GRAINED.reading("team_person.fifth_monday_shipped")
+    ordinal_figure = GRAINED.figure("team_person.fifth_monday_volume")
+    assert ordinal_reading is not None and ordinal_figure is not None
+    ordinal_store = await _figure_store(ordinal_figure, "work_issue.by_fifth_monday", ())
+    answer = await serve_reading(
+        ordinal_store, GRAINED, "t1", ordinal_reading, DEFAULTS, [3], at_day="9999-12-31"
+    )
+    assert answer.empty is not None
+    assert answer.empty.windows[0].bucket == "fifth monday of month"
+
+
+def _far_edge_ms() -> float:
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    return _dt(9999, 12, 31, 12, tzinfo=_UTC).timestamp() * 1000.0
+
+
+async def test_a_record_stamped_at_the_calendar_edge_buckets_without_crashing() -> None:
+    """The same overflow on the *write* path: `selected_day` asks
+    `ordinal_weekday_day` about the record's own month, so a fact timestamped
+    in December 9999 crashed the pass that filed it -- before any window was
+    ever asked for. It must simply land in no bucket, which is what a
+    selective rule means for a day that is not the rule's day."""
+    for rule in (
+        "first monday of month",
+        "fifth monday of month",
+        "fifth sunday of month",
+        "fifth tuesday of month",
+        "fifth saturday of month",
+    ):
+        assert selected_day(_far_edge_ms(), "UTC", rule) is None, rule
+        assert selected_day(_far_edge_ms(), None, rule) is None, rule
 
 
 async def test_a_minute_figure_serves_its_minutes_bucket_for_bucket() -> None:

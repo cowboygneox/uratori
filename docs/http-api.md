@@ -563,6 +563,8 @@ reinterpreted as bare positions.)
   one-bucket windows `1, 2-2, ..., 12-12`, expanded at the door so the
   sugared and enumerated spellings are one request -- a year of month
   windows on a month figure, each summed, floored and banded on its own.
+  The bare `each:12` means the same thing, since `12` means `1-12`; the
+  single bucket twelve back is `each:12-12`, which is also just `12-12`.
 
 The same span twice in one request is a `422`: one request serves each
 window once, exactly as a bundle's window list refuses its duplicates --
@@ -580,8 +582,8 @@ Two ceilings bound what one request may buy, both `422`s:
   checked before a span is expanded or resolved, so the refusal never
   costs what it refuses.
 - **A span may reach at most 3660 days back**, converting through the
-  figure's own rule: 121 positions is over a decade of quarters, and 3660
-  monthly buckets would be three centuries. The bucket ceiling cannot see
+  figure's own rule: 121 positions is six days of hours and thirty years
+  of quarters, and 3660 monthly buckets would be three centuries. The bucket ceiling cannot see
   this, because only the figure's declaration knows what a position is
   worth. (A `fifth monday of month` bucket converts at a quarter's width,
   not a month's: most months have no fifth Monday, so its buckets sit ~87

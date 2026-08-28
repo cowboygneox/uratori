@@ -57,7 +57,14 @@ def test_unit_suffixes_are_refused_toward_the_declarations() -> None:
     """The v0.12 unit tokens are retired, not silently reinterpreted: `48h`
     parsing as 48 buckets would quietly re-scale a bookmarked sub-day span
     by 60x. The refusal names where the unit now lives."""
-    for wrong in ("1-48h", "48h", "1-90m", "90m", "30d", "1-30d"):
+    for wrong in (
+        "1-48h", "48h", "1-90m", "90m", "30d", "1-30d",
+        # Case and the longer spellings too: the message exists to catch a
+        # bookmarked v0.12 span and send its author to the group clause, and
+        # `1-48H` falling through to the generic "not a window" sent exactly
+        # that reader hunting for a typo instead.
+        "1-48H", "48H", "90D", "1-90M", "48hr", "90min",
+    ):
         with pytest.raises(WindowError) as caught:
             as_window_spec(wrong)
         message = str(caught.value)
@@ -209,8 +216,33 @@ def test_each_refuses_an_oversized_span_without_first_expanding_it() -> None:
     the call is allowed to make, so it cannot flake on a slow runner the way a
     timing assertion would.
     """
-    with pytest.raises(WindowError):
-        expand_window_arg("each:1-20000000")
+    # Counted, not timed. `tests/test_server.py` already asserted a 422 for
+    # `each:1-1000000` and passed while allocating 136 MB first, because a
+    # status code cannot tell you what was spent reaching it. This counts the
+    # specs the call is allowed to construct, so it is deterministic and
+    # cannot flake on a slow runner.
+    import uratori.windows as module
+
+    built = 0
+    real = module.WindowSpec
+
+    class Counted(real):  # type: ignore[misc,valid-type]
+        def __new__(cls, *args: object, **kwargs: object) -> Counted:
+            nonlocal built
+            built += 1
+            return super().__new__(cls)  # type: ignore[misc]
+
+    module.WindowSpec = Counted  # type: ignore[misc]
+    try:
+        with pytest.raises(WindowError):
+            expand_window_arg("each:1-20000000")
+        assert built <= 2, (
+            f"refusing an oversized `each` built {built} window specs -- it must "
+            "validate the span before expanding it, or the refusal costs exactly "
+            "the work it exists to refuse"
+        )
+    finally:
+        module.WindowSpec = real  # type: ignore[misc]
 
     # And the legal maximum expands to exactly its buckets, no more.
     assert len(expand_window_arg(f"each:1-{MAX_BUCKETS}")) == MAX_BUCKETS
@@ -236,13 +268,25 @@ def test_one_request_may_not_ask_for_more_windows_than_the_ceiling() -> None:
     assert len(expand_window_args([f"each:1-{MAX_WINDOWS}"])) == MAX_WINDOWS
 
 
-def test_each_accepts_a_bare_bound_the_way_the_bundle_clause_does() -> None:
-    """`over each 12` parses in a bundle's window list and means the single
-    bucket 12. The HTTP spelling required the dash, so the same sugar was
-    accepted at one door and refused at the other -- a tile and the request
-    mirroring it disagreeing about a spelling neither author chose.
+def test_a_bare_bound_after_each_is_one_to_n_the_way_it_is_everywhere() -> None:
+    """Two bugs met here. The HTTP regex demanded the dash, so `each:12` was
+    refused at one door and accepted at the other; and the bundle clause
+    read the bare form as the single bucket 12, when `over 12` means `1-12`
+    everywhere else in the grammar.
+
+    The second is the dangerous one: it is silent. An author writing the
+    short spelling wants a column per bucket, and one column is a wrong
+    answer with no error attached. A bare bound is `1-N` whether or not
+    `each` precedes it; the single bucket 12 is `each 12-12`, which still
+    says so.
     """
-    assert expand_window_arg("each:12") == (WindowSpec(12, 12),)
+    assert expand_window_arg("each:3") == (
+        WindowSpec(1, 1),
+        WindowSpec(2, 2),
+        WindowSpec(3, 3),
+    )
+    assert expand_window_arg("each:3") == expand_window_arg("each:1-3")
+    # And the offset form still names one bucket when that is what is written.
     assert expand_window_arg("each:12-12") == (WindowSpec(12, 12),)
 
 

@@ -906,8 +906,11 @@ alike:
 
 - `30` -- the trailing span, buckets 1-30 pooled into **one window**;
 - `31-60` -- an offset span, the thirty before them, still one window;
-- `each 1-12` (HTTP: `each:1-12`) -- sugar for the twelve one-bucket
-  windows `1-1, 2-2, ..., 12-12`, **one window per bucket in order**, so a
+- `each 1-12` (HTTP: `each:1-12`), or the bare `each 12`, which means
+  `each 1-12` exactly as `12` means `1-12` -- sugar for the twelve one-bucket
+  windows `1, 2-2, ..., 12-12`, **one window per bucket in order** (the
+  nearest is spelled `1`, since a span starting at bucket 1 canonicalises
+  to its bare bound), so a
   per-bucket comparison -- this month against each of the eleven before it
   -- is not twelve enumerated spans. It expands at the door: the sugared
   and enumerated spellings are indistinguishable downstream, duplicate
@@ -1502,8 +1505,8 @@ substantive, a screen may bind to positions -- so `over 30, 60` and
   ceilings the request doors apply are applied here, at compile time, so a
   tile cannot commit to a request the server would refuse on every load: a
   span covers at most 3660 buckets and reaches at most 3660 days back
-  through the figure's own rule (121 positions is a week of hours and over
-  a decade of quarters), and one member asks for at most 366 windows --
+  through the figure's own rule (121 positions is six days of hours and
+  thirty years of quarters), and one member asks for at most 366 windows --
   `over each 1-3660` is inside the span ceiling and is still 3,660 answers
   per subject. Only a *windowed* reading
   may carry the list; a live one is named bare, mirroring the language's

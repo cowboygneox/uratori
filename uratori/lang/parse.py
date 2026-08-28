@@ -1802,7 +1802,13 @@ class _Parser:
                 last = self._window_bound(line)
                 bounds.append((first, last, each))
             else:
-                bounds.append((first if each else 1, last, each))
+                # A bare bound is `1-N` whether or not `each` precedes it, so
+                # `over each 12` is twelve one-bucket windows and not the
+                # single bucket 12 -- which is `each 12-12`, and is what the
+                # bare form used to mean. An author writing the short spelling
+                # wants a column per bucket; handing back one column with no
+                # error is a wrong answer wearing the right shape.
+                bounds.append((1, last, each))
             if self._at_op(","):
                 self._next()
                 continue

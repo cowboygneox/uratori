@@ -757,8 +757,13 @@ def _window(
         # bucket, or a month span, wearing a trailing-looking number is the
         # lie this field must not tell.
         trailing=spec.last if rule == "day" and spec.first == 1 else None,
-        frm=labels[0] if labels else "",
-        to=labels[-1] if labels else "",
+        # None, never "", when the span resolved to no bucket at all -- which
+        # happens only where the calendar runs out (an anchor in year 1, a
+        # span reaching past it). An empty string in a date field is a value
+        # that renders and sorts, and "no bucket" is an absence: rule 3's
+        # distinction, at the one edge that produces it.
+        frm=labels[0] if labels else None,
+        to=labels[-1] if labels else None,
         # A selective rule's covered buckets are not contiguous, so the
         # edges alone would claim days no bucket covers: the full list is
         # the honest shape, and only there -- for contiguous rules it would

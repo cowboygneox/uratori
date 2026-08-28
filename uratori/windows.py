@@ -227,12 +227,17 @@ _TOKEN = re.compile(r"([0-9]+)(?:-([0-9]+))?\Z")
 # The retired unit suffixes, matched only to refuse them with directions:
 # the unit moved into the declarations, and a message that just said
 # "not a window" would send somebody looking for a typo.
-_RETIRED_SUFFIX = re.compile(r"[0-9-]+(h|m|d)\Z")
+# Case-insensitive, and `hr`/`min` too: the point is to catch a bookmarked
+# v0.12 span and send its author to the group clause. `1-48H` getting the
+# generic "not a window" sent exactly the reader this message exists for
+# hunting a typo instead.
+_RETIRED_SUFFIX = re.compile(r"[0-9-]+(h|hr|hrs|m|min|mins|d)\Z", re.IGNORECASE)
 
-# `each:12` as well as `each:1-12`, because the bundle parser reads `over
-# each 12` -- a bare bound after `each` is the single bucket 12, the way a
-# bare bound elsewhere is `1-N`. Two doors onto one sugar had better accept
-# the same spellings, or a tile and the request it mirrors disagree.
+# `each:12` as well as `each:1-12`. A bare bound means `1-N` here exactly as
+# it does everywhere else, so `each:12` is the twelve one-bucket windows --
+# not the single bucket 12, which is what `each:12-12` says. The two
+# readings matter: a tile author writing the bare form wants twelve columns,
+# and silently handing back one is a wrong answer with no error attached.
 _EACH = re.compile(r"each:([0-9]+)(?:-([0-9]+))?\Z")
 
 
@@ -276,14 +281,16 @@ def expand_window_arg(value: int | str | WindowSpec) -> tuple[WindowSpec, ...]:
     windows `a-a` through `b-b`, in order; anything else is one spec.
 
     The expansion happens here, at the argument door, so `each:1-3` and the
-    enumerated `1-1, 2-2, 3-3` are indistinguishable everywhere downstream --
+    enumerated `1, 2-2, 3-3` are indistinguishable everywhere downstream --
     same windows, same duplicate check, same answer.
     """
     if isinstance(value, str):
         matched = _EACH.fullmatch(value.strip())
         if matched is not None:
-            first = int(matched.group(1))
-            last = int(matched.group(2)) if matched.group(2) is not None else first
+            if matched.group(2) is None:
+                first, last = 1, int(matched.group(1))
+            else:
+                first, last = int(matched.group(1)), int(matched.group(2))
             # Validated before expanded: `make_window_spec` carries the bucket
             # ceiling, so a refused span is refused without first building the
             # millions of one-bucket windows it asked for.

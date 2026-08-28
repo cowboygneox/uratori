@@ -1066,21 +1066,35 @@ def test_each_may_sit_beside_plain_spans_and_still_catches_duplicates() -> None:
     assert 'names "2-2" twice' in caught.value.message
 
 
-def test_a_bare_bound_after_each_means_that_one_bucket_at_both_doors() -> None:
-    """`over each 12` is the single bucket 12, the way a bare bound elsewhere
-    is `1-N` -- and the HTTP spelling must accept `each:12` for the same
-    reading, or a tile and the request mirroring it disagree about a spelling
-    neither author chose. The bundle clause took it and the query parameter's
-    regex demanded the dash, so the two doors answered differently."""
+def test_a_bare_bound_after_each_is_one_to_n_at_both_doors() -> None:
+    """`over 12` means `1-12`, so `over each 12` means twelve one-bucket
+    windows -- not the single bucket 12, which is `each 12-12` and still
+    says so. The bare form read as one window was silent: an author asking
+    for a column per bucket got one column and no error.
+
+    And the HTTP spelling must agree, or a tile and the request mirroring it
+    disagree about a spelling neither author chose -- the query parameter's
+    regex demanded the dash the bundle clause did not."""
     lib = compile_ok(
-        "\n# One bucket, twelve back.\n"
+        "\n# A bucket per column, four back.\n"
         "bundle team_person.one_card:\n"
-        "    just = reading team_person.to_merge over each 12\n"
+        "    just = reading team_person.to_merge over each 4\n"
     )
     plan = lib.bundle("team_person.one_card")
     assert plan is not None
-    assert plan.members[0].windows == (WindowSpec(first=12, last=12),)
-    assert expand_window_arg("each:12") == plan.members[0].windows
+    assert plan.members[0].windows == tuple(
+        WindowSpec(first=k, last=k) for k in (1, 2, 3, 4)
+    )
+    assert expand_window_arg("each:4") == plan.members[0].windows
+
+    single = compile_ok(
+        "\n# The one bucket four back, spelled as the span it is.\n"
+        "bundle team_person.single_card:\n"
+        "    just = reading team_person.to_merge over each 4-4\n"
+    )
+    only = single.bundle("team_person.single_card")
+    assert only is not None
+    assert only.members[0].windows == (WindowSpec(first=4, last=4),)
 
 
 def test_a_members_window_list_is_bounded_the_way_a_request_is() -> None:

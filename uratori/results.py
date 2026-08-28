@@ -130,13 +130,18 @@ class Window(BaseModel):
     over a day-grained figure), `null` for an offset span or any coarser or
     finer sequence rather than a number that would read as one."""
 
-    frm: str
-    to: str
+    frm: str | None = None
+    to: str | None = None
     """The first (oldest) and last (newest) bucket labels the span resolved
     to, in the sequence's own vocabulary: ISO days, `2026-08` months,
     `2026-Q3` quarters, `2026-W35` weeks, `2026-08-25T14:00` sub-day
     buckets. For a selective rule the edges alone cannot say which sparse
-    days were covered -- `buckets` carries the full list there."""
+    days were covered -- `buckets` carries the full list there.
+
+    Null when the span resolved to no bucket, which happens only where the
+    calendar runs out -- an anchor in year 1, or a span reaching past it.
+    An absence, not an empty string: `""` in a date field is a value that
+    renders and sorts, and there is no bucket here to name."""
 
     buckets: list[str] | None = None
     """Every bucket label the span covered, oldest first -- present exactly

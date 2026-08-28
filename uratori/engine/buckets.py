@@ -7,6 +7,7 @@ works in ids, which is what makes a figure's declared dependencies true.
 from __future__ import annotations
 
 import re
+from calendar import monthrange
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
@@ -358,11 +359,22 @@ def ordinal_rule_of(rule: str) -> tuple[int, int] | None:
 
 def ordinal_weekday_day(year: int, month: int, ordinal: int, weekday: int) -> str | None:
     """The date of e.g. the first Monday of a month, or None when the month
-    has no such day (a fifth Monday exists in some months only)."""
-    first = date(year, month, 1)
-    offset = (weekday - first.weekday()) % 7 + (ordinal - 1) * 7
-    day = first + timedelta(days=offset)
-    return day.isoformat() if day.month == month else None
+    has no such day (a fifth Monday exists in some months only).
+
+    Counted as a day *of the month*, never by adding days to the first: the
+    fifth weekday of December 9999 lands in January 10000, and building that
+    date to then reject it raises `OverflowError` -- an `ArithmeticError`,
+    which the routes do not catch, so it reaches the client as a 500 rather
+    than as the "no such day" this returns. `?at=9999-12-31` is an accepted
+    anchor and `end_of_day_ms` has a branch for exactly it, so the far edge
+    of the calendar is a place this function is genuinely asked about; a
+    record stamped in that month reaches it through `selected_day` on the
+    write path too.
+    """
+    day_of_month = 1 + (weekday - date(year, month, 1).weekday()) % 7 + (ordinal - 1) * 7
+    if day_of_month > monthrange(year, month)[1]:
+        return None
+    return date(year, month, day_of_month).isoformat()
 
 
 def _month_of(label: str) -> tuple[int, int]:

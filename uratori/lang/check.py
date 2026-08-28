@@ -2002,8 +2002,8 @@ class _Checker:
                 # written down: a span whose reach exceeds the ceiling under
                 # the source's own bucket rule. One shared implementation,
                 # so the tile's build error and the route's 422 speak the
-                # same words -- and rule-aware, because 121 positions is a
-                # week and a half of hours and over a decade of quarters.
+                # same words -- and rule-aware, because 121 positions is
+                # under a week of hours and thirty years of quarters.
                 source = _find(self.figures, reading.source)
                 rule = (source.grain if source is not None else None) or "day"
                 for spec in m.windows:
