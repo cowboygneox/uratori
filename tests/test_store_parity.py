@@ -206,6 +206,45 @@ async def test_values_round_trip_with_every_stored_shape(
     assert sorted(await s.subjects(tenant, "fig", "v1")) == ["list", "nothing", "word"]
 
 
+async def test_save_if_absent_inserts_once_and_says_which_call_did_it(
+    store: tuple[EngineStore, str],
+) -> None:
+    """The lazy fill's write: first one in wins, the rest are no-ops.
+
+    Two readers arriving together on an unmaterialised carried bucket both
+    compute it -- the rows are identical, so the race is benign -- but only
+    one of them may report a movement, and neither may overwrite a row a
+    pass wrote in between. A plain upsert would satisfy the first half and
+    quietly fail the second.
+    """
+    s, tenant = store
+    assert await s.save_if_absent(tenant, "fig", "v1", "p1@2026-06", 1500.0, ["g2"], "Aki") is True
+    assert await s.save_if_absent(tenant, "fig", "v1", "p1@2026-06", 9999.0, ["zz"], "Aki") is False
+
+    held = await s.value(tenant, "fig", "v1", "p1@2026-06")
+    assert held is not None
+    assert (held.value, held.members) == (1500.0, ("g2",)), (
+        "the loser of the race must not overwrite the winner's row"
+    )
+
+
+async def test_save_if_absent_does_not_treat_a_stored_null_as_absent(
+    store: tuple[EngineStore, str],
+) -> None:
+    """A materialised bucket whose value is *nothing* is materialised.
+
+    An absence in this engine means "not computed", and a row saying "we
+    computed this and could not tell" is a different claim. A store reading
+    the null as a gap would let every later pass recompute and re-report it
+    for ever -- the sawtooth signature, in the change stream.
+    """
+    s, tenant = store
+    assert await s.save_if_absent(tenant, "fig", "v1", "p1@2026-06", None, [], "Aki") is True
+    assert await s.save_if_absent(tenant, "fig", "v1", "p1@2026-06", 5.0, [], "Aki") is False
+    held = await s.value(tenant, "fig", "v1", "p1@2026-06")
+    assert held is not None and held.value is None
+
+
 async def test_day_ranges_are_inclusive_at_both_ends(
     store: tuple[EngineStore, str],
 ) -> None:

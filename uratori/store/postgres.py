@@ -494,6 +494,40 @@ class PostgresEngineStore:
             label,
         )
 
+    async def save_if_absent(
+        self,
+        tenant: str,
+        name: str,
+        version: str,
+        subject: str,
+        value: Value,
+        members: Iterable[str],
+        label: str,
+    ) -> bool:
+        # `do nothing` rather than `do update`: the caller is filling a gap it
+        # believes exists, and by the time the statement runs another reader
+        # or a pass may have filled it. The rows are identical either way --
+        # the materialiser is one function -- so the conflict is benign, and
+        # the boolean is what stops the loser reporting a movement that never
+        # happened.
+        row = await self._pool.fetchrow(
+            """
+            insert into figure_value
+              (tenant_id, name, version, subject_id, value, members, subject_label, computed_at)
+            values ($1, $2, $3, $4, $5, $6, $7, now())
+            on conflict (tenant_id, name, version, subject_id) do nothing
+            returning 1
+            """,
+            tenant,
+            name,
+            version,
+            subject,
+            json.dumps(value),
+            json.dumps(list(members)),
+            label,
+        )
+        return row is not None
+
     async def remove(self, tenant: str, name: str, version: str, subject: str) -> None:
         await self._pool.execute(
             "delete from figure_value where tenant_id = $1 and name = $2 and version = $3 "

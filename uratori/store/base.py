@@ -252,4 +252,32 @@ class EngineStore(Protocol):
         label: str,
     ) -> None: ...
 
+    async def save_if_absent(
+        self,
+        tenant: str,
+        name: str,
+        version: str,
+        subject: str,
+        value: Value,
+        members: Iterable[str],
+        label: str,
+    ) -> bool:
+        """Write a value only if nothing is stored under that key; say whether
+        it did.
+
+        The lazy half of `carried forward` needs it. A read that finds an
+        unmaterialised carried bucket materialises it in place and serves it,
+        and two readers arriving together both will -- benignly, because a
+        carried row is deterministic and time-invariant, so they compute the
+        same bytes. What must not happen is the second one *reporting* a
+        movement, or overwriting a row a pass wrote in between; the boolean
+        is what the caller reads to tell the two apart.
+
+        A stored null is **present**, not absent: "we computed this and could
+        not tell" is a claim, distinct from "nobody has computed this", and a
+        store that conflated them would re-fill and re-report the same bucket
+        on every pass for ever.
+        """
+        ...
+
     async def remove(self, tenant: str, name: str, version: str, subject: str) -> None: ...

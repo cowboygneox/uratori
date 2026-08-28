@@ -252,5 +252,23 @@ class MemoryEngineStore:
             subject=subject, value=value, members=tuple(members), label=label
         )
 
+    async def save_if_absent(
+        self,
+        tenant: str,
+        name: str,
+        version: str,
+        subject: str,
+        value: Value,
+        members: Iterable[str],
+        label: str,
+    ) -> bool:
+        key = (tenant, name, version, subject)
+        if key in self._values:
+            return False
+        self._values[key] = StoredValue(
+            subject=subject, value=value, members=tuple(members), label=label
+        )
+        return True
+
     async def remove(self, tenant: str, name: str, version: str, subject: str) -> None:
         self._values.pop((tenant, name, version, subject), None)
