@@ -907,10 +907,10 @@ group addressed by `:{scope}`, and the measure may not be a field measure.
 ### Statistics
 
 A closed vocabulary, not an expression grammar: `mean`, `median`, `worst`,
-`sum`, `count`, `series`. Each is a claim about a distribution that a reader
-has to be able to check against the evidence, and an arbitrary formula is not
-checkable by anybody not already reading the code. Each line of `calculate`
-is one statistic over one bound set.
+`sum`, `count`, `series`, `delta`. Each is a claim about a distribution that a
+reader has to be able to check against the evidence, and an arbitrary formula
+is not checkable by anybody not already reading the code. Each line of
+`calculate` is one statistic over one bound set.
 
 - **`sum` is why a count figure can be read at all.** The distribution
   statistics are refused over daily counts, because a mean of them is a mean
@@ -946,6 +946,42 @@ is one statistic over one bound set.
   raw collection the payload exists to withhold -- and refusing the word is
   also what makes a finer-than-stored series unwritable, since the finest
   series grain equals the coarsest sub-day stored grain.
+- **`delta`** is the change into each bucket of the range: one cell per
+  bucket, in the same order and count as a series, so the two draw against
+  one axis. n buckets produce n-1 changes, and the cell that has none is the
+  **oldest bucket in the range** -- it has no predecessor inside the window,
+  and the answer says so rather than omitting the bucket. That absence is
+  the whole discipline of the construct. The tempting fix is to fetch the
+  bucket *before* the window and difference against it, which produces a
+  fuller chart and a number the response cannot account for: one of its
+  values would be about a bucket the response does not contain, and a reader
+  checking the answer against its own evidence would come up short. It is
+  the same refusal an offset selector gets, one layer out.
+
+  A hole breaks the chain in **both** directions: the change into a missing
+  bucket and the change out of it are equally unknowable. Bridging the gap
+  -- differencing March against January because February is missing --
+  reports a two-bucket movement in a column headed per-bucket, and does it
+  exactly where collection was patchy. A flat run reads a real nought, which
+  is a finding ("it did not move") and not the same as not knowing.
+
+  It is allowed over a **count** figure, where the distribution statistics
+  are not: a mean of daily counts is a mean per day wearing a per-record
+  label, but the change from one day's count to the next is a claim about
+  days, which is what the buckets are. It is refused over a **live** reading
+  (nothing is stored to difference, so it would answer an empty list under a
+  heading promising a trend), twice in one reading (a response carries one),
+  and under a **band** -- a band compares one number and a delta is one cell
+  per bucket, so every row would band unknown for ever, which reads as
+  missing data rather than as a broken definition. There are deliberately no
+  stride or offset variants; each would be a second spelling of a question
+  nothing has asked.
+
+  `delta` is what closed this language's oldest gap. A trend had been listed
+  as missing for as long as there were readings, on the reasoning that the
+  server could compute one over a reading's answer. That reasoning was wrong
+  in the usual way: the number still reaches a screen, it just arrives with
+  no definition claiming it and no version citing it.
 - **A sum may not sit beside a distribution**: two numbers a reader can
   divide produce a third that no definition claims.
 
@@ -1364,8 +1400,8 @@ its own version and provenance exactly as it would served alone.
 **A bundle defines no calculation.** Members are names plus arguments,
 nothing else -- no `depends`, no `calculate`, no unit, no band, no
 cross-member arithmetic of any kind. A number derived from two members is a
-`combine` figure's job; a trend across windows is the server's job inside the
-reading's own response. Serving a bundle *triggers* evaluation of its
+`combine` figure's job; a trend inside one window is the reading's own
+`delta`. Serving a bundle *triggers* evaluation of its
 members, and every rule that makes a number trustworthy stays in the member's
 own definition and hash.
 
@@ -1627,6 +1663,12 @@ The ones most worth recognising, in the checker's own words:
   wearing a label that says per record"* -- only `sum` over counts.
 - *"...calculates both a sum and a distribution"* -- two numbers a reader can
   divide produce a third no definition claims.
+- *"...takes a delta, and it measures records as they stand"* -- a delta is
+  the change between adjacent stored buckets, and a live reading stores
+  none.
+- *"...bands on delta(...), which is one cell per bucket rather than one
+  number"* -- a band compares a single value; left to compile, every row
+  would band unknown for ever.
 - *"...bands on the mean, by default, which it does not calculate"* -- a band
   must colour a statistic the reading computes.
 - *"...is a reading, and a reading may only read a figure"* -- no means of
