@@ -505,6 +505,12 @@ def test_a_negative_duration_renders_in_the_same_unit_as_a_positive_one() -> Non
     assert format_value(-7200.0, "duration", settings) == "-2.0h"
     assert format_value(-30.0, "duration", settings) == "-30s"
     assert format_value(-172800.0, "duration", settings) == "-2.0d"
+    # A fall too small to render is not a fall in the wrong direction. A
+    # delta is the difference of two float means, so a tenth of a second is
+    # an ordinary cell, and "-0s" reads as a direction somebody measured
+    # where the truth is that it rounded away.
+    assert format_value(-0.1, "duration", settings) == "0s"
+    assert format_value(-0.0, "duration", settings) == "0s"
     # The same ladder shape, one unit along: a subtraction under `unit effort`
     # can go negative too, and printed a fortnight of work as "-240.0h".
     assert format_value(-864000.0, "effort", settings) == "-30.0d"

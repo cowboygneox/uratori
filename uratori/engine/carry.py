@@ -71,6 +71,12 @@ absence for exactly the buckets a value had been in force longest. It is a
 hard precondition rather than something checkable, which is the price of
 delegating the calendar; the engine's own span resolver clamps only at the
 beginning of the calendar, the one short answer this may safely mean.
+
+It is also asked for `cap + 1` exactly once, at the ceiling, to tell a
+calendar that happens to be `cap` long from one that runs on. A resolver
+with a reach bound of its own may refuse that question; a `ValueError` --
+which the engine's own `WindowError` is -- is read as "there is more
+calendar than the cap" and becomes a `CarryReachExceeded`.
 """
 
 
@@ -233,7 +239,21 @@ def sequence_to_present(
             # carry a sequence that would have fitted whole is the wrong
             # error. Asking for one past the ceiling settles it, at the cost
             # of a single call, only at the boundary.
-            beyond = labels_back(cap + 1)
+            try:
+                beyond = labels_back(cap + 1)
+            except ValueError:
+                # The resolver has a ceiling of its own and this probe went
+                # over it -- the engine's own span resolver refuses a reach
+                # past its bound rather than clamping. That refusal answers
+                # the question the probe was asking ("is there more calendar
+                # than the cap?") with a yes, so it becomes our refusal
+                # rather than escaping as somebody else's exception type.
+                beyond = []
+                raise CarryReachExceeded(
+                    f"carrying forward from {earliest} reaches past what the bucket "
+                    f"resolver will answer for, and past this carry's own ceiling of "
+                    f"{cap} buckets."
+                ) from None
             if len(beyond) <= cap:
                 labels = beyond
                 break

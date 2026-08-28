@@ -323,8 +323,57 @@ def test_the_walk_asks_the_resolver_and_stays_inside_the_cap() -> None:
         return walker(n)  # type: ignore[operator]
 
     sequence_to_present("2026-02", spy, cap=120)
+    assert seen == [1, 2, 4, 8], (
+        "the walk doubles until it reaches back past the anchor and then stops; "
+        f"it asked for {seen}"
+    )
+
+
+def test_a_short_answer_ends_the_walk_rather_than_widening_to_the_cap() -> None:
+    """A resolver that has run out of calendar is asked once more and no more.
+
+    A short answer is the only "there are no older buckets" signal the walk
+    gets. Ignoring it still returns the right labels -- which is why every
+    value assertion in this file misses it -- while doubling on to the
+    ceiling and then probing past it: nine calendar resolutions per subject
+    where three would do, on exactly the figures whose first change predates
+    collection.
+    """
+    seen: list[int] = []
+    calendar = ["2026-06", "2026-07", "2026-08"]
+
+    def clamped(n: int) -> list[str]:
+        seen.append(n)
+        return calendar[-min(n, len(calendar)) :]
+
+    assert sequence_to_present("1990-01", clamped, cap=120) == calendar
     assert seen, "the resolver is the only thing that knows what a bucket is"
-    assert max(seen) <= 121, "one probe past the ceiling settles a full calendar; no more"
+    assert max(seen) <= 2 * len(calendar), (
+        "the walk carried on past the answer that told it the calendar had "
+        f"ended -- it asked for {max(seen)} buckets of a {len(calendar)}-bucket "
+        f"calendar: {seen}"
+    )
+
+
+def test_a_resolver_that_refuses_to_look_further_becomes_our_own_refusal() -> None:
+    """The ceiling probe asks for one bucket more than the cap, and the
+    engine's own span resolver refuses a reach past its bound rather than
+    clamping.
+
+    Left unhandled that refusal escapes as the resolver's exception type,
+    from a call the caller never made, naming a limit the caller never set.
+    It answers the question the probe was asking, so it becomes the carry's
+    own refusal.
+    """
+    calendar = [f"2026-{m:02d}" for m in range(1, 13)]
+
+    def bounded(n: int) -> list[str]:
+        if n > len(calendar):
+            raise ValueError("this span reaches further back than the ceiling")
+        return calendar[-n:]
+
+    with pytest.raises(CarryReachExceeded):
+        sequence_to_present("1990-01", bounded, cap=len(calendar))
 
 
 def test_the_reach_is_capped_rather_than_walked_for_ever() -> None:

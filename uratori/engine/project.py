@@ -372,8 +372,12 @@ def _duration(seconds: float) -> str:
     until `delta` did -- a change between buckets goes both ways -- which is
     why the ladder survived this long looking total.
     """
-    sign = "-" if seconds < 0 else ""
     size = abs(seconds)
+    # The sign is dropped when the magnitude rounds away: a fall of a tenth of
+    # a second is "0s", never "-0s". A signed nought reads as a direction
+    # somebody measured, and this one is a rounding artefact -- reachable
+    # because a duration delta is the difference of two float means.
+    sign = "-" if seconds < 0 and round(size) != 0 else ""
     if size < 60:
         return f"{sign}{round(size)}s"
     if size < 3600:

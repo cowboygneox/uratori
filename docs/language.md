@@ -1789,9 +1789,16 @@ The ones most worth recognising, in the checker's own words:
 - *"...takes a delta, and it measures records as they stand"* -- a delta is
   the change between adjacent stored buckets, and a live reading stores
   none.
-- *"...bands on delta(...), which is one cell per bucket rather than one
-  number"* -- a band compares a single value; left to compile, every row
-  would band unknown for ever.
+- *"...takes a delta over a figure keyed by 15 minutes"* -- a delta's cells
+  are its source's own buckets and there is no grain to group them to, so a
+  sub-day source would put the raw collection on the wire. Left to compile
+  it did not fail: it answered an empty list, with no reason attached.
+- *"...bands on delta(...) / series(...), which is one cell per bucket rather
+  than one number"* -- a band compares a single value; left to compile, every
+  row would band unknown for ever, which reads as missing data rather than as
+  a broken definition. The `series` half of this refusal is newer than the
+  construct: banding a series compiled for as long as series existed, and
+  coloured nothing.
 - *"...bands on the mean, by default, which it does not calculate"* -- a band
   must colour a statistic the reading computes.
 - *"...is a reading, and a reading may only read a figure"* -- no means of

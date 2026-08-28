@@ -1072,3 +1072,33 @@ async def test_every_dial_entry_point_reaches_the_page_as_a_setting_edge(
         "the page never fetches the dials payload, so a definition's setting "
         "edges render as names with no values beside them"
     )
+
+
+def test_the_delta_cells_render_an_absence_as_an_absence_not_as_a_nought() -> None:
+    """A null delta cell printed as `0` would say "no change" where the
+    server said "not computed".
+
+    The whole payload is built to keep those apart, and the page would be
+    drawing a flat line through exactly the buckets nothing was collected
+    for, with no way for a reader to tell which was which.
+
+    Guarded on the source because the suite runs no JavaScript, so the reach
+    is honest but limited: it catches a null rendered as any numeral, and
+    not a null rendered as an empty string. The field-presence guard above
+    cannot catch either -- it only asks whether `delta_display` is mentioned,
+    and a mutant that renders every hole as `0` mentions it just as much.
+    """
+    source = _app_source_sans_comments()
+    found = re.search(r"function deltaCells\(window\)\s*\{(.*?)\n\}", source, re.S)
+    assert found is not None, "deltaCells has been renamed; this guard names it"
+    body = found.group(1)
+
+    for literal in re.findall(r"'([^']*)'", body):
+        assert not re.fullmatch(r"-?[0-9]+(?:\.[0-9]+)?", literal), (
+            f"deltaCells renders the literal {literal!r}. A cell the server said "
+            "nothing about must not print as a number"
+        )
+    assert body.count("'—'") >= 2, (
+        "both absences -- a column with no cells at all, and a hole inside one "
+        "-- print the absence glyph rather than a value"
+    )
