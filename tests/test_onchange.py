@@ -1117,3 +1117,39 @@ figure site.worse bucketed:
         median(m)
 '''
         )
+
+
+async def test_a_carried_bucket_cites_the_change_it_carried_from() -> None:
+    """"Why 25 in July?" is answerable, and the answer is a June record.
+
+    A carried bucket holds no records of its own -- nobody changed anything
+    that month -- so a naive evidence chain would cite the empty bucket and
+    dead-end exactly where the reader started asking. The row carries its
+    anchor's evidence instead, which is what makes the number walkable back
+    to the change, its instant and its author.
+    """
+    engine, store, library, _ = await _carried()
+
+    july = await engine.evidence("t1", "site.target_month", "s1@2026-07")
+    assert [m.key for m in july.members] == ["c2"], (
+        "a carried bucket cited something other than the change in force"
+    )
+
+    # And the anchor month cites the same record, because it is the same
+    # change -- the two buckets differ in label, never in provenance.
+    june = await engine.evidence("t1", "site.target_month", "s1@2026-06")
+    assert [m.key for m in june.members] == ["c2"]
+
+    # March carries February's, not June's: the chain follows the value in
+    # force at that coordinate rather than the latest change overall.
+    march = await engine.evidence("t1", "site.target_month", "s1@2026-03")
+    assert [m.key for m in march.members] == ["c1"]
+
+
+async def test_the_carried_row_is_headed_by_the_subjects_name() -> None:
+    """A carried bucket is a row on a board like any other, and a row headed
+    by a raw id reads as broken data rather than as a carried value."""
+    engine, store, library, _ = await _carried()
+    plan = library.figure("site.target_month")
+    rows = {r.subject: r.label for r in await store.values("t1", plan.name, plan.version)}
+    assert rows["s1@2026-07"] == "Northgate"

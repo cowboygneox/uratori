@@ -168,7 +168,7 @@ a real constraint on naming, better stated than discovered.
 | `group` | which records belong to which subject | one bucket per value |
 | `filter` | which records pass a test | one bucket |
 | `measure` | a quantity read off one record | nothing |
-| `figure` | one value per subject | values |
+| `figure` | one value per subject, or one per bucket when `bucketed` | values |
 | `reading` | a statistic over stored buckets, or over records right now | nothing |
 | `projection` | one row per record | nothing |
 | `summarise` | one row about a whole population | nothing |
@@ -769,11 +769,31 @@ figure team_person.time_to_merge bucketed:
         list(code_change.open_seconds over merged)
 ```
 
+`bucketed` is required, and refused where there is no sequence. The grain is
+written in the group and implied by the name, so the keyword is bare -- a
+figure restating the grain would be a second place for the two to disagree,
+leaving the checker to decide which wins. What the word adds is the
+*declaration*, exactly as [`across`](#across----a-second-dimension) does one
+key-part along: unsaid, every reader downstream is wrong in its own way -- a
+projection binds a column that never resolves, a bundle subscribes to every
+stored bucket of every subject, a rollup totals a sequence as though it were
+one number.
+
+It is deliberately **not in the version hash**. It mirrors the group's spec,
+and that spec is already hashed into every definition that reads it, so
+hashing it here would store a second copy of a fact already recorded --
+`keyed as` exactly: a construct that decides what the checker permits, never
+what the arithmetic produces. Staying out is also what made it introducible.
+Hashed, making it required would have moved every sequenced figure's version
+in every deployment and rebuilt every tenant's history to store
+byte-identical numbers.
+
 Time-keyed is what makes a figure readable over a range -- it is the property
 a windowed [reading](#reading----evaluated-never-stored) requires of its
 source. A bucket of time is not a dimension: it has no roster and no name, so
-a time-keyed figure cannot also declare `across`, cannot be read by a
-projection, and cannot be combined as a single value.
+a time-keyed figure cannot also declare `across` and cannot be read by a
+projection. It may be read by another *bucketed* figure, one coordinate at a
+time -- see [on-change data](#on-change-data-carried-forward) below.
 
 ### `across` -- a second dimension
 
@@ -840,6 +860,256 @@ same block, and one property makes it cheap:
 The dials a band reads must be figure settings, and they are tracked
 separately from the calculation's dials, so a dial only the band reads never
 forces a rebuild of values it did not affect.
+
+---
+
+## On-change data: `carried forward`
+
+Some of the world is recorded as **changes** rather than as states. A goal, a
+staffing level, a price, a facility setting: one record each time somebody
+moves the value, and nothing at all in between. The records are sparse by
+nature -- a month nobody touched it has no record -- and every screen wants
+the opposite shape, a value per month including the months nobody changed
+anything.
+
+Nothing below is about goals in particular. The pattern applies to any
+on-change fact, and the four declarations each answer exactly one question.
+
+```
+# One change to one setting, at one site, by one person.
+fact setting_change:
+    site_id as text
+    setting as text
+    value as number
+    set_at as moment
+    set_by as text
+
+filter setting_change.target where setting == "target_minutes"
+group setting_change.by_month from (site_id, set_at by month in tenant.timezone)
+
+# The target in force each month: the latest one set within the month,
+# carried across the months where nobody changed it.
+figure site.target_month bucketed:
+    display "{site} target"
+    unit duration
+
+    depends:
+        sets = setting_change.by_month:{site} & setting_change.target
+
+    calculate:
+        latest(setting_change.value over sets) carried forward
+```
+
+**The factoring is the design.** The group is *metric-agnostic* -- one group
+per fact stream, keyed by subject and month -- so one group serves every
+setting the stream carries. The filter owns the narrowing, because deciding
+which records are in play is what a filter is for. And the figure's **name**
+is the only place "this setting, monthly" is claimed, backed by the two parts
+it visibly intersects. Putting the setting's name in the group would mean a
+group per setting; putting the month in the filter would mean a filter that
+knows about calendars.
+
+### Reading a declared field
+
+`latest(setting_change.value over sets)` reads the field the most recent
+record in the bucket set it to. There is deliberately no measure in the way:
+`measure setting_change.goal = value in count` would be a second name for one
+field, written only to satisfy the grammar, in a language that refuses a
+second place to write one thing everywhere else.
+
+`latest` therefore covers two operations, and they do not blur. Over a
+**moment measure** it answers *when* -- the most recent instant in a
+population. Over a **declared field** it answers *what the value was then*.
+Which one was meant follows from what the dotted name resolves to, and a
+measure wins where both could match, so declaring one can never silently
+change what an existing figure computes.
+
+**Which record is "latest" is not a second thing to declare.** The group
+already said `set_at by month`; that field is when the change happened, and
+it is the only ordering in sight. Naming it again would be a second place for
+the two to disagree, and the disagreement is silent -- order by a different
+field than you bucketed by and a bucket reports a superseded value with
+nothing thrown. Ties break on the record key: arbitrary, but stable, because
+two changes stamped at the same instant are a data problem and answering them
+differently on each pass would be a figure that moves with nothing behind it.
+
+A field read must declare its `unit`. That is the unit rule in its sharpened
+form -- **declare only what cannot be derived** -- and nothing can derive
+this one: a count is a count and a sum of an effort measure is an effort
+because the *construct* says what the number is, where a field read says only
+that a record carries a number. The fact layer is structural on purpose, so
+`value as number` claims a shape and never a meaning. A redundant declaration
+stays refused everywhere it always was.
+
+### What `carried forward` does
+
+The buckets nobody changed anything in report the last change. With a target
+of 30m set in February and 25m in June, and August the present month:
+
+| Month | Value | Why |
+|---|---|---|
+| January | *absent* | nothing had ever been set |
+| February | 30m | a change landed here -- an **anchor** |
+| March, April, May | 30m | carried |
+| June | 25m | a new anchor |
+| July, August | 25m | carried |
+
+**Before the first anchor there is an absence, never a nought.** Nothing had
+been set, so there is nothing to report -- and a nought sits comfortably
+under every threshold, so a band would have coloured January green for a
+target that did not exist.
+
+**Each carried row cites the change it carried from.** July's evidence is the
+June record: its value, its `set_at`, its `set_by`. A carried bucket holds no
+records of its own, so a naive chain would cite the empty bucket and dead-end
+exactly where the reader started asking.
+
+### Why these rows may be stored
+
+The standing rule is that a stored value may never read a clock: the clock is
+not an event, so nothing would ever recompute what it produced, and the value
+would be real exactly once.
+
+A carried row does not read one. Its contents follow entirely from the
+anchors at or before its own bucket, so September's answer is the same answer
+for ever once September exists -- **deterministic and time-invariant**. What
+*is* clock-dependent is only how far the sequence has been extended, which is
+an existence question rather than a value one. Splitting those two halves is
+what makes materialising legal here where `now - requested_at` is refused,
+and it generalises: before deciding something cannot be stored because it
+moves with the clock, split it and check which half actually does.
+
+Three events extend a carried figure, and **one implementation serves all
+three**, so the rows are byte-identical whichever asked:
+
+- **A fact landing.** The bucket it lands in becomes an anchor, and the carry
+  is recomputed from that bucket *forward*. Buckets before it are untouched:
+  a change entered late but dated in April rewrites April onward and leaves
+  March exactly as it was. History is never rewritten by a later arrival --
+  which is precisely the property that makes these rows safe to store.
+- **A pass.** Every pass extends every carried figure to the bucket
+  containing the pass's own instant. The pass is the event that notices time;
+  the clock never is one.
+- **A read.** A read that finds an unmaterialised bucket materialises it in
+  place and then serves it, so a screen between passes is never told "never
+  computed" about a value that has demonstrably been in force for months.
+  Concurrent first-readers race benignly: both compute the same rows, and an
+  insert-or-nothing write decides which one counts as having created each.
+
+Three code paths writing these rows would be three chances to disagree, and
+every row would look plausible. The run log names the figures a pass carried,
+so "the pass ran and moved nothing" stays a different finding from "the pass
+never reached this figure".
+
+**Materialisation never runs past the present bucket**, whatever asks. The
+sequence is resolved by the same resolver a window's `over 1-6` uses, counted
+back from the anchor instant, so it cannot name a future bucket -- and a
+change dated next month materialises nothing until next month.
+
+**A carried grain finer than a pass can honour is refused.** Extension is the
+pass noticing time, so a figure owing a new bucket every minute would get one
+per sync and read as an absence in between. Fenced the way an age filter is
+fenced to whole days: the unenforceable version is not written, rather than
+written and left to disappoint. Carry at day grain or coarser.
+
+`carried forward` **is** in the version hash, where `bucketed` beside it is
+not. The asymmetry is the rule rather than an inconsistency: one mirrors a
+spec already hashed, the other changes what the stored values *are*. The same
+records under the same calculation give two buckets without it and twelve
+with it.
+
+### Comparing two sequences
+
+A bucketed figure may read another at the same coordinate:
+
+```
+# The median job length each month.
+figure site.actual_month bucketed:
+    display "{site} actual"
+
+    depends:
+        done = job.by_month:{site}
+
+    calculate:
+        median(job.length over done)
+
+# How far each month ran over or under the target in force that month.
+figure site.gap_month bucketed:
+    display "{site} gap"
+    unit duration
+
+    combine:
+        actual = site.actual_month
+        goal = site.target_month
+
+    calculate:
+        actual:{bucket} - goal:{bucket}
+
+    band:
+        when value > 0 then "over"
+        otherwise "ok"
+```
+
+**A sequenced figure's bare name is refused in expression position.** Written
+plain it reads like a static declaration when it is a point-in-time value --
+and, worse, with two sequences in one expression nothing says the arithmetic
+is per coordinate, so the obvious implementation is a positional zip: right
+until one source starts a bucket later than the other, and then every number
+is paired with the wrong month, plausibly, for ever.
+
+The semantics are **join by bucket key, never by position**. The subject
+being evaluated already *is* a coordinate, so reading a source at the same
+coordinate is a lookup under the same key and misalignment is
+unrepresentable. A coordinate one side holds and the other does not answers
+an **absence** there -- never a nought, and never a shift.
+
+The same selector works in a `band:` rung, comparing this figure's value
+against another figure at the same coordinate. A settings dial keeps its
+bare spelling, so bare-means-scalar and selector-means-sequenced are
+visually distinct by construction.
+
+**There is no `:{bucket - 1}`.** Offsets are refused in the grammar, because
+there is nothing to explain about a construct that does not exist. A stored
+value whose answer needs a bucket outside the population in view cannot be
+checked against the response that carries it: a reader is shown the number
+and, one coordinate back, nothing to check it against. It is the refusal
+[`delta`](#statistics)'s oldest cell gets, one layer down. If a definition
+wants the change between adjacent buckets, that is `delta`, where the range
+in view bounds the answer.
+
+### Statistics over a bucket
+
+A `bucketed` figure may take a distribution statistic over the records of its
+own bucket -- `median(job.length over done)` above. The standing refusal is
+against a statistic over **aggregates**: a mean of daily counts is a mean per
+*day* wearing a label that says per record. Here the population is the
+bucket's own records and the boundary is declared in the group, so "the
+median job length in August" is a sentence with a population a reader can
+check. The declared boundary is what turns the statistic into a claim.
+
+Outside a bucketed figure it is refused -- the population would be everything
+ever collected, so the number drifts with the data's age and nobody can say
+what it is a median *of*. Over a combined figure it is refused as the mean of
+means it would be.
+
+### Reading it back
+
+```
+# How the target and the work moved, month by month.
+reading site.pace(range):
+    display "{site} pace"
+
+    depends:
+        t = site.target_month in range
+
+    calculate:
+        median(t)
+        delta(t)
+```
+
+Nothing here is special to carried data: a carried figure is an ordinary
+bucketed figure whose buckets happen to be dense, so every reading, window
+and bundle rule applies unchanged.
 
 ---
 
@@ -1853,3 +2123,5 @@ construct nobody has checked.
 | a list of scalars in a fact | no construct can read one -- a predicate cannot test membership -- and a declared-but-unreadable field is a construct nobody has checked |
 | `work_hours` as a threshold unit | as shipped it was a synonym for `hours`; doing it honestly is a working calendar |
 | negative literals | a negative threshold is a dial; a negative value is a subtraction |
+| `:{bucket - 1}` and other offsets | an answer needing a bucket outside the population in view cannot be checked against the response that carries it; the change between adjacent buckets is `delta`, where the range bounds it |
+| a unit inherited from a fact field | the fact layer is structural, so there is nothing there to inherit; a declared-field read names its unit because nothing can derive it |

@@ -1102,3 +1102,45 @@ def test_the_delta_cells_render_an_absence_as_an_absence_not_as_a_nought() -> No
         "both absences -- a column with no cells at all, and a hole inside one "
         "-- print the absence glyph rather than a value"
     )
+
+
+def test_the_editor_knows_every_word_a_figure_header_can_carry() -> None:
+    """A construct the editor does not know renders as plain text beside the
+    keywords around it, which reads as a typo in the definition.
+
+    `series` sat unhighlighted for two releases and nothing went red, so the
+    words are enumerated here rather than trusted to whoever adds one. Held
+    against the *language's* own vocabulary: the source of truth is the
+    parser, so a keyword added there without a colour is caught by this
+    listing rather than by somebody noticing.
+    """
+    source = _app_source_sans_comments()
+    for word in ("bucketed", "carried", "forward", "median", "worst", "mean"):
+        assert f"'{word}'" in source, (
+            f"the editor does not know the word {word!r}, so a definition using it "
+            "renders it as plain text beside the keywords around it"
+        )
+
+
+def test_a_carried_figures_declaration_reaches_the_page_whole() -> None:
+    """The definition pane shows a figure exactly as written, and the header
+    pattern that finds the block has to admit every optional word.
+
+    It fails quietly when it does not -- the block is not found and the pane
+    serves a *blank* formula, which is a figure nobody can read on the very
+    surface that exists so they can. Both new header words are covered
+    together with the calculation's suffix, because all three are new places
+    the pattern could miss.
+    """
+    from tests.test_onchange import CARRIED, compile_world
+    from uratori.lang.source import declaration_source
+
+    lib = compile_world(CARRIED)
+    text = declaration_source(lib, "site.target_month")
+    assert text, "a carried figure served no formula at all"
+    assert "bucketed" in text
+    assert "carried forward" in text, (
+        "the suffix that says what the buckets between changes mean was cut "
+        "from the text a reader checks the number against"
+    )
+    assert "latest(setting_change.value over sets)" in text
