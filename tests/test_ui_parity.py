@@ -741,10 +741,12 @@ async def test_the_dials_route_serves_every_declarable_setting_with_its_value(
             "a threshold pair renders whole -- both rungs are the dial"
         )
 
-        # Every declarable dial answers, including the reserved rendering
-        # one -- the page joins declaration edges to this list, and a dial
-        # missing here would render as a name with no value beside it.
-        assert "tenant.hoursPerDay" in dials
+        # Every declarable dial answers -- the page joins declaration edges
+        # to this list, and a dial missing here would render as a name with
+        # no value beside it. There is no reserved one to add any more:
+        # `tenant.hoursPerDay` went when an effort stopped being rendered
+        # against a working day.
+        assert "tenant.hoursPerDay" not in dials
 
 
 async def test_a_dial_nobody_gave_a_value_is_a_stated_absence(pg_dsn: str) -> None:

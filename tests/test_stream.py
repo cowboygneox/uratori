@@ -873,22 +873,22 @@ def test_a_serving_run_reports_moved_as_a_superset_of_its_results(pg_dsn: str) -
 
 
 def test_the_runs_route_honours_serve_false_too(pg_dsn: str) -> None:
-    """The dial here is the effort rendering one: it re-words a display
-    without moving a stored value, which is the shape this door has to
-    report. (It used to be a band threshold, before a band's threshold
-    became a fact -- a fact write is a different door.)"""
+    """The trigger is a prose edit: outside every version hash, on the wire,
+    and noticed by the serve stamps alone -- which is the shape this door has
+    to report. (It used to be a band threshold, then the effort rendering
+    dial. Both are facts or gone.)"""
     with _service(pg_dsn) as client:
         _teach_tiles(client)
-        saved = client.put(
-            "/tenants/t1/settings",
-            json={"document": {"tenant": {"hoursPerDay": 4}}},
+        edited = TILE_SOURCE.replace(
+            "# Orders in hand right now.", "# Orders being carried."
         )
-        assert saved.status_code == 200
+        saved = client.put("/definitions", json={"source": edited})
+        assert saved.status_code == 200, saved.text
         ran = client.post("/tenants/t1/runs", json={"serve": False})
         assert ran.status_code == 200, ran.text
         body = ran.json()
         assert body["results"] == []
-        assert "shop_courier.lugging" in body["moved"]
+        assert "shop_courier.carrying" in body["moved"]
 
 
 def test_the_editors_run_reaches_a_subscriber(pg_dsn: str) -> None:
@@ -902,25 +902,27 @@ def test_the_editors_run_reaches_a_subscriber(pg_dsn: str) -> None:
                 {
                     "type": "subscribe",
                     "tenant": "t1",
-                    "entries": [{"name": "shop_courier.lugging"}],
+                    "entries": [{"name": "shop_courier.carrying"}],
                 }
             )
             socket.receive_json()
 
-            # The effort rendering dial: it re-words a display without moving
-            # a stored value, which is exactly the movement only a
-            # definition-only pass notices. (It used to be a band threshold,
-            # before a band's threshold became a fact.)
-            saved = client.put(
-                "/tenants/t1/settings",
-                json={"document": {"tenant": {"hoursPerDay": 4}}},
+            # A prose edit: outside every version hash, on the wire, and
+            # noticed by the serve stamps alone -- which is exactly the
+            # movement only a definition-only pass sees. (It used to be a
+            # band threshold, then the effort rendering dial. Both are facts
+            # or gone.)
+            edited = TILE_SOURCE.replace(
+                "# Orders in hand right now.", "# Orders being carried."
             )
-            assert saved.status_code == 200
+            saved = client.put("/definitions", json={"source": edited})
+            assert saved.status_code == 200, saved.text
             ran = client.post("/ui/api/tenants/t1/runs", json={})
             assert ran.status_code == 200, ran.text
 
             pushed = socket.receive_json()
-            assert pushed["result"]["name"] == "shop_courier.lugging"
+            assert pushed["result"]["name"] == "shop_courier.carrying"
+            assert pushed["result"]["doc"] == "Orders being carried."
 
 
 def test_a_pass_landing_during_a_subscribes_fetch_is_not_lost(pg_dsn: str) -> None:

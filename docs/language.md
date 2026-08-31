@@ -2049,11 +2049,11 @@ is now a fact:
 A dial named from any of those positions is refused, with the rewrite in the
 message.
 
-One path is still reserved rather than declared: `tenant.hoursPerDay`, which
-the renderer divides by to print an effort as days. It is not a threshold and
-it is not a calendar -- it is how long a working day is -- and it is the last
-thing here that a tenant sets. A host that renders efforts carries it in its
-defaults.
+No path is reserved any more. `tenant.hoursPerDay` was the last one: the
+renderer divided an effort by it to print "1d" instead of "8h", which made
+the length of a working day something a tenant set from a form and every
+effort on every board move when they did. An effort renders in hours, which
+needs nothing from anybody.
 
 ---
 

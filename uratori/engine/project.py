@@ -343,17 +343,19 @@ def format_value(value: Value, unit: FigureUnit, settings: Mapping[str, Any]) ->
     if unit == "duration":
         return _duration(value)
     if unit == "effort":
-        from ..schema import EFFORT_HOURS_SETTING
-
-        hours_per_day = float(setting_value(dict(settings), EFFORT_HOURS_SETTING))
-        # Scaled on the magnitude for the reason `_duration` is: the rung is a
-        # `>=` against a positive bound, so a negative effort -- which
-        # subtraction under `unit effort` can produce -- fell past it and
-        # printed a fortnight of work as "-240.0h".
+        # **Hours, always, and never days.** An effort is working time, so a
+        # day of it is however long a working day is -- which used to be a
+        # tenant dial the renderer divided by. That was the last number on a
+        # screen a tenant could move from a form, and moving it re-worded
+        # every effort on every board while no stored value went anywhere.
+        #
+        # Hours need no such input. "40h" says the same thing as "5d" to
+        # anybody who knows their own week, and it says it without the reader
+        # having to find out whose day the engine had in mind. Scaled on the
+        # magnitude and signed afterwards, as `_duration` is: subtraction
+        # under `unit effort` produces negatives, and a rung against a
+        # positive bound lets them through unformatted.
         sign = "-" if value < 0 else ""
-        days = abs(value) / (hours_per_day * 3600.0)
-        if days >= 1:
-            return f"{sign}{days:.1f}d"
         return f"{sign}{abs(value) / 3600.0:.1f}h"
     if unit == "moment":
         from datetime import UTC, datetime

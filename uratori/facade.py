@@ -48,7 +48,7 @@ from .lang.plan import BundlePlan, Library
 from .lang.settings import fingerprint as settings_fingerprint
 from .lang.source import declaration_source
 from .results import BundleResult, Evidence, Result
-from .schema import EFFORT_HOURS_SETTING, Schema
+from .schema import Schema
 from .store import EngineStore, FactSource, Pointer
 from .verify import verify_writes
 from .windows import WindowSpec
@@ -296,84 +296,57 @@ class Uratori:
         """What each projection and summary currently serves under.
 
         The same two-part discipline as every other pointer in the engine:
-        the declaration's version, and a fingerprint of the dials that can
-        move its *rendered* answer without moving any stored value -- its own
-        `value:`/`omit:`/flag dials, and the band dials of every figure it
-        binds `band of` (a band is worded at serve time, deliberately outside
-        the figure's compute fingerprint). This is what lets a definition-only
-        pass know, rather than guess, that an edit or a settings save reached
-        a projection: nothing about a projection is stored, so without a
-        stamp there is nothing to compare and the only honest alternatives
-        are serve-everything (the fixed tail this replaces) or a silent
-        freeze (the bug three reviewers found in the first attempt).
+        the declaration's version, and a fingerprint of what can move its
+        *rendered* answer without moving any stored value. That second part
+        is now empty of dials -- a threshold is a fact, a calendar is a fact,
+        and an effort renders in hours -- so what it carries is the
+        declaration's own prose, which is outside the version hash and still
+        reaches the screen. This is what lets a definition-only pass know,
+        rather than guess, that an edit reached a projection: nothing about a
+        projection is stored, so without a stamp there is nothing to compare
+        and the only honest alternatives are serve-everything (the fixed tail
+        this replaces) or a silent freeze (the bug three reviewers found in
+        the first attempt).
         """
         lib = self._library
         stamps: dict[str, Pointer] = {}
         for plan in lib.projections:
-            dials: set[str]
             # A `band of X` column used to add X's band *dials* here, because
             # turning one re-worded the column while nothing stored moved.
             # A band's threshold is a figure now, so what moves the column is
             # a value -- caught by `_reached`, which follows the same edge.
-            dials = set(plan.settings)
-            # The effort rendering dial, when any row value is an effort:
-            # `format_value` divides by it on the way to `display`, so the
-            # rendered rows move the moment it does -- the same edge the UI's
-            # dependency closure draws, and for a release the one dial that
-            # re-served the figures while every projection rendering the same
-            # efforts kept the old text.
-            if any(
-                unit == "effort" for _, _, unit, band in plan.reads if not band
-            ) or any(unit == "effort" for _, _, unit in plan.values):
-                dials.add(EFFORT_HOURS_SETTING)
             stamps[plan.name] = Pointer(
                 version=plan.version,
-                settings_fingerprint=_serve_fingerprint(
-                    document, sorted(dials), plan.doc
-                ),
+                settings_fingerprint=_serve_fingerprint(document, [], plan.doc),
             )
         for summary in lib.summaries:
-            dials = set(summary.settings)
-            if any(unit == "effort" for _, _, unit, _ in summary.totals) or any(
-                unit == "effort" for _, _, unit in summary.values
-            ):
-                dials.add(EFFORT_HOURS_SETTING)
             stamps[summary.name] = Pointer(
                 version=summary.version,
-                settings_fingerprint=_serve_fingerprint(
-                    document, sorted(dials), summary.doc
-                ),
+                settings_fingerprint=_serve_fingerprint(document, [], summary.doc),
             )
         # Figures and readings carry serve stamps too, under a prefixed key
         # because a figure's own name already holds its *compute* pointer.
-        # The dials here are exactly the ones that move a served answer
-        # without moving a stored value: a figure's band dials (a band is
-        # worded at serve time, deliberately outside the compute
-        # fingerprint), a reading's own dials (its band -- a reading stores
-        # nothing, so no pointer ever noticed for it), and the effort
-        # rendering dial where the unit is effort (`format_value` divides by
-        # it, so the rendered text moves the moment it does -- the same edge
-        # the UI's dependency closure draws). Before these stamps existed, a
-        # band threshold save updated nothing stored and pushed nothing, and
-        # every connected screen kept the old colour until a reload.
+        # What these notice is prose: a docstring or a display template
+        # reaches the screen and is deliberately outside the version hash, so
+        # without a stamp an edited explanation would land in the artifact
+        # and never on a connected board.
+        #
+        # They used to notice dials as well -- a figure's band thresholds, a
+        # reading's band, the working day an effort was rendered against --
+        # each a number that re-worded an answer while every stored value sat
+        # still. There are none left to notice.
         for figure_plan in lib.figures:
-            dials = set()
-            if figure_plan.unit == "effort":
-                dials.add(EFFORT_HOURS_SETTING)
             stamps[_serve_key(figure_plan.name)] = Pointer(
                 version=figure_plan.version,
                 settings_fingerprint=_serve_fingerprint(
-                    document, sorted(dials), figure_plan.doc, figure_plan.display
+                    document, [], figure_plan.doc, figure_plan.display
                 ),
             )
         for reading in lib.readings:
-            dials = set(reading.settings)
-            if reading.unit == "effort":
-                dials.add(EFFORT_HOURS_SETTING)
             stamps[_serve_key(reading.name)] = Pointer(
                 version=reading.version,
                 settings_fingerprint=_serve_fingerprint(
-                    document, sorted(dials), reading.doc, reading.display
+                    document, [], reading.doc, reading.display
                 ),
             )
         # Bundles carry a serve stamp too, for the one thing on their wire

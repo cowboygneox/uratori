@@ -178,15 +178,17 @@ async def test_a_definition_pass_serves_exactly_what_it_reached() -> None:
     )
 
 
-async def test_a_threshold_dial_now_reaches_nothing_at_all() -> None:
+async def test_a_settings_save_now_reaches_nothing_at_all() -> None:
     """This test used to turn `thresholds.wip.over` and watch the figure
     reading it recompute, the projection reading *that* follow, and the rest
     of the board stay still. Every one of those edges was real; what has gone
     is the dial at the end of them.
 
     A threshold cannot be named from a calculation, a band, a projection value
-    or a flag any more, so a threshold-shaped dial reaches nothing whatever it
-    is set to -- and the pass must serve nothing rather than fall back to the
+    or a flag any more; a calendar is a field on the subject's record; and an
+    effort renders in hours. So *no* dial reaches anything whatever it is set
+    to -- which is why the projection-renders-under-a-dial test that stood
+    beside this one is gone rather than rewritten -- and the pass must serve nothing rather than fall back to the
     fixed tail. The edges themselves did not disappear with it: a figure
     moving still reaches the projection reading it (the facts pass below), and
     a goal figure moving still re-words the figure banded against it
@@ -257,27 +259,6 @@ async def test_a_projections_own_edit_reaches_it() -> None:
     assert _served(report.results) == {"code_change.card"}
     report = await grown.run(TENANT)
     assert report.results == (), "the stamp settled; nothing is owed twice"
-
-
-async def test_a_dial_a_projection_renders_under_reaches_it() -> None:
-    """A projection is rendered at serve time; no stored value moves when a
-    dial it renders under turns, and before serve stamps the pass served
-    nothing while every subscribed row silently went stale. The projection
-    rendering under the dial re-serves; its neighbours do not.
-
-    The dial used to be a threshold in the weight ladder. Thresholds are
-    facts now, so the surviving instance is the working day, which the
-    renderer divides an effort by on the way to the text."""
-    store, facts = MemoryEngineStore(), MemoryFactStore()
-    _seed(facts)
-    facade = _facade(LIB, store, facts)
-    await facade.run(TENANT, full=True)
-
-    report = await facade.run(TENANT, {"tenant": {"hoursPerDay": 4}})
-    assert _served(report.results) == {"work_issue.weighted"}, (
-        "the row's effort renders against the working day; every rendered "
-        "load moved and only this projection prints one"
-    )
 
 
 async def test_a_summarys_own_edit_reaches_its_projection() -> None:

@@ -1498,13 +1498,20 @@ async def test_a_fanned_out_member_counts_once_and_buckets_page(pg_dsn: str) -> 
         assert rest["buckets_more"] is False
 
 
-async def test_effort_rendering_reads_the_dial_and_names_it_in_moved_by(
+async def test_an_effort_renders_in_hours_and_needs_no_dial(
     pg_dsn: str,
 ) -> None:
-    """`format_value` divides an effort by tenant.hoursPerDay at render time,
-    so the dial appears in no compiled plan -- and a closure built only from
-    plan edges would let the page claim 'nothing else can move this' about a
-    number whose text moves the moment the dial does."""
+    """`format_value` used to divide an effort by `tenant.hoursPerDay` at
+    render time, so the dial appeared in no compiled plan and the page had to
+    add it to `moved_by` by hand -- otherwise the closure claimed "nothing
+    else can move this" about a number whose text moved the moment the dial
+    did. Two tests stood here: that one, and a 409 for a host that declared
+    an effort measure and never set the dial.
+
+    An effort renders in hours now. There is no divisor, so there is no edge
+    to add and no misconfiguration to refuse -- and this test is what says
+    the edge really is gone rather than merely untested.
+    """
     async with serve(pg_dsn) as http:
         await _teach(http)
         put = await http.put(
@@ -1517,7 +1524,10 @@ async def test_effort_rendering_reads_the_dial_and_names_it_in_moved_by(
         assert put.status_code == 200, put.text
         world = (await http.get("/ui/api/world")).json()
         spent = next(d for d in world["declarations"] if d["name"] == "shop_order.spent")
-        assert {"type": "setting", "name": "tenant.hoursPerDay"} in spent["moved_by"]
+        assert all(d["type"] != "setting" for d in spent["moved_by"]), (
+            "an effort measure still names a dial, so its text can still move "
+            "from a settings form"
+        )
 
         await http.post(
             "/tenants/t1/facts",
@@ -1535,46 +1545,16 @@ async def test_effort_rendering_reads_the_dial_and_names_it_in_moved_by(
             },
         )
         page = (await http.get("/ui/api/tenants/t1/measured/shop_order.spent")).json()
-        assert page["records"][0]["display"] == "1.0d", "28,800s at 8h/day is one day"
+        assert page["records"][0]["display"] == "8.0h", "28,800s of working time"
 
         await http.put(
             "/tenants/t1/settings",
             json={"document": {"tenant": {"hoursPerDay": 4}}},
         )
         moved = (await http.get("/ui/api/tenants/t1/measured/shop_order.spent")).json()
-        assert moved["records"][0]["display"] == "2.0d", (
-            "the dial is read at render time -- which is exactly why it must "
-            "appear in moved_by"
+        assert moved["records"][0]["display"] == "8.0h", (
+            "a dial nothing reads changed the rendered text"
         )
-
-
-async def test_an_effort_measure_without_the_dial_is_a_409_naming_it(
-    pg_dsn: str,
-) -> None:
-    """The checker never requires the dial, so this misconfiguration compiles
-    and only fails at render time. It must fail as the raiser's own sentence
-    naming the dial, not as a 500 the operator has to go digging for."""
-    from uratori import Schema
-
-    bare = Schema(kinds=frozenset({"shop_order"}), name_fields={"shop_order": "ref"})
-    async with serve(pg_dsn) as http:
-        assert (await http.put("/schema", json=bare.to_document())).status_code == 200
-        put = await http.put(
-            "/definitions",
-            json={"source": "measure shop_order.spent = work_seconds in effort"},
-        )
-        assert put.status_code == 200, put.text
-        await http.post(
-            "/tenants/t1/facts",
-            json={"writes": {"shop_order": {"o0": {"ref": "A-0", "work_seconds": 60}}}},
-        )
-        refused = await http.get("/ui/api/tenants/t1/measured/shop_order.spent")
-        assert refused.status_code == 409
-        assert "hoursPerDay" in refused.json()["detail"]
-
-        record = await http.get("/ui/api/tenants/t1/facts/shop_order/o0")
-        assert record.status_code == 409
-        assert "hoursPerDay" in record.json()["detail"]
 
 
 async def test_a_dotted_name_field_names_records_on_every_surface(
@@ -1914,7 +1894,11 @@ async def test_the_editor_serves_the_source_the_deployment_holds(
         assert page["editable"] is True, "an open server grants editing"
         assert page["refusal"] is None
         assert len(page["fingerprint"]) == 12
-        assert page["dials"] == ["limits.carrying.over", "tenant.hoursPerDay"]
+        assert page["dials"] == ["limits.carrying.over"], (
+            "the editor offers the dials a definition may name; the reserved "
+            "rendering one went when an effort stopped being divided by a "
+            "working day"
+        )
         assert page["kinds"] == {"shop_courier": [], "shop_order": []}
         assert {d["name"]: d["kind"] for d in page["declarations"]} == {
             "shop_order.carried_by": "group",

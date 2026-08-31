@@ -37,13 +37,11 @@ Four things live here, and each is a decision the host owns:
   falling back to something plausible would produce numbers about the wrong
   dial.
 
-One dial path is reserved rather than declared: `tenant.hoursPerDay`, which the
-renderer divides by to print an `effort` (seconds of working time) as days.
-It is a settings path rather than a constant because it is per-tenant, and it
-is fixed rather than schema-declared because the formatter runs everywhere a
-value becomes text and threading a schema through every formatting call would
-buy renameability nobody has asked for. A host that renders efforts must carry
-it in `defaults`.
+No dial path is reserved. `tenant.hoursPerDay` was: the renderer divided by
+it to print an `effort` (seconds of working time) as days. An effort renders
+in hours now, which needs nothing from a tenant -- "40h" says what "5d" said
+to anybody who knows their own week, and it says it without the reader having
+to find out whose working day the engine had in mind.
 """
 
 from __future__ import annotations
@@ -59,9 +57,6 @@ if TYPE_CHECKING:  # a type-only import; schema.py must stay importable first
     from .lang.plan import Library
 
 _KIND = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-EFFORT_HOURS_SETTING = "tenant.hoursPerDay"
-"""The reserved dial: how many working hours make a day, for rendering effort."""
 
 
 @dataclass(frozen=True)

@@ -514,8 +514,11 @@ def test_a_negative_duration_renders_in_the_same_unit_as_a_positive_one() -> Non
     assert format_value(-0.1, "duration", settings) == "0s"
     assert format_value(-0.0, "duration", settings) == "0s"
     # The same ladder shape, one unit along: a subtraction under `unit effort`
-    # can go negative too, and printed a fortnight of work as "-240.0h".
-    assert format_value(-864000.0, "effort", settings) == "-30.0d"
+    # can go negative too, and a rung against a positive bound let it through
+    # unformatted. An effort renders in hours now -- there is no working day
+    # to divide by -- so the sign is the whole of what this arm has to get
+    # right.
+    assert format_value(-864000.0, "effort", settings) == "-240.0h"
 
 
 def test_a_delta_over_a_sub_day_figure_is_refused_rather_than_served_empty() -> None:

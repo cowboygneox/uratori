@@ -33,7 +33,7 @@ from .results import (
     Unit,
     Window,
 )
-from .schema import EFFORT_HOURS_SETTING, Schema
+from .schema import Schema
 from .store import (
     BucketChange,
     EngineStore,
@@ -49,7 +49,6 @@ from .windows import MAX_REACH_DAYS, WindowError, WindowSpec
 
 __all__ = [
     "DEFAULT_TRAILING",
-    "EFFORT_HOURS_SETTING",
     "MAX_REACH_DAYS",
     "SEPARATOR",
     "SHOWN_KEEP",

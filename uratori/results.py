@@ -198,11 +198,10 @@ class Window(BaseModel):
     display: dict[str, str] = Field(default_factory=dict)
     """Each statistic above, rendered.
 
-    **Rendered here because rendering a duration is a division**, and a division
-    is a calculation. 61,200 seconds is "17h" as wall-clock and, against a
-    tenant's working day, something else entirely -- so a client that formatted
-    it would need `hoursPerDay`, and a client that knows `hoursPerDay` is one
-    step from banding against a threshold.
+    **Rendered here because rendering a duration is a division**, and a
+    division is a calculation. A client that formatted 61,200 seconds into
+    "17h" would be one step from comparing it against a threshold, which is
+    the banding-in-two-places failure `level` exists to prevent.
 
     Beside the numbers rather than instead of them: a screen sometimes needs the
     magnitude (a bar's width) and always needs the text. Keyed by statistic name,
@@ -260,9 +259,9 @@ class Row(BaseModel):
 
     values: dict[str, float | str | None]
     display: dict[str, str]
-    """Each value above, rendered. Rendered on the server because rendering an
-    effort is a division against the tenant's working day, and a client that
-    knows the working day is one step from banding against a threshold.
+    """Each value above, rendered. Rendered on the server because rendering a
+    quantity is a division, and a client dividing seconds into hours is one
+    step from comparing them against a threshold.
 
     Required rather than defaulted, and there is exactly one constructor
     (`serve.py`'s `_row`), so a default buys nothing and costs something: it

@@ -3,9 +3,5 @@
   "figure_settings": [],
   "reading_settings": [],
   "project_settings": [],
-  "defaults": {
-    "tenant": {
-      "hoursPerDay": 8
-    }
-  }
+  "defaults": {}
 }

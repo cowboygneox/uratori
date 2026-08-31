@@ -67,7 +67,7 @@ about the world is a class of bug the object exists to make unwritable.
   "kinds": ["shop_courier", "shop_order"],
   "name_fields": {"shop_courier": "name", "shop_order": "ref"},
   "url_fields": {"shop_order": "url"},
-  "defaults": {"tenant": {"hoursPerDay": 8, "timezone": "UTC"}}
+  "defaults": {}
 }
 ```
 
@@ -94,10 +94,6 @@ Four things live here, and each is a decision the host owns:
   split by cost. More on these [below](#settings-dials).
 - **Defaults** are the shipped settings document, the base every tenant's
   sparse overrides are completed against.
-
-One dial path is reserved rather than declared: `tenant.hoursPerDay`, which
-the renderer divides by to print an *effort* (seconds of working time) as
-days. A host that renders efforts must carry it in `defaults`.
 
 ### Or declare the facts in the language
 
@@ -345,11 +341,9 @@ or a different dial.
 
 ## Settings dials
 
-Definitions read no dials at all now, and the section survives for the one
-path that is still a tenant's to set -- `tenant.hoursPerDay`, which the
-renderer divides by to print an effort as days -- and for the machinery a
-settings document still travels through. Two design decisions carried the
-weight here, and both still describe how that one value is handled.
+Definitions read no dials at all, and nothing the engine renders reads one
+either. The section survives for the machinery a settings document still
+travels through, and for the two design decisions that governed it.
 
 **A tenant's stored settings are sparse; completion happens once, at the
 boundary.** A tenant's document contains only what an operator changed. Every
@@ -400,9 +394,9 @@ definition's answer.
 Numbers travel twice, deliberately: `value` (the magnitude, for anything
 positional -- a bar's width, a marker's offset) and `display` (the text a
 reader sees, rendered by the server). Rendering is on the server because
-rendering a duration or an effort is a *division*, against a dial the client
-must not hold -- a client that knows `hoursPerDay` is one step from banding
-against a threshold. Band levels are the same story: a `level` is a word from
+rendering a duration is a *division* -- and a client dividing seconds into
+hours is one step from comparing them against a threshold, which is the
+banding-in-two-places failure below. Band levels are the same story: a `level` is a word from
 the definition, mapped to a colour by the renderer and never re-derived from
 a number, because banding in two places is how a card reads Watch while a
 sort weighs the same person as Good.

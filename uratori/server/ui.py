@@ -68,7 +68,7 @@ from ..results import (
     Subject,
     Unavailable,
 )
-from ..schema import EFFORT_HOURS_SETTING, Schema
+from ..schema import Schema
 from ..store.postgres import PostgresEngineStore
 from ..windows import WindowError, expand_window_args, window_token
 from . import db
@@ -826,7 +826,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             editable=edit,
             refusal=held.refusal,
             kinds=_kind_fields(held),
-            dials=sorted({*taught_schema(held).declarable, EFFORT_HOURS_SETTING}),
+            dials=sorted(taught_schema(held).declarable),
             declarations=[
                 DeclaredName(name=name, kind=kind)
                 for name, (kind, _) in sorted(_named(held.library).items())
@@ -1530,7 +1530,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         # it claims to explain.
         merged = schema.settings_for(raw)
         out: list[DialOut] = []
-        for name in sorted({*schema.declarable, EFFORT_HOURS_SETTING}):
+        for name in sorted(schema.declarable):
             held, has = _at_path(merged, name)
             if not has or held is None:
                 # Nothing servable at this name -- never written, written as
@@ -2181,7 +2181,6 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
                 fact_kind=measure.kind,
                 rests_on=[
                     Dependency(type="fact", name=measure.kind),
-                    *_effort_edges(measure.unit),
                 ],
             )
         )
@@ -2206,7 +2205,6 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
         )
         edges += [Dependency(type="figure", name=n) for n in sorted(sources)]
         edges += [Dependency(type="setting", name=n) for n in figure.settings]
-        edges += _effort_edges(figure.unit)
         out.append(
             DeclarationOut(
                 name=figure.name,
@@ -2231,7 +2229,6 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
         # reasoning as a figure's: what decides the word belongs in the graph.
         edges += [Dependency(type="figure", name=n) for n in reading.band_reads]
         edges += [Dependency(type="setting", name=n) for n in reading.settings]
-        edges += _effort_edges(reading.unit)
         out.append(
             DeclarationOut(
                 name=reading.name,
@@ -2260,10 +2257,6 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
         edges += [_grouping_edge(library, n) for n in projection.indexes]
         edges += [Dependency(type="fact", name=j.kind) for j in projection.joins]
         edges += [Dependency(type="setting", name=n) for n in projection.settings]
-        edges += _effort_edges(
-            *(unit for _, _, unit, _ in projection.reads),
-            *(unit for _, _, unit in projection.values),
-        )
         out.append(
             DeclarationOut(
                 name=projection.name,
@@ -2279,10 +2272,6 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
     for summary in library.summaries:
         edges = [Dependency(type="projection", name=summary.over)]
         edges += [Dependency(type="setting", name=n) for n in summary.settings]
-        edges += _effort_edges(
-            *(unit for _, _, unit, _ in summary.totals),
-            *(unit for _, _, unit in summary.values),
-        )
         out.append(
             DeclarationOut(
                 name=summary.name,
@@ -2328,21 +2317,6 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
 
     _fill_moved_by(out)
     return out
-
-
-def _effort_edges(*units: str | None) -> list[Dependency]:
-    """The render-time dial an `effort` unit reads, as a dependency edge.
-
-    `format_value` divides an effort by `tenant.hoursPerDay` when the number
-    becomes text, so the dial never appears in any compiled plan -- and a
-    closure built only from plan edges would let the page claim "nothing else
-    can move this" about a number whose rendered text moves the moment the
-    dial does. The edge is added at the declaration, so the closure carries
-    it to everything built on top.
-    """
-    if any(unit == "effort" for unit in units):
-        return [Dependency(type="setting", name=EFFORT_HOURS_SETTING)]
-    return []
 
 
 def _fill_moved_by(declarations: list[DeclarationOut]) -> None:

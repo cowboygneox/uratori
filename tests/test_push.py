@@ -466,29 +466,41 @@ async def test_serve_false_reports_what_moved_without_evaluating_answers() -> No
         "re-reported the same movement"
     )
 
-    # The dial variant is the assertion with teeth: a fact write moves no
-    # serve stamp (they were settled before it), so only a dial pass can
-    # prove serve=False still settles them. Skipping the settle would make
-    # the second run here re-report the same dial move for ever.
+    # The definition-only variant is the assertion with teeth: a fact write
+    # moves no serve stamp (they were settled before it), so only a pass that
+    # moves a stamp can prove serve=False still settles them. Skipping the
+    # settle would make the second run here re-report the same move for ever.
     #
-    # It used to turn a band threshold. Band thresholds are facts now, and a
-    # fact write is the case above -- so the dial with the same shape is the
-    # effort rendering one, which re-words a display without moving a value.
-    dial = await engine.run("t1", {"tenant": {"hoursPerDay": 4}}, serve=False)
-    assert dial.results == ()
-    assert "shop_courier.lugging" in dial.moved
-    settled = await engine.run("t1", {"tenant": {"hoursPerDay": 4}})
+    # It used to turn a dial -- a band threshold, then the effort rendering
+    # one. Both are gone, so what is left with that shape is prose: outside
+    # every version hash, on the wire, and noticed by the stamps alone.
+    reworded = compile_against(
+        SOURCE.replace("# Orders in hand right now.", "# Orders being carried."), WORLD
+    )
+    redeployed = Uratori(
+        schema=WORLD, library=reworded, store=engine._store, facts=facts
+    )
+    edit = await redeployed.run("t1", serve=False)
+    assert edit.results == ()
+    assert "shop_courier.carrying" in edit.moved
+    settled = await redeployed.run("t1")
     assert settled.moved == frozenset(), (
-        "the dial move was reported once and must not be reported again"
+        "the edit was reported once and must not be reported again"
     )
 
 
-async def test_the_effort_dial_re_serves_everything_that_renders_an_effort() -> None:
-    """`format_value` divides an effort by tenant.hoursPerDay on the way to
-    every `display`, so moving the dial re-words the effort figure AND the
-    projection rendering the same efforts -- for a release the figure
-    re-served and the projection kept the old text, which put two different
-    sentences about one quantity on one screen."""
+async def test_a_settings_save_now_re_serves_nothing_at_all() -> None:
+    """This was the effort dial's test: `format_value` divided an effort by
+    `tenant.hoursPerDay` on the way to every `display`, so moving it re-worded
+    the effort figure and the projection rendering the same efforts, while no
+    stored value moved anywhere. It was the last dial with that shape.
+
+    An effort renders in hours now, so there is nothing left for a settings
+    document to reach -- and the assertion inverts. It is worth keeping in
+    that form: the serve stamps still exist, and a stamp that started
+    fingerprinting a document nothing reads would re-serve the world on every
+    save, which is the fixed tail they were built to replace.
+    """
     engine, facts = _engine()
     facts.put(
         "t1",
@@ -500,16 +512,10 @@ async def test_the_effort_dial_re_serves_everything_that_renders_an_effort() -> 
 
     report = await engine.run("t1", {"tenant": {"hoursPerDay": 4}})
 
-    served = _results(report.results)
-    assert "shop_courier.lugging" in served, "the effort figure did not re-serve"
-    assert "shop_courier.desk" in served, (
-        "the projection renders the same efforts and kept the old text"
+    assert _results(report.results) == {}, (
+        "a settings save re-served something, so a definition or a renderer "
+        "still reads a dial"
     )
-    assert "shop_courier.carrying" not in served, (
-        "a count renders under no effort dial; re-serving it is the "
-        "whole-document fingerprint bug wearing a fix's name"
-    )
-    assert "shop_order.board" not in served
 
 
 async def test_a_prose_edit_re_serves_the_definition_and_its_tiles() -> None:

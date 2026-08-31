@@ -141,7 +141,7 @@ curl -s -X PUT "$BASE/schema" -H "$AUTH" -H 'Content-Type: application/json' -d 
   "kinds": ["shop_courier", "shop_order"],
   "name_fields": {"shop_courier": "name", "shop_order": "ref"},
   "url_fields": {"shop_order": "url"},
-  "defaults": {"tenant": {"hoursPerDay": 8, "timezone": "UTC"}}
+  "defaults": {}
 }'
 ```
 
@@ -159,10 +159,7 @@ facts **in the definition language** (`fact shop_order:` -- see
 [the language guide](language.md)) PUTs a schema of settings and defaults
 alone, and the kinds, name fields and url fields derive from the source at
 `PUT /definitions`. Declaring both is refused at compile time -- one world,
-one door. One dial path is reserved:
-`tenant.hoursPerDay`, which the renderer divides by to print an `effort`
-(seconds of working time) as days -- a world that renders efforts must carry
-it in `defaults`.
+one door.
 
 Responses:
 
@@ -836,9 +833,12 @@ Top level:
 
 `unit` is one of `count`, `duration`, `effort`, `share`, `days`, `level`,
 `moment`. The distinction that matters: `duration` is wall-clock and `effort`
-is working time -- the same 28,800 seconds is "8h" under one and, against the
-tenant's `tenant.hoursPerDay`, "1d" under the other, and both are right about
-their own quantity. The unit travels so a renderer never guesses.
+is working time. Both render in hours, so 28,800 seconds reads "8h" either
+way -- but they are not the same quantity, and the unit travels so a renderer
+never treats them as one. (An effort used to render as "1d" against a
+`tenant.hoursPerDay` dial. It was the last number on a screen a tenant could
+move from a form, and hours say the same thing without a reader having to
+find out whose working day the engine had in mind.)
 
 ### `state`, and the four ways an answer can be missing
 
