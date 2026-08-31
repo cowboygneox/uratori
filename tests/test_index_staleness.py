@@ -142,18 +142,19 @@ async def test_a_removed_filter_is_dropped_not_orphaned() -> None:
     }
 
 
-async def test_a_moved_bucket_dial_rebuilds_the_dialled_groupings_only() -> None:
-    """A calendar group's membership depends on a dial the index hash
-    deliberately excludes; the figure reading it notices through its own
-    settings fingerprint. When that figure goes pending, the rebuild must
-    reach the groupings whose spec actually reads a dial -- and not tax the
-    dial-free ones beside them.
+async def test_a_settings_save_now_rebuilds_no_grouping_at_all() -> None:
+    """Membership used to depend on dials the index hash deliberately excludes
+    -- an age threshold, a calendar -- and the machinery here existed to reach
+    exactly the groupings reading one when a tenant turned it.
 
-    The dial was an age threshold until thresholds became facts. The calendar
-    is the one that is left, and it is the same shape of claim."""
+    Both are facts now: a threshold is a number in the definition or a field
+    on the record's owner, and a calendar is a field on the subject's. So a
+    settings save reaches nothing, and the assertion inverts. What replaced
+    the edge is a *record* moving, which is pinned in test_calendar.py --
+    where a courier changing calendars refiles their whole history."""
     dialled = BASE + (
         "group work_issue.touched_by_day from (assignee_account_id through "
-        "team_person.accounts.account_id, updated_at by day in tenant.timezone)\n"
+        "team_person.accounts.account_id, updated_at by day)\n"
         "\n"
         "# Issues touched, day by day.\n"
         "figure team_person.touched bucketed:\n"
@@ -177,12 +178,10 @@ async def test_a_moved_bucket_dial_rebuilds_the_dialled_groupings_only() -> None
     turned = dict(DEFAULTS)
     turned["tenant"] = dict(DEFAULTS["tenant"], timezone="Asia/Tokyo")
     await Engine(store, facts, library, WORLD).run(TENANT, turned)
-    assert "work_issue.touched_by_day" in store.rebuilt, (
-        "the dial moved and the grouping reading it was not re-bucketed -- "
-        "its membership now describes the old dial"
+    assert store.rebuilt == [], (
+        "a settings save re-bucketed something, so a grouping still reads a "
+        "dial -- and a tenant can still move a whole history from a form"
     )
-    assert "work_issue.assigned_to" not in store.rebuilt
-    assert "work_issue.active" not in store.rebuilt
 
 
 async def test_a_full_pass_still_rebuilds_everything() -> None:
@@ -336,14 +335,15 @@ async def test_a_pass_dying_mid_rebuild_pays_only_the_remaining_debt() -> None:
     )
 
 
-async def test_a_moved_dial_reaches_the_groupings_that_read_it_even_unread() -> None:
-    """A dial-reading grouping nobody's figure reads -- an age filter kept
-    for a projection, a calendar group kept for browsing -- has no pointer
-    to notice a settings move for it. The stamp's own dial fingerprint is
-    what notices: the next pass rebuilds exactly the groupings reading the
-    moved dial, pending figures or none."""
+async def test_the_stamp_still_notices_a_grouping_whose_definition_moved() -> None:
+    """A grouping nobody's figure reads -- a filter kept for a projection, a
+    calendar group kept for browsing -- has no figure pointer to notice
+    anything on its behalf. Its own stamp is what notices, and it still has
+    to: the trigger is a definition edit rather than a settings save now that
+    a grouping reads no dial, but a grouping left stale because nothing above
+    it was pending is the same silent staleness either way."""
     dialled = BASE + (
-        "group work_issue.by_day from updated_at by day in tenant.timezone\n"
+        "group work_issue.by_day from updated_at by day\n"
     )
     store, facts = Ledger(), MemoryFactStore()
     _seed(facts)
@@ -363,13 +363,17 @@ async def test_a_moved_dial_reaches_the_groupings_that_read_it_even_unread() -> 
         "comparing what they claim to"
     )
 
+    # The trigger that is left: the grouping's own spec moved. Nothing above
+    # it is pending -- no figure reads it -- so its own stamp is the only
+    # thing that can notice, and a grouping left filed under the old rule
+    # would be a page quietly describing a world that has changed.
     store.rebuilt.clear()
-    moved = dict(unread)
-    moved["tenant"] = dict(DEFAULTS["tenant"], timezone="Asia/Tokyo")
-    await Engine(store, facts, library, WORLD).run(TENANT, moved)
+    edited = compile_source(
+        BASE + "group work_issue.by_day from updated_at by month\n"
+    )
+    await Engine(store, facts, edited, WORLD).run(TENANT, unread)
     assert store.rebuilt == ["work_issue.by_day"], (
-        "the zone moved and every day boundary with it; the zoned grouping "
-        "alone owes the rebuild"
+        "the grouping's own rule moved and it was not re-bucketed"
     )
 
 

@@ -791,7 +791,7 @@ def test_stat_line_composites_are_the_sum_of_their_parts() -> None:
 def test_kickoffs_are_eastern_wall_clock_rendered_with_the_right_offset() -> None:
     """games.csv times are US Eastern wall clock. The instant must be that
     wall time *placed in* the Eastern calendar -- never the machine's clock
-    shifted -- or every `by day in tenant.timezone` bucket in the demo moves.
+    shifted -- or every `by day` bucket in the demo moves.
     Both sides of the DST boundary, and the missing-gametime default."""
     module = _load_module()
     november = module.kickoff_of(_game("2025_10_A_B", "2025-11-16", "A", "B", "0", "3"))
@@ -988,8 +988,8 @@ def test_the_showcase_keeps_the_constructs_the_readme_promises() -> None:
         "many abbrs:",  # nesting as cardinality: every element
         "one venue:",  # and its other half: exactly one
         "through nfl_team.abbrs.abbr",  # the identity hop
-        "by day in tenant.timezone",  # calendar bucketing
-        "by 15 minutes in tenant.timezone",  # the sub-day grain
+        "by day in nfl_team.timezone",  # calendar bucketing, off the subject
+        "by 15 minutes in nfl_team.timezone",  # the sub-day grain
         "younger than 45 days",  # an age filter, against a written threshold
         "= kickoff - previous_kickoff",  # a duration measure
         "= moment kickoff",  # a moment measure
@@ -997,9 +997,9 @@ def test_the_showcase_keeps_the_constructs_the_readme_promises() -> None:
         "combine:",  # figures on figures
         "band:",  # a figure's thresholds
         "requires:",  # a reading's floor
-        "by hour in tenant.timezone",  # the hour grain, declared where grains live
-        "by month in tenant.timezone",  # the calendar trio's middle grain
-        "by quarter in tenant.timezone",  # and its coarse end
+        "by hour in nfl_team.timezone",  # the hour grain, declared where grains live
+        "by month",  # the calendar trio's middle grain
+        "by quarter",  # and its coarse end
         "band on mean:",  # a reading's band, over the statistic it judges
         "from nfl_game.finished & nfl_game.playoff",  # a set-expression population
         "omit when",  # the row-level gate

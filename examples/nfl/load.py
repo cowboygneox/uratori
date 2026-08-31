@@ -65,7 +65,7 @@ HERE = Path(__file__).parent
 NFLVERSE = "https://github.com/nflverse/nflverse-data/releases/download"
 
 # Kickoff times in games.csv are US Eastern wall clock; the loader renders
-# them as instants so `by day in tenant.timezone` has a real moment to file.
+# them as instants so `by day` has a real moment to file.
 EASTERN = ZoneInfo("America/New_York")
 
 # One franchise, several abbreviations: the relocations inside the nflverse
@@ -205,6 +205,9 @@ def team_facts(teams_csv: list[dict[str, str]], season_abbrs: set[str]) -> dict[
             "division": row["team_division"],
             "url": f"https://www.nfl.com/teams/{row['team_name'].lower().replace(' ', '-')}/",
             "logo": row.get("team_logo_espn", ""),
+            # The league keeps one clock, so every franchise carries it --
+            # as a fact about the team rather than a dial over the board.
+            "timezone": "America/New_York",
         }
     return facts
 

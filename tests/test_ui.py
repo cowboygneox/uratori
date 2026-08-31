@@ -487,7 +487,7 @@ async def test_the_ui_results_route_speaks_the_same_window_spans_as_the_api(
     ceiling's refusal as a 400 -- the UI showing a number, or an error, the
     API would not."""
     windowed = COURIER_SOURCE + """
-group shop_order.delivered_by_day from (courier_id, delivered_at by day in tenant.timezone)
+group shop_order.delivered_by_day from (courier_id, delivered_at by day)
 
 measure shop_order.riding_seconds = delivered_at - picked_up_at
 
@@ -546,9 +546,9 @@ async def test_the_world_payload_carries_each_declarations_bucket_rule(
     thirty days.
     """
     monthly = COURIER_SOURCE + """
-group shop_order.dropped_by_month from (courier_id, delivered_at by month in tenant.timezone)
+group shop_order.dropped_by_month from (courier_id, delivered_at by month)
 
-group shop_order.dropped_first_monday from (courier_id, delivered_at by first monday of month in tenant.timezone)
+group shop_order.dropped_first_monday from (courier_id, delivered_at by first monday of month)
 
 # Deliveries per courier per calendar month.
 figure shop_courier.monthly_drops bucketed:
@@ -703,7 +703,7 @@ async def test_the_ui_serves_its_page_with_the_frame_ancestors_it_was_given(
 # do this -- it holds two groupings and two figures, and a payload whose
 # contract is "every declaration of every kind" needs a corpus that has them.
 FULL_SOURCE = """
-group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
+group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day)
 group code_review_request.asked_of from reviewer_account_id through team_person.accounts.account_id
 filter code_review_request.pending where pending == true
 filter code_change.stale where updated_at older than 3 days
@@ -775,12 +775,12 @@ async def test_every_declaration_kind_travels_with_its_own_edges(pg_dsn: str) ->
         def rests(name: str) -> set[tuple[str, str]]:
             return {(d["type"], d["name"]) for d in by_name[name]["rests_on"]}
 
-        # A composite group: its own kind, the kind it hops through, and the
-        # zone dial that decides which day a bucket is.
+        # A composite group: its own kind, and the kind it hops through --
+        # which is also where the calendar deciding which day a bucket is
+        # lives, now that a calendar is a field on the subject's record.
         assert rests("code_change.merged_by_day") == {
             ("fact", "code_change"),
             ("fact", "team_person"),
-            ("setting", "tenant.timezone"),
         }
         # An age filter against a written threshold reads nothing but its
         # own kind's records; one reading a threshold off an owner would
@@ -883,8 +883,9 @@ async def test_moved_by_carries_settings_found_deep_in_the_chain(pg_dsn: str) ->
         lead_time = {
             (d["type"], d["name"]) for d in by_name["team_person.lead_time"]["moved_by"]
         }
-        assert ("setting", "tenant.timezone") in lead_time, (
-            "the zone dial lives on the group under the figure under the reading"
+        assert ("fact", "team_person") in lead_time, (
+            "the calendar lives on a record the group under the figure under "
+            "the reading resolves to, and the closure must reach it"
         )
         assert ("fact", "code_change") in lead_time
         assert ("fact", "team_person") in lead_time
@@ -2916,7 +2917,7 @@ own so the shared COURIER_WORLD keeps meaning what every other test says."""
 ABOUT_SOURCE = COURIER_SOURCE + """
 # One row per courier-day, so a courier's record page carries day rows whose
 # `dimension` is the day -- the shape the NFL demo's by-day figures have.
-group shop_order.by_courier_day from (courier_id, placed by day in tenant.timezone)
+group shop_order.by_courier_day from (courier_id, placed by day)
 
 # How many orders this courier took on, day by day.
 figure shop_courier.daily bucketed:
@@ -3607,7 +3608,6 @@ async def test_the_world_payload_lists_a_bundle_with_its_slots(pg_dsn: str) -> N
         assert {(d["type"], d["name"]) for d in card["moved_by"]} == {
             ("fact", "shop_order"),
             ("fact", "shop_courier"),
-            ("setting", "tenant.timezone"),
         }, "the closure must reach every leaf, and only leaves"
 
         spans = by_name["shop_courier.spans"]

@@ -2619,7 +2619,10 @@ def _part_edges(part: IndexField) -> list[Dependency]:
     if part.through is not None:
         edges.append(Dependency(type="fact", name=part.through.kind))
     if part.zone is not None:
-        edges.append(Dependency(type="setting", name=part.zone))
+        # The calendar is a field on the subject's record, so it is a fact
+        # edge like the hop beside it: what decides which day a bucket is
+        # belongs in the graph, and it is a record now rather than a dial.
+        edges.append(Dependency(type="fact", name=part.zone.kind))
     return edges
 
 

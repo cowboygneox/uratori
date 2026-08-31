@@ -359,14 +359,8 @@ class _Checker:
                 self._fact_kind(
                     part.through.kind, f"{word} {d.name} resolves through", d.line
                 )
-            if part.zone is not None and part.zone not in self._schema.bucket_settings:
-                raise CheckError(
-                    f'{word} {d.name} buckets by {part.truncate or part.select} in "{part.zone}", which is not a setting '
-                    f"a {word} may name. Those are: {', '.join(self._schema.bucket_settings)}. "
-                    "Moving one re-buckets a tenant's whole history, which is why the list is "
-                    "short.",
-                    d.line,
-                )
+            if part.zone is not None:
+                self._check_zone(d, part, word)
         if isinstance(d.spec, ByAge) and d.spec.through is not None:
             self._fact_kind(
                 d.spec.through.kind,
@@ -396,6 +390,49 @@ class _Checker:
             bucketed=isinstance(d.spec, (ByField, ByComposite)),
             label=d.label,
         )
+
+    def _check_zone(self, d: IndexDecl, part: IndexField, word: str) -> None:
+        """Whose calendar cuts this part's buckets, and whether it is a
+        calendar this group can actually reach.
+
+        The record is the bucket's **subject** -- the composite's first part,
+        resolved through its hop where it has one -- so naming a kind that
+        part does not resolve to would look every key up in the wrong table
+        and find nothing. Every record would be in no bucket, which reads as a
+        board that has collected nothing rather than as a wrong declaration.
+        """
+        zone = part.zone
+        assert zone is not None
+        self._fact_kind(zone.kind, f"{word} {d.name} reads its calendar from", d.line)
+        self._record_field(
+            zone.kind,
+            zone.field,
+            f"{word} {d.name} reads its calendar from {zone.kind}.{zone.field}",
+            d.line,
+        )
+        parts = _index_fields(d.spec)
+        subject = parts[0] if parts and parts[0] is not part else None
+        if subject is None:
+            # No subject part: the record being bucketed is the thing, so the
+            # calendar has to be on it.
+            if zone.kind != d.kind:
+                raise CheckError(
+                    f"{word} {d.name} buckets {d.kind} records with no subject part, so "
+                    f"the calendar is read off the record itself -- but it names "
+                    f"{zone.kind}.{zone.field}. Name a field on {d.kind}, or give the "
+                    "group a subject part whose records carry the calendar.",
+                    d.line,
+                )
+            return
+        if subject.through is not None and subject.through.kind != zone.kind:
+            raise CheckError(
+                f"{word} {d.name} fans out by {subject.through.kind} and reads its "
+                f"calendar from {zone.kind}.{zone.field}. The calendar is a fact about "
+                "the subject, so it has to be a field on the subject's own record -- "
+                f"named on {zone.kind}, every key would be looked up in the wrong table "
+                "and every record would land in no bucket.",
+                d.line,
+            )
 
     def _index_fields_exist(self, d: IndexDecl, word: str) -> None:
         """Every field a group or filter reads, against the declared world.
@@ -636,7 +673,12 @@ class _Checker:
         indexes = sorted(_indexes_in_sets(d.sets))
         measures = sorted(_measures_in(d.calculate))
         reads = sorted({source for source, _ in combines.values()})
-        settings = sorted(set(_settings_in(d.calculate)) | _zone_settings(indexes, self.indexes))
+        # A figure names no dial at all now: its thresholds are figures or
+        # literals, and its groupings' calendars are fields on records. The
+        # tuple stays because a pointer's fingerprint is keyed on it and an
+        # empty one is the honest claim that nothing tenant-set moves this
+        # value.
+        settings: list[str] = []
 
         depth = 0
         for source_name in reads:
@@ -3139,18 +3181,6 @@ def _measures_in(e: CalcExpr) -> set[str]:
     return out
 
 
-def _zone_settings(indexes: list[str], compiled: dict[str, CompiledIndex]) -> set[str]:
-    out: set[str] = set()
-    for name in indexes:
-        idx = compiled.get(name)
-        if idx is None:
-            continue
-        for part in _index_fields(idx.spec):
-            if part.zone is not None:
-                out.add(part.zone)
-    return out
-
-
 def _flag_settings(flags: tuple[FlagDecl, ...]) -> set[str]:
     out: set[str] = set()
     for f in flags:
@@ -3400,7 +3430,14 @@ def _field_hash(part: IndexField) -> object:
         # a selective rule is new vocabulary, and every spec written before
         # it existed must keep its version.
         "select": part.select,
-        "zone": part.zone,
+        # The calendar's record and field. A group cut on one subject's
+        # calendar and one cut on another's file the same instant under
+        # different labels, so the two are different specs.
+        "zone": (
+            {"kind": part.zone.kind, "field": part.zone.field}
+            if part.zone is not None
+            else None
+        ),
     }
 
 

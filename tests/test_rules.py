@@ -43,6 +43,7 @@ from uratori.lang.ast import Condition, Number, Part, SortDecl
 from uratori.lang.plan import ProjectPlan
 from uratori.lang.settings import fingerprint, seconds_per
 from uratori.results import Ok
+from uratori.store import MemoryFactStore
 from uratori.store.base import Pointer
 from uratori.store.memory import MemoryEngineStore
 
@@ -55,9 +56,9 @@ group work_issue.assigned_to from assignee_account_id through team_person.accoun
 filter work_issue.active where active == true
 filter work_issue.stuck where status_changed_at older than 14 days
 filter work_issue.fresh where status_changed_at younger than 14 days
-group work_issue.by_day from (assignee_account_id through team_person.accounts.account_id, completed_at by day in tenant.timezone)
-group work_issue.by_quarter from (assignee_account_id through team_person.accounts.account_id, completed_at by 15 minutes in tenant.timezone)
-group work_issue.by_minute from (assignee_account_id through team_person.accounts.account_id, completed_at by minute in tenant.timezone)
+group work_issue.by_day from (assignee_account_id through team_person.accounts.account_id, completed_at by day in team_person.timezone)
+group work_issue.by_quarter from (assignee_account_id through team_person.accounts.account_id, completed_at by 15 minutes in team_person.timezone)
+group work_issue.by_minute from (assignee_account_id through team_person.accounts.account_id, completed_at by minute in team_person.timezone)
 
 measure work_issue.estimate = estimate_seconds in effort
 measure work_issue.moved = moment updated_at
@@ -86,22 +87,40 @@ def _resolve(kind: str, path: str, value: str) -> list[str]:
     return [f"person-of-{value}"]
 
 
+def _calendars(by_subject: dict[str, str]) -> MemoryFactStore:
+    """A fact store holding nothing but each subject's calendar.
+
+    A group's `by day in team_person.timezone` reads the field off the
+    subject's record, so a serving path that resolves windows needs the
+    records -- and a test that supplied none would serve every subject in
+    UTC while claiming to test a zone.
+    """
+    facts = MemoryFactStore()
+    for key, zone in by_subject.items():
+        facts.put("t1", "team_person", key, {"display_name": key, "timezone": zone})
+    return facts
+
+
+LA = _calendars({"p1": "America/Los_Angeles", "w1": "America/Los_Angeles"})
+"""The calendar this file's subjects keep, as the tenant dial used to."""
+
+
 def test_older_than_and_younger_than_are_not_the_same_predicate() -> None:
     """Inverted, every stale merge request reads fresh and every fresh one reads
     stale -- and the board's whole "not moving" column means its opposite."""
     old = {"status_changed_at": "2025-01-01T00:00:00Z"}
     recent = {"status_changed_at": "2025-08-23T00:00:00Z"}
 
-    assert buckets_of(_index("work_issue.stuck"), old, DEFAULTS, _resolve, NOW) == [""]
-    assert buckets_of(_index("work_issue.stuck"), recent, DEFAULTS, _resolve, NOW) == []
-    assert buckets_of(_index("work_issue.fresh"), recent, DEFAULTS, _resolve, NOW) == [""]
-    assert buckets_of(_index("work_issue.fresh"), old, DEFAULTS, _resolve, NOW) == []
+    assert buckets_of(_index("work_issue.stuck"), old, _resolve, NOW) == [""]
+    assert buckets_of(_index("work_issue.stuck"), recent, _resolve, NOW) == []
+    assert buckets_of(_index("work_issue.fresh"), recent, _resolve, NOW) == [""]
+    assert buckets_of(_index("work_issue.fresh"), old, _resolve, NOW) == []
 
 
 def test_a_record_with_no_readable_moment_is_in_no_age_bucket() -> None:
     """Not in the "old" one. An absent timestamp is not evidence of age."""
-    assert buckets_of(_index("work_issue.stuck"), {}, DEFAULTS, _resolve, NOW) == []
-    assert buckets_of(_index("work_issue.fresh"), {}, DEFAULTS, _resolve, NOW) == []
+    assert buckets_of(_index("work_issue.stuck"), {}, _resolve, NOW) == []
+    assert buckets_of(_index("work_issue.fresh"), {}, _resolve, NOW) == []
 
 
 def test_a_day_belongs_to_the_tenants_calendar_and_not_to_utc() -> None:
@@ -117,12 +136,12 @@ def test_an_index_buckets_by_day_in_the_zone_its_definition_names() -> None:
         "assignee_account_id": "a1",
         "completed_at": "2025-08-24T02:26:40Z",
     }
-    la = {**DEFAULTS, "tenant": {**DEFAULTS["tenant"], "timezone": "America/Los_Angeles"}}
-    utc = {**DEFAULTS, "tenant": {**DEFAULTS["tenant"], "timezone": "UTC"}}
-    assert buckets_of(_index("work_issue.by_day"), record, la, _resolve, NOW) == [
+    la = {"person-of-a1": "America/Los_Angeles"}
+    utc = {"person-of-a1": "UTC"}
+    assert buckets_of(_index("work_issue.by_day"), record, _resolve, NOW, zones=la) == [
         "person-of-a1@2025-08-23"
     ]
-    assert buckets_of(_index("work_issue.by_day"), record, utc, _resolve, NOW) == [
+    assert buckets_of(_index("work_issue.by_day"), record, _resolve, NOW, zones=utc) == [
         "person-of-a1@2025-08-24"
     ]
 
@@ -133,16 +152,16 @@ def test_a_sub_day_bucket_is_labelled_in_the_tenants_calendar() -> None:
     the calendar the definition names, not by whichever zone the provider
     happened to write."""
     record = {"assignee_account_id": "a1", "completed_at": "2025-08-24T02:26:40Z"}
-    la = {**DEFAULTS, "tenant": {**DEFAULTS["tenant"], "timezone": "America/Los_Angeles"}}
-    utc = {**DEFAULTS, "tenant": {**DEFAULTS["tenant"], "timezone": "UTC"}}
+    la = {"person-of-a1": "America/Los_Angeles"}
+    utc = {"person-of-a1": "UTC"}
 
-    assert buckets_of(_index("work_issue.by_quarter"), record, la, _resolve, NOW) == [
+    assert buckets_of(_index("work_issue.by_quarter"), record, _resolve, NOW, zones=la) == [
         "person-of-a1@2025-08-23T19:15"
     ]
-    assert buckets_of(_index("work_issue.by_quarter"), record, utc, _resolve, NOW) == [
+    assert buckets_of(_index("work_issue.by_quarter"), record, _resolve, NOW, zones=utc) == [
         "person-of-a1@2025-08-24T02:15"
     ]
-    assert buckets_of(_index("work_issue.by_minute"), record, la, _resolve, NOW) == [
+    assert buckets_of(_index("work_issue.by_minute"), record, _resolve, NOW, zones=la) == [
         "person-of-a1@2025-08-23T19:26"
     ]
 
@@ -153,12 +172,12 @@ def test_the_repeated_hour_of_a_fall_back_merges_into_one_labelled_bucket() -> N
     "what happened in the quarter-hour labelled 01:30", which occurred twice.
     The alternative, keying by UTC, would make every local midnight sit
     mid-bucket in most of the world's zones."""
-    chicago = {**DEFAULTS, "tenant": {**DEFAULTS["tenant"], "timezone": "America/Chicago"}}
+    chicago = {"person-of-a1": "America/Chicago"}
     cdt = {"assignee_account_id": "a1", "completed_at": "2025-11-02T06:30:00Z"}  # 01:30 CDT
     cst = {"assignee_account_id": "a1", "completed_at": "2025-11-02T07:30:00Z"}  # 01:30 CST
 
-    first = buckets_of(_index("work_issue.by_quarter"), cdt, chicago, _resolve, NOW)
-    second = buckets_of(_index("work_issue.by_quarter"), cst, chicago, _resolve, NOW)
+    first = buckets_of(_index("work_issue.by_quarter"), cdt, _resolve, NOW, zones=chicago)
+    second = buckets_of(_index("work_issue.by_quarter"), cst, _resolve, NOW, zones=chicago)
     assert first == second == ["person-of-a1@2025-11-02T01:30"]
 
 
@@ -806,12 +825,12 @@ reading team_person.quarter_typical(range):
     calculate:
         median(m)
 
-group work_issue.by_month from (assignee_account_id through team_person.accounts.account_id, completed_at by month in tenant.timezone)
-group work_issue.by_calendar_quarter from (assignee_account_id through team_person.accounts.account_id, completed_at by quarter in tenant.timezone)
-group work_issue.by_hour from (assignee_account_id through team_person.accounts.account_id, completed_at by hour in tenant.timezone)
-group work_issue.by_week from (assignee_account_id through team_person.accounts.account_id, completed_at by week in tenant.timezone)
-group work_issue.by_first_monday from (assignee_account_id through team_person.accounts.account_id, completed_at by first monday of month in tenant.timezone)
-group work_issue.by_fifth_monday from (assignee_account_id through team_person.accounts.account_id, completed_at by fifth monday of month in tenant.timezone)
+group work_issue.by_month from (assignee_account_id through team_person.accounts.account_id, completed_at by month in team_person.timezone)
+group work_issue.by_calendar_quarter from (assignee_account_id through team_person.accounts.account_id, completed_at by quarter in team_person.timezone)
+group work_issue.by_hour from (assignee_account_id through team_person.accounts.account_id, completed_at by hour in team_person.timezone)
+group work_issue.by_week from (assignee_account_id through team_person.accounts.account_id, completed_at by week in team_person.timezone)
+group work_issue.by_first_monday from (assignee_account_id through team_person.accounts.account_id, completed_at by first monday of month in team_person.timezone)
+group work_issue.by_fifth_monday from (assignee_account_id through team_person.accounts.account_id, completed_at by fifth monday of month)
 
 # d
 figure team_person.weekly_lead bucketed:
@@ -1183,18 +1202,18 @@ def test_a_record_lands_in_its_first_monday_bucket_or_in_none_at_all() -> None:
     record completed on the first Monday buckets under that day, and a
     record on any other day is in no bucket -- there is no narrowing step a
     cheap path could skip, because off-rule the function is undefined."""
-    la = {"tenant": {"timezone": "America/Los_Angeles"}}
+    la = {"person-of-a1": "America/Los_Angeles"}
     on_monday = {"assignee_account_id": "a1", "completed_at": "2026-08-03T18:30:00-07:00"}
     mondays = GRAINED.indexes["work_issue.by_first_monday"]
-    assert buckets_of(mondays, on_monday, la, _resolve, NOW) == ["person-of-a1@2026-08-03"]
+    assert buckets_of(mondays, on_monday, _resolve, NOW, zones=la) == ["person-of-a1@2026-08-03"]
     off_monday = {"assignee_account_id": "a1", "completed_at": "2026-08-04T18:30:00-07:00"}
-    assert buckets_of(mondays, off_monday, la, _resolve, NOW) == []
+    assert buckets_of(mondays, off_monday, _resolve, NOW, zones=la) == []
     # The zone decides which day -- and therefore whether the rule holds at
     # all: 2026-08-04T02:00Z is still Monday the 3rd in Los Angeles.
     edge = {"assignee_account_id": "a1", "completed_at": "2026-08-04T02:00:00Z"}
-    assert buckets_of(mondays, edge, la, _resolve, NOW) == ["person-of-a1@2026-08-03"]
-    utc = {"tenant": {"timezone": "UTC"}}
-    assert buckets_of(mondays, edge, utc, _resolve, NOW) == []
+    assert buckets_of(mondays, edge, _resolve, NOW, zones=la) == ["person-of-a1@2026-08-03"]
+    utc = {"person-of-a1": "UTC"}
+    assert buckets_of(mondays, edge, _resolve, NOW, zones=utc) == []
 
 
 def test_a_coarse_bucket_holds_the_records_of_its_own_period_directly() -> None:
@@ -1227,7 +1246,7 @@ def test_a_coarse_bucket_holds_the_records_of_its_own_period_directly() -> None:
     the agreement `label_in` promises, restated where a reader of this test
     will look for it.
     """
-    la = {"tenant": {"timezone": "America/Los_Angeles"}}
+    la = {"person-of-a1": "America/Los_Angeles"}
     # Deliberately spread across month, quarter and year edges, and across a
     # DST boundary, in a zone whose day differs from UTC's for part of each.
     stamps = (
@@ -1246,7 +1265,7 @@ def test_a_coarse_bucket_holds_the_records_of_its_own_period_directly() -> None:
 
     by_rule = {
         rule: [
-            buckets_of(GRAINED.indexes[index], record, la, _resolve, NOW)
+            buckets_of(GRAINED.indexes[index], record, _resolve, NOW, zones=la)
             for record in records
         ]
         for rule, index in (
@@ -1323,7 +1342,7 @@ async def test_a_sub_day_figures_windows_are_positions_in_its_own_sequence() -> 
         ),
     )
     at = 1_756_036_800_000.0  # 2025-08-24T12:00Z, exactly 05:00 in Los Angeles
-    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, ["1-96"], at_ms=at)
+    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, ["1-96"], at_ms=at, facts=LA)
     assert isinstance(result.state, Ok)
     [window] = result.subjects[0].windows
     assert (window.frm, window.to) == ("2025-08-23T05:15", "2025-08-24T05:00")
@@ -1355,7 +1374,7 @@ async def test_a_failed_floor_withholds_the_series_with_everything_else() -> Non
     )
 
     at = 1_756_036_800_000.0  # 2025-08-24T12:00Z
-    result = await serve_reading(store, GRAINED, tenant, reading, DEFAULTS, [7], at_ms=at)
+    result = await serve_reading(store, GRAINED, tenant, reading, DEFAULTS, [7], at_ms=at, facts=LA)
 
     assert isinstance(result.state, Ok)
     window = result.subjects[0].windows[0]
@@ -1475,7 +1494,7 @@ async def test_an_hour_figure_serves_the_last_hours_of_its_own_sequence() -> Non
         ),
     )
     at = 1_756_036_800_000.0  # 05:00 in Los Angeles
-    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, [4], at_ms=at)
+    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, [4], at_ms=at, facts=LA)
     [window] = result.subjects[0].windows
     assert (window.frm, window.to) == ("2025-08-24T02:00", "2025-08-24T05:00")
     assert (window.span, window.bucket, window.trailing) == ("4", "hour", None)
@@ -1686,7 +1705,14 @@ async def test_an_anchor_day_ends_the_windows_in_the_readings_own_zone() -> None
         await store.save(tenant, figure.name, figure.version, subject, values, (), "P One")
 
     result = await serve_reading(
-        store, READINGS, tenant, reading, DEFAULTS, [7], at_day="2025-08-24"
+        store,
+        READINGS,
+        tenant,
+        reading,
+        DEFAULTS,
+        [7],
+        at_day="2025-08-24",
+        facts=_calendars({"p1": "America/Los_Angeles"}),
     )
 
     assert isinstance(result.state, Ok)
@@ -1920,7 +1946,7 @@ async def test_a_bare_number_is_positions_in_the_figures_own_sequence() -> None:
         ),
     )
     at = 1_756_036_800_000.0  # exactly 05:00 in Los Angeles
-    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, [2], at_ms=at)
+    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, [2], at_ms=at, facts=LA)
     [window] = result.subjects[0].windows
     assert (window.frm, window.to) == ("2025-08-24T04:45", "2025-08-24T05:00")
     assert (window.span, window.bucket, window.trailing) == ("2", "15 minutes", None)
@@ -2039,7 +2065,7 @@ async def test_a_minute_figure_serves_its_minutes_bucket_for_bucket() -> None:
         await store.save("t1", figure.name, figure.version, subject, values, (), "P One")
 
     at = 1_756_036_800_000.0  # 05:00 in Los Angeles
-    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, [90], at_ms=at)
+    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, [90], at_ms=at, facts=LA)
     [window] = result.subjects[0].windows
     assert (window.frm, window.to) == ("2025-08-24T03:31", "2025-08-24T05:00")
     assert (window.span, window.bucket, window.trailing) == ("90", "minute", None)

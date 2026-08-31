@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -955,7 +955,7 @@ async def test_the_described_library_covers_reading_projection_and_summary(
     grown = (
         COURIER_SOURCE
         + """
-group shop_order.delivered_by_day from (courier_id, delivered_at by day in tenant.timezone)
+group shop_order.delivered_by_day from (courier_id, delivered_at by day in shop_courier.timezone)
 filter shop_order.stale where picked_up_at older than 5 days
 filter shop_review.signed_off keyed as shop_order where approved == true
 
@@ -1071,7 +1071,11 @@ summarise shop_order.flow over shop_order.board:
     )
 
     by_day = {d["name"]: d for d in body["indexes"]}["shop_order.delivered_by_day"]
-    assert by_day["settings"] == ["tenant.timezone"]
+    assert by_day["settings"] == [], (
+        "a grouping reads no dial now -- its calendar is a field on the "
+        "subject's record, and a host told to offer an operator a timezone "
+        "control would be offering one that moves nothing"
+    )
     assert by_day["grain"] == "day", "the declaration that carries the truncation says so"
 
     keyed = {d["name"]: d for d in body["indexes"]}["shop_review.signed_off"]
@@ -1111,7 +1115,7 @@ async def test_the_described_library_names_the_fields_a_declaration_reads(
 RIDES_SOURCE = (
     COURIER_SOURCE
     + """
-group shop_order.delivered_by_day from (courier_id, delivered_at by day in tenant.timezone)
+group shop_order.delivered_by_day from (courier_id, delivered_at by day in shop_courier.timezone)
 
 measure shop_order.riding_seconds = delivered_at - picked_up_at
 
@@ -1168,18 +1172,21 @@ RIDES = {
 
 
 async def _teach_rides(http: httpx.AsyncClient, zone: str = RIDES_ZONE) -> None:
+    """The courier carries the calendar, because the calendar is a fact about
+    them: their days are cut on their own midnight rather than on one the
+    tenant set for everybody."""
     world = COURIER_WORLD.to_document()
-    world["bucket_settings"] = ["tenant.timezone"]
-    world["defaults"] = {
-        **world["defaults"],
-        "tenant": {"hoursPerDay": 8, "timezone": zone},
-    }
     assert (await http.put("/schema", json=world)).status_code == 200
     put = await http.put("/definitions", json={"source": RIDES_SOURCE})
     assert put.status_code == 200, put.text
     pushed = await http.post(
         "/tenants/t1/facts",
-        json={"writes": {"shop_courier": COURIER, "shop_order": RIDES}},
+        json={
+            "writes": {
+                "shop_courier": {"c1": {"name": "Aki", "timezone": zone}},
+                "shop_order": RIDES,
+            }
+        },
     )
     assert pushed.status_code == 200, pushed.text
 
@@ -1251,7 +1258,10 @@ async def test_an_unanchored_reading_still_ends_today(server: Server) -> None:
     result = got.json()
     assert result["state"]["ok"] is True
 
-    today = datetime.now(tz=ZoneInfo(RIDES_ZONE)).date().isoformat()
+    # The empty subject is what somebody with nothing looks like, and there is
+    # no record to read a calendar off -- so its window is cut in UTC and says
+    # so, rather than borrowing a calendar from whoever happens to exist.
+    today = datetime.now(tz=UTC).date().isoformat()
     assert result["subjects"] == []
     [window] = result["empty"]["windows"]
     assert window["to"] == today
@@ -1501,7 +1511,7 @@ async def test_a_duplicate_span_in_one_request_is_a_422(server: Server) -> None:
 QUARTER_RIDES_SOURCE = (
     RIDES_SOURCE
     + """
-group shop_order.delivered_by_hour from (courier_id, delivered_at by hour in tenant.timezone)
+group shop_order.delivered_by_hour from (courier_id, delivered_at by hour in shop_courier.timezone)
 
 # Every delivery's ride time, hour by hour.
 figure shop_courier.ride_hours bucketed:
@@ -1531,18 +1541,19 @@ async def test_an_hour_span_serves_over_http_with_an_honest_wire_shape(
     r2 (local 2026-06-30) is in, r1 (local 2026-06-28) is out -- and the
     window says what it is: hour buckets, label bounds, `trailing` null
     because only a day sequence's trailing span is a count of days."""
-    world = COURIER_WORLD.to_document()
-    world["bucket_settings"] = ["tenant.timezone"]
-    world["defaults"] = {
-        **world["defaults"],
-        "tenant": {"hoursPerDay": 8, "timezone": RIDES_ZONE},
-    }
-    assert (await server.http.put("/schema", json=world)).status_code == 200
+    assert (
+        await server.http.put("/schema", json=COURIER_WORLD.to_document())
+    ).status_code == 200
     put = await server.http.put("/definitions", json={"source": QUARTER_RIDES_SOURCE})
     assert put.status_code == 200, put.text
     pushed = await server.http.post(
         "/tenants/t1/facts",
-        json={"writes": {"shop_courier": COURIER, "shop_order": RIDES}},
+        json={
+            "writes": {
+                "shop_courier": {"c1": {"name": "Aki", "timezone": RIDES_ZONE}},
+                "shop_order": RIDES,
+            }
+        },
     )
     assert pushed.status_code == 200, pushed.text
 

@@ -529,10 +529,10 @@ def resolve_span(at_ms: float, zone: str | None, spec: WindowSpec, rule: str) ->
 def buckets_of(
     index: CompiledIndex,
     record: Mapping[str, Any],
-    settings: Mapping[str, Any],
     resolve: ThroughResolver,
     now_ms: float,
     owners: OwnerReader | None = None,
+    zones: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Which buckets this record belongs to. Empty means it is in none."""
     spec = index.spec
@@ -567,18 +567,33 @@ def buckets_of(
         return [""] if inside else []
 
     if isinstance(spec, ByField):
-        return _keys_for(spec.part, record, settings, resolve)
+        return _keys_for(spec.part, record, resolve, None, zones)
 
     if isinstance(spec, ByComposite):
+        # **Not a plain cross product any more.** A time part's calendar is a
+        # field on the *subject*, so which day an instant falls in depends on
+        # which subject's column it is being filed in: one 08:00 UTC merge is
+        # the 25th for a courier in Tokyo and the 24th for one in London.
+        # Computing each part's keys once and crossing them would have to pick
+        # one of those days for both, silently.
+        #
+        # So the keys of each part are computed against the prefix already
+        # accumulated, whose first element is the subject. For every part that
+        # reads no calendar this is the same cross product it always was.
         combos: list[list[str]] = [[]]
         for part in spec.parts:
-            keys = _keys_for(part, record, settings, resolve)
-            if not keys:
+            grown: list[list[str]] = []
+            for prefix in combos:
+                keys = _keys_for(
+                    part, record, resolve, prefix[0] if prefix else None, zones
+                )
+                grown.extend([*prefix, key] for key in keys)
+            if not grown:
                 # A composite with a missing part collapses to no bucket, which
                 # means the record counts for nobody. That is the honest answer:
                 # a pair key with a hole in it is not a pair.
                 return []
-            combos = [[*prefix, key] for prefix in combos for key in keys]
+            combos = grown
         return [compose(c) for c in combos]
 
     assert_never(spec)
@@ -647,8 +662,9 @@ def _age_threshold(
 def _keys_for(
     part: IndexField,
     record: Mapping[str, Any],
-    settings: Mapping[str, Any],
     resolve: ThroughResolver,
+    subject: str | None,
+    zones: Mapping[str, str] | None,
 ) -> list[str]:
     raw = read_path(record, part.field)
     if not raw:
@@ -663,8 +679,22 @@ def _keys_for(
             return []
 
     if part.truncate is not None or part.select is not None:
-        zone = _setting(settings, part.zone) if part.zone is not None else None
-        zone_name = str(zone) if zone is not None else None
+        zone_name: str | None = None
+        if part.zone is not None:
+            if subject is not None:
+                # The subject's own calendar. Absent means the subject has no
+                # calendar recorded, and a record cannot be filed under a day
+                # nobody has said how to cut -- so it is in no bucket, never
+                # in UTC's.
+                zone_name = (zones or {}).get(subject)
+            else:
+                # No subject part, so the record is the thing: read the
+                # calendar off it directly. The checker has already required
+                # the kind named to be this record's own.
+                held = read_path(record, part.zone.field)
+                zone_name = str(held[0]) if len(held) == 1 else None
+            if zone_name is None:
+                return []
         out: list[str] = []
         for value in raw:
             moment = parse_instant(value)
@@ -683,19 +713,6 @@ def _keys_for(
         return sorted(set(out))
 
     return raw
-
-
-def _setting(settings: Mapping[str, Any], path: str) -> Any:
-    node: Any = settings
-    for segment in path.split("."):
-        if not isinstance(node, Mapping) or segment not in node:
-            raise KeyError(
-                f'no value for setting "{path}". A definition named it, so bucketing cannot '
-                "proceed without it -- and falling back would file every record under the "
-                "wrong day or the wrong side of a threshold."
-            )
-        node = node[segment]
-    return node
 
 
 # ------------------------------------------------------------- measures --

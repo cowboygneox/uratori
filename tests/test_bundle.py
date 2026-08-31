@@ -68,7 +68,7 @@ projection work_issue.item:
 summarise work_issue.backlog over work_issue.item:
     count items
 
-group code_change.merged_by_quarter from (authorAccountId through team_person.accounts.accountId, mergedAt by 15 minutes in tenant.timezone)
+group code_change.merged_by_quarter from (authorAccountId through team_person.accounts.accountId, mergedAt by 15 minutes)
 
 # Time to merge, quarter by quarter.
 figure team_person.merge_quarters bucketed:
@@ -95,7 +95,7 @@ reading team_person.merge_daily(range):
         sum(m)
         series(m)
 
-group code_change.merged_by_minute from (authorAccountId through team_person.accounts.accountId, mergedAt by minute in tenant.timezone)
+group code_change.merged_by_minute from (authorAccountId through team_person.accounts.accountId, mergedAt by minute)
 
 # Merge times, minute by minute.
 figure team_person.merge_minutes bucketed:
@@ -334,7 +334,7 @@ def test_a_reversed_span_and_a_span_past_the_ceiling_are_refused() -> None:
     # figure the two coincide by construction, which is why this needs a
     # coarse rule to demonstrate at all.
     monthly = MEMBERS + """
-group code_change.merged_by_month from (authorAccountId through team_person.accounts.accountId, mergedAt by month in tenant.timezone)
+group code_change.merged_by_month from (authorAccountId through team_person.accounts.accountId, mergedAt by month)
 
 # Time to merge, month by month.
 figure team_person.merge_months bucketed:
@@ -541,7 +541,7 @@ SERVE_WORLD = Schema(
 SERVE_SOURCE = """
 group shop_order.carried_by from courier_id
 filter shop_order.open where status != "delivered"
-group shop_order.delivered_by_day from (courier_id, delivered_at by day in tenant.timezone)
+group shop_order.delivered_by_day from (courier_id, delivered_at by day)
 
 measure shop_order.riding_seconds = delivered_at - picked_up_at
 
@@ -1136,7 +1136,7 @@ def test_the_reach_ceiling_reads_the_figures_own_bucket_rule() -> None:
     coarse sequence cannot smuggle a longer walk in under a smaller-looking
     span -- decided when the tile compiles, in the serving door's words."""
     monthly = (
-        "\ngroup code_change.merged_by_month from (authorAccountId through team_person.accounts.accountId, mergedAt by month in tenant.timezone)\n"
+        "\ngroup code_change.merged_by_month from (authorAccountId through team_person.accounts.accountId, mergedAt by month)\n"
         "\n# Merges per month.\n"
         "figure team_person.merges_monthly bucketed:\n"
         '    display "{team_person} merges that month"\n'

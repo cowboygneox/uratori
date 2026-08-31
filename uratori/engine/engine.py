@@ -15,7 +15,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from ..lang.ast import ByAge
+from ..lang.ast import ByAge, Zone
 from ..lang.plan import CompiledIndex, FigurePlan, Library
 from ..lang.settings import fingerprint as settings_fingerprint
 from ..lang.settings import setting_value
@@ -270,7 +270,7 @@ class Engine:
                     tenant,
                     bases & alive,
                     at_ms=now,
-                    zone=_zone_of(lib, plan, settings),
+                    zones=await subject_zones(self._facts, tenant, zone_ref(lib, plan)),
                     trigger="pass",
                 )
             except CarryReachExceeded as refused:  # pragma: no cover - belt
@@ -353,7 +353,7 @@ class Engine:
 
     async def _resolver(
         self, tenant: str, only: set[str] | None = None
-    ) -> tuple[ThroughResolver, OwnerReader]:
+    ) -> tuple[ThroughResolver, OwnerReader, dict[tuple[str, str], dict[str, str]]]:
         """Resolve a value to the records that own it -- their ids, and, for
         an age filter reading a threshold off one, their bodies.
 
@@ -365,6 +365,7 @@ class Engine:
         """
         cache: dict[tuple[str, str], dict[str, list[str]]] = {}
         bodies: dict[tuple[str, str], dict[str, list[Mapping[str, Any]]]] = {}
+        calendars: dict[tuple[str, str], dict[str, str]] = {}
 
         async def build(kind: str, path: str) -> dict[str, list[str]]:
             table: dict[str, list[str]] = {}
@@ -372,6 +373,21 @@ class Engine:
                 for value in read_path(row.value, path):
                     table.setdefault(value, []).append(row.key)
             return {k: sorted(set(v)) for k, v in table.items()}
+
+        async def build_calendar(kind: str, field: str) -> dict[str, str]:
+            """Every subject's calendar, by their record key.
+
+            One fetch of the kind carrying it -- a roster kind, small by
+            construction -- rather than a read per record, because bucketing
+            asks for every record of the bucketed kind and a lookup per record
+            is the shape that turns a sync into a minute.
+            """
+            out: dict[str, str] = {}
+            for row in await self._facts.of_kind(tenant, kind):
+                held = read_path(row.value, field)
+                if len(held) == 1:
+                    out[row.key] = str(held[0])
+            return out
 
         async def build_bodies(kind: str, path: str) -> dict[str, list[Mapping[str, Any]]]:
             """The same join, keeping the records rather than their keys.
@@ -400,6 +416,11 @@ class Engine:
                 key = (spec.through.kind, spec.through.path)
                 if key not in bodies:
                     bodies[key] = await build_bodies(*key)
+            for part in _parts_of(index):
+                if part.zone is not None:
+                    key = (part.zone.kind, part.zone.field)
+                    if key not in calendars:
+                        calendars[key] = await build_calendar(*key)
 
         def resolve(kind: str, path: str, value: str) -> list[str]:
             return cache.get((kind, path), {}).get(value, [])
@@ -407,7 +428,7 @@ class Engine:
         def owners(kind: str, path: str, value: str) -> list[Mapping[str, Any]]:
             return bodies.get((kind, path), {}).get(value, [])
 
-        return resolve, owners
+        return resolve, owners, calendars
 
     async def _reindex(
         self,
@@ -417,13 +438,14 @@ class Engine:
         *,
         now_ms: float,
     ) -> None:
-        resolve, owners = await self._resolver(tenant, only=only)
+        resolve, owners, calendars = await self._resolver(tenant, only=only)
         for index in self._library.indexes.values():
             if only is not None and index.name not in only:
                 continue
+            zones = _calendar_of(index, calendars)
             wanted: dict[str, list[str]] = {}
             for row in await self._facts.of_kind(tenant, index.kind):
-                buckets = buckets_of(index, row.value, settings, resolve, now_ms, owners)
+                buckets = buckets_of(index, row.value, resolve, now_ms, owners, zones)
                 if buckets:
                     wanted[row.key] = buckets
             await self._store.replace_index(tenant, index.name, wanted)
@@ -445,7 +467,7 @@ class Engine:
         *,
         now_ms: float,
     ) -> list[Change]:
-        resolve, owners = await self._resolver(tenant)
+        resolve, owners, calendars = await self._resolver(tenant)
         touched: dict[str, set[str]] = {}
 
         def touch(subject: str, figure: str) -> None:
@@ -465,7 +487,12 @@ class Engine:
             for index in self._indexes_over(kind):
                 wanted = {
                     row.key: buckets_of(
-                        index, row.value, settings, resolve, now_ms, owners
+                        index,
+                        row.value,
+                        resolve,
+                        now_ms,
+                        owners,
+                        _calendar_of(index, calendars),
                     )
                     for row in rows
                 }
@@ -784,12 +811,35 @@ class Engine:
                 if plan.across is not None
                 else None
             )
+            # **A bucket the grouping no longer has.** A sparse sequenced
+            # figure has a row exactly where its group has a bucket, so a
+            # record that moved between buckets -- a corrected timestamp, or
+            # a subject whose calendar changed and refiled their whole history
+            # -- leaves the old row behind holding a number about a day that
+            # no longer has anything in it. Every reader believes it: the
+            # figure is stored, versioned and current.
+            #
+            # Carried figures are exempt, and that is the whole distinction
+            # between them: their rows exist precisely where no record does,
+            # and their own retirement rule is the one that governs them.
+            buckets = (
+                {
+                    key
+                    for key in await self._store.bucket_keys(tenant, plan.scope_index)
+                }
+                if plan.grain is not None
+                and not plan.carried
+                and plan.scope_index is not None
+                else None
+            )
             for stored in await self._store.values(tenant, plan.name, plan.version):
                 base = subject_of(stored.subject)
                 tail = stored.subject.split(SEPARATOR, 1)[1] if SEPARATOR in stored.subject else None
                 gone = base not in alive
                 if not gone and dimension is not None and tail is not None:
                     gone = tail not in dimension
+                if not gone and buckets is not None:
+                    gone = stored.subject not in buckets
                 if not gone:
                     continue
                 await self._store.remove(tenant, plan.name, plan.version, stored.subject)
@@ -968,26 +1018,53 @@ class Engine:
 
 
 
-def _zone_of(
-    lib: Library, plan: FigurePlan, settings: Mapping[str, Any]
-) -> str | None:
-    """Whose calendar the figure's buckets were written in.
+def _calendar_of(
+    index: CompiledIndex, calendars: Mapping[tuple[str, str], dict[str, str]]
+) -> dict[str, str] | None:
+    """The subject-key-to-calendar map this grouping needs, or None where it
+    declares no calendar and every bucket is cut in UTC."""
+    for part in _parts_of(index):
+        if part.zone is not None:
+            return calendars.get((part.zone.kind, part.zone.field), {})
+    return None
 
-    Resolved from the scope group's own zone dial, which is the only thing
+
+def zone_ref(lib: Library, plan: FigurePlan) -> Zone | None:
+    """Which record and field carry the calendar a figure's buckets were
+    written in.
+
+    Resolved from the scope group's own zone clause, which is the only thing
     that decided the labels at write time -- so extension and reading walk
     the same sequence. A second answer here would materialise labels a
     window never asks for.
     """
-    from ..lang.ast import ByComposite
-
     if plan.scope_index is None:
         return None
-    spec = lib.indexes[plan.scope_index].spec
-    if isinstance(spec, ByComposite):
-        for part in spec.parts:
-            if part.zone is not None:
-                return str(setting_value(dict(settings), part.zone))
+    for part in _parts_of(lib.indexes[plan.scope_index]):
+        zone: Zone | None = part.zone
+        if zone is not None:
+            return zone
     return None
+
+
+async def subject_zones(
+    facts: FactSource, tenant: str, zone: Zone | None
+) -> dict[str, str]:
+    """Every subject's calendar, by key. Empty where none is declared.
+
+    Shared by the pass and the serving path deliberately: the labels a window
+    counts back through have to be cut the same way the stored ones were, and
+    two answers to "whose calendar" would be a window walking a sequence that
+    does not exist.
+    """
+    if zone is None:
+        return {}
+    out: dict[str, str] = {}
+    for row in await facts.of_kind(tenant, zone.kind):
+        held = read_path(row.value, zone.field)
+        if len(held) == 1:
+            out[row.key] = str(held[0])
+    return out
 
 
 def _field_kinds(plan: FigurePlan) -> frozenset[str]:
@@ -1058,17 +1135,17 @@ def _index_version(index: CompiledIndex) -> str:
 
 
 def _index_dials(index: CompiledIndex) -> list[str]:
-    """The dials this grouping's buckets can move with: a calendar zone on a
-    truncated part, and nothing else now that an age threshold is a number in
-    the definition or a field on the record's owner. Empty for the dial-free
-    majority."""
-    from ..lang.ast import ByComposite, ByField
+    """The dials this grouping's buckets can move with -- none, now.
 
-    spec = index.spec
-    if isinstance(spec, ByField):
-        return [spec.part.zone] if spec.part.zone is not None else []
-    if isinstance(spec, ByComposite):
-        return [part.zone for part in spec.parts if part.zone is not None]
+    An age threshold is a number in the definition or a field on the record's
+    owner, and a calendar is a field on the subject's record. Both move with
+    *records*, and a record moving is what the change stream and the
+    through-kind escalation already notice; a settings fingerprint would be
+    watching a document nothing in a grouping reads.
+
+    Kept as a function rather than deleted so the stamp keeps its shape while
+    the settings document still exists at the door.
+    """
     return []
 
 

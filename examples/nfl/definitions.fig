@@ -28,6 +28,12 @@ fact nfl_team:
     conference as text
     division as text
     logo as text
+    # The calendar this franchise's days and hours are cut on. The league
+    # keeps one clock, so every team carries the same value here -- but it
+    # is a fact about the team rather than a control over the board, and a
+    # franchise that moved cities would move its own history and nobody
+    # else's.
+    timezone as text
     many abbrs:
         abbr as text
 
@@ -67,8 +73,8 @@ fact nfl_weekday:
 # is, explicitly, because a shutout's 0 is a measured nought. `weekday`
 # names the nfl_weekday the kickoff falls on in the league's own calendar
 # (US Eastern), deliberately fixed: a London morning game is Sunday
-# football, and moving the tenant.timezone dial re-buckets the day and
-# clock groups but never re-files what day the league played on.
+# football, and a franchise's own calendar re-buckets the day and clock
+# groups but never re-files what day the league played on.
 fact nfl_game:
     name name
     url url
@@ -198,7 +204,7 @@ group nfl_team_game.by_team from team through nfl_team.abbrs.abbr
 # split fans out across.
 group nfl_team_game.team_by_season from (team through nfl_team.abbrs.abbr, season)
 
-group nfl_team_game.team_by_day from (team through nfl_team.abbrs.abbr, kickoff by day in tenant.timezone)
+group nfl_team_game.team_by_day from (team through nfl_team.abbrs.abbr, kickoff by day in nfl_team.timezone)
 
 # Per team-season, by the season's own key -- no hop, because the record
 # names its team-season outright.
@@ -520,15 +526,15 @@ figure nfl_team_season.rate:
 # ------------------------------------------------------------ the players --
 
 group nfl_stat_line.by_player from player_id
-group nfl_stat_line.player_by_day from (player_id, kickoff by day in tenant.timezone)
+group nfl_stat_line.player_by_day from (player_id, kickoff by day in nfl_team.timezone)
 
 # The same lines at month and quarter grain: the day/month/quarter trio,
 # each its own declaration bucketing the records directly -- a month bucket
 # holds every stat line of the month, not a rollup of day buckets -- so
 # each grain is citable on its own and a window over any of them is just
 # `over 1-6` counted back through that grain's sequence.
-group nfl_stat_line.player_by_month from (player_id, kickoff by month in tenant.timezone)
-group nfl_stat_line.player_by_quarter from (player_id, kickoff by quarter in tenant.timezone)
+group nfl_stat_line.player_by_month from (player_id, kickoff by month)
+group nfl_stat_line.player_by_quarter from (player_id, kickoff by quarter)
 
 # A pair group: each stat line filed under (player, opponent franchise) --
 # the second part is a dimension, and the figure over it says so.
@@ -661,14 +667,14 @@ group nfl_play.in_season from season
 # the scheduled kickoff) and early seasons recorded none, so this covers
 # what genuinely has a clock -- the season totals live on the scoring
 # reading, not here.
-group nfl_play.scoring_slots from (scored_by through nfl_team.abbrs.abbr, clock_time by 15 minutes in tenant.timezone)
+group nfl_play.scoring_slots from (scored_by through nfl_team.abbrs.abbr, clock_time by 15 minutes in nfl_team.timezone)
 
 # The same verified clocks, filed into hours: a coarser view of scoring is
 # its own declaration, with its own name and hash, computed straight from
 # the plays -- never a re-grouping of the quarter-hour buckets on the way
 # out. A reading's window walks whichever of these two sequences its
 # figure declared.
-group nfl_play.scoring_hours from (scored_by through nfl_team.abbrs.abbr, clock_time by hour in tenant.timezone)
+group nfl_play.scoring_hours from (scored_by through nfl_team.abbrs.abbr, clock_time by hour in nfl_team.timezone)
 
 # Giveaways filed under whoever actually lost the ball -- on a muffed punt
 # that is the returner, not the team whose punt it was.

@@ -135,8 +135,8 @@ def test_a_delta_cell_is_never_computed_from_a_value_outside_the_points() -> Non
 # --------------------------------------------------------- the grammar --
 
 BASE = """
-group code_change.merged_by_day from (authorAccountId through team_person.accounts.accountId, mergedAt by day in tenant.timezone)
-group work_issue.delivered_by_day from (assigneeAccountId through team_person.accounts.accountId, completedAt by day in tenant.timezone)
+group code_change.merged_by_day from (authorAccountId through team_person.accounts.accountId, mergedAt by day)
+group work_issue.delivered_by_day from (assigneeAccountId through team_person.accounts.accountId, completedAt by day)
 group code_review_request.asked_of from reviewerAccountId through team_person.accounts.accountId
 filter code_review_request.pending where pending == true
 measure code_change.open_seconds = mergedAt - createdAt
@@ -528,7 +528,7 @@ def test_a_delta_over_a_sub_day_figure_is_refused_rather_than_served_empty() -> 
     by a different road.
     """
     sub_day = """
-group work_issue.by_quarter from (assigneeAccountId through team_person.accounts.accountId, completedAt by 15 minutes in tenant.timezone)
+group work_issue.by_quarter from (assigneeAccountId through team_person.accounts.accountId, completedAt by 15 minutes)
 
 # Delivered per quarter-hour.
 figure team_person.quarter_volume bucketed:

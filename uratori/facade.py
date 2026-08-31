@@ -209,13 +209,14 @@ class Uratori:
         from .lang.check import _index_fields
 
         specs = [index.spec for index in self._library.indexes.values()]
+        parts = [part for spec in specs for part in _index_fields(spec)]
         return frozenset(
-            [
-                part.through.kind
-                for spec in specs
-                for part in _index_fields(spec)
-                if part.through is not None
-            ]
+            [part.through.kind for part in parts if part.through is not None]
+            # A calendar is a field on the subject's record, so moving it
+            # refiles every one of that subject's buckets while the records
+            # themselves sit still -- the same blindness the identity hop has,
+            # and it needs the same escalation.
+            + [part.zone.kind for part in parts if part.zone is not None]
             + [
                 spec.through.kind
                 for spec in specs
@@ -711,7 +712,14 @@ class Uratori:
                 continue
             out.append(
                 await serve_reading(
-                    self._store, lib, tenant, reading, document, list(trailing), at_day=at
+                    self._store,
+                    lib,
+                    tenant,
+                    reading,
+                    document,
+                    list(trailing),
+                    at_day=at,
+                    facts=self._facts,
                 )
             )
 
@@ -801,7 +809,14 @@ class Uratori:
             if reading.mode == "live":
                 raise NotImplementedError("live readings are not servable yet")
             return await serve_reading(
-                self._store, lib, tenant, reading, document, list(trailing), at_day=at
+                self._store,
+                lib,
+                tenant,
+                reading,
+                document,
+                list(trailing),
+                at_day=at,
+                facts=self._facts,
             )
 
         projection = lib.projection(name)

@@ -1,18 +1,11 @@
 {
-  "bucket_settings": [
-    "tenant.timezone",
-    "form.recentDays"
-  ],
+  "bucket_settings": [],
   "figure_settings": [],
   "reading_settings": [],
   "project_settings": [],
   "defaults": {
     "tenant": {
-      "hoursPerDay": 8,
-      "timezone": "America/New_York"
-    },
-    "form": {
-      "recentDays": 45
+      "hoursPerDay": 8
     }
   }
 }

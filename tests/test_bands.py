@@ -66,13 +66,13 @@ fact goal_change:
     set_at as moment
 
 group shop_order.carried_by from courier_id
-group shop_order.dropped_by_month from (courier_id, delivered_at by month in tenant.timezone)
-group shop_order.dropped_by_day from (courier_id, delivered_at by day in tenant.timezone)
+group shop_order.dropped_by_month from (courier_id, delivered_at by month)
+group shop_order.dropped_by_day from (courier_id, delivered_at by day)
 filter shop_order.open where status != "delivered"
 
 group goal_change.by_courier from courier_id
-group goal_change.by_month from (courier_id, set_at by month in tenant.timezone)
-group goal_change.by_day from (courier_id, set_at by day in tenant.timezone)
+group goal_change.by_month from (courier_id, set_at by month)
+group goal_change.by_day from (courier_id, set_at by day)
 filter goal_change.drops where setting == "drops"
 filter goal_change.hand where setting == "hand"
 

@@ -43,9 +43,9 @@ WORLD = Schema(
 SOURCE = """
 group shop_order.carried_by from courier_id
 group shop_limit.set_for from courier_id
-group shop_limit.set_by_day from (courier_id, set_at by day in tenant.timezone)
+group shop_limit.set_by_day from (courier_id, set_at by day)
 filter shop_order.open where status != "delivered"
-group shop_order.delivered_by_day from (courier_id, delivered_at by day in tenant.timezone)
+group shop_order.delivered_by_day from (courier_id, delivered_at by day)
 group shop_review.rated_by from courier_id
 
 measure shop_order.riding_seconds = delivered_at - picked_up_at

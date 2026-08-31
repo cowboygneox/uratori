@@ -49,6 +49,7 @@ WORLD = '''
 fact site:
     name name
     name as text
+    timezone as text
 
 # One change to one setting, at one site, by one person. Sparse by nature:
 # a record exists only when somebody changed something, so a month with no
@@ -69,8 +70,8 @@ fact job:
 
 filter setting_change.target where setting == "target_minutes"
 group setting_change.at_site from site_id
-group setting_change.by_month from (site_id, set_at by month in tenant.timezone)
-group job.by_month from (site_id, finished_at by month in tenant.timezone)
+group setting_change.by_month from (site_id, set_at by month in site.timezone)
+group job.by_month from (site_id, finished_at by month in site.timezone)
 group job.at_site from site_id
 measure job.length = finished_at - started_at
 '''
@@ -210,13 +211,20 @@ def test_bucketed_is_not_in_the_version_hash() -> None:
     Pinned against the versions these two figures had *before* the keyword
     existed, because that is the actual claim: not that the flag hashes
     consistently, but that adding it moved nothing that was already stored.
+
+    The pin moved once, deliberately: `team_person.time_to_merge` buckets by
+    day, and the calendar that decides which day is a field on the subject's
+    record rather than a tenant dial. That changes the group's spec, so it
+    changes what the figure hashes -- a real rebuild, for a real change in
+    what a bucket means. The claim the pin makes is unchanged, and it is
+    still the claim that matters: nothing *incidental* moves a version.
     """
     from .test_lang import BASE
     from .world import compile_source as compile_suite
 
     lib = compile_suite(BASE)
     versions = {f.name: f.version for f in lib.figures}
-    assert versions["team_person.time_to_merge"] == "31cafa78b3bd", (
+    assert versions["team_person.time_to_merge"] == "5b655b06ef70", (
         "a sequenced figure's version moved when `bucketed` became required; "
         "every tenant would rebuild its whole history to store the same numbers"
     )
@@ -419,7 +427,7 @@ async def _run(source: str, changes: list[tuple[str, str, float, str, str]]):
         store=MemoryEngineStore(),
         facts=facts,
     )
-    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    facts.put("t1", "site", "s1", {"name": "Northgate", "timezone": "UTC"})
     for key, at, value, who, _ in changes:
         facts.put(
             "t1",
@@ -555,7 +563,7 @@ async def _carried(changes=CHANGES, at: float = AT):
     store = MemoryEngineStore()
     library = compile_world(CARRIED)
     engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
-    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    facts.put("t1", "site", "s1", {"name": "Northgate", "timezone": "UTC"})
     for key, when, value, who, _ in changes:
         facts.put(
             "t1",
@@ -673,7 +681,7 @@ async def test_every_trigger_writes_byte_identical_rows() -> None:
     store = MemoryEngineStore()
     library = compile_world(CARRIED)
     incremental = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
-    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    facts.put("t1", "site", "s1", {"name": "Northgate", "timezone": "UTC"})
     await incremental.run("t1", full=True, at_ms=AT)
     for key, when, value, who, _ in CHANGES:
         facts.put(
@@ -710,7 +718,7 @@ async def test_a_carried_grain_finer_than_a_pass_can_honour_is_refused() -> None
     """
     refuses(
         '''
-group setting_change.by_minute from (site_id, set_at by minute in tenant.timezone)
+group setting_change.by_minute from (site_id, set_at by minute)
 
 # Far too fine.
 figure site.target_minute bucketed:
@@ -749,7 +757,7 @@ async def _paced(at: float = AT):
     store = MemoryEngineStore()
     library = compile_world(PACE)
     engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
-    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    facts.put("t1", "site", "s1", {"name": "Northgate", "timezone": "UTC"})
     for key, when, value, who, _ in CHANGES:
         facts.put(
             "t1",
@@ -857,10 +865,10 @@ async def test_two_first_readers_race_benignly_and_only_one_creates_each_row() -
 
     first, second = await asyncio.gather(
         materialise(
-            store, figure, "t1", ["s1"], at_ms=later, zone="UTC", trigger="read"
+            store, figure, "t1", ["s1"], at_ms=later, zones={}, trigger="read"
         ),
         materialise(
-            store, figure, "t1", ["s1"], at_ms=later, zone="UTC", trigger="read"
+            store, figure, "t1", ["s1"], at_ms=later, zones={}, trigger="read"
         ),
     )
     created = [s for s, _, _ in first] + [s for s, _, _ in second]
@@ -879,7 +887,7 @@ async def test_the_run_log_names_the_figures_a_pass_carried() -> None:
     store = MemoryEngineStore()
     library = compile_world(CARRIED)
     engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
-    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    facts.put("t1", "site", "s1", {"name": "Northgate", "timezone": "UTC"})
     for key, when, value, who, _ in CHANGES:
         facts.put(
             "t1",
@@ -1331,7 +1339,7 @@ async def test_a_figure_over_a_carried_one_is_not_a_pass_behind() -> None:
     store = MemoryEngineStore()
     library = compile_world(DELTA_FIGURE)
     engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
-    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    facts.put("t1", "site", "s1", {"name": "Northgate", "timezone": "UTC"})
     for key, when, value, who, _ in CHANGES:
         facts.put(
             "t1",
@@ -1474,7 +1482,7 @@ async def test_a_reach_refusal_does_not_take_the_rest_of_the_pass_down() -> None
     from uratori import MemoryEngineStore, MemoryFactStore, Uratori
 
     daily = '''
-group setting_change.by_day from (site_id, set_at by day in tenant.timezone)
+group setting_change.by_day from (site_id, set_at by day)
 
 # A target carried day by day, whose first change is far older than the reach.
 figure site.target_day bucketed:
@@ -1501,7 +1509,7 @@ figure site.changes:
     store = MemoryEngineStore()
     library = compile_world(daily)
     engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
-    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    facts.put("t1", "site", "s1", {"name": "Northgate", "timezone": "UTC"})
     facts.put(
         "t1",
         "setting_change",
@@ -1568,8 +1576,8 @@ async def test_two_readers_taking_the_same_empty_snapshot_create_each_row_once()
     store.save_if_absent = save_if_absent  # type: ignore[method-assign]
     try:
         first, second = await asyncio.gather(
-            materialise(store, figure, "t1", ["s1"], at_ms=later, zone="UTC", trigger="read"),
-            materialise(store, figure, "t1", ["s1"], at_ms=later, zone="UTC", trigger="read"),
+            materialise(store, figure, "t1", ["s1"], at_ms=later, zones={}, trigger="read"),
+            materialise(store, figure, "t1", ["s1"], at_ms=later, zones={}, trigger="read"),
         )
     finally:
         store.values = real_values  # type: ignore[method-assign]
@@ -1600,7 +1608,7 @@ async def test_a_new_carried_bucket_reaches_the_push_surface() -> None:
     store = MemoryEngineStore()
     library = compile_world(CARRIED)
     engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
-    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    facts.put("t1", "site", "s1", {"name": "Northgate", "timezone": "UTC"})
     for key, when, value, who, _ in CHANGES:
         facts.put(
             "t1",
@@ -1667,7 +1675,7 @@ async def test_a_coordinate_absent_on_one_side_answers_absence_not_nought() -> N
     store = MemoryEngineStore()
     library = compile_world(DELTA_FIGURE)
     engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
-    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    facts.put("t1", "site", "s1", {"name": "Northgate", "timezone": "UTC"})
     # The target starts in June; the work starts in March.
     facts.put(
         "t1",
@@ -1715,7 +1723,7 @@ async def test_a_bucket_statistic_is_the_median_of_that_buckets_records() -> Non
     store = MemoryEngineStore()
     library = compile_world(MEDIAN)
     engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
-    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    facts.put("t1", "site", "s1", {"name": "Northgate", "timezone": "UTC"})
     # 10, 20 and 60 minutes: a median of 20 and a mean of 30, so the two
     # statistics cannot be confused for one another.
     for key, ends in (("j1", "09:10"), ("j2", "09:20"), ("j3", "10:00")):
@@ -1758,7 +1766,7 @@ async def test_a_warm_edit_under_a_derived_sequenced_figure_completes() -> None:
     store = MemoryEngineStore()
     library = compile_world(DELTA_FIGURE)
     engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
-    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    facts.put("t1", "site", "s1", {"name": "Northgate", "timezone": "UTC"})
     for key, when, value, who, _ in CHANGES:
         facts.put(
             "t1",
@@ -1819,7 +1827,7 @@ async def test_one_subject_reaching_too_far_back_does_not_lose_the_others() -> N
     from uratori import MemoryEngineStore, MemoryFactStore, Uratori
 
     daily = '''
-group setting_change.by_day from (site_id, set_at by day in tenant.timezone)
+group setting_change.by_day from (site_id, set_at by day)
 
 # A target carried day by day.
 figure site.target_day bucketed:
@@ -1837,7 +1845,7 @@ figure site.target_day bucketed:
     library = compile_world(daily)
     engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
     for site in ("s1", "s2"):
-        facts.put("t1", "site", site, {"name": site.upper()})
+        facts.put("t1", "site", site, {"name": site.upper(), "timezone": "UTC"})
     # s1 sorts first and is ordinary; s2 reaches back past the ceiling.
     facts.put(
         "t1",
@@ -1904,7 +1912,7 @@ async def test_a_bucket_nobody_could_measure_is_absent_rather_than_nought() -> N
     store = MemoryEngineStore()
     library = compile_world(MEDIAN)
     engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
-    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    facts.put("t1", "site", "s1", {"name": "Northgate", "timezone": "UTC"})
     # Finished, so it buckets by month -- but never started, so the length
     # measure has nothing to subtract from.
     facts.put(
@@ -1940,7 +1948,7 @@ async def test_a_bucket_statistic_cites_only_the_records_it_could_measure() -> N
     store = MemoryEngineStore()
     library = compile_world(MEDIAN)
     engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
-    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    facts.put("t1", "site", "s1", {"name": "Northgate", "timezone": "UTC"})
     facts.put(
         "t1",
         "job",
@@ -1986,7 +1994,7 @@ async def test_a_departed_subject_stops_gaining_buckets() -> None:
     library = compile_world(CARRIED)
     engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
     for site in ("s1", "s2"):
-        facts.put("t1", "site", site, {"name": site.upper()})
+        facts.put("t1", "site", site, {"name": site.upper(), "timezone": "UTC"})
         facts.put(
             "t1",
             "setting_change",
@@ -2030,7 +2038,7 @@ async def test_the_carry_extends_along_the_groups_own_calendar() -> None:
     store = MemoryEngineStore()
     library = compile_world(CARRIED)
     engine = Uratori(schema=ONCHANGE, library=library, store=store, facts=facts)
-    facts.put("t1", "site", "s1", {"name": "Northgate"})
+    facts.put("t1", "site", "s1", {"name": "Northgate", "timezone": "America/Chicago"})
     facts.put(
         "t1",
         "setting_change",
@@ -2045,7 +2053,6 @@ async def test_the_carry_extends_along_the_groups_own_calendar() -> None:
     )
     await engine.run(
         "t1",
-        settings={"tenant": {"timezone": "America/Chicago"}},
         full=True,
         at_ms=1_788_228_000_000.0,  # 2026-09-01T02:00Z -- 2026-08-31 in Chicago
     )
@@ -2146,6 +2153,7 @@ def test_a_field_read_across_a_list_is_refused_rather_than_taking_the_first() ->
 fact site:
     name name
     name as text
+    timezone as text
 
 # One change, with the revisions it went through.
 fact setting_change:
@@ -2158,7 +2166,7 @@ fact setting_change:
         amount as number
 
 filter setting_change.target where setting == "target_minutes"
-group setting_change.by_month from (site_id, set_at by month in tenant.timezone)
+group setting_change.by_month from (site_id, set_at by month in site.timezone)
 
 # The revised target each month.
 figure site.revised bucketed:

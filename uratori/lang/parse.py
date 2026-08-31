@@ -89,6 +89,7 @@ from .ast import (
     Truncation,
     ValueDecl,
     WindowedSource,
+    Zone,
 )
 from .lex import SyntaxError_, Token, lex, prose_above
 
@@ -573,11 +574,12 @@ class _Parser:
         return ByField(part=self._index_field())
 
     def _index_field(self) -> IndexField:
+        line = self._peek().line
         path = self._name("a field to bucket by")
         through: Through | None = None
         truncate: Truncation | None = None
         select: str | None = None
-        zone: str | None = None
+        zone: Zone | None = None
 
         if self._at_word("through"):
             self._next()
@@ -595,7 +597,18 @@ class _Parser:
             truncate, select = self._bucket_rule()
             if self._at_word("in"):
                 self._next()
-                zone = self._name("the setting naming the calendar, e.g. tenant.timezone")
+                named = self._name(
+                    "the record and field carrying the calendar, e.g. team_person.timezone"
+                )
+                kind, _, field = named.partition(".")
+                if not field:
+                    raise self._error(
+                        f'"{named}" needs a kind and a field -- `team_person.timezone`. '
+                        "A calendar is a fact about the subject now, not a tenant dial: "
+                        "one dial cut every board's days on somebody else's midnight.",
+                        line,
+                    )
+                zone = Zone(kind=kind, field=field)
 
         return IndexField(field=path, through=through, truncate=truncate, select=select, zone=zone)
 

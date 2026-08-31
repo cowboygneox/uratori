@@ -58,6 +58,7 @@ PARITY_SOURCE = """
 fact shop_courier:
     name name
     name as text
+    timezone as text
 
 # One order, from pickup to the door.
 fact shop_order:
@@ -85,10 +86,10 @@ fact shop_limit:
 
 group shop_order.carried_by from courier_id
 filter shop_order.open where status != "delivered"
-group shop_order.delivered_by_day from (courier_id, delivered_at by day in tenant.timezone)
+group shop_order.delivered_by_day from (courier_id, delivered_at by day in shop_courier.timezone)
 group shop_order.by_tag from tag_ids.tag
 group shop_limit.set_for from courier_id
-group shop_limit.set_by_day from (courier_id, set_at by day in tenant.timezone)
+group shop_limit.set_by_day from (courier_id, set_at by day)
 
 measure shop_order.riding_seconds = delivered_at - picked_up_at
 measure shop_limit.orders_allowed = orders in count
@@ -263,7 +264,7 @@ async def test_a_reading_names_its_statistics_and_the_one_the_band_judges(
     banded."""
     async with serve(pg_dsn) as http:
         await _teach(http)
-        await _push(http, {"shop_courier": {"c1": {"name": "Aki"}}, "shop_order": _rides(3)})
+        await _push(http, {"shop_courier": {"c1": {"name": "Aki", "timezone": "UTC"}}, "shop_order": _rides(3)})
 
         got = await http.get("/ui/api/tenants/t1/results/shop_courier.typical_ride")
         assert got.status_code == 200, got.text
@@ -328,7 +329,7 @@ reading shop_courier.usual_ride(range):
         assert put.status_code == 200, put.text
         put = await http.put("/definitions", json={"source": source})
         assert put.status_code == 200, put.text
-        await _push(http, {"shop_courier": {"c1": {"name": "Aki"}}, "shop_order": _rides(2)})
+        await _push(http, {"shop_courier": {"c1": {"name": "Aki", "timezone": "UTC"}}, "shop_order": _rides(2)})
 
         result = (await http.get("/ui/api/tenants/t1/results/shop_courier.ride_total")).json()
         assert result["statistics"] == ["total"]
@@ -364,7 +365,7 @@ async def test_a_record_serves_the_readings_scoped_to_its_kind(pg_dsn: str) -> N
         await _push(
             http,
             {
-                "shop_courier": {"c1": {"name": "Aki"}, "c2": {"name": "Bo"}},
+                "shop_courier": {"c1": {"name": "Aki", "timezone": "UTC"}, "c2": {"name": "Bo", "timezone": "UTC"}},
                 "shop_order": {**_rides(3), **_rides(2, "c2", prefix="b")},
             },
         )
@@ -406,7 +407,7 @@ async def test_a_record_serves_the_tiles_its_kind_appears_on(pg_dsn: str) -> Non
         await _push(
             http,
             {
-                "shop_courier": {"c1": {"name": "Aki"}, "c2": {"name": "Bo"}},
+                "shop_courier": {"c1": {"name": "Aki", "timezone": "UTC"}, "c2": {"name": "Bo", "timezone": "UTC"}},
                 "shop_order": {
                     **_rides(3),
                     **_rides(2, "c2", prefix="b"),
@@ -492,7 +493,7 @@ async def test_about_entries_state_their_true_totals(pg_dsn: str) -> None:
         await _teach(http)
         await _push(
             http,
-            {"shop_courier": {"c1": {"name": "Aki"}}, "shop_order": _rides(65)},
+            {"shop_courier": {"c1": {"name": "Aki", "timezone": "UTC"}}, "shop_order": _rides(65)},
         )
 
         about = await _about(http, "shop_courier", "c1")
@@ -520,7 +521,7 @@ async def test_computed_rows_page_in_row_order_without_drop_or_double(
         await _push(
             http,
             {
-                "shop_courier": {"c1": {"name": "Aki"}, "c2": {"name": "Bo"}},
+                "shop_courier": {"c1": {"name": "Aki", "timezone": "UTC"}, "c2": {"name": "Bo", "timezone": "UTC"}},
                 "shop_order": {**_rides(7), **_rides(4, "c2", prefix="b")},
             },
         )
@@ -581,7 +582,7 @@ async def test_the_paged_doors_refuse_what_the_overview_would_have(
         push = await http.post(
             "/tenants/t1/facts",
             json={
-                "writes": {"shop_courier": {"c1": {"name": "Aki"}}},
+                "writes": {"shop_courier": {"c1": {"name": "Aki", "timezone": "UTC"}}},
                 "defer": True,
             },
         )
@@ -624,7 +625,7 @@ async def test_cited_rows_page_in_subject_order_without_drop_or_double(
         await _push(
             http,
             {
-                "shop_courier": {"c1": {"name": "Aki"}},
+                "shop_courier": {"c1": {"name": "Aki", "timezone": "UTC"}},
                 "shop_tag": {t: {"label": t} for t in tags},
                 "shop_order": _rides(1, tags=tags),
             },
@@ -662,9 +663,9 @@ async def test_the_activity_log_pages_back_to_the_first_kept_run(pg_dsn: str) ->
     async with serve(pg_dsn) as http:
         await _teach(http)
         for i in range(5):
-            await _push(http, {"shop_courier": {"c1": {"name": f"Aki v{i}"}}})
+            await _push(http, {"shop_courier": {"c1": {"name": f"Aki v{i}", "timezone": "UTC"}}})
         # A do-nothing run, for the default view's paged path below.
-        await _push(http, {"shop_courier": {"c1": {"name": "Aki v4"}}})
+        await _push(http, {"shop_courier": {"c1": {"name": "Aki v4", "timezone": "UTC"}}})
 
         async def pages(quiet: bool, limit: int, total: int) -> list[int]:
             walked: list[int] = []
@@ -716,7 +717,7 @@ async def test_the_dials_route_serves_every_declarable_setting_with_its_value(
     engine's own settings_for merge gives, rendered once, server-side."""
     async with serve(pg_dsn) as http:
         await _teach(http)
-        await _push(http, {"shop_courier": {"c1": {"name": "Aki"}}})
+        await _push(http, {"shop_courier": {"c1": {"name": "Aki", "timezone": "UTC"}}})
         put = await http.put(
             "/tenants/t1/settings", json={"document": {"limits": {"carrying": {"over": 5}}}}
         )
@@ -764,7 +765,7 @@ async def test_a_dial_nobody_gave_a_value_is_a_stated_absence(pg_dsn: str) -> No
         assert put.status_code == 200, put.text
         put = await http.put("/definitions", json={"source": PARITY_SOURCE})
         assert put.status_code == 200, put.text
-        await _push(http, {"shop_courier": {"c1": {"name": "Aki"}}})
+        await _push(http, {"shop_courier": {"c1": {"name": "Aki", "timezone": "UTC"}}})
 
         got = await http.get("/ui/api/tenants/t1/dials")
         assert got.status_code == 200, got.text
@@ -785,7 +786,7 @@ async def test_the_dials_page_shows_what_the_engine_reads_not_the_raw_document(
     the calculation it claims to explain."""
     async with serve(pg_dsn) as http:
         await _teach(http)
-        await _push(http, {"shop_courier": {"c1": {"name": "Aki"}}})
+        await _push(http, {"shop_courier": {"c1": {"name": "Aki", "timezone": "UTC"}}})
         put = await http.put(
             "/tenants/t1/settings", json={"document": {"limits": {"ride": {"good": 1}}}}
         )
@@ -809,7 +810,7 @@ async def test_a_null_settings_leaf_is_an_absence_not_the_word_none(
     a chosen value would be an absence dressed as data."""
     async with serve(pg_dsn) as http:
         await _teach(http)
-        await _push(http, {"shop_courier": {"c1": {"name": "Aki"}}})
+        await _push(http, {"shop_courier": {"c1": {"name": "Aki", "timezone": "UTC"}}})
         put = await http.put(
             "/tenants/t1/settings",
             json={"document": {"limits": {"carrying": {"over": None}}}},
@@ -867,7 +868,7 @@ async def test_an_unservable_reading_still_has_a_name_on_the_record_page(
         assert put.status_code == 200, put.text
         put = await http.put("/definitions", json={"source": PARITY_SOURCE + LIVE_TAIL})
         assert put.status_code == 200, put.text
-        await _push(http, {"shop_courier": {"c1": {"name": "Aki"}}, "shop_order": _rides(3)})
+        await _push(http, {"shop_courier": {"c1": {"name": "Aki", "timezone": "UTC"}}, "shop_order": _rides(3)})
 
         about = await _about(http, "shop_courier", "c1")
         by_name = {r["name"]: r for r in about["readings"]}
@@ -1088,8 +1089,8 @@ async def test_every_threshold_entry_point_reaches_the_page_as_an_edge(
         assert ("figure", "shop_courier.ride_budget") in edges[
             "shop_courier.typical_ride"
         ], "a reading's band threshold"
-        assert ("setting", "tenant.timezone") in edges["shop_order.delivered_by_day"], (
-            "a group's day-bucketing zone"
+        assert ("fact", "shop_courier") in edges["shop_order.delivered_by_day"], (
+            "a group's calendar, which is a field on the subject's record"
         )
         # And the closure carries them to the tile, whose page shows the same
         # lines through the same moved_by rendering. `moved_by` is leaves

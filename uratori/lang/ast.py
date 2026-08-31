@@ -145,6 +145,30 @@ class Through:
 
 
 @dataclass(frozen=True)
+class Zone:
+    """Which record carries the calendar, and which of its fields.
+
+    `kind` is a fact kind, and the record is the one keyed by the bucket's
+    **subject** -- part one of a composite, resolved through its hop where it
+    has one. For a group with no subject part (a bare `from set_at by day`)
+    it is the record being bucketed, and the kind must be that record's own.
+
+    Written as `<kind>.<field>` so a reader can see which record without
+    tracing the group's first part, and so the checker can refuse the
+    mismatch: naming a kind the subject part does not resolve to would look
+    up every key in the wrong table and answer nothing, which reads as a
+    board with no buckets rather than as a wrong declaration.
+
+    A record with no value there is in **no bucket**. Never UTC as a
+    fallback: a subject nobody has recorded a calendar for has no calendar,
+    and defaulting one files their history under days they never worked.
+    """
+
+    kind: str
+    field: str
+
+
+@dataclass(frozen=True)
 class IndexField:
     """One component of an index key.
 
@@ -171,14 +195,24 @@ class IndexField:
     Mutually exclusive with `truncate`; hashed as its own key, so every
     spec written before the family existed keeps its version."""
 
-    zone: str | None = None
-    """`by day in tenant.timezone` -- whose calendar decides which day.
+    zone: Zone | None = None
+    """`by day in team_person.timezone` -- whose calendar decides which day.
 
-    The *name* of a setting, never its value: one plan is compiled once and
-    shared by every tenant, so a definition can say which dial it reads but not
-    what that dial is turned to. That keeps the version hash tenant-independent
-    while still recording the dependency, which is what lets the engine work
-    out from the plans alone that changing this setting must re-bucket.
+    A **field on the subject's record**, not a tenant dial. It used to be a
+    dial, and a dial made one calendar for a whole board: a courier in Tokyo
+    and one in London had their days cut on somebody else's midnight, and the
+    number under "yesterday" was about a period neither of them worked.
+
+    Subject-scoped rather than record-scoped, and that is the load-bearing
+    choice. Read off the record being bucketed, a subject's sequence could
+    mix calendars -- some of a courier's days cut in Tokyo, some in Berlin,
+    depending on where each order came from -- and a reading walks that
+    sequence counting back positions, so its window would be a span of no
+    particular calendar. Read off the subject, every bucket in a subject's
+    sequence is cut the same way. The price is that one record shared by two
+    subjects lands on two different dates, which is the honest answer to
+    "which day was this, for them": an 08:00 UTC merge is the 25th in Tokyo
+    and the 24th in London, and it is not the engine's place to pick.
 
     Absent means UTC, and that is a choice a definition makes rather than a
     default it falls into.

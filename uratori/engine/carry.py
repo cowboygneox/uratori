@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import logging
 from bisect import bisect_right
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -284,7 +284,7 @@ async def materialise(
     bases: Iterable[str],
     *,
     at_ms: float,
-    zone: str | None,
+    zones: Mapping[str, str],
     trigger: str,
     cap: int = MAX_CARRY_BUCKETS,
 ) -> list[tuple[str, Value, Value]]:
@@ -356,11 +356,18 @@ async def materialise(
         if not anchors:
             continue
 
-        def labels_back(n: int, _at: float = at_ms) -> list[str]:
+        # This subject's own calendar. A carried sequence is a run of
+        # consecutive buckets, and which buckets are consecutive is a question
+        # only a calendar answers -- so the one that cut the anchors has to be
+        # the one that fills between them, or the fill lands on days the
+        # subject's own rows never used.
+        zone = zones.get(base)
+
+        def labels_back(n: int, _at: float = at_ms, _zone: str | None = zone) -> list[str]:
             from ..windows import WindowSpec
             from .buckets import resolve_span
 
-            return resolve_span(_at, zone, WindowSpec(first=1, last=n), rule)
+            return resolve_span(_at, _zone, WindowSpec(first=1, last=n), rule)
 
         try:
             sequence = sequence_to_present(anchors[0].label, labels_back, cap=cap)

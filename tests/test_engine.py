@@ -37,7 +37,7 @@ filter work_issue.active where active == true
 filter code_change.open where state == "open"
 group code_change.by_source from connection_id
 group code_change.authored_in from (author_account_id through team_person.accounts.account_id, connection_id)
-group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
+group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day)
 
 measure work_issue.estimate = estimate_seconds in effort
 measure code_change.open_seconds = merged_at - created_at
@@ -419,29 +419,40 @@ async def test_identity_decides_the_subject_so_two_accounts_are_one_person() -> 
 # --------------------------------------------------------------- pointers --
 
 
-async def test_a_pointer_moves_only_when_a_definition_or_a_named_dial_does() -> None:
-    """The dial here is the bucketing calendar, because it is the only kind
-    left that reaches a stored value: thresholds are facts now, so a figure's
-    fingerprint covers the dials its *grouping* reads and nothing else."""
+async def test_a_pointer_moves_only_when_the_definition_does() -> None:
+    """A pointer is a definition's version plus a fingerprint of the dials it
+    reads, and the second half is empty now: a figure's thresholds are figures
+    or literals and its groupings' calendars are fields on records, so nothing
+    a tenant sets can move a stored value. What is left is the version, and it
+    must not move for a pass that changed nothing.
+
+    The dial half of this test went with the dials. A settings save reaching a
+    stored value is pinned as its opposite in test_pass_scope."""
     engine, facts, store = build()
     await seed(facts)
     await engine.run(TENANT, DEFAULTS, full=True)
     before = await store.pointer(TENANT, "team_person.merge_times")
     assert before is not None
+    assert before.settings_fingerprint == "{}", (
+        "a figure still names a dial, so a tenant can still move a stored value"
+    )
 
     await engine.run(TENANT, DEFAULTS, full=True)
     assert await store.pointer(TENANT, "team_person.merge_times") == before
 
-    moved = {**DEFAULTS, "tenant": {**DEFAULTS["tenant"], "timezone": "Asia/Tokyo"}}
-    await engine.run(TENANT, moved, full=True)
-    after = await store.pointer(TENANT, "team_person.merge_times")
-    assert after is not None and after.settings_fingerprint != before.settings_fingerprint
+    turned = {**DEFAULTS, "tenant": {**DEFAULTS["tenant"], "timezone": "Asia/Tokyo"}}
+    await engine.run(TENANT, turned, full=True)
+    assert await store.pointer(TENANT, "team_person.merge_times") == before, (
+        "a dial nothing names moved a pointer"
+    )
 
 
-async def test_moving_a_dial_only_rebuilds_the_figures_that_name_it() -> None:
+async def test_moving_a_dial_now_rebuilds_nothing_at_all() -> None:
     """The observable difference between a narrow save and a full rebuild is
     *work*, and a figure recomputed to the value it already held writes nothing
-    -- so the outcome has to say how many were rebuilt or nothing can assert it."""
+    -- so the outcome has to say how many were rebuilt or nothing can assert
+    it. What it must say now is none: the dials that reached a stored value
+    were thresholds and calendars, and both are facts."""
     engine, facts, _ = build()
     await seed(facts)
     await engine.run(TENANT, DEFAULTS, full=True)
@@ -449,9 +460,10 @@ async def test_moving_a_dial_only_rebuilds_the_figures_that_name_it() -> None:
     moved = {**DEFAULTS, "tenant": {**DEFAULTS["tenant"], "timezone": "Asia/Tokyo"}}
     outcome = await engine.run(TENANT, moved)
 
-    assert outcome.rebuilt == ("team_person.merge_times",), (
-        "the calendar moved, so the day-bucketed figure rebuilds and the rest "
-        "-- which name no dial at all now -- must not"
+    assert outcome.rebuilt == (), (
+        "a dial moved and something rebuilt, so a definition still reads one "
+        "-- every threshold is a fact or a literal now, and every calendar a "
+        "field on a record, so a settings document reaches no stored value"
     )
 
 
@@ -863,7 +875,7 @@ async def test_redefining_a_population_index_rebuilds_its_buckets() -> None:
 
 GRAINED = compile_source(
     """
-group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
+group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day)
 group code_change.by_author from author_account_id through team_person.accounts.account_id
 
 measure code_change.open_seconds = merged_at - created_at

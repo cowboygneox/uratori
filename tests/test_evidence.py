@@ -27,8 +27,8 @@ TENANT = "t1"
 
 LIB = compile_source(
     """
-group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
-group work_issue.delivered_by_day from (assignee_account_id through team_person.accounts.account_id, completed_at by day in tenant.timezone)
+group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day)
+group work_issue.delivered_by_day from (assignee_account_id through team_person.accounts.account_id, completed_at by day)
 group code_change.authored_in from (author_account_id through team_person.accounts.account_id, connection_id)
 filter code_change.open where state == "open"
 filter code_review.approved keyed as code_change where was_approved == true
@@ -742,7 +742,7 @@ async def test_the_facades_refusals_each_say_where_the_evidence_lives() -> None:
 
     lib = compile_source(
         """
-group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
+group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day)
 group code_review_request.asked_of from reviewer_account_id through team_person.accounts.account_id
 filter code_review_request.pending where pending == true
 
@@ -840,7 +840,7 @@ async def test_members_spanning_two_fact_kinds_are_served_bare_and_claim_nothing
     happened to miss."""
     mixed = compile_source(
         """
-group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
+group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day)
 filter work_issue.active where active == true
 
 # How much busier the board is than this person.

@@ -67,6 +67,8 @@ from .carry import materialise as _fill
 from .engine import (  # the same hashes the pass records, shared deliberately
     _index_version,
     _versions_if_legacy_current,
+    subject_zones,
+    zone_ref,
 )
 from .evaluate import band_of
 from .project import ProjectedRow, RenderedFlag, Summary, format_value
@@ -296,7 +298,7 @@ async def serve_figure(
         name=plan.name,
         version=plan.version,
         at=_iso(at),
-        zone=_zone_of(library, plan, settings),
+        zone=None,
         unit=_unit(plan.unit),
         label=_label_of(plan.name),
         doc=plan.doc,
@@ -620,6 +622,7 @@ async def serve_reading(
     windows: Sequence[int | str | WindowSpec],
     at_ms: float | None = None,
     at_day: str | None = None,
+    facts: FactSource | None = None,
 ) -> Result:
     """One request serves several windows from a single fetch.
 
@@ -671,9 +674,22 @@ async def serve_reading(
         raise ValueError(f"{plan.name} reads a figure that is not in the library")
 
     state = await availability(store, library, tenant, source, settings)
-    zone = _zone_of(library, source, settings)
+    # **Every subject's own calendar, and they need not agree.** A window is
+    # a span of positions in a subject's bucket sequence, and that sequence
+    # was cut on the subject's calendar at write time -- so counting back
+    # thirty days covers a different thirty dates for a courier in Tokyo than
+    # for one in London. Resolving one span for the board would file both
+    # against whichever calendar happened to be asked for, which is the
+    # plausible wrong number the calendar moved off a dial to avoid.
+    zone = zone_ref(library, source)
+    zones = await subject_zones(facts, tenant, zone) if facts is not None else {}
+    # The calendars actually in play. One, and the response can speak in it;
+    # several, and the only honest top-level answer is UTC with each window
+    # carrying its subject's own.
+    in_play: list[str | None] = list(sorted(set(zones.values()))) or [None]
+    shared = in_play[0] if len(in_play) == 1 else None
     if at_day is not None:
-        at = end_of_day_ms(at_day, zone)
+        at = end_of_day_ms(at_day, shared)
     else:
         at = at_ms if at_ms is not None else now_ms()
     # **A caller's `?at=` may narrow what is reported and must never move
@@ -691,7 +707,17 @@ async def serve_reading(
         refusal = refuse_reach(spec, rule)
         if refusal is not None:
             raise WindowError(refusal)
-    resolved = [(spec, resolve_span(at, zone, spec, rule)) for spec in specs]
+    def spans_in(where: str | None, anchor: float = at) -> list[tuple[WindowSpec, list[str]]]:
+        if at_day is not None:
+            anchor = end_of_day_ms(at_day, where)
+        return [(spec, resolve_span(anchor, where, spec, rule)) for spec in specs]
+
+    # One fetch covers every subject's labels: the bounds are the union
+    # across the calendars in play, so a range no subject asked for is never
+    # walked.
+    covering = [
+        label for where in in_play for _, labels in spans_in(where) for label in labels
+    ]
 
     # One fetch serves every window, bounded by the oldest and newest
     # covered labels across all of them: an offset span (`391-400`) ends far
@@ -700,7 +726,7 @@ async def serve_reading(
     # serve a ten-day window. Stored labels *are* sequence labels (nothing
     # is regrouped on a read), so the bounds are labels and the store's
     # range scan needs no translation.
-    all_labels = [label for _, labels in resolved for label in labels]
+    all_labels = covering
 
     subjects: list[Subject] = []
     if isinstance(state, Ok) and all_labels:
@@ -733,7 +759,7 @@ async def serve_reading(
                     for key in await store.bucket_keys(tenant, source.scope_index or "")
                 },
                     at_ms=fill_at,
-                    zone=zone,
+                    zones=zones,
                     trigger="read",
                 )
             except CarryReachExceeded as refused:
@@ -764,7 +790,8 @@ async def serve_reading(
 
         for base, held in sorted(by_subject.items()):
             served: list[Window] = []
-            for spec, labels in resolved:
+            where = zones.get(base) if zones else None
+            for spec, labels in spans_in(where):
                 covered = set(labels)
                 inside = [(d, v) for d, v in held if d in covered]
                 sample = sample_over(inside, labels)  # type: ignore[arg-type]
@@ -783,7 +810,7 @@ async def serve_reading(
                     for name, per_subject in goals.items()
                 }
                 served.append(
-                    _window(plan, sample, spec, labels, rule, zone, settings, against)
+                    _window(plan, sample, spec, labels, rule, where, settings, against)
                 )
             subjects.append(
                 Subject(
@@ -794,12 +821,16 @@ async def serve_reading(
                 )
             )
 
+    # The empty subject is what somebody with nothing looks like, and it has
+    # no calendar of its own -- there is no record to read one off. Its
+    # windows are cut in UTC and labelled as such, which is the honest answer
+    # rather than borrowing whichever subject sorted first.
     empty = Subject(
         id="",
         name="",
         windows=[
-            _window(plan, sample_over([], labels), spec, labels, rule, zone, settings)
-            for spec, labels in resolved
+            _window(plan, sample_over([], labels), spec, labels, rule, None, settings)
+            for spec, labels in spans_in(None)
         ],
     )
 
@@ -808,7 +839,11 @@ async def serve_reading(
         name=plan.name,
         version=plan.version,
         at=_iso(at),
-        zone=zone,
+        # One calendar on the response only where every subject shares it.
+        # Mixed, the honest answer is none at the top and each window's own
+        # underneath -- a single zone printed over rows cut three different
+        # ways would be a heading that lies about two thirds of them.
+        zone=shared,
         unit=_unit(plan.unit),
         label=_label_of(plan.name),
         doc=plan.doc,
@@ -984,20 +1019,6 @@ def _level_word_from(word: str) -> Level:
     from a when ladder. Both flow through unchanged.
     """
     return word
-
-
-def _zone_of(library: Library, plan: FigurePlan, settings: Mapping[str, Any]) -> str | None:
-    from ..lang.check import _index_fields
-
-    if plan.scope_index is None:
-        return None
-    for part in _index_fields(library.indexes[plan.scope_index].spec):
-        if part.zone is not None:
-            node: Any = settings
-            for segment in part.zone.split("."):
-                node = node.get(segment) if isinstance(node, Mapping) else None
-            return str(node) if node is not None else None
-    return None
 
 
 # --------------------------------------------------------- projections --
@@ -1495,6 +1516,7 @@ async def answer_bundle(
                         if member.windows is not None
                         else list(default_trailing),
                         at_ms=at,
+                        facts=facts,
                     ),
                 )
             )

@@ -1125,17 +1125,12 @@ def _library_out(library: Library) -> LibraryOut:
                         if part.through is not None
                     }
                 ),
-                # The dials this declaration itself reads: an age filter's
-                # a time bucket's calendar, which is the only dial left in a
-                # grouping now that an age threshold is a number or a field on
-                # the record's owner. Moving one re-buckets a tenant's whole
-                # history, and a host reading the declaration alone must not
-                # conclude it rests on nothing.
-                settings=sorted(
-                    {
-                        *(part.zone for part in parts if part.zone is not None),
-                    }
-                ),
+                # A grouping reads no dial at all now. Its calendar is a
+                # field on the subject's record and its age threshold a
+                # number or a field on the owner's, so what it rests on is
+                # *facts* -- reported as `through`, where a host reading the
+                # declaration alone will find it.
+                settings=[],
             )
             for i in library.indexes.values()
             for parts in [_index_fields(i.spec)]

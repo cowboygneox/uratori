@@ -31,10 +31,10 @@ group work_issue.in_container from containerId
 filter code_change.open where state == "open"
 group code_change.by_source from connectionId
 group code_change.authored_in from (authorAccountId through team_person.accounts.accountId, connectionId)
-group code_change.merged_by_day from (authorAccountId through team_person.accounts.accountId, mergedAt by day in tenant.timezone)
+group code_change.merged_by_day from (authorAccountId through team_person.accounts.accountId, mergedAt by day)
 group code_review_request.asked_of from reviewerAccountId through team_person.accounts.accountId
 filter code_review_request.pending where pending == true
-group work_issue.delivered_by_day from (assigneeAccountId through team_person.accounts.accountId, completedAt by day in tenant.timezone)
+group work_issue.delivered_by_day from (assigneeAccountId through team_person.accounts.accountId, completedAt by day)
 
 measure code_change.open_seconds = mergedAt - createdAt
 measure work_issue.estimate = estimateSeconds in effort
@@ -208,7 +208,7 @@ def test_the_rename_left_every_version_where_it_was() -> None:
     version, which in production is every tenant's history orphaned."""
     lib = compile_ok()
     assert lib.figure("team_person.wip").version == "d7fe57cb385c"
-    assert lib.figure("team_person.time_to_merge").version == "31cafa78b3bd"
+    assert lib.figure("team_person.time_to_merge").version == "5b655b06ef70"
 
 
 def test_a_groups_checker_messages_speak_the_group_word() -> None:
@@ -218,7 +218,7 @@ def test_a_groups_checker_messages_speak_the_group_word() -> None:
     group word through the zone refusal."""
     refuses(
         "\ngroup code_change.by_bad_day from (authorAccountId, mergedAt by day in flow.leadTimeDays)\n",
-        "not a setting a group may name",
+        "not a fact kind",
     )
 
 
@@ -414,7 +414,7 @@ def test_a_time_bucket_may_not_be_a_groups_first_part() -> None:
     """
     for rule in ("by day", "by month", "by first monday of month"):
         message = refuses(
-            f"group code_change.wrong_way from (mergedAt {rule} in tenant.timezone, authorAccountId)\n"
+            f"group code_change.wrong_way from (mergedAt {rule}, authorAccountId)\n"
             """
 # d
 figure team_person.upside_down:
@@ -2361,7 +2361,7 @@ def test_a_full_width_comment_inside_a_block_does_not_truncate_the_served_formul
 # A composite whose tail is a quarter-hour rather than a day, and a count
 # figure over it. Every test below builds on these two.
 QUARTER = """
-group code_change.merged_by_quarter from (authorAccountId through team_person.accounts.accountId, mergedAt by 15 minutes in tenant.timezone)
+group code_change.merged_by_quarter from (authorAccountId through team_person.accounts.accountId, mergedAt by 15 minutes)
 
 # d
 figure team_person.merge_rate bucketed:
@@ -2381,7 +2381,7 @@ def test_a_sub_day_truncation_is_the_figures_grain() -> None:
     lib = compile_ok(
         QUARTER
         + """
-group code_change.merged_by_minute from (authorAccountId through team_person.accounts.accountId, mergedAt by minute in tenant.timezone)
+group code_change.merged_by_minute from (authorAccountId through team_person.accounts.accountId, mergedAt by minute)
 
 # d
 figure team_person.merge_minutes bucketed:
@@ -2426,10 +2426,10 @@ def test_the_calendar_grains_are_declarable_and_are_the_figures_sequence() -> No
     walks whichever sequence its figure declared."""
     lib = compile_ok(
         """
-group code_change.merged_by_hour from (authorAccountId through team_person.accounts.accountId, mergedAt by hour in tenant.timezone)
-group code_change.merged_by_week from (authorAccountId through team_person.accounts.accountId, mergedAt by week in tenant.timezone)
-group code_change.merged_by_month from (authorAccountId through team_person.accounts.accountId, mergedAt by month in tenant.timezone)
-group code_change.merged_by_calendar_quarter from (authorAccountId through team_person.accounts.accountId, mergedAt by quarter in tenant.timezone)
+group code_change.merged_by_hour from (authorAccountId through team_person.accounts.accountId, mergedAt by hour)
+group code_change.merged_by_week from (authorAccountId through team_person.accounts.accountId, mergedAt by week)
+group code_change.merged_by_month from (authorAccountId through team_person.accounts.accountId, mergedAt by month)
+group code_change.merged_by_calendar_quarter from (authorAccountId through team_person.accounts.accountId, mergedAt by quarter)
 
 # d
 figure team_person.merges_hourly bucketed:
@@ -2480,7 +2480,7 @@ def test_an_ordinal_weekday_rule_parses_and_is_the_figures_sequence() -> None:
     own text so a window over it walks first-Mondays."""
     lib = compile_ok(
         """
-group code_change.merged_first_mondays from (authorAccountId through team_person.accounts.accountId, mergedAt by first monday of month in tenant.timezone)
+group code_change.merged_first_mondays from (authorAccountId through team_person.accounts.accountId, mergedAt by first monday of month)
 
 # d
 figure team_person.first_monday_merges bucketed:
@@ -2531,7 +2531,7 @@ def test_an_ordinal_rules_zone_must_be_a_bucket_setting() -> None:
     test_facts.)"""
     refuses(
         "group code_change.odd from (authorAccountId, mergedAt by first monday of month in nowhere.zone)\n",
-        "not a setting",
+        "not a fact kind",
     )
 
 
@@ -2582,7 +2582,7 @@ def test_a_minute_grain_figure_refuses_a_series() -> None:
     *is* the record -- the raw collection the payload exists to withhold.
     The scalar statistics stay legal: they pool the window's values."""
     minute_figure = """
-group code_change.merged_by_minute from (authorAccountId through team_person.accounts.accountId, mergedAt by minute in tenant.timezone)
+group code_change.merged_by_minute from (authorAccountId through team_person.accounts.accountId, mergedAt by minute)
 
 # d
 figure team_person.merges_by_minute bucketed:
@@ -2781,7 +2781,7 @@ def test_a_changed_bucket_rule_moves_the_figures_version() -> None:
         return (
             BASE
             + f"""
-group code_change.cut from (authorAccountId through team_person.accounts.accountId, mergedAt by {rule} in tenant.timezone)
+group code_change.cut from (authorAccountId through team_person.accounts.accountId, mergedAt by {rule})
 
 # d
 figure team_person.cut_count bucketed:

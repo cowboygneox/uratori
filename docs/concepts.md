@@ -345,8 +345,11 @@ or a different dial.
 
 ## Settings dials
 
-Definitions read named dials -- `tenant.timezone` on a day-bucketed group --
-and tenants set them. Two design decisions carry the weight here.
+Definitions read no dials at all now, and the section survives for the one
+path that is still a tenant's to set -- `tenant.hoursPerDay`, which the
+renderer divides by to print an effort as days -- and for the machinery a
+settings document still travels through. Two design decisions carried the
+weight here, and both still describe how that one value is handled.
 
 **A tenant's stored settings are sparse; completion happens once, at the
 boundary.** A tenant's document contains only what an operator changed. Every
@@ -362,7 +365,7 @@ what a dial is set to -- one boundary means one truth.)
 
 | List | Read from | Moving it invalidates |
 |---|---|---|
-| `bucket_settings` | a group's `by day in ...` | the buckets of every grouping that reads the dial -- day boundaries moved, so those memberships are suspect (each grouping's stamp carries a fingerprint of its dials, so the untouched rest stay built) |
+| `bucket_settings` | nothing: a group's calendar is a field on the subject's record, and an age filter's threshold a field on the owner's or a number of days | nothing |
 
 `figure_settings`, `reading_settings` and `project_settings` held
 **thresholds**: the numbers a calculation compared against, a band judged by,
@@ -377,11 +380,10 @@ to the records behind it, a dial was the one input that could not be: it moved
 the answer with nothing in the evidence to say so, and the number it moved
 hardest was the one deciding whether a reader should worry.
 
-The split is not bookkeeping: merging any two lists would let a definition
-write a dial into a position the engine cannot honour. And the pointer each
+The pointer each
 tenant carries includes a *fingerprint* of the dials that definition names,
-so moving `tenant.timezone` re-buckets the groupings that cut days by it and
-nothing else -- and a dial explicitly set to its default fingerprints
+so a fingerprint over an empty dial list is the honest claim that nothing a
+tenant sets moves a stored value -- and a dial explicitly set to its default fingerprints
 identically to an unset one, so a no-op save costs no rebuild.
 
 ## Results

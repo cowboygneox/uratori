@@ -319,7 +319,7 @@ filter shop_order.open where status != "delivered"
 filter work_issue.sized where estimate_seconds is set
 filter work_issue.stuck where status_changed_at older than 14 days
 group work_issue.assigned_to from assignee_account_id through team_person.accounts.account_id
-group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
+group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in team_person.timezone)
 filter code_review.approved keyed as code_change where was_approved == true
 ```
 
@@ -422,7 +422,7 @@ exactly as a write to an identity-hop kind does.
 ### Composite groups: time buckets and pairs
 
 ```
-group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
+group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in team_person.timezone)
 group code_change.authored_in   from (author_account_id through team_person.accounts.account_id, connection_id)
 ```
 
@@ -436,14 +436,45 @@ dimension. Because `@` joins the halves, a key value containing `@` is refused
 outright rather than encoded -- a subject that decomposes into the wrong pair
 is silent, and a refusal is not.
 
-`by day` truncates an instant to a calendar day. `in tenant.timezone` names
-*whose* calendar: the **name** of a bucket setting, never its value, because
-one compiled plan is shared by every tenant. Naming the dial is also what
-makes the dependency derivable, so turning it re-buckets automatically rather
-than on the day somebody remembers. A bare `by day` means UTC, and that is a
-choice a definition makes rather than a default it falls into -- two figures
-on one card, one cut by UTC days and one by the tenant's, would be two rows
-headed "30" measuring two different months.
+`by day` truncates an instant to a calendar day. `in team_person.timezone`
+names *whose* calendar: a **field on the subject's record**, read for the
+subject a bucket belongs to. A bare `by day` means UTC, and that is a choice a
+definition makes rather than a default it falls into -- two figures on one
+card, one cut by UTC days and one by somebody's own, would be two rows headed
+"30" measuring two different months.
+
+It used to be a tenant dial, and a dial meant one calendar for a whole board:
+a courier in Tokyo and one in London had their days cut on somebody else's
+midnight, and the number under "yesterday" was about a period neither of them
+worked.
+
+**Subject-scoped rather than record-scoped**, and that is the load-bearing
+choice. Read off the record being bucketed, a subject's sequence could mix
+calendars -- some of a courier's days cut in Tokyo, some in Berlin, depending
+on where each order came from -- and a reading walks that sequence counting
+back positions, so its window would be a span of no particular calendar. Read
+off the subject, every bucket in one subject's sequence is cut the same way.
+
+Three things follow, and the first is the price:
+
+- **One record shared by two subjects lands on two different dates.** An
+  08:00 UTC merge is the 25th in Tokyo and the 24th in London, and it is not
+  the engine's place to pick. So a composite group is no longer a plain cross
+  product of its parts: the time part is computed against the subject the
+  bucket is being filed under.
+- **A subject with no calendar recorded is in no bucket.** Never UTC as a
+  fallback: a subject nobody has said a calendar for has no calendar, and
+  defaulting one files their history under days they never worked, with
+  nothing on the board to say so.
+- **Moving a subject's calendar refiles their whole history**, and the
+  records themselves do not move -- so the change stream over them says
+  nothing. The kind carrying a calendar is treated exactly as a kind a group
+  resolves *through*: a write to one escalates the pass to a full one.
+
+The consequence a reader sees is on the [reading](#reading----evaluated-never-stored)
+side: "the last thirty days" covers a different thirty dates for each
+subject, so each window reports its own bounds and its own calendar, and the
+response carries one over the top only where every subject agrees.
 
 ### The bucket rules
 
@@ -492,7 +523,7 @@ them across the change would file a month's count under a day's key.
 The **selective rules** are the same family, deliberately partial:
 
 ```
-group shop_order.first_monday_drops from (courier_id, delivered_at by first monday of month in tenant.timezone)
+group shop_order.first_monday_drops from (courier_id, delivered_at by first monday of month in shop_courier.timezone)
 ```
 
 `by <ordinal> <weekday> of month` -- `first` through `fifth`, `monday`
@@ -963,7 +994,7 @@ fact setting_change:
     set_by as text
 
 filter setting_change.target where setting == "target_minutes"
-group setting_change.by_month from (site_id, set_at by month in tenant.timezone)
+group setting_change.by_month from (site_id, set_at by month in site.timezone)
 
 # The target in force each month: the latest one set within the month,
 # carried across the months where nobody changed it.
@@ -1293,9 +1324,9 @@ order lands in its day, its month and its quarter -- and each cut is its
 own declaration:
 
 ```
-group shop_order.drops_by_day     from (courier_id, delivered_at by day in tenant.timezone)
-group shop_order.drops_by_month   from (courier_id, delivered_at by month in tenant.timezone)
-group shop_order.drops_by_quarter from (courier_id, delivered_at by quarter in tenant.timezone)
+group shop_order.drops_by_day     from (courier_id, delivered_at by day in shop_courier.timezone)
+group shop_order.drops_by_month   from (courier_id, delivered_at by month in shop_courier.timezone)
+group shop_order.drops_by_quarter from (courier_id, delivered_at by quarter in shop_courier.timezone)
 
 # Deliveries per courier per day.
 figure shop_courier.daily_drops:
@@ -2004,39 +2035,25 @@ A definition never contains a tenant's numbers. Where a number varies it is a
 it is written in the definition, visible to the reader and hashed into the
 version.
 
-What remains of the dials is one thing that is not a number at all: the
-**calendar** a group cuts its buckets on. A definition names it --
-`tenant.timezone` -- and the host's schema declares which such names exist and
-their defaults. The name, never the value, is compiled into the plan: one plan
-is shared by every tenant, and naming it is what makes the dependency
-derivable, so turning it re-buckets exactly what read it (see
-[Concepts](concepts.md) for the host's side of this).
+**Nothing reads a dial.** The lists a schema declares are accepted so a host
+need not empty them to deploy, and each of them held one kind of number that
+is now a fact:
 
-| List | Named by | Turning it costs |
+| List | Held | Reads it now |
 |---|---|---|
-| bucket settings | a group's `by day in ...` | re-bucketing a tenant's whole history |
+| `figure_settings` | the numbers a calculation compared against | a figure named outright, or a literal |
+| `reading_settings` | a band's threshold | a figure named in the ladder, or a literal |
+| `project_settings` | a row value's or a flag's threshold | a figure bound with `read:`, or a literal |
+| `bucket_settings` | a calendar, and an age filter's threshold | a field on the subject's record; a field on the owner's, or a number of days |
 
-One list, where there were four. **Reading settings** held band thresholds,
-**figure settings** held the numbers a calculation compared against, and
-**projection settings** held the ones a row value or a flag did. All three
-are thresholds, and a threshold is a fact now: another figure, computed from
-the records that set it, or a number written in the definition where a reader
-can see it. A dial named from any of those positions is refused, with the
-rewrite in the message. The three lists are still *accepted* in a schema, so
-a host does not have to empty them to deploy; nothing reads them.
+A dial named from any of those positions is refused, with the rewrite in the
+message.
 
-A dial is a scalar. The two-edged `{good, poor}` shape went with the reading
-settings list -- it existed so a band clause could derive three words from
-one dial, and a ladder writes its own words. One path is reserved rather than
-declared: `tenant.hoursPerDay`, which the renderer divides by to print an
-effort as days; a host that renders efforts carries it in its defaults.
-
-A dial a definition names that resolves to nothing **raises** rather than
-falling back to something plausible -- the definition said which dial it
-wanted, so there is nothing to guess, and a fallback would produce values,
-numbers and evidence all about the wrong thing. A dial *set to nought* is a
-value somebody chose, distinct from an unset one; the invalidation machinery
-honours that distinction, so zeroing a threshold rebuilds what read it.
+One path is still reserved rather than declared: `tenant.hoursPerDay`, which
+the renderer divides by to print an effort as days. It is not a threshold and
+it is not a calendar -- it is how long a working day is -- and it is the last
+thing here that a tenant sets. A host that renders efforts carries it in its
+defaults.
 
 ---
 
