@@ -30,8 +30,11 @@ product's end users; a host builds its own screens against the
   current answer. A reading's windows draw one column per **declared**
   statistic -- the column set is the definition's, stable even when a
   window is withheld, the band column sits beside exactly the statistic the
-  band judges, and a declared `series` draws as bars in a column of its own
-  -- and a figure's rows carry an *evidence* button -- the
+  band judges, and a declared `series` draws as bars in a column of its own.
+  A window's date bounds carry **whose calendar** they are in wherever the
+  answer has no single one: a calendar is a field on the subject's record,
+  so two rows reading the same dates can be two different weeks -- and a
+  figure's rows carry an *evidence* button -- the
   stored citation, joined back to the records, and made to *lead to the
   amount*: the panel names the measure the value reads its members through,
   a sum's or an extreme's rows each show that record as the measure reads it

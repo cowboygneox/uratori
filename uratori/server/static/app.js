@@ -887,7 +887,16 @@ function resultBlocks(result) {
                 : 'no buckets in range')
                 : (window.frm && window.to
                   ? `${window.frm} → ${window.to}`
-                  : 'no buckets in range'))),
+                  : 'no buckets in range')),
+            // Whose calendar those dates are in, but only where the answer
+            // carries no single one: a calendar is a field on the subject's
+            // record, so two rows reading `2026-06-20 → 2026-06-26` can be
+            // two different weeks. Shown against the result's own zone, so
+            // a board where everybody shares one is not repeated on every
+            // row for nothing.
+            result.zone === null && window.zone
+              ? el('span', { class: 'faint' }, ` (${window.zone})`)
+              : null),
           window.unmet.length
             // Every statistic is withheld together, so one cell spans the
             // columns with the reason -- the columns still exist (the
