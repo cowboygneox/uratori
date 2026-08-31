@@ -196,13 +196,31 @@ class Uratori:
         )
 
     def _through_kinds(self) -> frozenset[str]:
+        """Every kind a grouping resolves *through* rather than buckets.
+
+        A record of one of these moving changes where other records land,
+        which the incremental path cannot see -- so it escalates to a full
+        pass. An age filter reading its threshold off an owner is the same
+        case one construct along: move a repository's staleness rule and
+        every change in that repository crosses the line or stops crossing
+        it, with nothing about the changes themselves having moved.
+        """
+        from .lang.ast import ByAge
         from .lang.check import _index_fields
 
+        specs = [index.spec for index in self._library.indexes.values()]
         return frozenset(
-            part.through.kind
-            for index in self._library.indexes.values()
-            for part in _index_fields(index.spec)
-            if part.through is not None
+            [
+                part.through.kind
+                for spec in specs
+                for part in _index_fields(spec)
+                if part.through is not None
+            ]
+            + [
+                spec.through.kind
+                for spec in specs
+                if isinstance(spec, ByAge) and spec.through is not None
+            ]
         )
 
     async def run(

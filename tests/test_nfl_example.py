@@ -990,7 +990,7 @@ def test_the_showcase_keeps_the_constructs_the_readme_promises() -> None:
         "through nfl_team.abbrs.abbr",  # the identity hop
         "by day in tenant.timezone",  # calendar bucketing
         "by 15 minutes in tenant.timezone",  # the sub-day grain
-        "younger than form.recentDays",  # an age filter
+        "younger than 45 days",  # an age filter, against a written threshold
         "= kickoff - previous_kickoff",  # a duration measure
         "= moment kickoff",  # a moment measure
         "across nfl_team",  # the second dimension

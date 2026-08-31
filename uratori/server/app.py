@@ -922,7 +922,6 @@ def _library_out(library: Library) -> LibraryOut:
     call (`declaration_prose`/`declaration_source`), so the HTTP door and the
     library door describe one library identically and cannot drift.
     """
-    from ..lang.ast import ByAge
     from ..lang.check import _index_fields
     from ..lang.source import declaration_prose, declaration_source
 
@@ -1127,13 +1126,14 @@ def _library_out(library: Library) -> LibraryOut:
                     }
                 ),
                 # The dials this declaration itself reads: an age filter's
-                # threshold, a time bucket's calendar. Moving one re-buckets
-                # a tenant's whole history, and a host reading the
-                # declaration alone must not conclude it rests on nothing.
+                # a time bucket's calendar, which is the only dial left in a
+                # grouping now that an age threshold is a number or a field on
+                # the record's owner. Moving one re-buckets a tenant's whole
+                # history, and a host reading the declaration alone must not
+                # conclude it rests on nothing.
                 settings=sorted(
                     {
                         *(part.zone for part in parts if part.zone is not None),
-                        *([i.spec.setting] if isinstance(i.spec, ByAge) else []),
                     }
                 ),
             )

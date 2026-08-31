@@ -236,8 +236,9 @@ class ByPresence:
 
 @dataclass(frozen=True)
 class ByAge:
-    """`where updatedAt older than thresholds.staleChangeDays` -- membership
-    decided by how long ago a moment was, in whole days, against a dial.
+    """`where updated_at older than 3 days`, or `older than stale_days from
+    repo_id through code_repo.id` -- membership decided by how long ago a
+    moment was, in whole days.
 
     **The one place a stored figure may read a clock**, and it is fenced
     differently from a clock measure rather than by the same rule. A clock
@@ -249,14 +250,43 @@ class ByAge:
 
     So the question is not "is this value decaying" but "how long may the
     crossing go unnoticed", and the answer is **until the next full reconcile**.
-    That holds only because every dial these name is in days, which is why the
-    unit is fixed here rather than borrowed from a band's: making it
-    configurable would make the unsafe version writable.
+    That holds only because the threshold is in days, which is why the unit is
+    fixed here rather than written: making it configurable would make the
+    unsafe version writable.
+
+    The threshold used to be a dial, and this was the hardest position to take
+    one out of: a filter narrows records *before* anything buckets them by
+    subject, so there is no subject whose goal figure could be looked up. What
+    there is instead is the record's own owner. `stale_days from repo_id
+    through code_repo.id` reads the number off the joined record, so each
+    repository declares its own staleness -- the same join a projection field
+    writes, one construct along.
+
+    **A join that matches no record is not in the filter.** Never a default
+    and never the whole population: an owner nobody has collected yet is a
+    threshold nobody has stated, and guessing one would file records under a
+    staleness rule nobody wrote.
+
+    `days` is the other arm: a number in the definition, for a threshold that
+    does not vary. It is not the dial by another name -- a reader can see it,
+    and moving it forks the version.
     """
 
     field: str
     direction: Literal["older", "younger"]
-    setting: str
+    days: float | None = None
+    """A literal threshold, in days."""
+
+    read: str | None = None
+    """The field to read the threshold off, on the joined record."""
+
+    local: str | None = None
+    """The field on *this* record naming its owner -- `repo_id`."""
+
+    through: Through | None = None
+    """Which record to read it off: the owner's kind, and the path its key is
+    matched on. Exactly one of `days` and (`read`, `local`, `through`) is
+    set."""
 
 
 @dataclass(frozen=True)

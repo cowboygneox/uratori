@@ -53,8 +53,8 @@ from .world import DEFAULTS, compile_source
 BASE = """
 group work_issue.assigned_to from assignee_account_id through team_person.accounts.account_id
 filter work_issue.active where active == true
-filter work_issue.stuck where status_changed_at older than thresholds.longWipDays
-filter work_issue.fresh where status_changed_at younger than thresholds.longWipDays
+filter work_issue.stuck where status_changed_at older than 14 days
+filter work_issue.fresh where status_changed_at younger than 14 days
 group work_issue.by_day from (assignee_account_id through team_person.accounts.account_id, completed_at by day in tenant.timezone)
 group work_issue.by_quarter from (assignee_account_id through team_person.accounts.account_id, completed_at by 15 minutes in tenant.timezone)
 group work_issue.by_minute from (assignee_account_id through team_person.accounts.account_id, completed_at by minute in tenant.timezone)

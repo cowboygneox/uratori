@@ -218,7 +218,7 @@ filter nfl_team_game.regular where game_type == "REG" label "regular season"
 # An age filter reads the wall clock, in whole days, against a bucket dial.
 # Over finished history it is honestly empty; during a live season it is
 # what "recent form" means.
-filter nfl_team_game.recent where kickoff younger than form.recentDays label "recently played"
+filter nfl_team_game.recent where kickoff younger than 45 days label "recently played"
 
 measure nfl_team_game.points_for = points_for in count
 measure nfl_team_game.points_against = points_against in count

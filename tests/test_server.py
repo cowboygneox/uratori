@@ -956,7 +956,7 @@ async def test_the_described_library_covers_reading_projection_and_summary(
         COURIER_SOURCE
         + """
 group shop_order.delivered_by_day from (courier_id, delivered_at by day in tenant.timezone)
-filter shop_order.stale where picked_up_at older than limits.staleDays
+filter shop_order.stale where picked_up_at older than 5 days
 filter shop_review.signed_off keyed as shop_order where approved == true
 
 measure shop_order.riding_seconds = delivered_at - picked_up_at
@@ -1064,9 +1064,10 @@ summarise shop_order.flow over shop_order.board:
 
     stale = {d["name"]: d for d in body["indexes"]}["shop_order.stale"]
     assert stale["declaration"] == "filter"
-    assert stale["settings"] == ["limits.staleDays"], (
-        "an age filter rests on its threshold dial; a host reading the "
-        "declaration alone must not conclude it rests on nothing"
+    assert stale["settings"] == [], (
+        "an age filter against a written threshold reads no dial at all -- a "
+        "host told otherwise would offer an operator a control that moves "
+        "nothing"
     )
 
     by_day = {d["name"]: d for d in body["indexes"]}["shop_order.delivered_by_day"]

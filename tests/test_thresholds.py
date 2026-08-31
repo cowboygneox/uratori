@@ -28,6 +28,7 @@ from uratori import (
     MemoryEngineStore,
     MemoryFactStore,
     Schema,
+    SyntaxError_,
     Uratori,
     compile_source,
 )
@@ -57,11 +58,15 @@ fact shop_order:
     courier_id as text
     depot_id as text
     status as text
+    placed_at as moment
 
-# Where an order is dispatched from.
+# Where an order is dispatched from, and how long one of its orders may sit
+# before it counts as stale. Each depot draws its own line.
 fact shop_depot:
     name name
     name as text
+    id as text
+    stale_days as number
 
 # What a courier is cleared for. One record per courier, moved when
 # somebody moves it.
@@ -358,3 +363,97 @@ def test_a_literal_and_a_figure_hash_differently() -> None:
     ).figure("shop_courier.spare")
     assert a is not None and b is not None
     assert a.version != b.version
+
+
+# ------------------------------------------------ an age filter's threshold --
+
+
+AGED = '''
+# Orders left sitting longer than the depot they came from allows.
+filter shop_order.stale where placed_at older than stale_days from depot_id through shop_depot.id
+'''
+
+
+def test_an_age_filter_reads_its_threshold_off_the_records_owner() -> None:
+    """The hardest position to take a dial out of, and the reason it needed
+    its own answer: a filter runs over records *before* anything buckets them
+    by subject, so there is no subject whose goal figure could be looked up.
+    What there is instead is the record's own owner."""
+    lib = compile_world(AGED)
+    spec = lib.indexes["shop_order.stale"].spec
+    assert spec.days is None
+    assert spec.read == "stale_days"
+    assert spec.local == "depot_id"
+    assert spec.through is not None and spec.through.kind == "shop_depot"
+
+
+def test_an_age_filter_may_not_name_a_dial() -> None:
+    with pytest.raises(SyntaxError_) as caught:
+        compile_world(
+            '''
+filter shop_order.dialled where placed_at older than limits.busy
+'''
+        )
+    assert "tenant dial" in str(caught.value) and "owner" in str(caught.value)
+
+
+def test_a_literal_age_threshold_still_compiles() -> None:
+    lib = compile_world("\nfilter shop_order.old where placed_at older than 3 days\n")
+    spec = lib.indexes["shop_order.old"].spec
+    assert spec.days == 3.0 and spec.through is None
+
+
+async def test_each_owner_draws_its_own_line() -> None:
+    """Two depots, two staleness rules, one filter. Under a dial there was one
+    number for the whole tenant and this was not expressible at all."""
+    facts = MemoryFactStore()
+    library = compile_world(AGED)
+    store = MemoryEngineStore()
+    engine = Uratori(schema=DIALLED, library=library, store=store, facts=facts)
+    facts.put("t1", "shop_depot", "d1", {"name": "North", "id": "d1", "stale_days": 1})
+    facts.put("t1", "shop_depot", "d2", {"name": "South", "id": "d2", "stale_days": 30})
+    # Both orders were placed the same number of days ago.
+    from datetime import UTC, datetime, timedelta
+
+    placed = (datetime.now(tz=UTC) - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for key, depot in (("o1", "d1"), ("o2", "d2")):
+        facts.put(
+            "t1",
+            "shop_order",
+            key,
+            {"ref": key, "courier_id": "c1", "depot_id": depot, "status": "riding",
+             "placed_at": placed},
+        )
+    await engine.run("t1", full=True)
+
+    held = sorted(await store.members("t1", "shop_order.stale", ""))
+    assert held == ["o1"], (
+        f"one depot's line is at a day and the other's at a month, and the filter "
+        f"held {held}"
+    )
+
+
+async def test_an_order_whose_owner_is_unknown_is_in_no_filter() -> None:
+    """Never a default and never the whole population: an owner nobody has
+    collected is a staleness rule nobody has stated, and guessing one files
+    records under a line the definition never drew."""
+    facts = MemoryFactStore()
+    library = compile_world(AGED)
+    store = MemoryEngineStore()
+    engine = Uratori(schema=DIALLED, library=library, store=store, facts=facts)
+    from datetime import UTC, datetime, timedelta
+
+    placed = (datetime.now(tz=UTC) - timedelta(days=500)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    facts.put(
+        "t1",
+        "shop_order",
+        "o1",
+        {"ref": "o1", "courier_id": "c1", "depot_id": "missing", "status": "riding",
+         "placed_at": placed},
+    )
+    await engine.run("t1", full=True)
+
+    assert await store.members("t1", "shop_order.stale", "") == frozenset(), (
+        "an order five hundred days old was filed as stale against a threshold "
+        "nobody has stated"
+    )

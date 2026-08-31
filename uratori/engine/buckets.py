@@ -32,6 +32,16 @@ escape scheme is a second thing to keep in step and no provider id has ever
 contained one.
 """
 
+OwnerReader = Callable[[str, str, str], list[Mapping[str, Any]]]
+"""(fact kind, path, value) -> the *records* that own this value.
+
+The same join `ThroughResolver` walks, answering the bodies rather than the
+keys. An age filter reads its threshold off the owner -- `older than
+stale_days from repo_id through code_repo.id` -- and a key cannot be read a
+field off. Kept as a second callback rather than folded into the resolver so
+that a pass which needs no field never pays to hold the bodies.
+"""
+
 ThroughResolver = Callable[[str, str, str], list[str]]
 """(fact kind, path, value) -> the ids of the records that own this value.
 
@@ -522,6 +532,7 @@ def buckets_of(
     settings: Mapping[str, Any],
     resolve: ThroughResolver,
     now_ms: float,
+    owners: OwnerReader | None = None,
 ) -> list[str]:
     """Which buckets this record belongs to. Empty means it is in none."""
     spec = index.spec
@@ -544,7 +555,13 @@ def buckets_of(
         moment = read_instant(record, spec.field)
         if moment is None:
             return []
-        days = float(_setting(settings, spec.setting))
+        days = _age_threshold(spec, record, owners)
+        if days is None:
+            # No threshold, so no membership. Never a default and never the
+            # whole population: an owner nobody has collected yet is a
+            # staleness rule nobody has stated, and guessing one files records
+            # under a line the definition never drew.
+            return []
         age_days = (now_ms - moment) / 86_400_000
         inside = age_days >= days if spec.direction == "older" else age_days < days
         return [""] if inside else []
@@ -593,6 +610,38 @@ def _is_set(record: Mapping[str, Any], path: str) -> bool:
         if isinstance(node, str) and node != "":
             return True
     return False
+
+
+def _age_threshold(
+    spec: ByAge, record: Mapping[str, Any], owners: OwnerReader | None
+) -> float | None:
+    """How many days this filter's line is drawn at, for this record.
+
+    A number in the definition, or a field on the record's owner. The owner
+    path answers None wherever the join does not land on exactly one readable
+    number -- no owner, several owners disagreeing, or a value that is not a
+    number -- because each of those is a threshold nobody stated, and the
+    filter is what a stated threshold produces.
+    """
+    if spec.days is not None:
+        return spec.days
+    if owners is None or spec.through is None or spec.local is None or spec.read is None:
+        return None
+    keys = read_path(record, spec.local)
+    if len(keys) != 1:
+        # A record naming two owners has two staleness rules and no way to
+        # choose, which is the projection join's rule one construct along.
+        return None
+    found = owners(spec.through.kind, spec.through.path, keys[0])
+    if len(found) != 1:
+        return None
+    values = read_path(found[0], spec.read)
+    if len(values) != 1:
+        return None
+    try:
+        return float(values[0])
+    except (TypeError, ValueError):
+        return None
 
 
 def _keys_for(

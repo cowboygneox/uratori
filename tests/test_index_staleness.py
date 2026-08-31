@@ -143,19 +143,23 @@ async def test_a_removed_filter_is_dropped_not_orphaned() -> None:
 
 
 async def test_a_moved_bucket_dial_rebuilds_the_dialled_groupings_only() -> None:
-    """An age filter's membership depends on a dial the index hash
+    """A calendar group's membership depends on a dial the index hash
     deliberately excludes; the figure reading it notices through its own
     settings fingerprint. When that figure goes pending, the rebuild must
     reach the groupings whose spec actually reads a dial -- and not tax the
-    dial-free ones beside them."""
-    aged = BASE + (
-        'filter work_issue.fresh where updated_at younger than thresholds.staleChangeDays label "fresh"\n'
+    dial-free ones beside them.
+
+    The dial was an age threshold until thresholds became facts. The calendar
+    is the one that is left, and it is the same shape of claim."""
+    dialled = BASE + (
+        "group work_issue.touched_by_day from (assignee_account_id through "
+        "team_person.accounts.account_id, updated_at by day in tenant.timezone)\n"
         "\n"
-        "# Recent load.\n"
-        "figure team_person.fresh_wip:\n"
+        "# Issues touched, day by day.\n"
+        "figure team_person.touched bucketed:\n"
         '    display "{value}"\n'
         "    depends:\n"
-        "        mine = work_issue.assigned_to:{team_person} & work_issue.fresh\n"
+        "        mine = work_issue.touched_by_day:{team_person}\n"
         "    calculate:\n"
         "        count(mine)\n"
     )
@@ -166,14 +170,14 @@ async def test_a_moved_bucket_dial_rebuilds_the_dialled_groupings_only() -> None
         {"title": "New", "assignee_account_id": "a1", "active": True,
          "updated_at": "2026-08-25T00:00:00Z"},
     )
-    library = compile_source(aged)
+    library = compile_source(dialled)
     await Engine(store, facts, library, WORLD).run(TENANT, DEFAULTS, full=True)
     store.rebuilt.clear()
 
     turned = dict(DEFAULTS)
-    turned["thresholds"] = dict(DEFAULTS["thresholds"], staleChangeDays=99)
+    turned["tenant"] = dict(DEFAULTS["tenant"], timezone="Asia/Tokyo")
     await Engine(store, facts, library, WORLD).run(TENANT, turned)
-    assert "work_issue.fresh" in store.rebuilt, (
+    assert "work_issue.touched_by_day" in store.rebuilt, (
         "the dial moved and the grouping reading it was not re-bucketed -- "
         "its membership now describes the old dial"
     )
@@ -339,7 +343,6 @@ async def test_a_moved_dial_reaches_the_groupings_that_read_it_even_unread() -> 
     what notices: the next pass rebuilds exactly the groupings reading the
     moved dial, pending figures or none."""
     dialled = BASE + (
-        'filter work_issue.fresh where updated_at younger than thresholds.staleChangeDays label "fresh"\n'
         "group work_issue.by_day from updated_at by day in tenant.timezone\n"
     )
     store, facts = Ledger(), MemoryFactStore()
@@ -351,15 +354,17 @@ async def test_a_moved_dial_reaches_the_groupings_that_read_it_even_unread() -> 
     await Engine(store, facts, library, WORLD).run(TENANT, DEFAULTS, full=True)
 
     store.rebuilt.clear()
-    aged = dict(DEFAULTS)
-    aged["thresholds"] = dict(DEFAULTS["thresholds"], staleChangeDays=99)
-    await Engine(store, facts, library, WORLD).run(TENANT, aged)
-    assert store.rebuilt == ["work_issue.fresh"], (
-        "the age dial moved and only the grouping reading it owes a rebuild"
+    unread = dict(DEFAULTS)
+    unread["thresholds"] = dict(DEFAULTS["thresholds"], staleChangeDays=99)
+    await Engine(store, facts, library, WORLD).run(TENANT, unread)
+    assert store.rebuilt == [], (
+        "a dial no grouping can name any more moved something; either a "
+        "threshold is still readable from a filter or the stamps are not "
+        "comparing what they claim to"
     )
 
     store.rebuilt.clear()
-    moved = dict(aged)
+    moved = dict(unread)
     moved["tenant"] = dict(DEFAULTS["tenant"], timezone="Asia/Tokyo")
     await Engine(store, facts, library, WORLD).run(TENANT, moved)
     assert store.rebuilt == ["work_issue.by_day"], (

@@ -362,7 +362,7 @@ what a dial is set to -- one boundary means one truth.)
 
 | List | Read from | Moving it invalidates |
 |---|---|---|
-| `bucket_settings` | a group's `by day in ...` and a filter's `older/younger than ...` | the buckets of every grouping that reads the dial -- day boundaries moved, so those memberships are suspect (each grouping's stamp carries a fingerprint of its dials, so the untouched rest stay built) |
+| `bucket_settings` | a group's `by day in ...` | the buckets of every grouping that reads the dial -- day boundaries moved, so those memberships are suspect (each grouping's stamp carries a fingerprint of its dials, so the untouched rest stay built) |
 
 `figure_settings`, `reading_settings` and `project_settings` held
 **thresholds**: the numbers a calculation compared against, a band judged by,

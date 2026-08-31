@@ -674,11 +674,46 @@ class _Parser:
         if self._at_word("older") or self._at_word("younger"):
             word = self._next().value
             self._keyword("than")
-            setting = self._name("a settings path holding a number of days")
+            direction: Literal["older", "younger"] = (
+                "older" if word == "older" else "younger"
+            )
+            line = self._peek().line
+
+            if self._peek().kind == "number":
+                days = float(self._next().value)
+                # `3 days` reads better than `3` and costs one optional word.
+                # The unit is fixed either way -- see `ByAge` for why making it
+                # configurable would make the unsafe version writable.
+                if self._at_word("days"):
+                    self._next()
+                return ByAge(field=field, direction=direction, days=days)
+
+            read = self._name("a number of days, or a field to read one from")
+            if "." in read:
+                raise self._error(
+                    f'"{read}" is a dotted name, so it reads a tenant dial. A filter '
+                    "runs over records before anything buckets them by subject, so "
+                    "there is no subject to look a goal up by -- read the threshold "
+                    "off the record's owner instead (`older than stale_days from "
+                    "repo_id through code_repo.id`), or write the number of days "
+                    "here where a reader can see it.",
+                    line,
+                )
+            self._keyword("from")
+            local = self._name("the field on this record that names its owner")
+            self._keyword("through")
+            joined = self._name("the owner's kind and the field its key is matched on")
+            kind, _, path = joined.partition(".")
+            if not path:
+                raise self._error(
+                    f'"{joined}" needs a kind and a path -- `code_repo.id`.', line
+                )
             return ByAge(
                 field=field,
-                direction="older" if word == "older" else "younger",
-                setting=setting,
+                direction=direction,
+                read=read,
+                through=Through(kind=kind, path=path),
+                local=local,
             )
 
         if self._at_op("==") or self._at_op("!="):

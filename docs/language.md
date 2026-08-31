@@ -317,7 +317,7 @@ compares every version.
 group shop_order.carried_by from courier_id
 filter shop_order.open where status != "delivered"
 filter work_issue.sized where estimate_seconds is set
-filter work_issue.stuck where status_changed_at older than thresholds.longWipDays
+filter work_issue.stuck where status_changed_at older than 14 days
 group work_issue.assigned_to from assignee_account_id through team_person.accounts.account_id
 group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
 filter code_review.approved keyed as code_change where was_approved == true
@@ -377,22 +377,47 @@ difference would move a coverage figure when an operator cleared a box rather
 than when anybody estimated anything. A boolean `false` counts as **present**,
 because somebody answered.
 
-**Age**: `where updated_at older than thresholds.staleChangeDays` (and
-`younger than`). Membership is decided by how long ago a moment was, in whole
-days, against a dial. This is **the one clock a stored figure may read**, and
-it is fenced differently from a clock measure rather than by the same rule: a
-clock measure decays every second, but membership does not -- a record crosses
-this line once, on a knowable day, and until it does the answer is unchanged.
-The question is not "is this value decaying" but "how long may the crossing go
-unnoticed", and the answer is *until the next full pass*. That only holds
-because every dial these clauses may name is in days; the unit is fixed
-precisely so the unsafe version cannot be written. A record whose moment
-cannot be read is in **no** age bucket -- an absent timestamp is not evidence
-of age.
+**Age**: `where updated_at older than 3 days` (and `younger than`).
+Membership is decided by how long ago a moment was, in whole days. This is
+**the one clock a stored figure may read**, and it is fenced differently from
+a clock measure rather than by the same rule: a clock measure decays every
+second, but membership does not -- a record crosses this line once, on a
+knowable day, and until it does the answer is unchanged. The question is not
+"is this value decaying" but "how long may the crossing go unnoticed", and the
+answer is *until the next full pass*. That only holds because the threshold is
+in days; the unit is fixed precisely so the unsafe version cannot be written.
+A record whose moment cannot be read is in **no** age bucket -- an absent
+timestamp is not evidence of age.
 
-The dial an age clause names must be one of the schema's **bucket settings**
-(see [Settings dials](#settings-dials) below), because turning it re-buckets a
-tenant's whole history.
+Where the line is not the same for every record, it is read off the record's
+**owner**:
+
+```
+filter code_change.idle where updated_at older than stale_days from repo_id through code_repo.id
+```
+
+-- the same join a projection field writes, one construct along. Each
+repository declares its own staleness, and the threshold is a fact like every
+other number.
+
+This is the position a dial was hardest to remove from, and it is worth saying
+why the answer is a join rather than a figure. Everywhere else a threshold
+that varies is a figure looked up by subject; a filter has no subject. It runs
+over records *before* anything buckets them by person or site, so there is
+nothing to look a goal up by -- and a figure that could feed a filter would be
+a cycle, since the filter decides the population the figure is computed over.
+What a record does have is its owner.
+
+**A join that matches no record is not in the filter.** Never a default and
+never the whole population: an owner nobody has collected yet is a threshold
+nobody has stated. The same for a record naming two owners -- two staleness
+rules and no way to choose, which is the projection join's rule one construct
+along.
+
+Moving the owner's record moves the line for every record under it, and the
+incremental path cannot see that from the records themselves -- so a write to
+a kind an age filter reads through **escalates the pass to a full one**,
+exactly as a write to an identity-hop kind does.
 
 ### Composite groups: time buckets and pairs
 
@@ -1581,9 +1606,10 @@ looks like a complete one:
   group read whole looks for a bucket keyed by the empty string and
   finds nothing; a scoped bucket (`:{...}`) has no row to be scoped by.
 - **No age filters.** Age buckets are resolved against the clock at reindex
-  time, and no figure pointer covers a filter only a `from` reads -- moving
-  the dial it names would change who is on the page with nothing rebuilding
-  it.
+  time, and no figure pointer covers a filter only a `from` reads -- so the
+  page would show a population as old as the last pass, and moving the
+  threshold its owner declares would change who is on the page with nothing
+  rebuilding it.
 - **The filter's id space must be the projection's kind.** Ids from another
   space match no record of this kind, so every row would be filtered away
   with nothing thrown.
@@ -1988,7 +2014,7 @@ derivable, so turning it re-buckets exactly what read it (see
 
 | List | Named by | Turning it costs |
 |---|---|---|
-| bucket settings | a group's `by day in ...` and a filter's `older/younger than ...` | re-bucketing a tenant's whole history |
+| bucket settings | a group's `by day in ...` | re-bucketing a tenant's whole history |
 
 One list, where there were four. **Reading settings** held band thresholds,
 **figure settings** held the numbers a calculation compared against, and
@@ -2179,9 +2205,11 @@ The ones most worth recognising, in the checker's own words:
 - *"summary ... binds 'x', which is already a value of ..."* / *"Only a
   number may be summed"* / *"...reads 'x', which nothing binds"* -- the
   summary's namespace and typing rules.
-- *"...is not a setting a group may name. Those are: ..."* (and the
-  filter, calculation and projection variants) -- the settings lists, each
-  enforced at the position that pays its cost.
+- *"...is not a setting a group may name. Those are: ..."* -- the one
+  surviving settings list, enforced at the position that pays its cost.
+- *"... is a dotted name, so it reads a tenant dial"* on an age filter --
+  refused at lex time, with both answers: read the threshold off the record's
+  owner, or write the number of days.
 - *"...band compares against "x", which is a tenant dial"* -- a threshold
   outside the fact stream is the one number on a card nothing can cite. The
   refusal carries the rewrite, because an author staring at a definition that

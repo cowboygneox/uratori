@@ -706,7 +706,7 @@ FULL_SOURCE = """
 group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in tenant.timezone)
 group code_review_request.asked_of from reviewer_account_id through team_person.accounts.account_id
 filter code_review_request.pending where pending == true
-filter code_change.stale where updated_at older than thresholds.staleChangeDays
+filter code_change.stale where updated_at older than 3 days
 
 measure code_change.open_seconds = merged_at - created_at
 measure code_review_request.waiting_seconds = now - requested_at
@@ -782,11 +782,10 @@ async def test_every_declaration_kind_travels_with_its_own_edges(pg_dsn: str) ->
             ("fact", "team_person"),
             ("setting", "tenant.timezone"),
         }
-        # An age filter reads a threshold dial.
-        assert rests("code_change.stale") == {
-            ("fact", "code_change"),
-            ("setting", "thresholds.staleChangeDays"),
-        }
+        # An age filter against a written threshold reads nothing but its
+        # own kind's records; one reading a threshold off an owner would
+        # carry that owner's kind as an edge.
+        assert rests("code_change.stale") == {("fact", "code_change")}
         # A measure rests on the records it measures, and nothing else.
         assert rests("code_change.open_seconds") == {("fact", "code_change")}
         assert by_name["code_change.open_seconds"]["version"] is None
@@ -1619,7 +1618,7 @@ async def test_membership_states_its_dial_caveat(pg_dsn: str) -> None:
         defaults={"thresholds": {"staleDays": 3}},
     )
     source = (
-        "filter shop_order.stale where placed_at older than thresholds.staleDays\n"
+        "filter shop_order.stale where placed_at older than 5 days\n"
         'filter shop_order.open where status != "delivered"\n'
     )
     async with serve(pg_dsn) as http:
@@ -1637,7 +1636,10 @@ async def test_membership_states_its_dial_caveat(pg_dsn: str) -> None:
             },
         )
         aged = (await http.get("/ui/api/tenants/t1/membership/shop_order.stale")).json()
-        assert aged["note"] is not None and "thresholds.staleDays" in aged["note"]
+        assert aged["note"] is not None and "against the clock" in aged["note"], (
+            "an age filter's filing is as old as the last pass, and a reader "
+            "looking at it must be told so"
+        )
         plain = (await http.get("/ui/api/tenants/t1/membership/shop_order.open")).json()
         assert plain["note"] is None
 

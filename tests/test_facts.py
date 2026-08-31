@@ -375,7 +375,7 @@ def test_a_through_path_must_exist_on_the_other_kind() -> None:
 
 def test_an_age_filter_needs_a_moment() -> None:
     refuses(
-        BASE + "\nfilter shop_order.heavy where weight_grams older than limits.carrying.over\n",
+        BASE + "\nfilter shop_order.heavy where weight_grams older than 3 days\n",
         "moment",
     )
 
@@ -522,7 +522,7 @@ def test_a_fully_exercised_world_compiles() -> None:
         + """
 group shop_order.by_ref from ref through shop_courier.accounts.account_id
 group shop_order.by_day from (ref, placed_at by day)
-filter shop_order.fresh where placed_at younger than limits.carrying.over
+filter shop_order.fresh where placed_at younger than 3 days
 measure shop_order.transit_seconds = delivered_at - placed_at
 measure shop_order.weight = weight_grams in count
 measure shop_order.placed = moment placed_at

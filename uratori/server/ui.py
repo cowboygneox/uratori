@@ -1593,6 +1593,16 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             s.pool, tenant, name, after=buckets_after, limit=buckets_limit
         )
         dials = [e.name for e in _spec_edges(index.spec) if e.type == "setting"]
+        # An age filter is decided against the clock, so its filing is as old
+        # as the last pass whether or not it reads a dial -- and where its
+        # threshold comes off the record's owner, moving that owner moves the
+        # line for every record under it.
+        aged = isinstance(index.spec, ByAge)
+        owner = (
+            index.spec.through.kind
+            if isinstance(index.spec, ByAge) and index.spec.through is not None
+            else None
+        )
         return MembershipOut(
             name=name,
             kind=_grouping_kind(index),
@@ -1604,13 +1614,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             buckets=[MembershipBucket(**b) for b in buckets],
             buckets_total=buckets_total,
             buckets_more=more,
-            note=(
-                f"Membership here reads {' and '.join(dials)}: the filing shown "
-                "is from the last pass, so a dial moved since then shows only "
-                "after the next one."
-                if dials
-                else None
-            ),
+            note=_membership_note(dials, aged=aged, owner=owner),
         )
 
     @ui.get(
@@ -2545,12 +2549,39 @@ def _grouping_edge(library: Library, name: str) -> Dependency:
     )
 
 
+def _membership_note(dials: list[str], *, aged: bool, owner: str | None) -> str | None:
+    """The caveat a filing carries, or None where there is none.
+
+    Two reasons a bucket table can describe a world that has moved: a dial it
+    reads has turned, and -- for an age filter -- the clock has advanced.
+    Both resolve at the next pass, and a reader looking at stale filing
+    deserves to be told which it is rather than left to wonder.
+    """
+    reasons: list[str] = []
+    if dials:
+        reasons.append(f"reads {' and '.join(dials)}")
+    if aged:
+        reasons.append("is decided against the clock")
+    if owner is not None:
+        reasons.append(f"takes its threshold from each record's {owner}")
+    if not reasons:
+        return None
+    return (
+        f"Membership here {', and '.join(reasons)}: the filing shown is from "
+        "the last pass, so anything moved since then shows only after the "
+        "next one."
+    )
+
+
 def _spec_edges(spec: IndexBy) -> list[Dependency]:
     """What an index reads beyond its own kind's records: the `through` hop
-    into another kind, and the dials (`by day in <zone setting>`, age
-    thresholds) that decide membership."""
+    into another kind, the calendar a time bucket is cut on, and -- for an age
+    filter reading its threshold off the record's owner -- that owner's kind.
+    Each of them decides membership, so each is an edge the page must draw."""
     if isinstance(spec, ByAge):
-        return [Dependency(type="setting", name=spec.setting)]
+        if spec.through is None:
+            return []
+        return [Dependency(type="fact", name=spec.through.kind)]
     if isinstance(spec, ByField):
         return _part_edges(spec.part)
     if isinstance(spec, ByComposite):

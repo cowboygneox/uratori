@@ -15,6 +15,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from ..lang.ast import ByAge
 from ..lang.plan import CompiledIndex, FigurePlan, Library
 from ..lang.settings import fingerprint as settings_fingerprint
 from ..lang.settings import setting_value
@@ -23,6 +24,7 @@ from ..schema import Schema
 from ..store import EngineStore, FactSource
 from .buckets import (
     SEPARATOR,
+    OwnerReader,
     ThroughResolver,
     buckets_of,
     measure_of,
@@ -351,8 +353,9 @@ class Engine:
 
     async def _resolver(
         self, tenant: str, only: set[str] | None = None
-    ) -> ThroughResolver:
-        """Resolve a value to the ids of the records that own it.
+    ) -> tuple[ThroughResolver, OwnerReader]:
+        """Resolve a value to the records that own it -- their ids, and, for
+        an age filter reading a threshold off one, their bodies.
 
         Built once per pass and cached, because a join is asked for every record
         of every index that names one, and doing it per record is the shape that
@@ -361,6 +364,7 @@ class Engine:
         the hop kinds of the groupings it is leaving alone.
         """
         cache: dict[tuple[str, str], dict[str, list[str]]] = {}
+        bodies: dict[tuple[str, str], dict[str, list[Mapping[str, Any]]]] = {}
 
         async def build(kind: str, path: str) -> dict[str, list[str]]:
             table: dict[str, list[str]] = {}
@@ -368,6 +372,20 @@ class Engine:
                 for value in read_path(row.value, path):
                     table.setdefault(value, []).append(row.key)
             return {k: sorted(set(v)) for k, v in table.items()}
+
+        async def build_bodies(kind: str, path: str) -> dict[str, list[Mapping[str, Any]]]:
+            """The same join, keeping the records rather than their keys.
+
+            Built only for the joins an age filter reads a threshold through,
+            because holding every owner's body costs more than holding its id
+            and the identity hop -- the common case by far -- needs only the
+            id.
+            """
+            table: dict[str, list[Mapping[str, Any]]] = {}
+            for row in await self._facts.of_kind(tenant, kind):
+                for value in read_path(row.value, path):
+                    table.setdefault(value, []).append(row.value)
+            return table
 
         for index in self._library.indexes.values():
             if only is not None and index.name not in only:
@@ -377,11 +395,19 @@ class Engine:
                     key = (part.through.kind, part.through.path)
                     if key not in cache:
                         cache[key] = await build(*key)
+            spec = index.spec
+            if isinstance(spec, ByAge) and spec.through is not None:
+                key = (spec.through.kind, spec.through.path)
+                if key not in bodies:
+                    bodies[key] = await build_bodies(*key)
 
         def resolve(kind: str, path: str, value: str) -> list[str]:
             return cache.get((kind, path), {}).get(value, [])
 
-        return resolve
+        def owners(kind: str, path: str, value: str) -> list[Mapping[str, Any]]:
+            return bodies.get((kind, path), {}).get(value, [])
+
+        return resolve, owners
 
     async def _reindex(
         self,
@@ -391,13 +417,13 @@ class Engine:
         *,
         now_ms: float,
     ) -> None:
-        resolve = await self._resolver(tenant, only=only)
+        resolve, owners = await self._resolver(tenant, only=only)
         for index in self._library.indexes.values():
             if only is not None and index.name not in only:
                 continue
             wanted: dict[str, list[str]] = {}
             for row in await self._facts.of_kind(tenant, index.kind):
-                buckets = buckets_of(index, row.value, settings, resolve, now_ms)
+                buckets = buckets_of(index, row.value, settings, resolve, now_ms, owners)
                 if buckets:
                     wanted[row.key] = buckets
             await self._store.replace_index(tenant, index.name, wanted)
@@ -419,7 +445,7 @@ class Engine:
         *,
         now_ms: float,
     ) -> list[Change]:
-        resolve = await self._resolver(tenant)
+        resolve, owners = await self._resolver(tenant)
         touched: dict[str, set[str]] = {}
 
         def touch(subject: str, figure: str) -> None:
@@ -438,7 +464,9 @@ class Engine:
             rows = await self._facts.some(tenant, kind, list(keys))
             for index in self._indexes_over(kind):
                 wanted = {
-                    row.key: buckets_of(index, row.value, settings, resolve, now_ms)
+                    row.key: buckets_of(
+                        index, row.value, settings, resolve, now_ms, owners
+                    )
                     for row in rows
                 }
                 # The buckets a record *left* have to be read before the write,
@@ -1030,13 +1058,13 @@ def _index_version(index: CompiledIndex) -> str:
 
 
 def _index_dials(index: CompiledIndex) -> list[str]:
-    """The dials this grouping's buckets can move with: an age threshold, or
-    a calendar zone on a truncated part. Empty for the dial-free majority."""
-    from ..lang.ast import ByAge, ByComposite, ByField
+    """The dials this grouping's buckets can move with: a calendar zone on a
+    truncated part, and nothing else now that an age threshold is a number in
+    the definition or a field on the record's owner. Empty for the dial-free
+    majority."""
+    from ..lang.ast import ByComposite, ByField
 
     spec = index.spec
-    if isinstance(spec, ByAge):
-        return [spec.setting]
     if isinstance(spec, ByField):
         return [spec.part.zone] if spec.part.zone is not None else []
     if isinstance(spec, ByComposite):

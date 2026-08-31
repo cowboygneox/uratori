@@ -367,10 +367,23 @@ class _Checker:
                     "short.",
                     d.line,
                 )
-        if isinstance(d.spec, ByAge) and d.spec.setting not in self._schema.bucket_settings:
-            raise CheckError(
-                f'{word} {d.name} narrows by age against "{d.spec.setting}", which is not a '
-                f"setting a {word} may name. Those are: {', '.join(self._schema.bucket_settings)}.",
+        if isinstance(d.spec, ByAge) and d.spec.through is not None:
+            self._fact_kind(
+                d.spec.through.kind,
+                f"{word} {d.name} reads its age threshold from",
+                d.line,
+            )
+            self._record_field(
+                d.spec.through.kind,
+                d.spec.read or "",
+                f"{word} {d.name} reads its age threshold from "
+                f"{d.spec.through.kind}.{d.spec.read}",
+                d.line,
+            )
+            self._record_field(
+                d.kind,
+                d.spec.local or "",
+                f"{word} {d.name} joins to its owner through {d.spec.local}",
                 d.line,
             )
         self._index_fields_exist(d, word)
@@ -3135,8 +3148,6 @@ def _zone_settings(indexes: list[str], compiled: dict[str, CompiledIndex]) -> se
         for part in _index_fields(idx.spec):
             if part.zone is not None:
                 out.add(part.zone)
-        if isinstance(idx.spec, ByAge):
-            out.add(idx.spec.setting)
     return out
 
 
@@ -3316,7 +3327,17 @@ def _index_hash(idx: CompiledIndex) -> object:
             "by": "age",
             "field": spec.field,
             "direction": spec.direction,
-            "setting": spec.setting,
+            # The threshold, however it is written: a number of days, or the
+            # field and join it is read off. Both decide who is in the filter,
+            # so both are the spec.
+            "days": spec.days,
+            "read": spec.read,
+            "local": spec.local,
+            "through": (
+                {"kind": spec.through.kind, "path": spec.through.path}
+                if spec.through is not None
+                else None
+            ),
         }
     else:
         assert_never(spec)

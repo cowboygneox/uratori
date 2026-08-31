@@ -26,7 +26,7 @@ BASE = """
 group work_issue.assigned_to from assigneeAccountId through team_person.accounts.accountId
 filter work_issue.active where active == true
 filter work_issue.sized where estimateSeconds is set
-filter work_issue.stuck where statusChangedAt older than thresholds.longWipDays
+filter work_issue.stuck where statusChangedAt older than 14 days
 group work_issue.in_container from containerId
 filter code_change.open where state == "open"
 group code_change.by_source from connectionId
@@ -260,17 +260,18 @@ figure nonsense_thing.count:
 # ------------------------------------------------------------- group/filter --
 
 
-def test_an_age_filter_may_only_name_a_bucket_setting() -> None:
-    """Moving one re-buckets a tenant's whole history, which is why the list is
-    short and closed."""
-    refuses(
-        "\nfilter code_change.late where mergedAt older than flow.leadTimeDays\n",
-        "not a setting a filter may name",
-    )
+def test_an_age_filter_may_not_name_a_dial() -> None:
+    """The hardest position to take a dial out of: a filter runs over records
+    before anything buckets them by subject, so there is no subject whose goal
+    figure could be looked up. The refusal carries both answers -- read the
+    threshold off the record's owner, or write the days here."""
+    with pytest.raises(SyntaxError_) as caught:
+        compile_ok("\nfilter code_change.late where mergedAt older than flow.leadTimeDays\n")
+    assert "tenant dial" in str(caught.value) and "owner" in str(caught.value)
 
 
-def test_the_control_an_age_filter_over_a_bucket_setting_compiles() -> None:
-    compile_ok("\nfilter code_change.late where mergedAt older than thresholds.staleChangeDays\n")
+def test_the_control_an_age_filter_over_a_written_threshold_compiles() -> None:
+    compile_ok("\nfilter code_change.late where mergedAt older than 3 days\n")
 
 
 def test_two_declarations_may_not_disagree_about_a_kinds_id_space() -> None:
