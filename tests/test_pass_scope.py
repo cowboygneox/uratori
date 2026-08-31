@@ -178,34 +178,6 @@ async def test_a_definition_pass_serves_exactly_what_it_reached() -> None:
     )
 
 
-async def test_a_settings_save_now_reaches_nothing_at_all() -> None:
-    """This test used to turn `thresholds.wip.over` and watch the figure
-    reading it recompute, the projection reading *that* follow, and the rest
-    of the board stay still. Every one of those edges was real; what has gone
-    is the dial at the end of them.
-
-    A threshold cannot be named from a calculation, a band, a projection value
-    or a flag any more; a calendar is a field on the subject's record; and an
-    effort renders in hours. So *no* dial reaches anything whatever it is set
-    to -- which is why the projection-renders-under-a-dial test that stood
-    beside this one is gone rather than rewritten -- and the pass must serve nothing rather than fall back to the
-    fixed tail. The edges themselves did not disappear with it: a figure
-    moving still reaches the projection reading it (the facts pass below), and
-    a goal figure moving still re-words the figure banded against it
-    (test_bands.py)."""
-    store, facts = MemoryEngineStore(), MemoryFactStore()
-    _seed(facts)
-    facade = _facade(LIB, store, facts)
-    await facade.run(TENANT, full=True)
-
-    report = await facade.run(TENANT, {"thresholds": {"wip": {"over": 1}}})
-    assert report.outcome.reindexed == ()
-    assert _served(report.results) == set(), (
-        "a dial no definition can name moved something, so either a "
-        "definition still reads one or the pass fell back to serving the world"
-    )
-
-
 async def test_a_facts_pass_is_still_the_serving_moment() -> None:
     """The carve-out: records arrived, so every projection re-serves --
     including the one whose kind the batch never mentioned, because the

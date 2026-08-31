@@ -2,7 +2,7 @@
 
 Pure, deliberately: the recorder freezes what these produce into Postgres, so
 everything here is decided *once*, at write time, against the unit and the
-tenant's settings as they were then. Nothing is re-derived on read -- a figure
+tenant's world as it was then. Nothing is re-derived on read -- a figure
 redefined next week, or a formatter improved, must not rewrite the history of
 what moved.
 
@@ -30,9 +30,8 @@ these down after getting it wrong; they are kept, not rediscovered:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal
 
 from ..lang.ast import FigureUnit
 from ..lang.plan import Library
@@ -102,7 +101,7 @@ def weight_of(change: Change, unit: FigureUnit) -> float:
 
 
 def render_change(
-    change: Change, unit: FigureUnit, settings: Mapping[str, Any]
+    change: Change, unit: FigureUnit
 ) -> RenderedChange:
     """Freeze one movement as text.
 
@@ -122,8 +121,8 @@ def render_change(
         subject_id=change.subject,
         kind=change.kind,
         label=change.label,
-        before_display=format_value(change.before, unit, settings),
-        after_display=format_value(change.after, unit, settings),
+        before_display=format_value(change.before, unit),
+        after_display=format_value(change.after, unit),
         unit=unit,
         weight=weight_of(change, unit),
     )
@@ -132,7 +131,6 @@ def render_change(
 def shown_changes(
     changes: list[Change] | tuple[Change, ...],
     library: Library,
-    settings: Mapping[str, Any],
 ) -> list[RenderedChange]:
     """Rank every movement, cap, and render only the survivors.
 
@@ -158,6 +156,6 @@ def shown_changes(
         weighed.append((change, unit, weight_of(change, unit)))
     weighed.sort(key=lambda entry: (entry[0].kind != "removed", -entry[2]))
     return [
-        render_change(change, unit, settings)
+        render_change(change, unit)
         for change, unit, _ in weighed[:SHOWN_KEEP]
     ]

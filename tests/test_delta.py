@@ -384,7 +384,7 @@ async def test_the_oldest_bucket_is_absent_rather_than_reaching_one_day_back() -
     store, at = await _seeded()
     reading = DAILY.reading("team_person.merge_trend")
     assert reading is not None
-    result = await serve_reading(store, DAILY, "t1", reading, DEFAULTS, [3], at_ms=at)
+    result = await serve_reading(store, DAILY, "t1", reading, [3], at_ms=at)
 
     assert isinstance(result.state, Ok)
     window = result.subjects[0].windows[0]
@@ -406,7 +406,7 @@ async def test_no_fetch_reaches_outside_the_resolved_window() -> None:
     store, at = await _seeded()
     reading = DAILY.reading("team_person.merge_trend")
     assert reading is not None
-    await serve_reading(store, DAILY, "t1", reading, DEFAULTS, [3], at_ms=at)
+    await serve_reading(store, DAILY, "t1", reading, [3], at_ms=at)
 
     assert store.ranges, "the window is served from a bounded fetch"
     for frm, to in store.ranges:
@@ -429,8 +429,7 @@ async def test_two_spans_fetch_across_their_union_and_neither_borrows_the_others
     store, at = await _seeded()
     reading = DAILY.reading("team_person.merge_trend")
     assert reading is not None
-    result = await serve_reading(
-        store, DAILY, "t1", reading, DEFAULTS, ["1-2", "3-4"], at_ms=at
+    result = await serve_reading(store, DAILY, "t1", reading, ["1-2", "3-4"], at_ms=at
     )
     newer, older = result.subjects[0].windows
     assert newer.delta is not None and newer.delta[0] is None
@@ -466,7 +465,7 @@ reading team_person.fussy(range):
     reading = lib.reading("team_person.fussy")
     figure = lib.figure("team_person.time_to_merge")
     assert reading is not None and figure is not None
-    result = await serve_reading(store, lib, "t1", reading, DEFAULTS, [3], at_ms=at)
+    result = await serve_reading(store, lib, "t1", reading, [3], at_ms=at)
     window = result.subjects[0].windows[0]
     assert window.unmet, "the floor should have fallen short"
     assert window.delta is None, "a withheld reading may not still publish its trend"
@@ -485,7 +484,7 @@ async def test_the_delta_cells_are_served_rendered_and_signed() -> None:
     store, at = await _seeded()
     reading = DAILY.reading("team_person.merge_trend")
     assert reading is not None
-    result = await serve_reading(store, DAILY, "t1", reading, DEFAULTS, [3], at_ms=at)
+    result = await serve_reading(store, DAILY, "t1", reading, [3], at_ms=at)
     window = result.subjects[0].windows[0]
 
     assert window.delta == [None, 40.0, -20.0]
@@ -501,24 +500,23 @@ def test_a_negative_duration_renders_in_the_same_unit_as_a_positive_one() -> Non
     unit ladder testing `seconds < 60` -- which every negative satisfies."""
     from uratori.engine.project import format_value
 
-    settings = {"tenant": {"hoursPerDay": 8}}
-    assert format_value(3600.0, "duration", settings) == "1.0h"
-    assert format_value(-3600.0, "duration", settings) == "-1.0h"
-    assert format_value(-7200.0, "duration", settings) == "-2.0h"
-    assert format_value(-30.0, "duration", settings) == "-30s"
-    assert format_value(-172800.0, "duration", settings) == "-2.0d"
+    assert format_value(3600.0, "duration") == "1.0h"
+    assert format_value(-3600.0, "duration") == "-1.0h"
+    assert format_value(-7200.0, "duration") == "-2.0h"
+    assert format_value(-30.0, "duration") == "-30s"
+    assert format_value(-172800.0, "duration") == "-2.0d"
     # A fall too small to render is not a fall in the wrong direction. A
     # delta is the difference of two float means, so a tenth of a second is
     # an ordinary cell, and "-0s" reads as a direction somebody measured
     # where the truth is that it rounded away.
-    assert format_value(-0.1, "duration", settings) == "0s"
-    assert format_value(-0.0, "duration", settings) == "0s"
+    assert format_value(-0.1, "duration") == "0s"
+    assert format_value(-0.0, "duration") == "0s"
     # The same ladder shape, one unit along: a subtraction under `unit effort`
     # can go negative too, and a rung against a positive bound let it through
     # unformatted. An effort renders in hours now -- there is no working day
     # to divide by -- so the sign is the whole of what this arm has to get
     # right.
-    assert format_value(-864000.0, "effort", settings) == "-240.0h"
+    assert format_value(-864000.0, "effort") == "-240.0h"
 
 
 def test_a_delta_over_a_sub_day_figure_is_refused_rather_than_served_empty() -> None:

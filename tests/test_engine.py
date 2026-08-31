@@ -27,7 +27,7 @@ import pytest
 from uratori.engine.engine import Engine
 from uratori.store import MemoryEngineStore, MemoryFactStore
 
-from .world import DEFAULTS, WORLD, compile_source
+from .world import WORLD, compile_source
 
 TENANT = "t1"
 
@@ -200,7 +200,7 @@ def value_of(store: MemoryEngineStore, figure: str, subject: str) -> Any:
 async def test_a_cold_run_computes_every_figure_for_every_subject() -> None:
     engine, facts, store = build()
     await seed(facts)
-    outcome = await engine.run(TENANT, DEFAULTS, full=True)
+    outcome = await engine.run(TENANT, full=True)
 
     assert value_of(store, "team_person.wip", "p1") == 2
     assert value_of(store, "team_person.wip", "p2") == 0
@@ -213,19 +213,19 @@ async def test_a_measured_nought_is_written_for_everybody_on_the_roster() -> Non
     Without it, every reader downstream has to guess which it is looking at."""
     engine, facts, store = build()
     await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
     assert value_of(store, "team_person.wip", "p2") == 0
 
 
 async def test_a_band_reads_the_figure_beneath_it() -> None:
     engine, facts, store = build()
     await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
     # Two in progress, warn at three: comfortable.
     assert value_of(store, "team_person.wip_level", "p1") == "ok"
     for n in range(3, 8):
         issue(facts, f"CX-{n}", "jira:ada", True)
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
     assert value_of(store, "team_person.wip_level", "p1") == "over"
 
 
@@ -234,7 +234,7 @@ async def test_a_rollup_equals_the_sum_of_its_parts() -> None:
     because there is only one count."""
     engine, facts, store = build()
     await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
     assert value_of(store, "team_person.open_mrs_by_source", "p1@c1") == 2
     assert value_of(store, "team_person.open_mrs_by_source", "p1@c2") == 1
     assert value_of(store, "team_person.open_mrs", "p1") == 3
@@ -245,7 +245,7 @@ async def test_a_dimensioned_figure_writes_no_pair_that_never_existed() -> None:
     connections that categorically cannot hold a merge request."""
     engine, facts, store = build()
     await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
     assert value_of(store, "team_person.open_mrs_by_source", "p2@c1") is None
 
 
@@ -258,11 +258,11 @@ async def test_a_departed_subject_is_reported_as_removed() -> None:
     counting somebody who is gone."""
     engine, facts, store = build()
     await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
     assert value_of(store, "team_person.wip", "p2") == 0
 
     facts.drop(TENANT, "team_person", "p2")
-    outcome = await engine.run(TENANT, DEFAULTS, full=True)
+    outcome = await engine.run(TENANT, full=True)
 
     removed = [c for c in outcome.changes if c.kind == "removed" and c.subject == "p2"]
     assert removed, "a departed person must appear in the change stream"
@@ -275,9 +275,9 @@ async def test_a_removed_change_carries_the_name_the_subject_had() -> None:
     report says anything a reader can use."""
     engine, facts, _ = build()
     await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
     facts.drop(TENANT, "team_person", "p2")
-    outcome = await engine.run(TENANT, DEFAULTS, full=True)
+    outcome = await engine.run(TENANT, full=True)
     removed = next(c for c in outcome.changes if c.kind == "removed" and c.subject == "p2")
     assert removed.label == "Bo Rivers"
 
@@ -285,11 +285,11 @@ async def test_a_removed_change_carries_the_name_the_subject_had() -> None:
 async def test_a_departed_dimension_removes_its_pairs() -> None:
     engine, facts, store = build()
     await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
     assert value_of(store, "team_person.open_mrs_by_source", "p1@c2") == 1
 
     facts.drop(TENANT, "data_connection", "c2")
-    outcome = await engine.run(TENANT, DEFAULTS, full=True)
+    outcome = await engine.run(TENANT, full=True)
 
     assert value_of(store, "team_person.open_mrs_by_source", "p1@c2") is None
     assert any(c.subject == "p1@c2" and c.kind == "removed" for c in outcome.changes)
@@ -301,17 +301,17 @@ async def test_a_run_that_moved_nothing_reports_nothing() -> None:
     reported on every recompute, they would all pass for the wrong reason."""
     engine, facts, _ = build()
     await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
-    again = await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
+    again = await engine.run(TENANT, full=True)
     assert again.changes == ()
 
 
 async def test_a_movement_reports_both_ends() -> None:
     engine, facts, _ = build()
     await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
     issue(facts, "CX-4", "jira:ada", True)
-    outcome = await engine.run(TENANT, DEFAULTS, written={"work_issue": ["CX-4"]})
+    outcome = await engine.run(TENANT, written={"work_issue": ["CX-4"]})
     moved = next(c for c in outcome.changes if c.figure == "team_person.wip")
     assert (moved.before, moved.after) == (2, 3)
 
@@ -322,10 +322,10 @@ async def test_a_band_change_is_reported_even_though_both_ends_are_words() -> No
     None and discards every band change on the board."""
     engine, facts, _ = build()
     await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
     for n in range(4, 10):
         issue(facts, f"CX-{n}", "jira:ada", True)
-    outcome = await engine.run(TENANT, DEFAULTS, full=True)
+    outcome = await engine.run(TENANT, full=True)
     band = next(c for c in outcome.changes if c.figure == "team_person.wip_level")
     assert (band.before, band.after) == ("ok", "over")
 
@@ -340,8 +340,8 @@ async def test_a_scoped_run_leaves_the_state_a_full_run_would() -> None:
     full_engine, full_facts, full_store = build()
     await seed(scoped_facts)
     await seed(full_facts)
-    await scoped_engine.run(TENANT, DEFAULTS, full=True)
-    await full_engine.run(TENANT, DEFAULTS, full=True)
+    await scoped_engine.run(TENANT, full=True)
+    await full_engine.run(TENANT, full=True)
 
     for facts in (scoped_facts, full_facts):
         issue(facts, "CX-9", "jira:ada", True, 1800)
@@ -350,10 +350,9 @@ async def test_a_scoped_run_leaves_the_state_a_full_run_would() -> None:
 
     await scoped_engine.run(
         TENANT,
-        DEFAULTS,
         written={"work_issue": ["CX-9", "CX-1"], "code_change": ["c1:3"]},
     )
-    await full_engine.run(TENANT, DEFAULTS, full=True)
+    await full_engine.run(TENANT, full=True)
 
     assert scoped_store._values == full_store._values
 
@@ -365,15 +364,15 @@ async def test_the_control_a_deliberately_narrowed_run_disagrees() -> None:
     full_engine, full_facts, full_store = build()
     await seed(scoped_facts)
     await seed(full_facts)
-    await scoped_engine.run(TENANT, DEFAULTS, full=True)
-    await full_engine.run(TENANT, DEFAULTS, full=True)
+    await scoped_engine.run(TENANT, full=True)
+    await full_engine.run(TENANT, full=True)
 
     for facts in (scoped_facts, full_facts):
         issue(facts, "CX-9", "jira:ada", True)
 
     # Tell the scoped run about a *different* record than the one that moved.
-    await scoped_engine.run(TENANT, DEFAULTS, written={"work_issue": ["CX-3"]})
-    await full_engine.run(TENANT, DEFAULTS, full=True)
+    await scoped_engine.run(TENANT, written={"work_issue": ["CX-3"]})
+    await full_engine.run(TENANT, full=True)
 
     assert scoped_store._values != full_store._values
 
@@ -384,11 +383,11 @@ async def test_a_field_edit_that_moves_no_bucket_still_moves_the_figure() -> Non
     warm path driven by bucket movement alone would go stale until a reconcile."""
     engine, facts, store = build()
     await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
     assert value_of(store, "team_person.wip_effort", "p1") == 10800
 
     issue(facts, "CX-1", "jira:ada", True, 36000)
-    outcome = await engine.run(TENANT, DEFAULTS, written={"work_issue": ["CX-1"]})
+    outcome = await engine.run(TENANT, written={"work_issue": ["CX-1"]})
 
     assert value_of(store, "team_person.wip_effort", "p1") == 43200
     assert any(c.figure == "team_person.wip_effort" for c in outcome.changes)
@@ -397,11 +396,11 @@ async def test_a_field_edit_that_moves_no_bucket_still_moves_the_figure() -> Non
 async def test_a_part_moving_marks_the_total_above_it() -> None:
     engine, facts, store = build()
     await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
     assert value_of(store, "team_person.open_mrs", "p1") == 3
 
     change(facts, "c1:9", "gitlab:ada", "c1")
-    await engine.run(TENANT, DEFAULTS, written={"code_change": ["c1:9"]})
+    await engine.run(TENANT, written={"code_change": ["c1:9"]})
 
     assert value_of(store, "team_person.open_mrs", "p1") == 4
 
@@ -411,7 +410,7 @@ async def test_identity_decides_the_subject_so_two_accounts_are_one_person() -> 
     Jira login and a GitLab login into two half-people."""
     engine, facts, store = build()
     await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
     assert value_of(store, "team_person.wip", "p1") == 2
     assert value_of(store, "team_person.open_mrs", "p1") == 3
 
@@ -419,52 +418,11 @@ async def test_identity_decides_the_subject_so_two_accounts_are_one_person() -> 
 # --------------------------------------------------------------- pointers --
 
 
-async def test_a_pointer_moves_only_when_the_definition_does() -> None:
-    """A pointer is a definition's version plus a fingerprint of the dials it
-    reads, and the second half is empty now: a figure's thresholds are figures
-    or literals and its groupings' calendars are fields on records, so nothing
-    a tenant sets can move a stored value. What is left is the version, and it
-    must not move for a pass that changed nothing.
-
-    The dial half of this test went with the dials. A settings save reaching a
-    stored value is pinned as its opposite in test_pass_scope."""
-    engine, facts, store = build()
-    await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
-    before = await store.pointer(TENANT, "team_person.merge_times")
-    assert before is not None
-    assert before.settings_fingerprint == "{}", (
-        "a figure still names a dial, so a tenant can still move a stored value"
-    )
-
-    await engine.run(TENANT, DEFAULTS, full=True)
-    assert await store.pointer(TENANT, "team_person.merge_times") == before
-
-    turned = {**DEFAULTS, "tenant": {**DEFAULTS["tenant"], "timezone": "Asia/Tokyo"}}
-    await engine.run(TENANT, turned, full=True)
-    assert await store.pointer(TENANT, "team_person.merge_times") == before, (
-        "a dial nothing names moved a pointer"
-    )
-
-
-async def test_moving_a_dial_now_rebuilds_nothing_at_all() -> None:
-    """The observable difference between a narrow save and a full rebuild is
-    *work*, and a figure recomputed to the value it already held writes nothing
-    -- so the outcome has to say how many were rebuilt or nothing can assert
-    it. What it must say now is none: the dials that reached a stored value
-    were thresholds and calendars, and both are facts."""
-    engine, facts, _ = build()
-    await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
-
-    moved = {**DEFAULTS, "tenant": {**DEFAULTS["tenant"], "timezone": "Asia/Tokyo"}}
-    outcome = await engine.run(TENANT, moved)
-
-    assert outcome.rebuilt == (), (
-        "a dial moved and something rebuilt, so a definition still reads one "
-        "-- every threshold is a fact or a literal now, and every calendar a "
-        "field on a record, so a settings document reaches no stored value"
-    )
+# Two tests stood here, and both turned a dial: one watched a figure's
+# pointer move when a threshold did, the other watched exactly the figures
+# naming it rebuild. A pass takes no settings document at all now -- there is
+# nothing to turn, and the guarantee they enforced is stronger than a test:
+# it is unwritable.
 
 
 async def test_a_failed_run_raises_rather_than_reporting_nothing() -> None:
@@ -477,7 +435,7 @@ async def test_a_failed_run_raises_rather_than_reporting_nothing() -> None:
 
     engine = Engine(MemoryEngineStore(), Broken(), LIB, WORLD)
     with pytest.raises(RuntimeError):
-        await engine.run(TENANT, DEFAULTS, full=True)
+        await engine.run(TENANT, full=True)
 
 
 async def test_a_departed_person_does_not_come_back_on_the_next_backfill() -> None:
@@ -486,11 +444,11 @@ async def test_a_departed_person_does_not_come_back_on_the_next_backfill() -> No
     back -- with the delete reported, which is worse than not reporting it."""
     engine, facts, store = build()
     await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
     facts.drop(TENANT, "team_person", "p2")
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
     assert value_of(store, "team_person.wip", "p2") is None
-    again = await engine.run(TENANT, DEFAULTS, full=True)
+    again = await engine.run(TENANT, full=True)
     assert again.changes == ()
 
 
@@ -506,12 +464,12 @@ async def test_a_scoped_run_catches_a_field_edit_that_moves_no_bucket_at_all() -
     """
     engine, facts, store = build()
     await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
     assert value_of(store, "team_person.wip", "p1") == 2
 
     # One field, one record, nothing else in the batch.
     issue(facts, "CX-1", "jira:ada", False, 3600)
-    await engine.run(TENANT, DEFAULTS, written={"work_issue": ["CX-1"]})
+    await engine.run(TENANT, written={"work_issue": ["CX-1"]})
 
     assert value_of(store, "team_person.wip", "p1") == 1, (
         "a record leaving a predicate index did not reach the figure that reads it"
@@ -524,11 +482,11 @@ async def test_a_warm_run_reports_a_departed_subject_too() -> None:
     reconciles keeps every value they had, and the change stream says nothing."""
     engine, facts, store = build()
     await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
     assert value_of(store, "team_person.wip", "p2") == 0
 
     facts.drop(TENANT, "team_person", "p2")
-    outcome = await engine.run(TENANT, DEFAULTS, deleted={"team_person": ["p2"]})
+    outcome = await engine.run(TENANT, deleted={"team_person": ["p2"]})
 
     assert value_of(store, "team_person.wip", "p2") is None
     assert any(c.subject == "p2" and c.kind == "removed" for c in outcome.changes), (
@@ -541,10 +499,10 @@ async def test_a_warm_run_with_no_deletions_does_not_pay_for_the_scan() -> None:
     and every ordinary sync deletes nothing. It must not run then."""
     engine, facts, _ = build()
     await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
 
     issue(facts, "CX-4", "jira:ada", True)
-    outcome = await engine.run(TENANT, DEFAULTS, written={"work_issue": ["CX-4"]})
+    outcome = await engine.run(TENANT, written={"work_issue": ["CX-4"]})
     assert all(c.kind == "moved" for c in outcome.changes)
 
 
@@ -585,17 +543,17 @@ async def test_a_projection_from_is_the_definition_of_on_the_page() -> None:
     store = MemoryEngineStore()
     _change(facts, "c1", "open")
     _change(facts, "c2", "merged")
-    await Engine(store, facts, POPULATED, WORLD).run(TENANT, DEFAULTS, full=True)
+    await Engine(store, facts, POPULATED, WORLD).run(TENANT, full=True)
 
     filtered = POPULATED.projection("code_change.card")
     control = POPULATED.projection("code_change.every")
     assert filtered is not None and control is not None
 
-    rows, state, _ = await project_rows(store, facts, POPULATED, TENANT, filtered, DEFAULTS, 0.0)
+    rows, state, _ = await project_rows(store, facts, POPULATED, TENANT, filtered, 0.0)
     assert state.ok is True
     assert [r.id for r in rows] == ["c1"]
 
-    rows, _, _ = await project_rows(store, facts, POPULATED, TENANT, control, DEFAULTS, 0.0)
+    rows, _, _ = await project_rows(store, facts, POPULATED, TENANT, control, 0.0)
     assert {r.id for r in rows} == {"c1", "c2"}
 
 
@@ -609,11 +567,11 @@ async def test_an_empty_population_is_an_empty_page_and_not_an_absence() -> None
     facts = MemoryFactStore()
     store = MemoryEngineStore()
     _change(facts, "c2", "merged")
-    await Engine(store, facts, POPULATED, WORLD).run(TENANT, DEFAULTS, full=True)
+    await Engine(store, facts, POPULATED, WORLD).run(TENANT, full=True)
 
     filtered = POPULATED.projection("code_change.card")
     assert filtered is not None
-    rows, state, _ = await project_rows(store, facts, POPULATED, TENANT, filtered, DEFAULTS, 0.0)
+    rows, state, _ = await project_rows(store, facts, POPULATED, TENANT, filtered, 0.0)
     assert state.ok is True, "an empty population is a truthful page, not a missing one"
     assert rows == []
 
@@ -623,7 +581,7 @@ async def test_an_empty_population_is_an_empty_page_and_not_an_absence() -> None
     # never built.
     control = POPULATED.projection("code_change.every")
     assert control is not None
-    control_rows, _, _ = await project_rows(store, facts, POPULATED, TENANT, control, DEFAULTS, 0.0)
+    control_rows, _, _ = await project_rows(store, facts, POPULATED, TENANT, control, 0.0)
     assert [r.id for r in control_rows] == ["c2"]
 
 
@@ -712,7 +670,7 @@ async def test_a_new_population_index_is_built_by_the_next_sync_not_the_next_ful
 
     engine, facts, store = build()
     await seed(facts)
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
 
     grown = compile_source(LIB_SOURCE + GROWN_BY_ONE_INDEX)
     change(facts, "c9:1", "gitlab:ada", "c1", state="closed")
@@ -723,15 +681,15 @@ async def test_a_new_population_index_is_built_by_the_next_sync_not_the_next_ful
     # Between the deploy and the tenant's first pass the population's buckets
     # do not exist, and an Ok page here would be a confident zero -- so the
     # serving path refuses, the way it refuses a figure behind a deploy.
-    early, state, _ = await project_rows(store, facts, grown, TENANT, plan, DEFAULTS, 0.0)
+    early, state, _ = await project_rows(store, facts, grown, TENANT, plan, 0.0)
     assert state.ok is False and early == []
     assert state.because == "behind-deploy"
 
     # The delta poll that follows the deploy: one record written, no full pass.
     upgraded = Engine(store, facts, grown, WORLD)
-    await upgraded.run(TENANT, DEFAULTS, written={"code_change": ["c9:1"]})
+    await upgraded.run(TENANT, written={"code_change": ["c9:1"]})
 
-    rows, state2, _ = await project_rows(store, facts, grown, TENANT, plan, DEFAULTS, 0.0)
+    rows, state2, _ = await project_rows(store, facts, grown, TENANT, plan, 0.0)
     assert state2.ok is True
     assert {r.id for r in rows} == {"c9:1", "c9:2"}, (
         "the page after a deploy is the population, not whichever records the "
@@ -753,7 +711,7 @@ async def test_a_population_before_any_pass_is_never_computed_rather_than_empty(
 
     plan = POPULATED.projection("code_change.card")
     assert plan is not None
-    rows, state, _ = await project_rows(store, facts, POPULATED, TENANT, plan, DEFAULTS, 0.0)
+    rows, state, _ = await project_rows(store, facts, POPULATED, TENANT, plan, 0.0)
     assert state.ok is False and rows == []
     assert state.because == "never-computed"
 
@@ -773,7 +731,7 @@ async def test_a_failed_reindex_is_retried_rather_than_recorded_as_built() -> No
     # record like this distinguishes "the wholesale rebuild ran" from "the
     # deltas happened to cover everything".
     change(facts, "c8:0", "gitlab:ada", "c1", state="closed")
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
 
     grown = compile_source(LIB_SOURCE + GROWN_BY_ONE_INDEX)
     change(facts, "c9:1", "gitlab:ada", "c1", state="closed")
@@ -782,21 +740,19 @@ async def test_a_failed_reindex_is_retried_rather_than_recorded_as_built() -> No
     upgraded = Engine(store, facts, grown, WORLD)
     real_reindex = upgraded._reindex
 
-    async def dies(
-        tenant: str, settings: Any, only: Any = None, *, now_ms: float = 0.0
-    ) -> None:
+    async def dies(tenant: str, only: Any = None, *, now_ms: float = 0.0) -> None:
         raise RuntimeError("the database went away mid-rebuild")
 
     upgraded._reindex = dies  # type: ignore[method-assign]
     with pytest.raises(RuntimeError):
-        await upgraded.run(TENANT, DEFAULTS, written={"code_change": ["c9:1"]})
+        await upgraded.run(TENANT, written={"code_change": ["c9:1"]})
     upgraded._reindex = real_reindex  # type: ignore[method-assign]
 
-    await upgraded.run(TENANT, DEFAULTS, written={"code_change": ["c9:2"]})
+    await upgraded.run(TENANT, written={"code_change": ["c9:2"]})
 
     plan = grown.projection("code_change.archived")
     assert plan is not None
-    rows, state, _ = await project_rows(store, facts, grown, TENANT, plan, DEFAULTS, 0.0)
+    rows, state, _ = await project_rows(store, facts, grown, TENANT, plan, 0.0)
     assert state.ok is True
     assert {r.id for r in rows} == {"c8:0", "c9:1", "c9:2"}, (
         "the failed rebuild was recorded as done, so the retry never happened "
@@ -811,25 +767,21 @@ async def test_a_cold_pass_that_reads_no_index_still_builds_a_new_population() -
     the index-set trigger the cold pass would record nothing rebuilt, the
     gate would go green, and the projection would serve Ok over buckets that
     were never built: a confident empty page."""
-    from copy import deepcopy
-
     from uratori.engine.serve import project_rows
 
     engine, facts, store = build()
     await seed(facts)
     change(facts, "c8:0", "gitlab:ada", "c1", state="closed")
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
 
     grown = compile_source(LIB_SOURCE + GROWN_BY_ONE_INDEX)
-    moved = deepcopy(dict(DEFAULTS))
-    moved["thresholds"]["wip"]["warn"] = 4  # pending: wip_level alone, no indexes
 
     upgraded = Engine(store, facts, grown, WORLD)
-    await upgraded.run(TENANT, moved)
+    await upgraded.run(TENANT)
 
     plan = grown.projection("code_change.archived")
     assert plan is not None
-    rows, state, _ = await project_rows(store, facts, grown, TENANT, plan, moved, 0.0)
+    rows, state, _ = await project_rows(store, facts, grown, TENANT, plan, 0.0)
     assert state.ok is True
     assert {r.id for r in rows} == {"c8:0"}, (
         "the cold pass skipped the rebuild, so the page is not the population"
@@ -847,10 +799,10 @@ async def test_redefining_a_population_index_rebuilds_its_buckets() -> None:
     engine, facts, store = build()
     await seed(facts)
     change(facts, "c8:0", "gitlab:ada", "c1", state="closed")
-    await engine.run(TENANT, DEFAULTS, full=True)
+    await engine.run(TENANT, full=True)
 
     grown = compile_source(LIB_SOURCE + GROWN_BY_ONE_INDEX)
-    await Engine(store, facts, grown, WORLD).run(TENANT, DEFAULTS)
+    await Engine(store, facts, grown, WORLD).run(TENANT)
 
     # The same index name, redefined to mean the opposite population.
     redefined_source = LIB_SOURCE + GROWN_BY_ONE_INDEX.replace(
@@ -858,11 +810,11 @@ async def test_redefining_a_population_index_rebuilds_its_buckets() -> None:
     )
     change(facts, "c9:9", "gitlab:ada", "c1", state="merged")
     redefined = compile_source(redefined_source)
-    await Engine(store, facts, redefined, WORLD).run(TENANT, DEFAULTS)
+    await Engine(store, facts, redefined, WORLD).run(TENANT)
 
     plan = redefined.projection("code_change.archived")
     assert plan is not None
-    rows, state, _ = await project_rows(store, facts, redefined, TENANT, plan, DEFAULTS, 0.0)
+    rows, state, _ = await project_rows(store, facts, redefined, TENANT, plan, 0.0)
     assert state.ok is True
     assert {r.id for r in rows} == {"c9:9"}, (
         "the page is still the old predicate's records: the redefinition "
@@ -918,7 +870,7 @@ async def test_a_time_bucket_with_every_member_gated_off_is_an_absent_subject() 
     )
 
     engine = Engine(store, facts, GRAINED, WORLD)
-    outcome = await engine.run(TENANT, DEFAULTS, full=True)
+    outcome = await engine.run(TENANT, full=True)
 
     plan = GRAINED.figure("team_person.merge_spans")
     assert plan is not None
@@ -947,7 +899,7 @@ async def test_full_passes_over_an_empty_time_bucket_stay_silent() -> None:
     assert plan is not None
 
     for attempt in range(3):
-        outcome = await engine.run(TENANT, DEFAULTS, full=True)
+        outcome = await engine.run(TENANT, full=True)
         assert await store.values(TENANT, plan.name, plan.version) == []
         assert [c for c in outcome.changes if c.figure == plan.name] == [], (
             f"pass {attempt + 1} reported movement over a day that has none"
@@ -967,7 +919,7 @@ async def test_a_roster_subjects_empty_list_is_a_measured_value_not_an_absence()
     plan = GRAINED.figure("team_person.span_list")
     assert plan is not None
 
-    first = await engine.run(TENANT, DEFAULTS, full=True)
+    first = await engine.run(TENANT, full=True)
     held = await store.value(TENANT, plan.name, plan.version, "p1")
     assert held is not None
     assert held.value == []
@@ -975,7 +927,7 @@ async def test_a_roster_subjects_empty_list_is_a_measured_value_not_an_absence()
     mine = [c for c in first.changes if c.figure == plan.name and c.subject == "p1"]
     assert [c.kind for c in mine] == ["moved"], "a measured nought arrives as a movement"
 
-    second = await engine.run(TENANT, DEFAULTS, full=True)
+    second = await engine.run(TENANT, full=True)
     assert [c for c in second.changes if c.figure == plan.name] == [], (
         "an unchanged empty list must not be re-reported"
     )

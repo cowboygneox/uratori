@@ -18,14 +18,11 @@ from uratori import (
     Uratori,
     compile_source,
 )
-from uratori.lang.settings import fingerprint
 
 COURIER_WORLD = Schema(
     kinds=frozenset({"shop_order", "shop_courier"}),
     name_fields={"shop_courier": "name", "shop_order": "ref"},
     url_fields={"shop_order": "url"},
-    figure_settings=("limits.carrying.over",),
-    defaults={"tenant": {"hoursPerDay": 8}, "limits": {"carrying": {"over": 3}}},
 )
 
 COURIER_SOURCE = '''
@@ -150,78 +147,6 @@ def test_the_server_contract_parses_documents_identically() -> None:
     assert SchemaIn(**COURIER_WORLD.to_document()).build() == COURIER_WORLD
 
 
-def test_settings_merge_lands_a_whole_band_as_one_value() -> None:
-    """A band written whole replaces whole -- `flatten` emits bands whole, so
-    that is the only shape a stored document carries."""
-    schema = Schema(
-        kinds=frozenset({"shop_order"}),
-        defaults={"flow": {"speed": {"good": 2, "poor": 5}}},
-    )
-    merged = schema.settings_for({"flow": {"speed": {"good": 1, "poor": 9}}})
-    assert merged["flow"]["speed"] == {"good": 1, "poor": 9}
-
-    # A non-band node merges leaf by leaf: setting one dial must not unset its
-    # neighbours.
-    schema = Schema(
-        kinds=frozenset({"shop_order"}),
-        defaults={"limits": {"a": 1, "b": 2}},
-    )
-    merged = schema.settings_for({"limits": {"a": 9}})
-    assert merged["limits"] == {"a": 9, "b": 2}
-
-
-def test_completing_a_document_never_touches_the_defaults() -> None:
-    """The defaults are shared by every tenant of a deployment, so a merge
-    that mutates them turns one tenant's dial into everybody's new default.
-
-    This is not hypothetical: the first implementation assigned the defaults'
-    nested dicts into the merged document by reference and then merged the
-    overrides *into those shared objects* -- one tenant's override quietly
-    rewrote the schema's defaults for the life of the process, and the rest of
-    this suite caught it as tests poisoning each other through a module-level
-    world."""
-    schema = Schema(
-        kinds=frozenset({"shop_order"}),
-        defaults={"limits": {"carrying": {"over": 3}}},
-    )
-    merged = schema.settings_for({"limits": {"carrying": {"over": 10}}})
-    assert merged["limits"]["carrying"]["over"] == 10
-    assert schema.defaults["limits"]["carrying"]["over"] == 3, (
-        "the tenant's dial leaked into the shared defaults"
-    )
-    # And the other direction: editing the merged document afterwards must not
-    # reach back either.
-    fresh = schema.settings_for({})
-    fresh["limits"]["carrying"]["over"] = 99
-    assert schema.defaults["limits"]["carrying"]["over"] == 3
-
-
-def test_a_dial_set_to_its_default_fingerprints_like_an_unset_one() -> None:
-    """What makes 'complete the document, then fingerprint' equivalent to the
-    old 'fingerprint sparse with a default fallback': the stored fingerprints
-    written before the extraction must keep validating, or every tenant pays a
-    full rebuild for a refactor that changed no value."""
-    named = ["limits.carrying.over"]
-    unset = fingerprint(COURIER_WORLD.settings_for({}), named)
-    explicit = fingerprint(
-        COURIER_WORLD.settings_for({"limits": {"carrying": {"over": 3}}}), named
-    )
-    changed = fingerprint(
-        COURIER_WORLD.settings_for({"limits": {"carrying": {"over": 4}}}), named
-    )
-    assert unset == explicit
-    assert unset != changed, "the control: a moved dial must move the fingerprint"
-
-
-def test_a_missing_dial_raises_rather_than_guessing() -> None:
-    """A definition named the dial, so there is nothing to guess -- a fallback
-    would band every subject against a number nobody chose."""
-    from uratori.lang.settings import setting_value
-
-    with pytest.raises(KeyError, match="no value for setting"):
-        setting_value(COURIER_WORLD.settings_for({}), "limits.unheard.of")
-
-
 async def test_a_pass_with_deletions_escalates_to_full() -> None:
     """The warm path honours `deleted`, but the cold branch never reads it --
     so a delete landing while any pointer is stale (the ordinary state between
@@ -327,24 +252,7 @@ async def test_a_full_pass_reports_the_kinds_it_read_as_covered() -> None:
     full = Schema(
         kinds=frozenset({"shop_order", "shop_courier"}),
         name_fields={"shop_courier": "name"},
-        bucket_settings=("tenant.timezone", "windows.historyDays"),
-        figure_settings=("limits.carrying.over",),
-        reading_settings=("flow.speed",),
-        project_settings=("limits.carrying.over", "windows.historyDays"),
-        defaults={"tenant": {"timezone": "UTC", "hoursPerDay": 8}},
     )
     assert Schema.from_document(full.to_document()) == full
 
 
-def test_the_travelling_document_shares_no_state_with_the_schema() -> None:
-    """`to_document` is built, retried and persisted; a document aliasing the
-    schema's own defaults would carry whatever happened to process state in
-    the window between building and sending -- the exact route by which one
-    tenant's dial once became the deployment's stored default."""
-    schema = Schema(
-        kinds=frozenset({"shop_order"}),
-        defaults={"limits": {"carrying": {"over": 3}}},
-    )
-    document = schema.to_document()
-    document["defaults"]["limits"]["carrying"]["over"] = 99
-    assert schema.defaults["limits"]["carrying"]["over"] == 3

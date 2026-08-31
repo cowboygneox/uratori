@@ -116,8 +116,8 @@ migration job, no init container, and no coordination beyond the lock Postgres
 already provides.
 
 **What to back up.** The database is the deployment. `pg_dump` of the one
-database captures the declared schema, the definitions source, every tenant's
-settings, every fact and every computed value -- restore it, start a
+database captures the declared schema, the definitions source, every fact and
+every computed value -- restore it, start a
 container, and the server comes back knowing its world, because the
 definitions source is stored and recompiled at boot (a build whose compiler
 refuses the stored source boots unready rather than crashing; see

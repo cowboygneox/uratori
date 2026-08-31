@@ -548,7 +548,7 @@ DeclaredUnit: TypeAlias = Literal["share", "days", "effort", "count", "duration"
 
 `delivered / committed` is mute. It could be a share, and `breakdown -
 delivered` over the same two operands is seconds of effort. Deriving it would
-mean dimensional analysis over a language whose leaves include a settings dial
+mean dimensional analysis over a language whose leaves include another figure
 of unknown unit; guessing puts "144000" or "0.6d" on a screen.
 
 So arithmetic **must** declare one and every other calculation must **not** --
@@ -922,9 +922,9 @@ class Coord:
     a reader shown the number would have nothing to check it against. That
     is the refusal `delta`'s oldest cell gets, one layer down.
 
-    Bare stays scalar -- a settings dial keeps its plain spelling -- so the
-    two shapes are visually distinct by construction and a reader never has
-    to look up which kind of thing a name is.
+    Bare means one value per subject and a selector means one per coordinate,
+    so the two shapes are visually distinct by construction and a reader never
+    has to look up which kind of thing a name is.
 
     `name` is a `combine` binding in a figure's `calculate`, and a figure
     name in a `band:` rung, because those are the two places a second

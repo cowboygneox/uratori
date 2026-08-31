@@ -226,7 +226,6 @@ async def test_a_deferred_batch_is_still_verified_whole(server: Server) -> None:
     declarations, because only a declared world has a boundary to enforce."""
     schema = {
         "kinds": [],
-        "figure_settings": ["limits.carrying.over"],
         "defaults": {"tenant": {"hoursPerDay": 8}, "limits": {"carrying": {"over": 3}}},
     }
     declared = (
@@ -944,12 +943,6 @@ async def test_the_described_library_covers_reading_projection_and_summary(
     pinned separately so the shape cannot rot into a figures-only feature."""
     world = COURIER_WORLD.to_document()
     world["kinds"] = sorted([*world["kinds"], "shop_review", "shop_queue"])
-    world["bucket_settings"] = ["tenant.timezone", "limits.staleDays"]
-    world["defaults"] = {
-        **world["defaults"],
-        "tenant": {"hoursPerDay": 8, "timezone": "UTC"},
-        "limits": {**world["defaults"]["limits"], "staleDays": 3},
-    }
     put = await server.http.put("/schema", json=world)
     assert put.status_code == 200, put.text
     grown = (

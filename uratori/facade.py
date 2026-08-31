@@ -22,9 +22,10 @@ listener-only shape, deliberately: a second shape is a second contract, and a
 second contract is where a hand-written republishing step -- and with it
 duplicate arithmetic -- comes back.
 
-Settings arrive sparse and are completed over `schema.defaults` here, at the
-boundary, exactly once. Everything below assumes a complete document and
-raises on a missing dial rather than guessing.
+A settings document is still accepted at every door and read by nothing: a
+definition's numbers come from facts, its calendars from records and its
+efforts render in hours, so there is no dial left to complete or to raise on.
+A host mid-migration finds its old document inert rather than refused.
 """
 
 from __future__ import annotations
@@ -45,7 +46,6 @@ from .engine.serve import (
     serve_reading,
 )
 from .lang.plan import BundlePlan, Library
-from .lang.settings import fingerprint as settings_fingerprint
 from .lang.source import declaration_source
 from .results import BundleResult, Evidence, Result
 from .schema import Schema
@@ -90,10 +90,10 @@ class Uratori:
         store: EngineStore,
         facts: FactSource,
     ) -> None:
-        # A fact-taught library carries the world; the declared schema then
-        # holds only settings and defaults. Completing it here, once, is what
-        # keeps every consumer below -- the engine freezing labels, evidence
-        # resolving links, `verify` checking kinds -- reading one world.
+        # A fact-taught library carries the world. Completing the schema here,
+        # once, is what keeps every consumer below -- the engine freezing
+        # labels, evidence resolving links, `verify` checking kinds -- reading
+        # one world.
         self._schema = schema.taught_by(library)
         self._library = library
         self._store = store
@@ -188,7 +188,6 @@ class Uratori:
         )
         return await self._engine.run(
             tenant,
-            self._schema.settings_for(settings),
             written=written,
             deleted=deleted,
             full=full or escalate,
@@ -251,7 +250,7 @@ class Uratori:
         would re-report the same dial move on every pass for ever.
         """
         outcome = await self.execute(
-            tenant, settings, written=written, deleted=deleted, full=full, at_ms=at_ms
+            tenant, written=written, deleted=deleted, full=full, at_ms=at_ms
         )
         touched = {change.figure for change in outcome.changes}
         # A pass through the facts door (or `full`, or deleting) is the
@@ -264,8 +263,7 @@ class Uratori:
         # certainty, so it serves exactly what the change can touch, and a
         # change that reaches nothing serves nothing and wakes nobody.
         sync = full or written is not None or deleted is not None
-        document = self._schema.settings_for(settings)
-        stamps = self._serve_stamps(document)
+        stamps = self._serve_stamps()
         held = await self._store.pointers(tenant)
         refreshed = self._refreshed(stamps, held)
         projections = (
@@ -275,7 +273,6 @@ class Uratori:
         if serve:
             results = await self._serve(
                 tenant,
-                settings,
                 touched=touched,
                 refreshed=refreshed,
                 projections=projections,
@@ -292,7 +289,7 @@ class Uratori:
         await self._settle_serve_stamps(tenant, stamps, held)
         return RunReport(outcome=outcome, results=results, moved=moved)
 
-    def _serve_stamps(self, document: Mapping[str, Any]) -> dict[str, Pointer]:
+    def _serve_stamps(self) -> dict[str, Pointer]:
         """What each projection and summary currently serves under.
 
         The same two-part discipline as every other pointer in the engine:
@@ -317,12 +314,12 @@ class Uratori:
             # a value -- caught by `_reached`, which follows the same edge.
             stamps[plan.name] = Pointer(
                 version=plan.version,
-                settings_fingerprint=_serve_fingerprint(document, [], plan.doc),
+                settings_fingerprint=_serve_fingerprint(plan.doc),
             )
         for summary in lib.summaries:
             stamps[summary.name] = Pointer(
                 version=summary.version,
-                settings_fingerprint=_serve_fingerprint(document, [], summary.doc),
+                settings_fingerprint=_serve_fingerprint(summary.doc),
             )
         # Figures and readings carry serve stamps too, under a prefixed key
         # because a figure's own name already holds its *compute* pointer.
@@ -339,14 +336,14 @@ class Uratori:
             stamps[_serve_key(figure_plan.name)] = Pointer(
                 version=figure_plan.version,
                 settings_fingerprint=_serve_fingerprint(
-                    document, [], figure_plan.doc, figure_plan.display
+                    figure_plan.doc, figure_plan.display
                 ),
             )
         for reading in lib.readings:
             stamps[_serve_key(reading.name)] = Pointer(
                 version=reading.version,
                 settings_fingerprint=_serve_fingerprint(
-                    document, [], reading.doc, reading.display
+                    reading.doc, reading.display
                 ),
             )
         # Bundles carry a serve stamp too, for the one thing on their wire
@@ -357,7 +354,7 @@ class Uratori:
         for bundle in lib.bundles:
             stamps[_serve_key(bundle.name)] = Pointer(
                 version=bundle.version,
-                settings_fingerprint=_serve_fingerprint(document, [], bundle.doc),
+                settings_fingerprint=_serve_fingerprint(bundle.doc),
             )
         return stamps
 
@@ -630,13 +627,12 @@ class Uratori:
         ranking).
         """
         return await self._serve(
-            tenant, settings, touched=touched, projections=None, trailing=trailing, at=at
+            tenant, touched=touched, projections=None, trailing=trailing, at=at
         )
 
     async def _serve(
         self,
         tenant: str,
-        settings: Mapping[str, Any] | None = None,
         *,
         touched: set[str] | None = None,
         refreshed: frozenset[str] = frozenset(),
@@ -644,7 +640,6 @@ class Uratori:
         trailing: Sequence[int | str | WindowSpec] = DEFAULT_TRAILING,
         at: str | None = None,
     ) -> tuple[Result | BundleResult, ...]:
-        document = self._schema.settings_for(settings)
         lib = self._library
         out: list[Result | BundleResult] = []
 
@@ -671,7 +666,7 @@ class Uratori:
                 and not (set(plan.band_reads) & touched)
             ):
                 continue
-            out.append(await serve_figure(self._store, lib, tenant, plan, document))
+            out.append(await serve_figure(self._store, lib, tenant, plan))
 
         for reading in lib.readings:
             if reading.mode != "window" or reading.source is None:
@@ -689,7 +684,6 @@ class Uratori:
                     lib,
                     tenant,
                     reading,
-                    document,
                     list(trailing),
                     at_day=at,
                     facts=self._facts,
@@ -701,7 +695,7 @@ class Uratori:
                 continue
             out.append(
                 await answer_projection(
-                    self._store, self._facts, lib, tenant, projection, document
+                    self._store, self._facts, lib, tenant, projection
                 )
             )
 
@@ -731,7 +725,6 @@ class Uratori:
                         lib,
                         tenant,
                         bundle,
-                        document,
                         default_trailing=DEFAULT_TRAILING,
                     )
                 )
@@ -764,7 +757,6 @@ class Uratori:
         stored figures, live pages -- can only be served as they stand, so an
         anchored tile would put June's reading beside today's page under a
         wrapper claiming one clock. Anchor the reading by its own name."""
-        document = self._schema.settings_for(settings)
         lib = self._library
 
         figure = lib.figure(name)
@@ -775,7 +767,7 @@ class Uratori:
             # is that the evidence is visible. Their rows carry the day or the
             # dimension in `dimension`; what still never travels is a numeric
             # list (`_wire`).
-            return await serve_figure(self._store, lib, tenant, figure, document)
+            return await serve_figure(self._store, lib, tenant, figure)
 
         reading = lib.reading(name)
         if reading is not None:
@@ -786,7 +778,6 @@ class Uratori:
                 lib,
                 tenant,
                 reading,
-                document,
                 list(trailing),
                 at_day=at,
                 facts=self._facts,
@@ -795,7 +786,7 @@ class Uratori:
         projection = lib.projection(name)
         if projection is not None:
             return await answer_projection(
-                self._store, self._facts, lib, tenant, projection, document
+                self._store, self._facts, lib, tenant, projection
             )
 
         summary = lib.summary(name)
@@ -809,7 +800,7 @@ class Uratori:
             if over is None:  # pragma: no cover - the checker refuses this
                 raise ValueError(f"{name} summarises a projection that is not compiled")
             return await answer_projection(
-                self._store, self._facts, lib, tenant, over, document
+                self._store, self._facts, lib, tenant, over
             )
 
         bundle = lib.bundle(name)
@@ -828,7 +819,6 @@ class Uratori:
                 lib,
                 tenant,
                 bundle,
-                document,
                 default_trailing=DEFAULT_TRAILING,
             )
 
@@ -850,13 +840,12 @@ class Uratori:
         dead-ends the exact reader this surface exists for. `None` means the
         figure is available and this subject has no row.
         """
-        document = self._schema.settings_for(settings)
         lib = self._library
 
         plan = lib.figure(name)
         if plan is not None:
             return await serve_evidence(
-                self._store, self._facts, lib, self._schema, tenant, plan, document, subject
+                self._store, self._facts, lib, self._schema, tenant, plan, subject
             )
 
         reading = lib.reading(name)
@@ -885,25 +874,28 @@ class Uratori:
         raise LookupError(f"No figure called {name}")
 
 
-def _serve_fingerprint(
-    document: Mapping[str, Any], dials: Sequence[str], *prose: str
-) -> str:
-    """What a definition's SERVED answer is rendered under: the dials it
-    renders with, and the prose that travels on the wire beside the numbers
-    (`doc`, and the display template where one exists).
+def _serve_fingerprint(*prose: str) -> str:
+    """What a definition's SERVED answer is rendered under: the prose that
+    travels on the wire beside the numbers (`doc`, and the display template
+    where one exists).
 
-    The prose rides in the fingerprint because it is deliberately outside
-    every version hash -- an explanation is not a calculation -- yet it IS on
-    the wire: without this, editing the sentence above a figure updated the
+    The prose rides in a fingerprint because it is deliberately outside every
+    version hash -- an explanation is not a calculation -- yet it IS on the
+    wire: without this, editing the sentence above a figure updated the
     artifact and the routes while every connected screen kept the old words
-    until a reload, and `moved` claimed nothing had."""
+    until a reload, and `moved` claimed nothing had.
+
+    It used to carry the dials a definition rendered under, beside the prose.
+    Nothing renders under a dial now, so prose is all that is left -- and the
+    field it lands in is still called `settings_fingerprint`, because it is a
+    stored column and renaming it would be a migration for a word."""
     import hashlib
 
     h = hashlib.sha256()
     for part in prose:
         h.update(part.encode("utf-8"))
         h.update(b"\x00")
-    return f"{settings_fingerprint(dict(document), list(dials))}|{h.hexdigest()[:16]}"
+    return h.hexdigest()[:16]
 
 
 def _serve_key(name: str) -> str:

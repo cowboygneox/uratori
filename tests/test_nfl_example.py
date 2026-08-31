@@ -1285,8 +1285,7 @@ async def test_the_loaded_records_join_under_the_definitions_in_a_running_engine
             facts.put("nfl", kind, key, record)
     store = MemoryEngineStore()
     engine = Engine(store, facts, library, schema)
-    settings = json.loads((EXAMPLE / "schema.json").read_text())["defaults"]
-    await engine.run("nfl", settings, full=True)
+    await engine.run("nfl", full=True)
 
     def value_of(figure: str, subject: str):
         plan = library.figure(figure)

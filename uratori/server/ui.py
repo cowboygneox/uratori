@@ -225,7 +225,6 @@ class SourceOut(BaseModel):
     promised, so it must see the refused text and the reason together."""
 
     kinds: dict[str, list[str]]
-    dials: list[str]
     declarations: list[DeclaredName]
 
 
@@ -713,31 +712,6 @@ class CitedPageOut(BaseModel):
     total: int
 
 
-class DialOut(BaseModel):
-    """One tenant dial, valued: what a definition names by name, answered
-    with what the tenant's copy currently holds. A definition compiles
-    against the name and reads the value at serve time -- so the page
-    joining these to a declaration's setting edges is showing the exact pair
-    the engine computes with.
-
-    `display` is rendered server-side (a threshold pair prints both rungs)
-    and is None exactly when nobody holds a value -- declarable, defaulted
-    nowhere, set by nobody -- which `source: "unset"` states rather than
-    dressing the absence as a value."""
-
-    name: str
-    display: str | None
-    source: Literal["tenant", "default", "unset"]
-    """Who answered: the tenant's own settings document, the schema's
-    defaults, or nobody. On the wire because "3, because nobody changed it"
-    and "3, because this tenant chose it" are different facts about the same
-    number, and the page must not flatten them."""
-
-
-class DialsOut(BaseModel):
-    dials: list[DialOut]
-
-
 def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
     ui = APIRouter()
 
@@ -826,7 +800,6 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             editable=edit,
             refusal=held.refusal,
             kinds=_kind_fields(held),
-            dials=sorted(taught_schema(held).declarable),
             declarations=[
                 DeclaredName(name=name, kind=kind)
                 for name, (kind, _) in sorted(_named(held.library).items())
@@ -938,22 +911,21 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             )
         facade = facade_for(s, world, library)
         async with s.lock_for(tenant):
-            settings = await db.load_settings(s.pool, tenant)
             # The same debt rule as the API's run door: a bulk import that
             # deferred its pass left this tenant owing a FULL one, and an
             # editor pass that ran incremental over that gap would settle
             # the debt's flag without paying it.
             full = body.full or await db.deferred(s.pool, tenant)
-            report = await facade.run(tenant, settings, full=full)
+            report = await facade.run(tenant, full=full)
             if full:
                 await db.clear_deferred(s.pool, tenant)
-            out = run_out(report, world, library, settings, written=0, deleted=0)
+            out = run_out(report, world, library, written=0, deleted=0)
             await record_pass(s, tenant, "run", full=full, out=out)
             # The editor's pass reaches the socket exactly as the API's does:
             # an editor save that recoloured a board while every subscribed
             # screen kept the old answers would be the freeze this delivery
             # path exists to end.
-            await push_pass(s, tenant, facade, settings, report)
+            await push_pass(s, tenant, facade, report)
         return EditRunOut(ok=True, changed=out.changed, rebuilt=out.rebuilt)
 
     # -------------------------------------------------------------- facts --
@@ -1069,7 +1041,6 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                     )
                     for name in over
                 ]
-            settings = schema.settings_for(await db.load_settings(s.pool, tenant))
             at_ms = time.time() * 1000.0
             try:
                 for name in sorted(library.measures):
@@ -1079,7 +1050,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                     measured.append(
                         RecordMeasureOut(
                             measure=name,
-                            display=_measured_display(measure, value, settings, at_ms),
+                            display=_measured_display(measure, value, at_ms),
                         )
                     )
             except KeyError as gap:
@@ -1140,8 +1111,6 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             )
 
         store = PostgresEngineStore(s.pool)
-        raw = await db.load_settings(s.pool, tenant)
-        document = taught_schema(s.world).settings_for(raw)
 
         # One guard over all three sections, the same sentence the record
         # route serves: a fixable dial gap (an effort figure with no
@@ -1153,7 +1122,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 if plan.scope != kind:
                     continue
                 result = await serve_figure(
-                    store, library, tenant, plan, document, subject=key
+                    store, library, tenant, plan, subject=key
                 )
                 total = len(result.subjects)
                 more = total > ABOUT_ROWS
@@ -1179,7 +1148,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 if reading.scope != kind:
                     continue
                 try:
-                    answer = await facade.answer(tenant, reading.name, raw)
+                    answer = await facade.answer(tenant, reading.name)
                 except NotImplementedError as gap:
                     about_readings.append(
                         AboutReadingOut(
@@ -1236,7 +1205,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             )
             cited: list[CitedFigureOut] = []
             for plan in cited_plans:
-                state = await figure_availability(store, library, tenant, plan, document)
+                state = await figure_availability(store, library, tenant, plan)
                 rows: list[CitedRowOut] = []
                 more = False
                 total = 0
@@ -1245,7 +1214,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                     total = len(found)
                     more = total > ABOUT_ROWS
                     rows = [
-                        _cited_row(stored, plan.unit, document)
+                        _cited_row(stored, plan.unit)
                         for stored in found[:ABOUT_ROWS]
                     ]
                 cited.append(
@@ -1269,7 +1238,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 # from-set, the omit gate, the sort and the limit are part of
                 # what the page says, and a bespoke single-row path would show a
                 # row the real page refused.
-                answer = await facade.answer(tenant, project.name, raw)
+                answer = await facade.answer(tenant, project.name)
                 if not isinstance(answer, Result):
                     # pragma: no cover - the plan came from the library, so
                     # the name is a projection and a projection answers a
@@ -1308,7 +1277,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 ):
                     continue
                 try:
-                    served = await facade.answer(tenant, bundle.name, raw)
+                    served = await facade.answer(tenant, bundle.name)
                 except NotImplementedError as gap:
                     # A tile with a live-reading member cannot be evaluated
                     # at all today; it still lists, addresses intact, with
@@ -1390,7 +1359,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         for one subject run chronologically), the cursor is the last row id
         shown, and the total is the honest count beside every page."""
         s = _state(request)
-        world, library = ready(s)
+        _world, library = ready(s)
         plan = next((p for p in library.figures if p.name == figure), None)
         if plan is None:
             raise HTTPException(status_code=404, detail=f"No figure called {figure}")
@@ -1404,8 +1373,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 status_code=404, detail=f"Nothing is stored for {key} under {kind}"
             )
         store = PostgresEngineStore(s.pool)
-        document = taught_schema(world).settings_for(await db.load_settings(s.pool, tenant))
-        state = await figure_availability(store, library, tenant, plan, document)
+        state = await figure_availability(store, library, tenant, plan)
         if not isinstance(state, Ok):
             # 409 like the cited door's: a fixable state (run a pass), and a
             # 200 whose empty page reads as "zero rows" is the confident
@@ -1419,7 +1387,6 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 library=library,
                 tenant=tenant,
                 plan=plan,
-                settings=document,
                 subject=key,
             )
         except KeyError as gap:
@@ -1469,7 +1436,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         size is the sample's cap, so the first page IS the sample and the
         cursor is the last subject id shown."""
         s = _state(request)
-        world, library = ready(s)
+        _world, library = ready(s)
         plan = next((p for p in library.figures if p.name == figure), None)
         if plan is None:
             raise HTTPException(status_code=404, detail=f"No figure called {figure}")
@@ -1483,8 +1450,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 status_code=404, detail=f"Nothing is stored for {key} under {kind}"
             )
         store = PostgresEngineStore(s.pool)
-        document = taught_schema(world).settings_for(await db.load_settings(s.pool, tenant))
-        state = await figure_availability(store, library, tenant, plan, document)
+        state = await figure_availability(store, library, tenant, plan)
         if not isinstance(state, Ok):
             # 409 like the membership drill's: a fixable state (run a pass),
             # and the page that links here has already shown the sentence.
@@ -1500,60 +1466,10 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         return CitedPageOut(
             figure=plan.name,
             scope=plan.scope,
-            rows=[_cited_row(stored, plan.unit, document) for stored in found[:limit]],
+            rows=[_cited_row(stored, plan.unit) for stored in found[:limit]],
             more=more,
             total=total,
         )
-
-    # ---------------------------------------------------------------- dials --
-
-    @ui.get("/ui/api/tenants/{tenant}/dials", response_model=DialsOut, include_in_schema=False)
-    async def dials(tenant: str, request: Request) -> DialsOut:
-        """Every declarable dial, valued for this tenant.
-
-        A definition names a dial by name and the engine reads the value at
-        serve time -- this is that read, exposed, so a declaration page can
-        put the current value beside every setting edge it lists. The merge
-        is the same precedence `settings_for` applies (tenant over default),
-        answered per dial so the page can also say WHO answered -- a
-        threshold left on its default and one a tenant chose are different
-        facts about the same number."""
-        s = _state(request)
-        if s.world is None:
-            raise HTTPException(status_code=409, detail="No schema has been declared yet")
-        schema = taught_schema(s.world)
-        raw = await db.load_settings(s.pool, tenant)
-        # The MERGED document, because that is what the engine reads: a
-        # tenant that half-overrides a threshold pair must show the pair the
-        # bands actually compare against, and a page that walked the raw
-        # document alone would show a dial disagreeing with the calculation
-        # it claims to explain.
-        merged = schema.settings_for(raw)
-        out: list[DialOut] = []
-        for name in sorted(schema.declarable):
-            held, has = _at_path(merged, name)
-            if not has or held is None:
-                # Nothing servable at this name -- never written, written as
-                # an explicit null, or shadowed by a non-mapping ancestor.
-                # The engine's read through this name finds the same
-                # nothing, so the page states the absence instead of
-                # rendering a repr of it or a default the merge discarded.
-                out.append(DialOut(name=name, display=None, source="unset"))
-                continue
-            tenant_held, tenant_has = _at_path(raw, name)
-            out.append(
-                DialOut(
-                    name=name,
-                    display=_dial_display(held),
-                    # "tenant" means the tenant's document contributed here
-                    # (wholly, or one rung of a merged pair); "default"
-                    # means the schema's copy serves untouched.
-                    source=(
-                        "tenant" if tenant_has and tenant_held is not None else "default"
-                    ),
-                )
-            )
-        return DialsOut(dials=out)
 
     # ---------------------------------------------------------- membership --
 
@@ -1592,7 +1508,6 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         buckets, more, members, buckets_total = await db.bucket_counts(
             s.pool, tenant, name, after=buckets_after, limit=buckets_limit
         )
-        dials = [e.name for e in _spec_edges(index.spec) if e.type == "setting"]
         # An age filter is decided against the clock, so its filing is as old
         # as the last pass whether or not it reads a dial -- and where its
         # threshold comes off the record's owner, moving that owner moves the
@@ -1614,7 +1529,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             buckets=[MembershipBucket(**b) for b in buckets],
             buckets_total=buckets_total,
             buckets_more=more,
-            note=_membership_note(dials, aged=aged, owner=owner),
+            note=_membership_note(aged=aged, owner=owner),
         )
 
     @ui.get(
@@ -1690,7 +1605,6 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             s.pool, tenant, measure.kind, after=after, q=q, limit=limit
         )
         held_schema = taught_schema(world)
-        settings = held_schema.settings_for(await db.load_settings(s.pool, tenant))
         at_ms = time.time() * 1000.0
         name_field = held_schema.name_fields.get(measure.kind)
         try:
@@ -1698,7 +1612,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 MeasuredRecordOut(
                     key=row["key"],
                     name=_field_at(row["value"], name_field),
-                    display=_measured_display(measure, row["value"], settings, at_ms),
+                    display=_measured_display(measure, row["value"], at_ms),
                 )
                 for row in records
             ]
@@ -1787,7 +1701,6 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             answer = await facade.answer(
                 tenant,
                 name,
-                await db.load_settings(s.pool, tenant),
                 trailing=specs or DEFAULT_TRAILING,
             )
         except WindowError as refusal:
@@ -1807,7 +1720,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         facade = facade_for(s, world, library)
         try:
             answer = await facade.evidence(
-                tenant, name, subject, await db.load_settings(s.pool, tenant)
+                tenant, name, subject
             )
         except LookupError as refusal:
             raise HTTPException(status_code=404, detail=str(refusal)) from refusal
@@ -1952,7 +1865,6 @@ def _measure_unit(measure: CompiledMeasure) -> FigureUnit:
 def _measured_display(
     measure: CompiledMeasure,
     record: Mapping[str, Any],
-    settings: Mapping[str, Any],
     at_ms: float,
 ) -> str | None:
     """One record's measurement, rendered -- or None, which is an absence the
@@ -1960,10 +1872,10 @@ def _measured_display(
     held = measure_of(measure, record, at_ms)
     if held is None:
         return None
-    return format_value(held, _measure_unit(measure), settings)
+    return format_value(held, _measure_unit(measure))
 
 
-def _cited_row(stored: Any, unit: Any, document: Mapping[str, Any]) -> CitedRowOut:
+def _cited_row(stored: Any, unit: Any) -> CitedRowOut:
     """One citing value as the page shows it -- shared by the about entry's
     capped sample and the paged walk, so the first page IS the sample."""
     tail = stored.subject.split(SEPARATOR, 1)[1] if SEPARATOR in stored.subject else None
@@ -1972,36 +1884,8 @@ def _cited_row(stored: Any, unit: Any, document: Mapping[str, Any]) -> CitedRowO
         subject=subject_of(stored.subject),
         name=stored.label,
         dimension=tail,
-        display=format_value(stored.value, unit, document),
+        display=format_value(stored.value, unit),
     )
-
-
-def _at_path(document: Mapping[str, Any] | None, dotted: str) -> tuple[Any, bool]:
-    """Walk a dotted dial name into a settings document: the value, and
-    whether the document actually holds one -- two answers, because None as
-    a sentinel cannot tell "set to nothing" from "never set", and the dials
-    payload states who answered."""
-    node: Any = document or {}
-    for segment in dotted.split("."):
-        if not isinstance(node, Mapping) or segment not in node:
-            return None, False
-        node = node[segment]
-    return node, True
-
-
-def _dial_display(value: Any) -> str:
-    """A dial's value as text, rendered here because every rendered string
-    on the page is the server's. Deliberately plain: a dial is configuration
-    (a zone name, a threshold, a pair of rungs), not a computed quantity, so
-    there is no unit arithmetic -- a threshold pair prints both rungs,
-    because the pair IS the dial."""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, Mapping):
-        return " · ".join(f"{k} {_dial_display(v)}" for k, v in value.items())
-    if isinstance(value, (list, tuple)):
-        return ", ".join(_dial_display(v) for v in value)
-    return str(value)
 
 
 def _member_concerns(library: Library, member_kind: str, name: str, kind: str) -> bool:
@@ -2523,17 +2407,15 @@ def _grouping_edge(library: Library, name: str) -> Dependency:
     )
 
 
-def _membership_note(dials: list[str], *, aged: bool, owner: str | None) -> str | None:
+def _membership_note(*, aged: bool, owner: str | None) -> str | None:
     """The caveat a filing carries, or None where there is none.
 
-    Two reasons a bucket table can describe a world that has moved: a dial it
-    reads has turned, and -- for an age filter -- the clock has advanced.
-    Both resolve at the next pass, and a reader looking at stale filing
-    deserves to be told which it is rather than left to wonder.
+    A bucket table can describe a world that has moved -- an age filter is
+    decided against the clock, and a threshold read off an owner moves when
+    that owner does. Both resolve at the next pass, and a reader looking at
+    stale filing deserves to be told which it is rather than left to wonder.
     """
     reasons: list[str] = []
-    if dials:
-        reasons.append(f"reads {' and '.join(dials)}")
     if aged:
         reasons.append("is decided against the clock")
     if owner is not None:

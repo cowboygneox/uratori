@@ -44,9 +44,6 @@ STATIC = Path(__file__).parent.parent / "uratori" / "server" / "static"
 # ------------------------------------------------------------- fixtures --
 
 PARITY_SCHEMA = {
-    "bucket_settings": ["tenant.timezone"],
-    "figure_settings": ["limits.carrying.over"],
-    "reading_settings": ["limits.ride"],
     "defaults": {
         "tenant": {"hoursPerDay": 8, "timezone": "UTC"},
         "limits": {"carrying": {"over": 3}, "ride": {"good": 3600, "poor": 7200}},
@@ -708,139 +705,6 @@ async def test_the_activity_log_pages_back_to_the_first_kept_run(pg_dsn: str) ->
 # ------------------------------------------------------- dials, valued --
 
 
-async def test_the_dials_route_serves_every_declarable_setting_with_its_value(
-    pg_dsn: str,
-) -> None:
-    """A definition names a dial by name; the page must also say what the
-    tenant's copy of that dial holds right now, and whether that is the
-    tenant's own setting or the schema's default -- the same two answers the
-    engine's own settings_for merge gives, rendered once, server-side."""
-    async with serve(pg_dsn) as http:
-        await _teach(http)
-        await _push(http, {"shop_courier": {"c1": {"name": "Aki", "timezone": "UTC"}}})
-        put = await http.put(
-            "/tenants/t1/settings", json={"document": {"limits": {"carrying": {"over": 5}}}}
-        )
-        assert put.status_code == 200, put.text
-
-        got = await http.get("/ui/api/tenants/t1/dials")
-        assert got.status_code == 200, got.text
-        dials = {d["name"]: d for d in got.json()["dials"]}
-
-        over = dials["limits.carrying.over"]
-        assert over["display"] == "5"
-        assert over["source"] == "tenant", "the tenant turned this one"
-
-        zone = dials["tenant.timezone"]
-        assert zone["display"] == "UTC"
-        assert zone["source"] == "default", "untouched, so the schema's default"
-
-        ride = dials["limits.ride"]
-        assert ride["source"] == "default"
-        assert "3600" in ride["display"] and "7200" in ride["display"], (
-            "a threshold pair renders whole -- both rungs are the dial"
-        )
-
-        # Every declarable dial answers -- the page joins declaration edges
-        # to this list, and a dial missing here would render as a name with
-        # no value beside it. There is no reserved one to add any more:
-        # `tenant.hoursPerDay` went when an effort stopped being rendered
-        # against a working day.
-        assert "tenant.hoursPerDay" not in dials
-
-
-async def test_a_dial_nobody_gave_a_value_is_a_stated_absence(pg_dsn: str) -> None:
-    """Declarable, never defaulted, never set: the dial lists with no display
-    and `source` saying nobody holds it -- not a fabricated rendering of a
-    value that does not exist."""
-    async with serve(pg_dsn) as http:
-        schema = {
-            "bucket_settings": ["tenant.timezone"],
-            "figure_settings": ["limits.carrying.over"],
-            "reading_settings": ["limits.ride"],
-            "defaults": {
-                "tenant": {"hoursPerDay": 8, "timezone": "UTC"},
-                "limits": {"ride": {"good": 3600, "poor": 7200}},
-            },
-        }
-        put = await http.put("/schema", json=schema)
-        assert put.status_code == 200, put.text
-        put = await http.put("/definitions", json={"source": PARITY_SOURCE})
-        assert put.status_code == 200, put.text
-        await _push(http, {"shop_courier": {"c1": {"name": "Aki", "timezone": "UTC"}}})
-
-        got = await http.get("/ui/api/tenants/t1/dials")
-        assert got.status_code == 200, got.text
-        dials = {d["name"]: d for d in got.json()["dials"]}
-        over = dials["limits.carrying.over"]
-        assert over["display"] is None
-        assert over["source"] == "unset"
-
-
-async def test_the_dials_page_shows_what_the_engine_reads_not_the_raw_document(
-    pg_dsn: str,
-) -> None:
-    """The dial's value is the MERGED one -- the same `settings_for` merge
-    the engine computes with -- never a walk of the raw tenant document. A
-    tenant that half-overrides a threshold pair ({good: 1} over
-    {good: 2, poor: 5}) is served good 1 · poor 5, and a page that walked
-    the raw document would show `good 1` alone: a dial that disagrees with
-    the calculation it claims to explain."""
-    async with serve(pg_dsn) as http:
-        await _teach(http)
-        await _push(http, {"shop_courier": {"c1": {"name": "Aki", "timezone": "UTC"}}})
-        put = await http.put(
-            "/tenants/t1/settings", json={"document": {"limits": {"ride": {"good": 1}}}}
-        )
-        assert put.status_code == 200, put.text
-
-        dials = {d["name"]: d for d in (await http.get("/ui/api/tenants/t1/dials")).json()["dials"]}
-        ride = dials["limits.ride"]
-        assert "1" in ride["display"] and "7200" in ride["display"], (
-            "the merged pair, both rungs -- the engine bands against poor "
-            "7200 whatever the tenant wrote beside good"
-        )
-        assert ride["source"] == "tenant"
-
-
-async def test_a_null_settings_leaf_is_an_absence_not_the_word_none(
-    pg_dsn: str,
-) -> None:
-    """A tenant document may carry an explicit null (the settings body is
-    untyped JSON). The engine's merge treats it as holding nothing, and the
-    dials page must agree -- rendering the Python repr `None` as if it were
-    a chosen value would be an absence dressed as data."""
-    async with serve(pg_dsn) as http:
-        await _teach(http)
-        await _push(http, {"shop_courier": {"c1": {"name": "Aki", "timezone": "UTC"}}})
-        put = await http.put(
-            "/tenants/t1/settings",
-            json={"document": {"limits": {"carrying": {"over": None}}}},
-        )
-        assert put.status_code == 200, put.text
-
-        dials = {d["name"]: d for d in (await http.get("/ui/api/tenants/t1/dials")).json()["dials"]}
-        over = dials["limits.carrying.over"]
-        assert over["display"] != "None", "never the repr of an absence"
-        # What the engine actually reads through the merge is what the page
-        # must claim -- computed here from the engine's own merge, so the
-        # test cannot drift from it.
-        from uratori.schema import Schema
-
-        merged = Schema.from_document(PARITY_SCHEMA).settings_for(
-            {"limits": {"carrying": {"over": None}}}
-        )
-        engine_reads = merged["limits"]["carrying"]["over"]
-        if engine_reads is None:
-            assert over["display"] is None and over["source"] == "unset"
-        else:
-            assert over["display"] == str(engine_reads)
-            assert over["source"] in ("tenant", "default")
-
-
-# ------------------------------------------------------ the unservable --
-
-
 LIVE_TAIL = """
 # Orders in hand right now, against the clock.
 reading shop_courier.queue():
@@ -1109,12 +973,14 @@ async def test_every_threshold_entry_point_reaches_the_page_as_an_edge(
             "the tile's page never names the records that decide its colours"
         )
 
-    # The page joins those edges to the tenant's current values through the
-    # dials payload.
+    # The page used to join a setting edge to the tenant's current value
+    # through a dials payload -- "which dial" without "holding what" sent the
+    # reader elsewhere to finish the sentence. There are no setting edges, so
+    # the fetch is gone, and this is what says so.
     source = _app_source_sans_comments()
-    assert "/dials" in source, (
-        "the page never fetches the dials payload, so a definition's setting "
-        "edges render as names with no values beside them"
+    assert "/dials" not in source, (
+        "the page still fetches a dials payload, for a route that no longer "
+        "exists and edges that are never emitted"
     )
 
 

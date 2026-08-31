@@ -214,13 +214,6 @@ class LibraryOut(BaseModel):
     and the hash a committed artifact reviews tiles by."""
 
 
-class SettingsIn(BaseModel):
-    document: dict[str, Any]
-    """The tenant's sparse settings document. The engine completes it over the
-    schema's defaults at every use; storing it sparse keeps "an operator chose
-    this" distinguishable from "the default reached through"."""
-
-
 class FactsIn(BaseModel):
     """One batch of fact movement, as the host saw it.
 

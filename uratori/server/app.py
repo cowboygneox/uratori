@@ -63,7 +63,6 @@ from .contract import (
     RunIn,
     RunOut,
     SchemaIn,
-    SettingsIn,
     Subscribe,
     SubscribeEntry,
     TenantRemoved,
@@ -306,16 +305,6 @@ def create_app(
         await s.hub.retire_entries(known_names(library))
         return _library_out(library)
 
-    # ----------------------------------------------------------- settings --
-
-    @app.put("/tenants/{tenant}/settings", response_model=Ack, dependencies=[auth])
-    async def put_settings(tenant: str, body: SettingsIn, s: S) -> Ack:
-        """Store the tenant's sparse document. Deliberately does not run a
-        pass: whether to pay for the rebuild now or at the next sync is the
-        host's call, and `POST /tenants/{t}/runs` is how it says now."""
-        await db.save_settings(s.pool, tenant, body.document)
-        return Ack(ok=True)
-
     # -------------------------------------------------------------- facts --
 
     @app.post("/tenants/{tenant}/facts", response_model=RunOut, dependencies=[auth])
@@ -392,7 +381,6 @@ def create_app(
                 )
                 await record_pass(s, tenant, "facts-deferred", full=False, out=out)
                 return out
-            settings = await db.load_settings(s.pool, tenant)
             full = body.full or await db.deferred(s.pool, tenant)
             # `serve: false` skips evaluating the full default results ONLY
             # when no firehose subscriber needs them anyway: the caller may
@@ -402,7 +390,6 @@ def create_app(
             serve = body.serve or s.hub.wants_everything(tenant)
             report = await facade.run(
                 tenant,
-                settings,
                 written=moved,
                 deleted={k: list(v) for k, v in body.deletes.items()},
                 full=full,
@@ -416,39 +403,36 @@ def create_app(
                 report,
                 world,
                 library,
-                settings,
                 written=written,
                 deleted=sum(len(v) for v in body.deletes.values()),
                 include_results=body.serve,
             )
             await record_pass(s, tenant, "facts", full=full, out=out)
-            await push_pass(s, tenant, facade, settings, report)
+            await push_pass(s, tenant, facade, report)
         return out
 
     @app.post("/tenants/{tenant}/runs", response_model=RunOut, dependencies=[auth])
     async def post_run(tenant: str, body: RunIn, s: S) -> RunOut:
-        """A pass with no new facts: pick up a settings change, a redeployed
+        """A pass with no new facts: pick up a redeployed
         definition, or (with `full`) rebuild everything from what is stored."""
         world, library = ready(s)
         facade = facade_for(s, world, library)
         async with s.lock_for(tenant):
-            settings = await db.load_settings(s.pool, tenant)
             full = body.full or await db.deferred(s.pool, tenant)
             serve = body.serve or s.hub.wants_everything(tenant)
-            report = await facade.run(tenant, settings, full=full, serve=serve)
+            report = await facade.run(tenant, full=full, serve=serve)
             if full:
                 await db.clear_deferred(s.pool, tenant)
             out = run_out(
                 report,
                 world,
                 library,
-                settings,
                 written=0,
                 deleted=0,
                 include_results=body.serve,
             )
             await record_pass(s, tenant, "run", full=full, out=out)
-            await push_pass(s, tenant, facade, settings, report)
+            await push_pass(s, tenant, facade, report)
         return out
 
     # ------------------------------------------------------------ results --
@@ -522,7 +506,6 @@ def create_app(
             return list(
                 await facade.results(
                     tenant,
-                    await db.load_settings(s.pool, tenant),
                     trailing=windows_of(trailing) or DEFAULT_TRAILING,
                     at=anchor_of(at),
                 )
@@ -557,7 +540,6 @@ def create_app(
             result = await facade.answer(
                 tenant,
                 name,
-                await db.load_settings(s.pool, tenant),
                 trailing=windows_of(trailing) or DEFAULT_TRAILING,
                 at=anchor_of(at),
             )
@@ -591,7 +573,7 @@ def create_app(
         facade = facade_for(s, world, library)
         try:
             answer = await facade.evidence(
-                tenant, name, subject, await db.load_settings(s.pool, tenant)
+                tenant, name, subject
             )
         except LookupError as refusal:
             raise HTTPException(status_code=404, detail=str(refusal)) from refusal
@@ -692,7 +674,7 @@ def create_app(
                         facade = facade_for(s, world, world.library)
                         async with s.lock_for(tenant):
                             results = await facade.results(
-                                tenant, await db.load_settings(s.pool, tenant)
+                                tenant
                             )
                             for result in results:
                                 await s.hub.send(
@@ -727,7 +709,6 @@ def create_app(
                 # Under the lock neither order matters, but registering first
                 # keeps the window shut even if the locking ever changes.
                 async with s.lock_for(tenant):
-                    settings = await db.load_settings(s.pool, tenant)
                     for asked in frame.entries:
                         refusal = _refuse_entry(world.library, asked)
                         if refusal is not None:
@@ -749,7 +730,6 @@ def create_app(
                             answer = await facade.answer(
                                 tenant,
                                 entry.name,
-                                settings,
                                 trailing=entry.windows
                                 if entry.windows is not None
                                 else DEFAULT_TRAILING,

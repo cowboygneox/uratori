@@ -28,7 +28,7 @@ from uratori.engine.engine import Engine
 from uratori.store import MemoryEngineStore, MemoryFactStore
 
 from .test_engine import LIB, TENANT, change, connection, issue, person
-from .world import DEFAULTS, WORLD
+from .world import WORLD
 
 
 class CountingFacts(MemoryFactStore):
@@ -111,7 +111,7 @@ async def _loads_for(people: int) -> tuple[Loads, Loads]:
     _seed(facts, people)
 
     _reset(facts, store)
-    cold_outcome = await engine.run(TENANT, DEFAULTS, full=True)
+    cold_outcome = await engine.run(TENANT, full=True)
     cold = _snapshot(facts, store, len(cold_outcome.changes))
 
     # The warm pass: touch every person's work at once -- a bulk sync, not a
@@ -122,7 +122,7 @@ async def _loads_for(people: int) -> tuple[Loads, Loads]:
         issue(facts, key, f"jira:{n}", active=True, estimate=1800)
         written["work_issue"].append(key)
     _reset(facts, store)
-    warm_outcome = await engine.run(TENANT, DEFAULTS, written=written)
+    warm_outcome = await engine.run(TENANT, written=written)
     warm = _snapshot(facts, store, len(warm_outcome.changes))
     return cold, warm
 

@@ -282,14 +282,14 @@ async def test_tenants_are_listed_with_their_fact_counts(pg_dsn: str) -> None:
         await http.post(
             "/tenants/t2/facts", json={"writes": {"shop_courier": COURIER}}
         )
-        # A tenant taught settings but never fed is exactly the
-        # misconfiguration an investigator comes looking for.
-        await http.put("/tenants/t3/settings", json={"document": {}})
+        # A third tenant used to be reachable here by storing settings and
+        # never feeding it -- exactly the misconfiguration an investigator
+        # comes looking for. There are no settings, so the two ways in are
+        # facts and runs.
         tenants = (await http.get("/ui/api/tenants")).json()["tenants"]
         assert {(t["tenant"], t["facts"]) for t in tenants} == {
             ("t1", 2),
             ("t2", 1),
-            ("t3", 0),
         }
 
 
@@ -1595,8 +1595,6 @@ async def test_membership_states_its_dial_caveat(pg_dsn: str) -> None:
 
     world = Schema(
         kinds=frozenset({"shop_order"}),
-        bucket_settings=("thresholds.staleDays",),
-        defaults={"thresholds": {"staleDays": 3}},
     )
     source = (
         "filter shop_order.stale where placed_at older than 5 days\n"
@@ -1894,10 +1892,9 @@ async def test_the_editor_serves_the_source_the_deployment_holds(
         assert page["editable"] is True, "an open server grants editing"
         assert page["refusal"] is None
         assert len(page["fingerprint"]) == 12
-        assert page["dials"] == ["limits.carrying.over"], (
-            "the editor offers the dials a definition may name; the reserved "
-            "rendering one went when an effort stopped being divided by a "
-            "working day"
+        assert "dials" not in page, (
+            "the editor still offers dial completions, for names no definition "
+            "can write"
         )
         assert page["kinds"] == {"shop_courier": [], "shop_order": []}
         assert {d["name"]: d["kind"] for d in page["declarations"]} == {
@@ -2826,19 +2823,6 @@ async def test_an_unchanged_batch_still_serves_the_board(pg_dsn: str) -> None:
         )
 
 
-async def test_the_run_guard_knows_a_settings_only_tenant(pg_dsn: str) -> None:
-    """`tenant_exists` unions facts, settings and run history, like the
-    tenant list it replaced -- a tenant taught settings but never fed is
-    exactly the misconfiguration an investigator pokes at, and 404ing its
-    run door would tell them it does not exist."""
-    async with serve(pg_dsn) as http:
-        await _teach(http)
-        put = await http.put("/tenants/t7/settings", json={"document": {}})
-        assert put.status_code == 200, put.text
-        ran = await http.post("/ui/api/tenants/t7/runs", json={})
-        assert ran.status_code == 200, ran.text
-
-
 async def test_the_editor_pass_pays_deferred_debt_in_full(pg_dsn: str) -> None:
     """A bulk import that deferred its pass leaves the tenant owing a FULL
     one; the editor's run door must upgrade like the API's, and the log must
@@ -2889,11 +2873,6 @@ async def test_the_editor_pass_pays_deferred_debt_in_full(pg_dsn: str) -> None:
 
 ABOUT_WORLD = dataclasses.replace(
     COURIER_WORLD,
-    bucket_settings=("tenant.timezone",),
-    defaults={
-        "tenant": {"hoursPerDay": 8, "timezone": "UTC"},
-        "limits": {"carrying": {"over": 3}},
-    },
 )
 """The courier world plus the one dial a day group needs. A schema of its
 own so the shared COURIER_WORLD keeps meaning what every other test says."""

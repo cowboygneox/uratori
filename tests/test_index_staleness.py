@@ -22,7 +22,7 @@ from __future__ import annotations
 from uratori.engine.engine import Engine
 from uratori.store import MemoryEngineStore, MemoryFactStore
 
-from .world import DEFAULTS, WORLD, compile_source
+from .world import WORLD, compile_source
 
 TENANT = "t1"
 
@@ -72,12 +72,12 @@ async def test_an_arrived_filter_rebuilds_itself_and_nothing_else() -> None:
     stale one was paid for."""
     store, facts = Ledger(), MemoryFactStore()
     _seed(facts)
-    await Engine(store, facts, compile_source(BASE), WORLD).run(TENANT, DEFAULTS, full=True)
+    await Engine(store, facts, compile_source(BASE), WORLD).run(TENANT, full=True)
     assert set(store.rebuilt) == {"work_issue.assigned_to", "work_issue.active"}
 
     store.rebuilt.clear()
     grown = Engine(store, facts, compile_source(BASE + PARKED), WORLD)
-    await grown.run(TENANT, DEFAULTS)
+    await grown.run(TENANT)
     assert store.rebuilt == ["work_issue.parked"], (
         "the untouched groupings were re-bucketed for a filter they never met"
     )
@@ -91,7 +91,7 @@ async def test_an_edited_filter_rebuilds_only_itself() -> None:
     store, facts = Ledger(), MemoryFactStore()
     _seed(facts)
     await Engine(store, facts, compile_source(BASE + PARKED), WORLD).run(
-        TENANT, DEFAULTS, full=True
+        TENANT, full=True
     )
     store.rebuilt.clear()
 
@@ -99,7 +99,7 @@ async def test_an_edited_filter_rebuilds_only_itself() -> None:
     'filter work_issue.parked where active == false label "parked"',
     'filter work_issue.parked where title == "Shelved" label "parked"',
     )
-    await Engine(store, facts, compile_source(edited), WORLD).run(TENANT, DEFAULTS)
+    await Engine(store, facts, compile_source(edited), WORLD).run(TENANT)
     assert store.rebuilt == ["work_issue.parked"]
 
 
@@ -110,12 +110,12 @@ async def test_a_label_moves_no_bucket_and_costs_no_rebuild() -> None:
     store, facts = Ledger(), MemoryFactStore()
     _seed(facts)
     await Engine(store, facts, compile_source(BASE + PARKED), WORLD).run(
-        TENANT, DEFAULTS, full=True
+        TENANT, full=True
     )
     store.rebuilt.clear()
 
     relabelled = (BASE + PARKED).replace('label "parked"', 'label "on ice"')
-    await Engine(store, facts, compile_source(relabelled), WORLD).run(TENANT, DEFAULTS)
+    await Engine(store, facts, compile_source(relabelled), WORLD).run(TENANT)
     assert store.rebuilt == [] and store.dropped == []
 
 
@@ -127,12 +127,12 @@ async def test_a_removed_filter_is_dropped_not_orphaned() -> None:
     store, facts = Ledger(), MemoryFactStore()
     _seed(facts)
     await Engine(store, facts, compile_source(BASE + PARKED), WORLD).run(
-        TENANT, DEFAULTS, full=True
+        TENANT, full=True
     )
     assert set(await store.members(TENANT, "work_issue.parked", "")) == {"i2"}
     store.rebuilt.clear()
 
-    await Engine(store, facts, compile_source(BASE), WORLD).run(TENANT, DEFAULTS)
+    await Engine(store, facts, compile_source(BASE), WORLD).run(TENANT)
     assert store.dropped == ["work_issue.parked"]
     assert store.rebuilt == []
     assert set(await store.members(TENANT, "work_issue.parked", "")) == set()
@@ -142,48 +142,6 @@ async def test_a_removed_filter_is_dropped_not_orphaned() -> None:
     }
 
 
-async def test_a_settings_save_now_rebuilds_no_grouping_at_all() -> None:
-    """Membership used to depend on dials the index hash deliberately excludes
-    -- an age threshold, a calendar -- and the machinery here existed to reach
-    exactly the groupings reading one when a tenant turned it.
-
-    Both are facts now: a threshold is a number in the definition or a field
-    on the record's owner, and a calendar is a field on the subject's. So a
-    settings save reaches nothing, and the assertion inverts. What replaced
-    the edge is a *record* moving, which is pinned in test_calendar.py --
-    where a courier changing calendars refiles their whole history."""
-    dialled = BASE + (
-        "group work_issue.touched_by_day from (assignee_account_id through "
-        "team_person.accounts.account_id, updated_at by day)\n"
-        "\n"
-        "# Issues touched, day by day.\n"
-        "figure team_person.touched bucketed:\n"
-        '    display "{value}"\n'
-        "    depends:\n"
-        "        mine = work_issue.touched_by_day:{team_person}\n"
-        "    calculate:\n"
-        "        count(mine)\n"
-    )
-    store, facts = Ledger(), MemoryFactStore()
-    _seed(facts)
-    facts.put(
-        TENANT, "work_issue", "i3",
-        {"title": "New", "assignee_account_id": "a1", "active": True,
-         "updated_at": "2026-08-25T00:00:00Z"},
-    )
-    library = compile_source(dialled)
-    await Engine(store, facts, library, WORLD).run(TENANT, DEFAULTS, full=True)
-    store.rebuilt.clear()
-
-    turned = dict(DEFAULTS)
-    turned["tenant"] = dict(DEFAULTS["tenant"], timezone="Asia/Tokyo")
-    await Engine(store, facts, library, WORLD).run(TENANT, turned)
-    assert store.rebuilt == [], (
-        "a settings save re-bucketed something, so a grouping still reads a "
-        "dial -- and a tenant can still move a whole history from a form"
-    )
-
-
 async def test_a_full_pass_still_rebuilds_everything() -> None:
     """`full` is the repair word: whatever the per-index bookkeeping says,
     a full pass re-buckets the lot -- it is also what re-crosses age
@@ -191,9 +149,9 @@ async def test_a_full_pass_still_rebuilds_everything() -> None:
     store, facts = Ledger(), MemoryFactStore()
     _seed(facts)
     library = compile_source(BASE + PARKED)
-    await Engine(store, facts, library, WORLD).run(TENANT, DEFAULTS, full=True)
+    await Engine(store, facts, library, WORLD).run(TENANT, full=True)
     store.rebuilt.clear()
-    await Engine(store, facts, library, WORLD).run(TENANT, DEFAULTS, full=True)
+    await Engine(store, facts, library, WORLD).run(TENANT, full=True)
     assert set(store.rebuilt) == {
         "work_issue.assigned_to",
         "work_issue.active",
@@ -211,7 +169,7 @@ async def test_the_legacy_stamp_seeds_an_up_to_date_tenant() -> None:
     store, facts = Ledger(), MemoryFactStore()
     _seed(facts)
     library = compile_source(BASE)
-    await Engine(store, facts, library, WORLD).run(TENANT, DEFAULTS, full=True)
+    await Engine(store, facts, library, WORLD).run(TENANT, full=True)
 
     # What an upgrade finds: membership rows present, per-index versions
     # absent, the old stamp still standing. Planted through the memory
@@ -220,7 +178,7 @@ async def test_the_legacy_stamp_seeds_an_up_to_date_tenant() -> None:
     store._index_sets[TENANT] = _index_set_version(library)
 
     store.rebuilt.clear()
-    await Engine(store, facts, library, WORLD).run(TENANT, DEFAULTS)
+    await Engine(store, facts, library, WORLD).run(TENANT)
     assert store.rebuilt == [], (
         "the stamp said every grouping was current; rebuilding anyway taxes "
         "every tenant once per upgrade for nothing"
@@ -243,13 +201,13 @@ async def test_a_stale_legacy_stamp_forces_the_rebuild_it_names() -> None:
     store, facts = Ledger(), MemoryFactStore()
     _seed(facts)
     old = compile_source(BASE)
-    await Engine(store, facts, old, WORLD).run(TENANT, DEFAULTS, full=True)
+    await Engine(store, facts, old, WORLD).run(TENANT, full=True)
     store._index_stamps.clear()
     store._index_sets[TENANT] = _index_set_version(old)
 
     store.rebuilt.clear()
     grown = compile_source(BASE + PARKED)
-    await Engine(store, facts, grown, WORLD).run(TENANT, DEFAULTS)
+    await Engine(store, facts, grown, WORLD).run(TENANT)
     assert set(store.rebuilt) == {
         "work_issue.assigned_to",
         "work_issue.active",
@@ -274,7 +232,7 @@ async def test_a_reinstated_filter_cannot_narrow_the_figures_it_feeds() -> None:
         facts.put(TENANT, "work_issue", f"i{n}",
                   {"title": f"T{n}", "assignee_account_id": "a1", "active": True})
     with_figure = compile_source(BASE)
-    await Engine(store, facts, with_figure, WORLD).run(TENANT, DEFAULTS, full=True)
+    await Engine(store, facts, with_figure, WORLD).run(TENANT, full=True)
     plan = next(p for p in with_figure.figures if p.name == "team_person.wip")
     held = await store.value(TENANT, "team_person.wip", plan.version, "p1")
     assert held is not None and held.value == 3.0
@@ -284,12 +242,12 @@ async def test_a_reinstated_filter_cannot_narrow_the_figures_it_feeds() -> None:
         "group work_issue.assigned_to from assignee_account_id "
         "through team_person.accounts.account_id\n"
     )
-    await Engine(store, facts, bare, WORLD).run(TENANT, DEFAULTS)
+    await Engine(store, facts, bare, WORLD).run(TENANT)
     assert "work_issue.active" in store.dropped
 
     # Reinstated verbatim, and the next pass carries an ordinary delta.
     outcome = await Engine(store, facts, with_figure, WORLD).run(
-        TENANT, DEFAULTS, written={"work_issue": ["i0"]}
+        TENANT, written={"work_issue": ["i0"]}
     )
     healed = await store.value(TENANT, "team_person.wip", plan.version, "p1")
     assert healed is not None and healed.value == 3.0, (
@@ -321,7 +279,7 @@ async def test_a_pass_dying_mid_rebuild_pays_only_the_remaining_debt() -> None:
     _seed(facts)
     library = compile_source(BASE + PARKED)
     with pytest.raises(RuntimeError):
-        await Engine(store, facts, library, WORLD).run(TENANT, DEFAULTS, full=True)
+        await Engine(store, facts, library, WORLD).run(TENANT, full=True)
     assert "work_issue.parked" not in (await store.index_stamps(TENANT)), (
         "stamped before its rebuild ran -- the next pass would trust buckets "
         "that were never written"
@@ -329,7 +287,7 @@ async def test_a_pass_dying_mid_rebuild_pays_only_the_remaining_debt() -> None:
 
     store.wounded = False
     store.rebuilt.clear()
-    await Engine(store, facts, library, WORLD).run(TENANT, DEFAULTS)
+    await Engine(store, facts, library, WORLD).run(TENANT)
     assert store.rebuilt == ["work_issue.parked"], (
         "the retry owed one grouping and paid for something else"
     )
@@ -339,31 +297,26 @@ async def test_the_stamp_still_notices_a_grouping_whose_definition_moved() -> No
     """A grouping nobody's figure reads -- a filter kept for a projection, a
     calendar group kept for browsing -- has no figure pointer to notice
     anything on its behalf. Its own stamp is what notices, and it still has
-    to: the trigger is a definition edit rather than a settings save now that
-    a grouping reads no dial, but a grouping left stale because nothing above
-    it was pending is the same silent staleness either way."""
-    dialled = BASE + (
-        "group work_issue.by_day from updated_at by day\n"
-    )
+    to. The trigger used to be a settings save -- a grouping read a dial and
+    a tenant turned it. A grouping reads no dial now, so what is left is a
+    definition edit, and a grouping left stale because nothing above it was
+    pending is the same silent staleness either way."""
+    unread = BASE + "group work_issue.by_day from updated_at by day\n"
     store, facts = Ledger(), MemoryFactStore()
     _seed(facts)
     facts.put(TENANT, "work_issue", "i3",
               {"title": "New", "assignee_account_id": "a1", "active": True,
                "updated_at": "2026-08-25T00:00:00Z"})
-    library = compile_source(dialled)
-    await Engine(store, facts, library, WORLD).run(TENANT, DEFAULTS, full=True)
+    library = compile_source(unread)
+    await Engine(store, facts, library, WORLD).run(TENANT, full=True)
 
     store.rebuilt.clear()
-    unread = dict(DEFAULTS)
-    unread["thresholds"] = dict(DEFAULTS["thresholds"], staleChangeDays=99)
-    await Engine(store, facts, library, WORLD).run(TENANT, unread)
+    await Engine(store, facts, library, WORLD).run(TENANT)
     assert store.rebuilt == [], (
-        "a dial no grouping can name any more moved something; either a "
-        "threshold is still readable from a filter or the stamps are not "
-        "comparing what they claim to"
+        "a pass that changed nothing re-bucketed something"
     )
 
-    # The trigger that is left: the grouping's own spec moved. Nothing above
+    # The trigger: the grouping's own spec moved. Nothing above
     # it is pending -- no figure reads it -- so its own stamp is the only
     # thing that can notice, and a grouping left filed under the old rule
     # would be a page quietly describing a world that has changed.
@@ -371,7 +324,7 @@ async def test_the_stamp_still_notices_a_grouping_whose_definition_moved() -> No
     edited = compile_source(
         BASE + "group work_issue.by_day from updated_at by month\n"
     )
-    await Engine(store, facts, edited, WORLD).run(TENANT, unread)
+    await Engine(store, facts, edited, WORLD).run(TENANT)
     assert store.rebuilt == ["work_issue.by_day"], (
         "the grouping's own rule moved and it was not re-bucketed"
     )
@@ -399,13 +352,13 @@ async def test_a_projection_is_not_unseated_by_an_unrelated_arrival() -> None:
     facts.put(TENANT, "code_change", "c1", {"title": "c1", "state": "open"})
     facts.put(TENANT, "code_change", "c2", {"title": "c2", "state": "merged"})
     await Engine(store, facts, compile_source(POPULATION), WORLD).run(
-        TENANT, DEFAULTS, full=True
+        TENANT, full=True
     )
 
     grown = compile_source(POPULATION + PARKED)
     plan = grown.projection("code_change.card")
     assert plan is not None
-    rows, state, _ = await project_rows(store, facts, grown, TENANT, plan, DEFAULTS, 0.0)
+    rows, state, _ = await project_rows(store, facts, grown, TENANT, plan, 0.0)
     assert state.ok is True, (
         "an unrelated filter arrived and the page went behind-deploy -- the "
         "whole-set gate back under a new name"
@@ -424,19 +377,19 @@ async def test_a_projection_over_an_edited_population_waits_for_the_pass() -> No
     facts.put(TENANT, "code_change", "c1", {"title": "c1", "state": "open"})
     facts.put(TENANT, "code_change", "c2", {"title": "c2", "state": "merged"})
     await Engine(store, facts, compile_source(POPULATION), WORLD).run(
-        TENANT, DEFAULTS, full=True
+        TENANT, full=True
     )
 
     edited_source = POPULATION.replace('state == "open"', 'state == "merged"')
     edited = compile_source(edited_source)
     plan = edited.projection("code_change.card")
     assert plan is not None
-    rows, state, _ = await project_rows(store, facts, edited, TENANT, plan, DEFAULTS, 0.0)
+    rows, state, _ = await project_rows(store, facts, edited, TENANT, plan, 0.0)
     assert state.ok is False and state.because == "behind-deploy"
     assert rows == []
 
-    await Engine(store, facts, edited, WORLD).run(TENANT, DEFAULTS)
-    rows, state, _ = await project_rows(store, facts, edited, TENANT, plan, DEFAULTS, 0.0)
+    await Engine(store, facts, edited, WORLD).run(TENANT)
+    rows, state, _ = await project_rows(store, facts, edited, TENANT, plan, 0.0)
     assert state.ok is True
     assert [r.id for r in rows] == ["c2"]
 
@@ -452,7 +405,7 @@ async def test_the_projection_gate_honours_the_upgrade_window() -> None:
     store, facts = Ledger(), MemoryFactStore()
     facts.put(TENANT, "code_change", "c1", {"title": "c1", "state": "open"})
     library = compile_source(POPULATION)
-    await Engine(store, facts, library, WORLD).run(TENANT, DEFAULTS, full=True)
+    await Engine(store, facts, library, WORLD).run(TENANT, full=True)
     plan = library.projection("code_change.card")
     assert plan is not None
 
@@ -460,11 +413,11 @@ async def test_the_projection_gate_honours_the_upgrade_window() -> None:
     # whole-set stamp standing.
     store._index_stamps.clear()
     store._index_sets[TENANT] = _index_set_version(library)
-    rows, state, _ = await project_rows(store, facts, library, TENANT, plan, DEFAULTS, 0.0)
+    rows, state, _ = await project_rows(store, facts, library, TENANT, plan, 0.0)
     assert state.ok is True and [r.id for r in rows] == ["c1"]
 
     store._index_sets[TENANT] = "another-library-entirely"
-    _, state, _ = await project_rows(store, facts, library, TENANT, plan, DEFAULTS, 0.0)
+    _, state, _ = await project_rows(store, facts, library, TENANT, plan, 0.0)
     assert state.ok is False and state.because == "behind-deploy", (
         "a mismatched stamp means bucketed-under-other-definitions, and "
         "never-computed would deny the history"

@@ -530,12 +530,6 @@ def test_the_committed_artifact_carries_the_bundles() -> None:
 SERVE_WORLD = Schema(
     kinds=frozenset({"shop_order", "shop_courier"}),
     name_fields={"shop_courier": "name", "shop_order": "ref"},
-    bucket_settings=("tenant.timezone",),
-    figure_settings=("limits.carrying.over",),
-    defaults={
-        "tenant": {"hoursPerDay": 8, "timezone": "UTC"},
-        "limits": {"carrying": {"over": 3}},
-    },
 )
 
 SERVE_SOURCE = """

@@ -8,7 +8,7 @@ the engine is constructed -- never threaded through individual calls, because
 two call sites disagreeing about the world is a class of bug this object exists
 to make unwritable.
 
-Four things live here, and each is a decision the host owns:
+Three things live here, and each is a decision the host owns:
 
 - **Fact kinds.** The closed set of record kinds a definition may name. Closed
   because kinds are compile-time -- they are written in definitions and hashed
@@ -25,23 +25,14 @@ Four things live here, and each is a decision the host owns:
   and a kind with no url field serves bare titles. Declared rather than
   guessed, because a field that happens to be called "url" is a host
   convention the engine was never taught.
-- **The four settings lists.** Which dials a definition may name, split by what
-  turning the dial *costs*: a bucket setting re-buckets a tenant's whole
-  history, a figure setting recomputes one value per subject, a reading or
-  projection setting is free because nothing is stored. Merging any two would
-  let a definition write a dial in a position the engine cannot honour.
-- **Defaults.** The shipped settings document. A tenant's stored settings are
-  sparse -- only what an operator changed -- and every calculation needs a
-  complete document, so the engine merges a tenant's document over these at
-  its boundary. A dial a definition names that resolves to nothing **raises**;
-  falling back to something plausible would produce numbers about the wrong
-  dial.
-
-No dial path is reserved. `tenant.hoursPerDay` was: the renderer divided by
-it to print an `effort` (seconds of working time) as days. An effort renders
-in hours now, which needs nothing from a tenant -- "40h" says what "5d" said
-to anybody who knows their own week, and it says it without the reader having
-to find out whose working day the engine had in mind.
+There were two more, and they are gone. **Settings lists** said which dials a
+definition could name in which position, and **defaults** was the shipped
+document those dials were completed against. A definition's numbers come from
+facts now -- a figure computed from the records that set them -- or are
+written where a reader can see them, so there is no dial to declare, no
+document to complete and no position to police. A host that still sends the
+retired keys is not refused: they are dropped, so a deploy mid-migration is a
+no-op rather than a failure.
 """
 
 from __future__ import annotations
@@ -50,8 +41,6 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
-
-from .lang.settings import merge_settings
 
 if TYPE_CHECKING:  # a type-only import; schema.py must stay importable first
     from .lang.plan import Library
@@ -64,11 +53,6 @@ class Schema:
     kinds: frozenset[str]
     name_fields: Mapping[str, str] = field(default_factory=dict)
     url_fields: Mapping[str, str] = field(default_factory=dict)
-    bucket_settings: tuple[str, ...] = ()
-    figure_settings: tuple[str, ...] = ()
-    reading_settings: tuple[str, ...] = ()
-    project_settings: tuple[str, ...] = ()
-    defaults: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for kind in sorted(self.kinds):
@@ -121,18 +105,6 @@ class Schema:
             },
         )
 
-    @property
-    def declarable(self) -> frozenset[str]:
-        """Every dial some declaration is allowed to name, whatever position it
-        is in. Derived from the four lists rather than stored, so it cannot
-        drift from them."""
-        return frozenset(
-            self.bucket_settings
-            + self.figure_settings
-            + self.reading_settings
-            + self.project_settings
-        )
-
     def to_document(self) -> dict[str, Any]:
         """The schema as JSON, the shape the service's `PUT /schema` takes.
 
@@ -141,44 +113,20 @@ class Schema:
         round trip (`from_document(to_document())`) is a property a test can
         hold.
 
-        The defaults are deep-copied, not aliased: this document travels, is
-        retried, and is persisted, and a document sharing nodes with a live
-        process's mutable state would carry whatever happened to that state in
-        the window between building and sending."""
-        import copy
-
+        """
         return {
             "kinds": sorted(self.kinds),
             "name_fields": dict(self.name_fields),
             "url_fields": dict(self.url_fields),
-            "bucket_settings": list(self.bucket_settings),
-            "figure_settings": list(self.figure_settings),
-            "reading_settings": list(self.reading_settings),
-            "project_settings": list(self.project_settings),
-            "defaults": copy.deepcopy(dict(self.defaults)),
         }
 
     @classmethod
     def from_document(cls, document: Mapping[str, Any]) -> Schema:
+        # The retired settings keys are dropped rather than refused: a host
+        # deploying against this build with a document it has not yet edited
+        # should find the keys inert, not the door shut.
         return cls(
             kinds=frozenset(document.get("kinds", ())),
             name_fields=dict(document.get("name_fields", {})),
             url_fields=dict(document.get("url_fields", {})),
-            bucket_settings=tuple(document.get("bucket_settings", ())),
-            figure_settings=tuple(document.get("figure_settings", ())),
-            reading_settings=tuple(document.get("reading_settings", ())),
-            project_settings=tuple(document.get("project_settings", ())),
-            defaults=dict(document.get("defaults", {})),
         )
-
-    def settings_for(self, document: Mapping[str, Any] | None) -> dict[str, Any]:
-        """A tenant's sparse document, completed over the defaults.
-
-        This is the one place sparse becomes complete. Everything below the
-        engine's boundary assumes a complete document and raises on a missing
-        dial, because below the boundary a fallback would be a number about the
-        wrong dial -- and because two layers each applying defaults is how an
-        evaluation and an invalidation come to disagree about what a dial is
-        set to.
-        """
-        return merge_settings(self.defaults, document or {})

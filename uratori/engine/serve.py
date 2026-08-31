@@ -28,7 +28,6 @@ from ..lang.plan import (
     SummarisePlan,
     Value,
 )
-from ..lang.settings import fingerprint as settings_fingerprint
 from ..results import (
     BundleMemberResult,
     BundleResult,
@@ -110,7 +109,6 @@ async def availability(
     library: Library,
     tenant: str,
     plan: FigurePlan,
-    settings: Mapping[str, Any],
 ) -> Ok | Unavailable:
     pointer = await store.pointer(tenant, plan.name)
     if pointer is None:
@@ -125,12 +123,6 @@ async def availability(
                 f"values here were computed by {plan.name}@{pointer.version}, and this build "
                 f"holds @{plan.version}"
             ),
-        )
-    wanted = settings_fingerprint(dict(settings), list(plan.settings))
-    if pointer.settings_fingerprint != wanted:
-        return Unavailable(
-            because="setting-moved",
-            detail="a dial this definition reads has changed and the rebuild has not finished",
         )
     if not await _any_index_holds(store, library, tenant, plan):
         # **A nought written by walking the roster is not a measured nought.**
@@ -180,7 +172,6 @@ async def band_thresholds(
     library: Library,
     tenant: str,
     plan: FigurePlan,
-    settings: Mapping[str, Any],
 ) -> dict[str, dict[str, Value]]:
     """The figures a band compares against, resolved per subject key.
 
@@ -203,7 +194,7 @@ async def band_thresholds(
         source = library.figure(name)
         if source is None:  # pragma: no cover - the checker resolved it
             continue
-        if not isinstance(await availability(store, library, tenant, source, settings), Ok):
+        if not isinstance(await availability(store, library, tenant, source), Ok):
             continue
         for stored in await store.values(tenant, source.name, source.version):
             out.setdefault(stored.subject, {})[name] = stored.value
@@ -218,7 +209,6 @@ async def serve_figure(
     library: Library,
     tenant: str,
     plan: FigurePlan,
-    settings: Mapping[str, Any],
     at_ms: float | None = None,
     subject: str | None = None,
 ) -> Result:
@@ -232,12 +222,12 @@ async def serve_figure(
     a grained or split figure keeps for one subject.
     """
     at = at_ms if at_ms is not None else now_ms()
-    state = await availability(store, library, tenant, plan, settings)
+    state = await availability(store, library, tenant, plan)
     subjects: list[Subject] = []
     thresholds: dict[str, dict[str, Value]] = {}
 
     if isinstance(state, Ok):
-        thresholds = await band_thresholds(store, library, tenant, plan, settings)
+        thresholds = await band_thresholds(store, library, tenant, plan)
         if subject is None:
             rows = await store.values(tenant, plan.name, plan.version)
         else:
@@ -261,7 +251,7 @@ async def serve_figure(
                     # stays null because a numeric list is something a browser
                     # can reduce over, and this app's claim is that it has
                     # nothing to reduce.
-                    display=format_value(stored.value, plan.unit, settings),
+                    display=format_value(stored.value, plan.unit),
                     # The figure's own band, from its own definition. This used
                     # to be a second figure found by scanning the library for a
                     # `level` one that combined this plan -- so the word came
@@ -330,7 +320,6 @@ async def serve_evidence(
     schema: Schema,
     tenant: str,
     plan: FigurePlan,
-    settings: Mapping[str, Any],
     subject: str,
 ) -> Evidence | None:
     """One stored value's citation, joined back to what it cites.
@@ -341,7 +330,7 @@ async def serve_evidence(
     empty members list under an Ok state would read as "this value cites
     nothing": a confident claim about a figure the tenant has never run.
     """
-    state = await availability(store, library, tenant, plan, settings)
+    state = await availability(store, library, tenant, plan)
     if not isinstance(state, Ok):
         return Evidence(
             figure=plan.name, version=plan.version, subject=subject, state=state
@@ -374,9 +363,9 @@ async def serve_evidence(
     def measurement(position: int) -> str | None:
         if values is None or values[position] is None:
             return None
-        return format_value(values[position], plan.unit, settings)
+        return format_value(values[position], plan.unit)
 
-    display = format_value(stored.value, plan.unit, settings)
+    display = format_value(stored.value, plan.unit)
 
     if plan.combines:
         # A rollup: its evidence is the cells it read, not the records
@@ -413,7 +402,7 @@ async def serve_evidence(
                         title=part.label if part is not None else None,
                         held=part is not None,
                         display=(
-                            format_value(part.value, below.unit, settings)
+                            format_value(part.value, below.unit)
                             if part is not None and below is not None
                             else None
                         ),
@@ -486,7 +475,7 @@ async def serve_evidence(
             shown = measurement(position)
             if shown is None and live is not None and value is not None:
                 got = measure_of(live, value, None)
-                shown = format_value(got, plan.unit, settings) if got is not None else None
+                shown = format_value(got, plan.unit) if got is not None else None
             members.append(
                 EvidenceMember(
                     key=key,
@@ -618,7 +607,6 @@ async def serve_reading(
     library: Library,
     tenant: str,
     plan: ReadingPlan,
-    settings: Mapping[str, Any],
     windows: Sequence[int | str | WindowSpec],
     at_ms: float | None = None,
     at_day: str | None = None,
@@ -673,7 +661,7 @@ async def serve_reading(
     if source is None:
         raise ValueError(f"{plan.name} reads a figure that is not in the library")
 
-    state = await availability(store, library, tenant, source, settings)
+    state = await availability(store, library, tenant, source)
     # **Every subject's own calendar, and they need not agree.** A window is
     # a span of positions in a subject's bucket sequence, and that sequence
     # was cut on the subject's calendar at write time -- so counting back
@@ -785,7 +773,7 @@ async def serve_reading(
         # below, so the window's total is judged against the total of the goal
         # across those buckets rather than against one bucket's worth of it.
         goals = await _band_goals(
-            store, library, tenant, plan, settings, min(all_labels), max(all_labels)
+            store, library, tenant, plan, min(all_labels), max(all_labels)
         )
 
         for base, held in sorted(by_subject.items()):
@@ -810,7 +798,7 @@ async def serve_reading(
                     for name, per_subject in goals.items()
                 }
                 served.append(
-                    _window(plan, sample, spec, labels, rule, where, settings, against)
+                    _window(plan, sample, spec, labels, rule, where, against)
                 )
             subjects.append(
                 Subject(
@@ -829,7 +817,7 @@ async def serve_reading(
         id="",
         name="",
         windows=[
-            _window(plan, sample_over([], labels), spec, labels, rule, None, settings)
+            _window(plan, sample_over([], labels), spec, labels, rule, None)
             for spec, labels in spans_in(None)
         ],
     )
@@ -861,7 +849,6 @@ async def _band_goals(
     library: Library,
     tenant: str,
     plan: ReadingPlan,
-    settings: Mapping[str, Any],
     frm: str,
     to: str,
 ) -> dict[str, dict[str, list[tuple[str, Value]]]]:
@@ -881,7 +868,7 @@ async def _band_goals(
         goal = library.figure(name)
         if goal is None:  # pragma: no cover - the checker resolved it
             continue
-        if not isinstance(await availability(store, library, tenant, goal, settings), Ok):
+        if not isinstance(await availability(store, library, tenant, goal), Ok):
             continue
         held: dict[str, list[tuple[str, Value]]] = {}
         for stored in await store.values_in_range(tenant, goal.name, goal.version, frm, to):
@@ -920,7 +907,6 @@ def _window(
     labels: Sequence[str],
     rule: str,
     zone: str | None,
-    settings: Mapping[str, Any],
     thresholds: Mapping[str, float | None] = {},
 ) -> Window:
     unmet = unmet_of(plan, sample)
@@ -950,7 +936,7 @@ def _window(
     # number rather than through the reading's own unit -- otherwise a queue of
     # three prints as three seconds.
     rendered = {
-        key: format_value(value, "count" if key == "count" else plan.unit, settings)
+        key: format_value(value, "count" if key == "count" else plan.unit)
         for key, value in stats.items()
         if value is not None
     }
@@ -984,7 +970,7 @@ def _window(
         delta=changes,
         delta_display=(
             [
-                None if v is None else format_value(v, plan.unit, settings)
+                None if v is None else format_value(v, plan.unit)
                 for v in changes
             ]
             if changes is not None
@@ -1029,7 +1015,6 @@ def serve_projection(
     rows: Sequence[ProjectedRow],
     summary_plan: SummarisePlan | None,
     summary: Summary | None,
-    settings: Mapping[str, Any],
     at_ms: float,
     state: Ok | Unavailable,
 ) -> Result:
@@ -1037,7 +1022,7 @@ def serve_projection(
         Subject(
             id=row.id,
             name=str(row.values.get("key") or row.values.get("name") or row.id),
-            row=_row(row.values, row.units, row.flags, settings),
+            row=_row(row.values, row.units, row.flags),
         )
         for row in rows
     ]
@@ -1056,7 +1041,7 @@ def serve_projection(
         banded=False,
         subjects=subjects,
         summary=(
-            _row(summary.values, summary.units, summary.flags, settings)
+            _row(summary.values, summary.units, summary.flags)
             if summary is not None
             else None
         ),
@@ -1067,7 +1052,6 @@ def _row(
     values: Mapping[str, Value],
     units: Mapping[str, str],
     flags: Sequence[RenderedFlag],
-    settings: Mapping[str, Any],
 ) -> Row:
     """A projected row on the wire: the numbers, the text, and the sentences.
 
@@ -1093,7 +1077,7 @@ def _row(
     return Row(
         values={k: _wire(v) for k, v in values.items()},
         display={
-            k: format_value(v, _unit(units.get(k, "count")), settings)
+            k: format_value(v, _unit(units.get(k, "count")))
             for k, v in values.items()
         },
         units={k: _unit(u) for k, u in units.items()},
@@ -1158,7 +1142,6 @@ async def answer_projection(
     library: Library,
     tenant: str,
     plan: ProjectPlan,
-    settings: Mapping[str, Any],
     at_ms: float | None = None,
 ) -> Result:
     """A projection, whole: read every row, summarise them, then page.
@@ -1177,9 +1160,9 @@ async def answer_projection(
     """
     at = at_ms if at_ms is not None else now_ms()
     rows, state, _missing = await project_rows(
-        store, facts, library, tenant, plan, settings, at
+        store, facts, library, tenant, plan, at
     )
-    return _compose_projection(library, plan, rows, state, settings, at)
+    return _compose_projection(library, plan, rows, state, at)
 
 
 def _compose_projection(
@@ -1187,7 +1170,6 @@ def _compose_projection(
     plan: ProjectPlan,
     rows: list[ProjectedRow],
     state: Ok | Unavailable,
-    settings: Mapping[str, Any],
     at: float,
 ) -> Result:
     """Summarise, then page -- the tail of `answer_projection`, split out so a
@@ -1208,14 +1190,14 @@ def _compose_projection(
     # the only reader: a fabricated row on the wire is available to anything
     # that asks, and the rule is that an absence is never a nought.
     summary = (
-        summarise(summary_plan, rows, settings, at)
+        summarise(summary_plan, rows, at)
         if summary_plan is not None and isinstance(state, Ok)
         else None
     )
     shown = ordered(plan, rows)
     if plan.limit is not None:
         shown = shown[: plan.limit]
-    return serve_projection(plan, shown, summary_plan, summary, settings, at, state)
+    return serve_projection(plan, shown, summary_plan, summary, at, state)
 
 
 async def project_rows(
@@ -1224,7 +1206,6 @@ async def project_rows(
     library: Library,
     tenant: str,
     plan: ProjectPlan,
-    settings: Mapping[str, Any],
     at_ms: float,
 ) -> tuple[list[ProjectedRow], Ok | Unavailable, list[str]]:
     """Every row of a projection, and which of its figures were unavailable.
@@ -1310,7 +1291,7 @@ async def project_rows(
         source = library.figure(figure_name)
         if source is None:
             continue
-        state = await availability(store, library, tenant, source, settings)
+        state = await availability(store, library, tenant, source)
         if not isinstance(state, Ok):
             missing.append(figure_name)
             continue
@@ -1318,7 +1299,7 @@ async def project_rows(
         # goals X compares against -- resolved once for the whole projection
         # rather than per row, since every row reads the same figure.
         against = (
-            await band_thresholds(store, library, tenant, source, settings) if band else {}
+            await band_thresholds(store, library, tenant, source) if band else {}
         )
         for stored in await store.values(tenant, source.name, source.version):
             # The band is derived here rather than read: it is evaluated from
@@ -1346,7 +1327,6 @@ async def project_rows(
                 record.value,
                 {f: v for f, v in values.get(record.key, {}).items()},
                 joins,
-                settings,
                 at_ms,
             )
         )
@@ -1392,7 +1372,6 @@ async def _population(store: EngineStore, tenant: str, plan: ProjectPlan) -> fro
 def serve_summary(
     plan: SummarisePlan,
     summary: Summary | None,
-    settings: Mapping[str, Any],
     at_ms: float,
     state: Ok | Unavailable,
 ) -> Result:
@@ -1420,7 +1399,7 @@ def serve_summary(
         state=state,
         banded=False,
         summary=(
-            _row(summary.values, summary.units, summary.flags, settings)
+            _row(summary.values, summary.units, summary.flags)
             if summary is not None
             else None
         ),
@@ -1433,7 +1412,6 @@ async def answer_bundle(
     library: Library,
     tenant: str,
     plan: BundlePlan,
-    settings: Mapping[str, Any],
     default_trailing: Sequence[int],
 ) -> BundleResult:
     """A bundle, whole: every member's ordinary answer, in declaration order,
@@ -1469,7 +1447,7 @@ async def answer_bundle(
             if projection is None:  # pragma: no cover - the checker refuses this
                 raise ValueError(f"{plan.name} names a projection that is not compiled")
             rows, state, _missing = await project_rows(
-                store, facts, library, tenant, projection, settings, at
+                store, facts, library, tenant, projection, at
             )
             held = (rows, state)
             evaluated[name] = held
@@ -1491,7 +1469,7 @@ async def answer_bundle(
             results.append(
                 slotted(
                     member.slot,
-                    await serve_figure(store, library, tenant, figure, settings, at_ms=at),
+                    await serve_figure(store, library, tenant, figure, at_ms=at),
                 )
             )
         elif member.kind == "reading":
@@ -1511,7 +1489,6 @@ async def answer_bundle(
                         library,
                         tenant,
                         reading,
-                        settings,
                         list(member.windows)
                         if member.windows is not None
                         else list(default_trailing),
@@ -1528,7 +1505,7 @@ async def answer_bundle(
             results.append(
                 slotted(
                     member.slot,
-                    _compose_projection(library, projection, rows, state, settings, at),
+                    _compose_projection(library, projection, rows, state, at),
                 )
             )
         else:  # summary
@@ -1537,14 +1514,14 @@ async def answer_bundle(
                 raise ValueError(f"{plan.name} names a summary that is not compiled")
             rows, state = await rows_of(summary_plan.over)
             summary = (
-                summarise(summary_plan, rows, settings, at)
+                summarise(summary_plan, rows, at)
                 if isinstance(state, Ok)
                 else None
             )
             results.append(
                 slotted(
                     member.slot,
-                    serve_summary(summary_plan, summary, settings, at, state),
+                    serve_summary(summary_plan, summary, at, state),
                 )
             )
 

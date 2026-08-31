@@ -15,18 +15,18 @@ product's end users; a host builds its own screens against the
   bottoms out on the schema rather than on raw records. Each page shows the
   prose above the declaration, the version hash (the citation every value
   carries), the source exactly as written, and three answers: **moved by**,
-  the server-computed closure to its leaves -- the fact kinds and tenant
-  dials a change to which can move this number, and nothing else can;
+  the server-computed closure to its leaves -- the fact kinds a change to
+  which can move this number, and nothing else can;
   **built from**, the declarations it composes, one hop at a time; and
   **used by**, the reverse. Every page then shows its data for the chosen
   tenant -- a filter its matching records, a group its buckets and their
   members, a measure each record's rendered measurement -- and drills to the
-  record pages themselves. Every setting leaf under **moved by** carries the
-  chosen tenant's current value beside the name -- who answered (the
-  tenant's own document or the schema's default) said out loud, and a dial
-  nobody holds stated as the finding it is -- because a definition names a
-  dial by name and a reader should not need a settings document to finish
-  the sentence. For servable kinds the page also asks for the
+  record pages themselves. Every leaf under **moved by** is a fact kind, and
+  that is the whole of it: a definition's numbers come from records, so the
+  page can name the records and stop. (A leaf used to be able to be a tenant
+  dial, carried with its current value beside the name, because "which dial"
+  without "holding what" sent the reader elsewhere to finish the sentence.
+  There are no dials.) For servable kinds the page also asks for the
   current answer. A reading's windows draw one column per **declared**
   statistic -- the column set is the definition's, stable even when a
   window is withheld, the band column sits beside exactly the statistic the
@@ -98,7 +98,7 @@ Where the deployment grants it (see the posture below), the UI carries an
   where `changed` tells the cascade's truth: editing a filter marks every
   figure whose plan hashes its text in, even though their own lines are
   untouched. Completion is served from what the world knows -- fact kinds
-  and their fields, declarable dials, declared names -- plus the language's
+  and their fields, declared names -- plus the language's
   own closed word lists.
 - **A save is a teach.** `PUT /ui/api/source` compiles and persists exactly
   the way [`PUT /definitions`](http-api.md) does, fact declarations and

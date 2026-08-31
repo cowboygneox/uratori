@@ -34,14 +34,6 @@ from uratori import CheckError, Schema, SyntaxError_, compile_source
 
 ONCHANGE = Schema(
     kinds=frozenset(),
-    bucket_settings=("tenant.timezone",),
-    figure_settings=("limits.target.over",),
-    reading_settings=("flow.targetMinutes",),
-    defaults={
-        "tenant": {"timezone": "UTC", "hoursPerDay": 8},
-        "limits": {"target": {"over": 0}},
-        "flow": {"targetMinutes": {"good": 2, "poor": 5}},
-    },
 )
 
 WORLD = '''
@@ -772,7 +764,7 @@ async def _paced(at: float = AT):
             },
         )
     await engine.run("t1", full=True, at_ms=at)
-    return engine, store, library
+    return engine, store, library, facts
 
 
 async def test_a_read_after_the_pass_fills_the_buckets_time_has_added() -> None:
@@ -786,7 +778,7 @@ async def test_a_read_after_the_pass_fills_the_buckets_time_has_added() -> None:
     """
     from uratori.engine.serve import serve_reading
 
-    _, store, library = await _paced(at=AT)
+    _, store, library, facts = await _paced(at=AT)
     plan = library.reading("site.target_pace")
     figure = library.figure("site.target_month")
 
@@ -796,7 +788,7 @@ async def test_a_read_after_the_pass_fills_the_buckets_time_has_added() -> None:
     # Two months pass with no sync at all, and then somebody looks.
     later = 1_792_843_200_000.0  # 2026-10-24T12:00Z
     result = await serve_reading(
-        store, library, "t1", plan, ONCHANGE.defaults, [3], at_ms=later
+        store, library, "t1", plan, [3], at_ms=later, facts=facts
     )
     after = {r.subject for r in await store.values("t1", figure.name, figure.version)}
     assert {"s1@2026-09", "s1@2026-10"} <= after, (
@@ -818,15 +810,15 @@ async def test_the_read_writes_the_same_rows_a_pass_would_have() -> None:
 
     later = 1_792_843_200_000.0  # 2026-10-24T12:00Z
 
-    _, read_store, read_lib = await _paced(at=AT)
+    _, read_store, read_lib, read_facts = await _paced(at=AT)
     await serve_reading(
         read_store,
         read_lib,
         "t1",
         read_lib.reading("site.target_pace"),
-        ONCHANGE.defaults,
         [3],
         at_ms=later,
+        facts=read_facts,
     )
     figure = read_lib.figure("site.target_month")
     read_rows = {
@@ -834,7 +826,7 @@ async def test_the_read_writes_the_same_rows_a_pass_would_have() -> None:
         for r in await read_store.values("t1", figure.name, figure.version)
     }
 
-    _, pass_store, pass_lib = await _paced(at=later)
+    _, pass_store, pass_lib, _ = await _paced(at=later)
     pass_figure = pass_lib.figure("site.target_month")
     pass_rows = {
         r.subject: (r.value, r.members)
@@ -859,7 +851,7 @@ async def test_two_first_readers_race_benignly_and_only_one_creates_each_row() -
 
     from uratori.engine.carry import materialise
 
-    _, store, library = await _paced(at=AT)
+    _, store, library, _facts = await _paced(at=AT)
     figure = library.figure("site.target_month")
     later = 1_792_843_200_000.0
 
@@ -1269,7 +1261,7 @@ async def test_a_read_anchored_in_the_future_writes_no_future_buckets() -> None:
     """
     from uratori.engine.serve import serve_reading
 
-    _, store, library = await _paced(at=AT)
+    _, store, library, facts = await _paced(at=AT)
     figure = library.figure("site.target_month")
     before = {r.subject for r in await store.values("t1", figure.name, figure.version)}
 
@@ -1280,9 +1272,9 @@ async def test_a_read_anchored_in_the_future_writes_no_future_buckets() -> None:
         library,
         "t1",
         library.reading("site.target_pace"),
-        ONCHANGE.defaults,
         [3],
         at_day="2031-06-15",
+        facts=facts,
     )
     after = {r.subject for r in await store.values("t1", figure.name, figure.version)}
     assert after == before, (
@@ -1548,7 +1540,7 @@ async def test_two_readers_taking_the_same_empty_snapshot_create_each_row_once()
 
     from uratori.engine.carry import materialise
 
-    _, store, library = await _paced(at=AT)
+    _, store, library, _facts = await _paced(at=AT)
     figure = library.figure("site.target_month")
     later = 1_792_843_200_000.0
 

@@ -73,7 +73,7 @@ about the world is a class of bug the object exists to make unwritable.
 
 (As JSON because that is the wire: this exact document is what `PUT /schema`
 takes. `GET /schema` answers it back with every absent list made explicit --
-`bucket_settings: []` and friends -- so a diff against what you sent compares
+`name_fields: {}` and friends -- so a diff against what you sent compares
 shapes, not omissions.)
 
 Four things live here, and each is a decision the host owns:
@@ -90,10 +90,12 @@ Four things live here, and each is a decision the host owns:
   members carry one so a reader can walk from a cited record to the source
   system. Declared rather than guessed, because a field that happens to be
   called `url` is a host convention the engine was never taught.
-- **Settings lists** declare which dials definitions may read -- four lists,
-  split by cost. More on these [below](#settings-dials).
-- **Defaults** are the shipped settings document, the base every tenant's
-  sparse overrides are completed against.
+
+There is no fourth thing. A schema used to carry **settings lists** -- which
+dials a definition could read, in which position -- and **defaults**, the
+document those were completed against. Every number a definition needs comes
+from a fact now, or is written in the definition; the keys are accepted and
+dropped, so a host mid-migration is not refused.
 
 ### Or declare the facts in the language
 
@@ -118,8 +120,8 @@ fact shop_courier:
     name as text
 ```
 
-The schema document then carries **settings and defaults alone**, and the
-compile refuses a schema that also declares kinds: one world, one door.
+The schema document then carries nothing at all, and the compile refuses a
+schema that also declares kinds: one world, one door.
 What the fuller declaration buys -- field existence and type checks on every
 path a definition reads, verification of every record that arrives, and a
 schema a reader can trace a number back to -- is
@@ -176,8 +178,8 @@ they are plumbing, not numbers a reader meets.
   is never a bare float of unknown meaning.
 - **Figures** are stored, per-subject values, recomputed incrementally as
   facts move. `carrying` counts each courier's open orders; `load_band` is a
-  figure built *on* a figure (the `combine` block), banding the count against
-  a settings dial.
+  figure built *on* a figure (the `combine` block), turning the count into a
+  word.
 - **Readings** summarise a time-keyed figure over windows -- spans of
   integer positions in the figure's own bucket sequence, counted back from
   the anchor: "orders delivered over the last 30 days" (`30` on a
@@ -335,58 +337,44 @@ computed values, pointers and settings are all keyed by tenant; the schema
 and the definitions are not. Two tenants running the same definition are
 running *the same definition* -- the content hash says so -- and what differs
 per tenant is only which version it has computed and what its dials are set
-to. There is no per-tenant code path anywhere, which is what makes "this
-tenant sees a different number" always answerable by data: different facts,
-or a different dial.
+to. There is no per-tenant code path anywhere, and no per-tenant
+configuration either, which is what makes "this tenant sees a different
+number" always answerable the same way: different facts.
 
-## Settings dials
+## No settings
 
-Definitions read no dials at all, and nothing the engine renders reads one
-either. The section survives for the machinery a settings document still
-travels through, and for the two design decisions that governed it.
+There is nothing here to configure, and that is the point.
 
-**A tenant's stored settings are sparse; completion happens once, at the
-boundary.** A tenant's document contains only what an operator changed. Every
-calculation needs a complete document, so the engine merges the tenant's
-document over `schema.defaults` exactly once, at its front door. Everything
-below assumes a complete document and *raises* on a missing dial: a
-definition named the dial, so there is nothing to guess, and a fallback would
-band every subject against a number nobody chose. (Two layers each applying
-defaults is also how an evaluation and an invalidation come to disagree about
-what a dial is set to -- one boundary means one truth.)
+Every number a definition needs is a **fact** -- another figure, computed
+from the records that set it -- or is written in the definition, where a
+reader can see it and where moving it forks the version like any other change
+to what the definition says. A band's threshold, a calculation's, a row
+value's, a flag's; the calendar a group cuts its buckets on; the line an age
+filter draws. All of them.
 
-**One list is read, where there were four:**
-
-| List | Read from | Moving it invalidates |
-|---|---|---|
-| `bucket_settings` | nothing: a group's calendar is a field on the subject's record, and an age filter's threshold a field on the owner's or a number of days | nothing |
-
-`figure_settings`, `reading_settings` and `project_settings` held
-**thresholds**: the numbers a calculation compared against, a band judged by,
-and a row value or flag tested. A threshold is a fact now -- another figure,
-computed from the records that set it -- or a number written in the definition
-where a reader can see it. A dial named from any of those positions is
-refused with the rewrite; the lists are still accepted so a host need not
-empty them to deploy, and nothing reads them.
-
-The reason is the doctrine's own. On a card where every number can be traced
-to the records behind it, a dial was the one input that could not be: it moved
+There used to be four lists of dials, split by what turning one cost, and a
+defaults document to complete a tenant's sparse overrides against. The
+machinery was careful -- fingerprints on every pointer so a moved dial
+rebuilt exactly what read it, a boundary where sparse became complete so two
+layers could not disagree -- and all of it existed to make one thing safe
+that should not have existed. On a card where every number can be traced to
+the records behind it, a dial was the one input that could not be: it moved
 the answer with nothing in the evidence to say so, and the number it moved
 hardest was the one deciding whether a reader should worry.
 
-The pointer each
-tenant carries includes a *fingerprint* of the dials that definition names,
-so a fingerprint over an empty dial list is the honest claim that nothing a
-tenant sets moves a stored value -- and a dial explicitly set to its default fingerprints
-identically to an unset one, so a no-op save costs no rebuild.
+A schema still accepts the retired keys and drops them, so a host deploying
+mid-migration finds them inert rather than refused. `PUT /tenants/{t}/settings`
+is gone, and so is the table behind it -- existing deployments keep theirs,
+unread.
 
 ## Results
 
 Every answer -- served over HTTP or pushed over the websocket -- is one
 `Result`, and the same object on either transport. The envelope carries the definition's `version` (the citation),
-`at` (one evaluation instant for the whole response), the tenant's calendar
-`zone`, the `unit` (so a renderer never guesses whether 28,800 seconds is
-"8h" of wall-clock or "1d" of working time), and `subjects`: one row per
+`at` (one evaluation instant for the whole response), the `zone` its
+subjects' buckets are cut in where they share one, the `unit` (so a renderer never guesses whether 28,800 seconds is
+wall-clock or working time -- both print as "8h", and they are not the same
+quantity), and `subjects`: one row per
 subject, id, frozen name and value together, in the server's order -- a
 screen does not sort, because sorting is a calculation and the sort key is a
 definition's answer.

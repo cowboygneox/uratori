@@ -104,7 +104,7 @@ def taught_schema(world: World) -> Schema:
     """The world as taught, whichever door taught it.
 
     A fact-taught library carries the kinds and name fields; the declared
-    schema then holds only settings. Every surface that *describes* the world
+    schema then holds nothing of its own. Every surface that *describes* the world
     (the UI's kind list, its record names) reads through this, so those
     surfaces cannot disagree -- the facade does the same completion
     internally. The one deliberate exception is `GET /schema`, which answers
@@ -181,22 +181,16 @@ def run_out(
     report: RunReport,
     world: World,
     library: Library,
-    settings: dict[str, Any],
     *,
     written: int,
     deleted: int,
     include_results: bool = True,
 ) -> RunOut:
-    # The sample is rendered against the tenant's own dials as they stand
-    # now -- an effort formatted with the wrong working day is a wrong
-    # sentence frozen into the caller's activity log for ever.
-    #
     # `include_results=False` is the `serve: false` caller: the pass may
     # still have evaluated results (the server's own socket subscribers need
     # them), but the caller asked for the moved names instead of the
     # payloads, and handing both would make the lean request pay the fat
     # response.
-    document = world.schema.settings_for(settings)
     return RunOut(
         written=written,
         deleted=deleted,
@@ -215,7 +209,7 @@ def run_out(
                 unit=c.unit,
                 weight=c.weight,
             )
-            for c in shown_changes(list(report.outcome.changes), library, document)
+            for c in shown_changes(list(report.outcome.changes), library)
         ],
         results=list(report.results) if include_results else [],
         moved=sorted(report.moved),
@@ -254,7 +248,6 @@ async def push_pass(
     s: State,
     tenant: str,
     facade: Uratori,
-    settings: dict[str, Any],
     report: RunReport,
 ) -> None:
     """Deliver one pass to the socket, both interests at once.
@@ -274,7 +267,6 @@ async def push_pass(
         return await facade.answer(
             tenant,
             entry.name,
-            settings,
             trailing=entry.windows if entry.windows is not None else DEFAULT_TRAILING,
         )
 

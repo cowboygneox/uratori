@@ -56,11 +56,11 @@ your app ──facts──▶ uratori ──Results──▶ your screens
 - **Facts** are the plain JSON records you push, in batches. The engine's own
   change detection decides what moved, and a cascade recomputes exactly the
   figures that depended on it -- including figures built on other figures.
-- **A `Schema`** declares your world once -- or the world lives in the
-  definitions themselves as `fact` declarations, with the schema carrying
-  settings and defaults alone: which fact kinds exist, which field
-  carries a record's human name, which settings dials a definition may read,
-  and their defaults.
+- **A `Schema`** declares your world once -- which fact kinds exist, which
+  field carries a record's human name, which carries its link -- or the world
+  lives in the definitions themselves as `fact` declarations and the schema
+  carries nothing. There are no settings: every number a definition needs
+  comes from a fact or is written in the definition.
 - **Definitions** (`.fig`) declare what to compute: *groups* bucket records
   by a field, *filters* narrow them to whatever passes a test, *measures*
   read quantities off them, *figures* are stored per-subject values
@@ -93,9 +93,8 @@ database beside it. Then teach it and feed it:
 |---|---|
 | `PUT /schema`, `GET /schema` | Declare (or replace) the world; read it back. A replacement is refused whole if the loaded definitions no longer compile under it. |
 | `PUT /definitions`, `GET /definitions` | Compile and load source (a bad definition is a 422 in the checker's own words); read back the library described -- names, versions, prose, formulas and what each rests on. |
-| `PUT /tenants/{t}/settings` | Store a tenant's sparse dial document. |
 | `POST /tenants/{t}/facts` | Apply writes/deletes (with the provider's own stamps as the stale-write guard), run the pass, get back counts, a ranked change sample, and the re-served `Result`s. `defer: true` writes without the pass, for bulk imports that close with one full run. |
-| `POST /tenants/{t}/runs` | A pass with no new facts (a moved dial, `{"full": true}` to rebuild). |
+| `POST /tenants/{t}/runs` | A pass with no new facts (a redeployed definition, `{"full": true}` to rebuild). |
 | `GET /tenants/{t}/results[/{name}]` | Current answers. |
 | `GET /tenants/{t}/evidence/{name}?subject=…` | The records behind one stored value: the citation, joined back to the records it names. |
 | `DELETE /tenants/{t}` | Every row the tenant owns, gone; answers the counts, because "ok" is the least useful true thing a destructive route can say. |

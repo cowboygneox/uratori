@@ -45,9 +45,6 @@ from .test_server import server as service  # noqa: F401
 
 TAUGHT = Schema(
     kinds=frozenset(),
-    bucket_settings=("limits.carrying.over",),
-    figure_settings=("limits.carrying.over",),
-    defaults={"tenant": {"hoursPerDay": 8}, "limits": {"carrying": {"over": 3}}},
 )
 
 FACTS = '''

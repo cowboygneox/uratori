@@ -15,7 +15,6 @@ that carry decisions:
   the plans are recompiled at boot**, because the source is the truth and a
   compiled artifact read back would let a stale copy decide what the server
   computes.
-- `tenant_settings` -- each tenant's sparse dial document.
 
 Schema management is one idempotent `ensure_schema` under an advisory lock
 rather than numbered migration files: the schema is young and additive. The
@@ -51,12 +50,6 @@ create table if not exists engine_world (
   id      int primary key check (id = 1),
   schema  jsonb not null,
   source  text,
-  updated_at timestamptz not null default now()
-);
-
-create table if not exists tenant_settings (
-  tenant_id  text primary key,
-  document   jsonb not null,
   updated_at timestamptz not null default now()
 );
 
@@ -215,35 +208,6 @@ async def save_world(
         json.dumps(schema_document),
         source,
     )
-
-
-# -------------------------------------------------------------- settings --
-
-
-async def load_settings(pool: asyncpg.Pool[Any], tenant: str) -> dict[str, Any]:
-    row = await pool.fetchrow(
-        "select document from tenant_settings where tenant_id = $1", tenant
-    )
-    if row is None:
-        return {}
-    document = row["document"]
-    return document if isinstance(document, dict) else json.loads(document)
-
-
-async def save_settings(pool: asyncpg.Pool[Any], tenant: str, document: dict[str, Any]) -> None:
-    await pool.execute(
-        """
-        insert into tenant_settings (tenant_id, document, updated_at)
-        values ($1, $2, now())
-        on conflict (tenant_id) do update
-          set document = excluded.document, updated_at = now()
-        """,
-        tenant,
-        json.dumps(document),
-    )
-
-
-# ------------------------------------------------------------ import debt --
 
 
 async def mark_deferred(pool: asyncpg.Pool[Any], tenant: str) -> None:
@@ -423,7 +387,6 @@ async def tenant_exists(pool: asyncpg.Pool[Any], tenant: str) -> bool:
     held = await pool.fetchval(
         """
         select exists (select 1 from fact where tenant_id = $1)
-            or exists (select 1 from tenant_settings where tenant_id = $1)
             or exists (select 1 from run_log where tenant_id = $1)
         """,
         tenant,
@@ -432,17 +395,19 @@ async def tenant_exists(pool: asyncpg.Pool[Any], tenant: str) -> bool:
 
 
 async def list_tenants(pool: asyncpg.Pool[Any]) -> list[dict[str, Any]]:
-    """Every tenant the database knows, however it got there: facts pushed,
-    settings stored, or runs logged. The union matters -- a tenant taught
-    settings but never fed is exactly the misconfiguration an investigator
-    comes looking for."""
+    """Every tenant the database knows, however it got there: facts pushed or
+    runs logged. The union matters -- a tenant that has run and holds nothing
+    is exactly the misconfiguration an investigator comes looking for.
+
+    It used to count a third way in, a stored settings document. There are no
+    settings; the table went with them, and existing deployments keep theirs
+    untouched and unread rather than paying a destructive migration for a
+    tidier list."""
     rows = await pool.fetch(
         """
         select tenant_id, sum(facts)::int as facts
         from (
           select tenant_id, count(*) as facts from fact group by tenant_id
-          union all
-          select tenant_id, 0 from tenant_settings
           union all
           select distinct tenant_id, 0 from run_log
         ) sources
@@ -743,7 +708,6 @@ async def remove_tenant(pool: asyncpg.Pool[Any], tenant: str) -> tuple[int, int]
         ("index_built", "tenant_id"),
         ("index_state", "tenant_id"),
         ("figure_value", "tenant_id"),
-        ("tenant_settings", "tenant_id"),
         ("run_log", "tenant_id"),
         ("import_debt", "tenant_id"),
     ):

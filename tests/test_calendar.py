@@ -31,7 +31,7 @@ from uratori import (
 )
 from uratori.results import Result
 
-WORLD = Schema(kinds=frozenset(), defaults={})
+WORLD = Schema(kinds=frozenset())
 
 SOURCE = '''
 # Somebody who carries orders, and the calendar their days are cut on.

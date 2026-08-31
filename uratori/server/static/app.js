@@ -110,7 +110,6 @@ async function loadWorld() {
   usedBy = new Map();
   for (const declaration of world.declarations) {
     for (const edge of declaration.rests_on) {
-      if (edge.type === 'setting') continue;
       // A fact edge counts as usage when the kind is DECLARED (0.4.0 fact
       // declarations): its page must say who reads it, or the leaves every
       // trace bottoms out on would all claim nobody does.
@@ -290,42 +289,16 @@ function recordHash(kind, key) {
   return `#/facts/${encodeURIComponent(kind)}/${encodeURIComponent(key)}`;
 }
 
-// One leaf of the impact answer: where the records live, or which dial.
-// A dial line carries the tenant's current value when the dials payload is
-// in hand: the definition names the dial by NAME (the compile-once rule),
-// and this is the value the engine reads through that name at serve time —
-// both halves on one line, because "which dial" without "holding what" sends
-// the reader to a settings document to finish the sentence.
-function leafLine(edge, dials) {
-  if (edge.type === 'fact') {
-    return el('li', {},
-      el('span', { class: 'badge fact' }, 'fact'), ' ',
-      el('a', { class: 'mono', href: `#/facts/${encodeURIComponent(edge.name)}` }, edge.name),
-      el('span', { class: 'leaf' }, ' — the records themselves'));
-  }
-  const held = dials instanceof Map ? dials.get(edge.name) : null;
+// One leaf of the impact answer, and there is one kind left: the records.
+// A dial used to be the other, carrying the tenant's current value beside
+// the name a definition read it by — "which dial" without "holding what"
+// sent the reader to a settings page to finish the sentence. Nothing reads
+// a dial now, so every leaf is a fact.
+function leafLine(edge) {
   return el('li', {},
-    el('span', { class: 'badge setting' }, 'setting'), ' ',
-    el('span', { class: 'mono' }, edge.name),
-    el('span', { class: 'leaf' }, ' — a tenant dial'),
-    held
-      ? (held.source === 'unset'
-          // Nothing servable at this name — never written, an explicit
-          // null, or a clobbered ancestor: a stated absence, in the finding
-          // voice — a definition reading a dial that holds nothing is
-          // exactly what an investigator came to find.
-          ? el('span', { class: 'finding' }, ' — holding no servable value')
-          : el('span', { class: 'leaf' }, ', currently ',
-              el('span', { class: 'mono' }, held.display),
-              held.source === 'tenant' ? ' (set by this tenant)' : ' (the schema default)'))
-      : dials === 'failed'
-        ? el('span', { class: 'faint' }, ' — its current value could not be read')
-        : dials instanceof Map
-          // The payload answered and this name was not in it: a dial the
-          // schema no longer declares, stated rather than left to read
-          // like the no-tenant case under prose promising values.
-          ? el('span', { class: 'finding' }, ' — not a dial this deployment declares')
-          : null);
+    el('span', { class: 'badge fact' }, 'fact'), ' ',
+    el('a', { class: 'mono', href: `#/facts/${encodeURIComponent(edge.name)}` }, edge.name),
+    el('span', { class: 'leaf' }, ' — the records themselves'));
 }
 
 // One direct dependency, one hop, never a subtree. The old recursive tree
@@ -334,7 +307,7 @@ function leafLine(edge, dials) {
 // That walk is the server's job now (moved_by); structure reads one hop at a
 // time, by navigation.
 function edgeLine(edge) {
-  if (edge.type === 'fact' || edge.type === 'setting') return leafLine(edge);
+  if (edge.type === 'fact') return leafLine(edge);
   return el('li', {},
     el('span', { class: `badge ${edge.type}` }, edge.type), ' ',
     el('a', { class: 'mono', href: `#/definitions/${encodeURIComponent(edge.name)}` }, edge.name),
@@ -434,30 +407,15 @@ async function declarationPane(name, params) {
   // wrong sentence about the records everything else moves with.
   const movedBy = declaration.moved_by || [];
   if (declaration.kind !== 'fact') {
-    // The dial values, for the setting leaves below: fetched only when this
-    // declaration reads a dial, and joined here by name — the joining is
-    // structure (which value sits on which line), the values themselves are
-    // the server's, rendered.
-    let dials = null;
-    if (tenant() && movedBy.some((edge) => edge.type === 'setting')) {
-      const answer = await get(`tenants/${encodeURIComponent(tenant())}/dials`);
-      dials = answer.ok
-        ? new Map(answer.body.dials.map((dial) => [dial.name, dial]))
-        : 'failed';
-    }
     parts.push(el('h2', {}, 'Moved by'));
     if (movedBy.length) {
       parts.push(
         el('p', { class: 'prose' },
-          'A change to any of these records or dials can move this ',
-          declaration.kind, ' — nothing else can.',
-          dials
-            ? [' Dial values are tenant ',
-               el('span', { class: 'verbatim' }, tenant()), '’s, as served right now.']
-            : null),
-        el('ul', { class: 'tree' }, movedBy.map((edge) => leafLine(edge, dials))));
+          'A change to any of these records can move this ',
+          declaration.kind, ' — nothing else can.'),
+        el('ul', { class: 'tree' }, movedBy.map((edge) => leafLine(edge))));
     } else {
-      parts.push(el('p', { class: 'faint' }, 'Nothing — it reads no records and no dials.'));
+      parts.push(el('p', { class: 'faint' }, 'Nothing — it reads no records at all.'));
     }
   }
 
@@ -495,7 +453,7 @@ async function declarationPane(name, params) {
                     : '—'))))));
   } else {
     const structural = declaration.rests_on.filter(
-      (edge) => edge.type !== 'fact' && edge.type !== 'setting');
+      (edge) => edge.type !== 'fact');
     if (structural.length) {
       parts.push(el('h2', {}, 'Built from'),
         el('ul', { class: 'tree' }, structural.map((edge) => edgeLine(edge))));
@@ -1830,7 +1788,7 @@ async function activityView(params) {
 // The language's closed vocabularies, mirrored from the parser. Mirrored
 // rather than served because they are compile-time constants of the engine
 // build this page shipped inside -- the world-dependent lists (kinds, fields,
-// dials, declared names) DO arrive from the server, on /ui/api/source.
+// declared names) DO arrive from the server, on /ui/api/source.
 const FIG_DECLS = ['fact', 'group', 'filter', 'measure', 'figure', 'reading', 'projection', 'summarise', 'bundle'];
 const FIG_SECTIONS = {
   fact: ['name', 'url', 'one', 'many'],
@@ -1934,7 +1892,6 @@ async function editorView(params) {
   // figure drafted a minute ago completes inside the next one.
   const vocab = {
     kinds: page.kinds,
-    dials: page.dials,
     names: new Map(page.declarations.map((d) => [d.name, d.kind])),
   };
 
@@ -2336,8 +2293,7 @@ async function editorView(params) {
       list = (decl && decl.kw === 'projection' ? FIG_FIELD_TYPES : FIG_FACT_TYPES)
         .map((word) => [word, 'kw']);
     } else if (prev === 'in') {
-      list = [...vocab.dials.map((dial) => [dial, 'setting']),
-              ...FIG_UNITS.map((word) => [word, 'kw'])];
+      list = FIG_UNITS.map((word) => [word, 'kw']);
     } else if (prev === 'from' || prev === 'over') {
       list = ownLine && (decl.kw === 'group' || decl.kw === 'filter')
         ? fieldsOf(kindOf)
@@ -2357,8 +2313,7 @@ async function editorView(params) {
         list = [...(kindOf ? fieldsOf(kindOf) : []), ...namesOf('figure', 'measure')];
       }
     } else if (prefix.includes('.')) {
-      list = [...vocab.dials.map((dial) => [dial, 'setting']),
-              ...[...vocab.names].map(([name, kind]) => [name, kind]),
+      list = [...[...vocab.names].map(([name, kind]) => [name, kind]),
               ...kindPaths()];
     } else if (prefix.length >= 2) {
       list = [...(kindOf ? fieldsOf(kindOf) : []),

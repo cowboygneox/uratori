@@ -423,13 +423,16 @@ def test_a_presence_test_answers_before_the_null_guard() -> None:
     nothing = Condition(left=Part(name="x"), op="nothing")
     something = Condition(left=Part(name="x"), op="something")
 
-    assert holds(nothing, {"x": None}, DEFAULTS, 0.0) is True
-    assert holds(something, {"x": None}, DEFAULTS, 0.0) is False
-    assert holds(nothing, {"x": 3.0}, DEFAULTS, 0.0) is False
-    assert holds(something, {"x": 3.0}, DEFAULTS, 0.0) is True
+    assert holds(nothing, {"x": None}, 0.0) is True
+    assert holds(something, {"x": None}, 0.0) is False
+    assert holds(nothing, {"x": 3.0}, 0.0) is False
+    assert holds(something, {"x": 3.0}, 0.0) is True
 
     # And an ordinary comparison against an unknown is still unknown.
-    assert holds(Condition(left=Part(name="x"), op=">=", right=Number(value=1)), {"x": None}, DEFAULTS, 0.0) is None
+    assert (
+        holds(Condition(left=Part(name="x"), op=">=", right=Number(value=1)), {"x": None}, 0.0)
+        is None
+    )
 
 
 def test_an_unsorted_row_goes_last_in_either_direction() -> None:
@@ -750,7 +753,7 @@ def test_an_unknown_does_not_count_towards_a_summary() -> None:
         ProjectedRow(id="b", values={"n": None}, units={}, flags=(), sort_key=None),
         ProjectedRow(id="c", values={"n": 1.0}, units={}, flags=(), sort_key=None),
     ]
-    assert summarise(plan, rows, DEFAULTS, 0.0).values["big"] == 1.0
+    assert summarise(plan, rows, 0.0).values["big"] == 1.0
 
 
 def test_an_unknown_contribution_makes_a_whole_total_absent() -> None:
@@ -770,10 +773,10 @@ def test_an_unknown_contribution_makes_a_whole_total_absent() -> None:
         ProjectedRow(id="a", values={"n": 2.0}, units={}, flags=(), sort_key=None),
         ProjectedRow(id="b", values={"n": 3.0}, units={}, flags=(), sort_key=None),
     ]
-    assert summarise(plan, complete, DEFAULTS, 0.0).values["all"] == 5.0
+    assert summarise(plan, complete, 0.0).values["all"] == 5.0
 
     gap = [*complete, ProjectedRow(id="c", values={"n": None}, units={}, flags=(), sort_key=None)]
-    assert summarise(plan, gap, DEFAULTS, 0.0).values["all"] is None
+    assert summarise(plan, gap, 0.0).values["all"] is None
 
 
 # -------------------------------------------------------- sub-day grouping --
@@ -1313,7 +1316,7 @@ def test_a_coarse_bucket_holds_the_records_of_its_own_period_directly() -> None:
 
 async def _figure_store(figure, index_name, rows):  # type: ignore[no-untyped-def]
     store = MemoryEngineStore()
-    stamp = fingerprint(dict(DEFAULTS), list(figure.settings))
+    stamp = fingerprint(dict(DEFAULTS), [])
     await store.set_pointer(
         "t1", figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
     )
@@ -1342,7 +1345,7 @@ async def test_a_sub_day_figures_windows_are_positions_in_its_own_sequence() -> 
         ),
     )
     at = 1_756_036_800_000.0  # 2025-08-24T12:00Z, exactly 05:00 in Los Angeles
-    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, ["1-96"], at_ms=at, facts=LA)
+    result = await serve_reading(store, GRAINED, "t1", reading, ["1-96"], at_ms=at, facts=LA)
     assert isinstance(result.state, Ok)
     [window] = result.subjects[0].windows
     assert (window.frm, window.to) == ("2025-08-23T05:15", "2025-08-24T05:00")
@@ -1364,7 +1367,7 @@ async def test_a_failed_floor_withholds_the_series_with_everything_else() -> Non
     assert figure is not None and reading is not None
 
     tenant = "t1"
-    stamp = fingerprint(dict(DEFAULTS), list(figure.settings))
+    stamp = fingerprint(dict(DEFAULTS), [])
     await store.set_pointer(
         tenant, figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
     )
@@ -1374,7 +1377,7 @@ async def test_a_failed_floor_withholds_the_series_with_everything_else() -> Non
     )
 
     at = 1_756_036_800_000.0  # 2025-08-24T12:00Z
-    result = await serve_reading(store, GRAINED, tenant, reading, DEFAULTS, [7], at_ms=at, facts=LA)
+    result = await serve_reading(store, GRAINED, tenant, reading, [7], at_ms=at, facts=LA)
 
     assert isinstance(result.state, Ok)
     window = result.subjects[0].windows[0]
@@ -1400,8 +1403,7 @@ async def test_a_month_window_pools_the_months_own_buckets() -> None:
             ("p1@2026-02", 9.0),  # one month beyond the span: out
         ),
     )
-    result = await serve_reading(
-        store, GRAINED, "t1", reading, DEFAULTS, [6], at_day="2026-08-15"
+    result = await serve_reading(store, GRAINED, "t1", reading, [6], at_day="2026-08-15"
     )
     assert isinstance(result.state, Ok)
     [window] = result.subjects[0].windows
@@ -1429,8 +1431,7 @@ async def test_each_serves_one_window_per_bucket_with_every_rule_per_window() ->
             ("p1@2026-06", [86_400.0, 172_800.0]),
         ),
     )
-    sugared = await serve_reading(
-        store, GRAINED, "t1", reading, DEFAULTS, ["each:1-3"], at_day="2026-08-15"
+    sugared = await serve_reading(store, GRAINED, "t1", reading, ["each:1-3"], at_day="2026-08-15"
     )
     august, july, june = sugared.subjects[0].windows
     # Bucket 1's one-bucket window spells canonically as the trailing "1".
@@ -1440,15 +1441,13 @@ async def test_each_serves_one_window_per_bucket_with_every_rule_per_window() ->
     assert july.mean is None and july.unmet, "an empty month must fall short on its own"
     assert june.mean == 129_600.0
 
-    spelled = await serve_reading(
-        store, GRAINED, "t1", reading, DEFAULTS, ["1", "2-2", "3-3"], at_day="2026-08-15"
+    spelled = await serve_reading(store, GRAINED, "t1", reading, ["1", "2-2", "3-3"], at_day="2026-08-15"
     )
     assert sugared.subjects[0].windows == spelled.subjects[0].windows
 
     # The pooled control: `over 3` is ONE window over the same buckets, so
     # the distinction each exists for is visible in the answer.
-    pooled = await serve_reading(
-        store, GRAINED, "t1", reading, DEFAULTS, [3], at_day="2026-08-15"
+    pooled = await serve_reading(store, GRAINED, "t1", reading, [3], at_day="2026-08-15"
     )
     [window] = pooled.subjects[0].windows
     assert window.mean == 115_200.0, "the pooled mean runs over all three records"
@@ -1468,8 +1467,7 @@ async def test_a_quarter_window_walks_calendar_quarters_across_the_year() -> Non
             ("p1@2025-Q2", 8.0),  # position 4: out
         ),
     )
-    result = await serve_reading(
-        store, GRAINED, "t1", reading, DEFAULTS, ["2-3"], at_day="2026-02-10"
+    result = await serve_reading(store, GRAINED, "t1", reading, ["2-3"], at_day="2026-02-10"
     )
     [window] = result.subjects[0].windows
     assert (window.frm, window.to) == ("2025-Q3", "2025-Q4")
@@ -1494,7 +1492,7 @@ async def test_an_hour_figure_serves_the_last_hours_of_its_own_sequence() -> Non
         ),
     )
     at = 1_756_036_800_000.0  # 05:00 in Los Angeles
-    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, [4], at_ms=at, facts=LA)
+    result = await serve_reading(store, GRAINED, "t1", reading, [4], at_ms=at, facts=LA)
     [window] = result.subjects[0].windows
     assert (window.frm, window.to) == ("2025-08-24T02:00", "2025-08-24T05:00")
     assert (window.span, window.bucket, window.trailing) == ("4", "hour", None)
@@ -1520,8 +1518,7 @@ async def test_a_sparse_window_carries_its_buckets_because_edges_cannot() -> Non
             ("p1@2026-02-02", [777.0]),  # position 7: out
         ),
     )
-    result = await serve_reading(
-        store, GRAINED, "t1", reading, DEFAULTS, [6], at_day="2026-08-28"
+    result = await serve_reading(store, GRAINED, "t1", reading, [6], at_day="2026-08-28"
     )
     [window] = result.subjects[0].windows
     assert window.bucket == "first monday of month"
@@ -1551,8 +1548,7 @@ async def test_fifth_monday_windows_pool_only_the_buckets_that_exist() -> None:
             ("p1@2026-06-29", 3.0),
         ),
     )
-    result = await serve_reading(
-        store, GRAINED, "t1", reading, DEFAULTS, [3], at_day="2026-09-01"
+    result = await serve_reading(store, GRAINED, "t1", reading, [3], at_day="2026-09-01"
     )
     [window] = result.subjects[0].windows
     assert window.buckets == ["2026-03-30", "2026-06-29", "2026-08-31"]
@@ -1596,16 +1592,15 @@ async def test_a_month_figure_agrees_with_the_day_figure_over_the_same_days() ->
     )
 
     months = await serve_reading(
-        month_store, GRAINED, "t1", month_reading, DEFAULTS, [6], at_day="2026-08-28"
+        month_store, GRAINED, "t1", month_reading, [6], at_day="2026-08-28", facts=LA
     )
     # 2026-03-01 .. 2026-08-28 inclusive is 181 days.
     days = await serve_reading(
-        day_store, READINGS, "t1", day_reading, DEFAULTS, [181], at_day="2026-08-28"
+        day_store, READINGS, "t1", day_reading, [181], at_day="2026-08-28", facts=LA
     )
     assert months.subjects[0].windows[0].mean == days.subjects[0].windows[0].mean == 25.0
 
-    control = await serve_reading(
-        day_store, READINGS, "t1", day_reading, DEFAULTS, [180], at_day="2026-08-28"
+    control = await serve_reading(day_store, READINGS, "t1", day_reading, [180], at_day="2026-08-28"
     )
     assert control.subjects[0].windows[0].mean == 30.0, (
         "the control window drops 1 March; agreeing anyway would mean the "
@@ -1691,7 +1686,7 @@ async def test_an_anchor_day_ends_the_windows_in_the_readings_own_zone() -> None
     assert figure is not None and reading is not None
 
     tenant = "t1"
-    stamp = fingerprint(dict(DEFAULTS), list(figure.settings))
+    stamp = fingerprint(dict(DEFAULTS), [])
     await store.set_pointer(
         tenant, figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
     )
@@ -1704,13 +1699,7 @@ async def test_an_anchor_day_ends_the_windows_in_the_readings_own_zone() -> None
     ):
         await store.save(tenant, figure.name, figure.version, subject, values, (), "P One")
 
-    result = await serve_reading(
-        store,
-        READINGS,
-        tenant,
-        reading,
-        DEFAULTS,
-        [7],
+    result = await serve_reading(store, READINGS, tenant, reading, [7],
         at_day="2025-08-24",
         facts=_calendars({"p1": "America/Los_Angeles"}),
     )
@@ -1745,7 +1734,7 @@ async def test_a_declared_floor_and_band_apply_unchanged_under_an_anchor() -> No
     assert figure is not None and reading is not None
 
     tenant = "t1"
-    stamp = fingerprint(dict(DEFAULTS), list(figure.settings))
+    stamp = fingerprint(dict(DEFAULTS), [])
     await store.set_pointer(
         tenant, figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
     )
@@ -1757,16 +1746,14 @@ async def test_a_declared_floor_and_band_apply_unchanged_under_an_anchor() -> No
     ):
         await store.save(tenant, figure.name, figure.version, subject, values, (), "P One")
 
-    short = await serve_reading(
-        store, READINGS, tenant, reading, DEFAULTS, [7], at_day="2025-08-23"
+    short = await serve_reading(store, READINGS, tenant, reading, [7], at_day="2025-08-23"
     )
     window = short.subjects[0].windows[0]
     assert window.unmet, "two values against a floor of three should have fallen short"
     assert window.mean is None
     assert window.level == "unknown"
 
-    met = await serve_reading(
-        store, READINGS, tenant, reading, DEFAULTS, [7], at_day="2025-08-24"
+    met = await serve_reading(store, READINGS, tenant, reading, [7], at_day="2025-08-24"
     )
     window = met.subjects[0].windows[0]
     assert window.unmet == []
@@ -1788,7 +1775,7 @@ async def test_a_sub_day_reading_under_an_anchor_ends_in_the_anchor_days_last_bu
     assert figure is not None and reading is not None
 
     tenant = "t1"
-    stamp = fingerprint(dict(DEFAULTS), list(figure.settings))
+    stamp = fingerprint(dict(DEFAULTS), [])
     await store.set_pointer(
         tenant, figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
     )
@@ -1801,8 +1788,7 @@ async def test_a_sub_day_reading_under_an_anchor_ends_in_the_anchor_days_last_bu
     ):
         await store.save(tenant, figure.name, figure.version, subject, value, (), "P One")
 
-    result = await serve_reading(
-        store, GRAINED, tenant, reading, DEFAULTS, [7], at_day="2025-08-24"
+    result = await serve_reading(store, GRAINED, tenant, reading, [7], at_day="2025-08-24"
     )
 
     assert isinstance(result.state, Ok)
@@ -1824,7 +1810,7 @@ async def test_a_sub_day_reading_under_an_anchor_ends_in_the_anchor_days_last_bu
 
 async def _day_reading_store(figure, days):  # type: ignore[no-untyped-def]
     store = MemoryEngineStore()
-    stamp = fingerprint(dict(DEFAULTS), list(figure.settings))
+    stamp = fingerprint(dict(DEFAULTS), [])
     await store.set_pointer(
         "t1", figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
     )
@@ -1836,7 +1822,7 @@ async def _day_reading_store(figure, days):  # type: ignore[no-untyped-def]
 
 async def _quarter_store(figure, buckets):  # type: ignore[no-untyped-def]
     store = MemoryEngineStore()
-    stamp = fingerprint(dict(DEFAULTS), list(figure.settings))
+    stamp = fingerprint(dict(DEFAULTS), [])
     await store.set_pointer(
         "t1", figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
     )
@@ -1866,8 +1852,7 @@ async def test_offset_buckets_partition_the_days_with_no_overlap_and_no_gap() ->
         ),
     )
 
-    result = await serve_reading(
-        store, READINGS, "t1", reading, DEFAULTS, ["1-3", "4-6"], at_day="2025-08-24"
+    result = await serve_reading(store, READINGS, "t1", reading, ["1-3", "4-6"], at_day="2025-08-24"
     )
     near, far = result.subjects[0].windows
     assert (near.frm, near.to) == ("2025-08-22", "2025-08-24")
@@ -1892,8 +1877,7 @@ async def test_a_bare_number_and_its_explicit_span_are_one_window() -> None:
     )
     served = []
     for spelling in (3, "1-3"):
-        result = await serve_reading(
-            store, READINGS, "t1", reading, DEFAULTS, [spelling], at_day="2025-08-24"
+        result = await serve_reading(store, READINGS, "t1", reading, [spelling], at_day="2025-08-24"
         )
         served.append(result.subjects[0].windows[0])
     bare, explicit = served
@@ -1918,8 +1902,7 @@ async def test_the_floor_and_band_hold_per_bucket_not_per_request() -> None:
             ("p1@2025-08-20", [86_400.0]),  # the far bucket's only value
         ),
     )
-    result = await serve_reading(
-        store, READINGS, "t1", reading, DEFAULTS, ["1-3", "4-6"], at_day="2025-08-24"
+    result = await serve_reading(store, READINGS, "t1", reading, ["1-3", "4-6"], at_day="2025-08-24"
     )
     near, far = result.subjects[0].windows
     assert near.unmet == [] and near.mean == 172_800.0 and near.level == "ok"
@@ -1946,7 +1929,7 @@ async def test_a_bare_number_is_positions_in_the_figures_own_sequence() -> None:
         ),
     )
     at = 1_756_036_800_000.0  # exactly 05:00 in Los Angeles
-    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, [2], at_ms=at, facts=LA)
+    result = await serve_reading(store, GRAINED, "t1", reading, [2], at_ms=at, facts=LA)
     [window] = result.subjects[0].windows
     assert (window.frm, window.to) == ("2025-08-24T04:45", "2025-08-24T05:00")
     assert (window.span, window.bucket, window.trailing) == ("2", "15 minutes", None)
@@ -1965,8 +1948,7 @@ async def test_unit_suffixed_window_tokens_are_refused_at_the_serving_door() -> 
     store = await _day_reading_store(figure, ())
     for token in ("1-48h", "1-90m", "30d"):
         with pytest.raises(WindowError, match="retired"):
-            await serve_reading(
-                store, READINGS, "t1", reading, DEFAULTS, [token], at_day="2025-08-24"
+            await serve_reading(store, READINGS, "t1", reading, [token], at_day="2025-08-24"
             )
 
 
@@ -1981,8 +1963,7 @@ async def test_a_calendar_edge_anchor_answers_at_every_grain_and_span_shape() ->
     pace = READINGS.reading("team_person.pace")
     assert figure is not None and pace is not None
     store = await _day_reading_store(figure, ())
-    result = await serve_reading(
-        store, READINGS, "t1", pace, DEFAULTS, [7], at_day="9999-12-31"
+    result = await serve_reading(store, READINGS, "t1", pace, [7], at_day="9999-12-31"
     )
     assert result.empty is not None
     assert result.empty.windows[0].to == "9999-12-31"
@@ -1992,8 +1973,7 @@ async def test_a_calendar_edge_anchor_answers_at_every_grain_and_span_shape() ->
     assert quarter_figure is not None and throughput is not None
     grained_store = await _quarter_store(quarter_figure, ())
     for windows in (["2-4"], [7]):
-        result = await serve_reading(
-            grained_store, GRAINED, "t1", throughput, DEFAULTS, windows, at_day="9999-12-31"
+        result = await serve_reading(grained_store, GRAINED, "t1", throughput, windows, at_day="9999-12-31"
         )
         assert result.empty is not None
         far = result.empty.windows[0].to
@@ -2013,8 +1993,7 @@ async def test_a_calendar_edge_anchor_answers_at_every_grain_and_span_shape() ->
     ordinal_figure = GRAINED.figure("team_person.fifth_monday_volume")
     assert ordinal_reading is not None and ordinal_figure is not None
     ordinal_store = await _figure_store(ordinal_figure, "work_issue.by_fifth_monday", ())
-    answer = await serve_reading(
-        ordinal_store, GRAINED, "t1", ordinal_reading, DEFAULTS, [3], at_day="9999-12-31"
+    answer = await serve_reading(ordinal_store, GRAINED, "t1", ordinal_reading, [3], at_day="9999-12-31"
     )
     assert answer.empty is not None
     assert answer.empty.windows[0].bucket == "fifth monday of month"
@@ -2052,7 +2031,7 @@ async def test_a_minute_figure_serves_its_minutes_bucket_for_bucket() -> None:
     reading = GRAINED.reading("team_person.minute_typical")
     assert figure is not None and reading is not None
     store = MemoryEngineStore()
-    stamp = fingerprint(dict(DEFAULTS), list(figure.settings))
+    stamp = fingerprint(dict(DEFAULTS), [])
     await store.set_pointer(
         "t1", figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
     )
@@ -2065,7 +2044,7 @@ async def test_a_minute_figure_serves_its_minutes_bucket_for_bucket() -> None:
         await store.save("t1", figure.name, figure.version, subject, values, (), "P One")
 
     at = 1_756_036_800_000.0  # 05:00 in Los Angeles
-    result = await serve_reading(store, GRAINED, "t1", reading, DEFAULTS, [90], at_ms=at, facts=LA)
+    result = await serve_reading(store, GRAINED, "t1", reading, [90], at_ms=at, facts=LA)
     [window] = result.subjects[0].windows
     assert (window.frm, window.to) == ("2025-08-24T03:31", "2025-08-24T05:00")
     assert (window.span, window.bucket, window.trailing) == ("90", "minute", None)
@@ -2084,7 +2063,7 @@ async def test_a_duplicate_span_in_one_request_is_refused_across_spellings() -> 
     assert figure is not None and reading is not None
     store = await _day_reading_store(figure, ())
     with pytest.raises(WindowError, match="twice"):
-        await serve_reading(store, READINGS, "t1", reading, DEFAULTS, ["30", "1-30"])
+        await serve_reading(store, READINGS, "t1", reading, ["30", "1-30"])
 
 
 async def test_the_fetch_reaches_no_further_than_the_spans_it_serves() -> None:
@@ -2105,8 +2084,7 @@ async def test_the_fetch_reaches_no_further_than_the_spans_it_serves() -> None:
         return await original(tenant, name, version, frm, to)
 
     store.values_in_range = recording  # type: ignore[method-assign]
-    await serve_reading(
-        store, READINGS, "t1", reading, DEFAULTS, ["391-400"], at_day="2025-08-24"
+    await serve_reading(store, READINGS, "t1", reading, ["391-400"], at_day="2025-08-24"
     )
     [(frm, to)] = asked
     assert frm == "2024-07-21"
@@ -2137,8 +2115,7 @@ async def test_the_serving_door_refuses_a_reach_past_the_horizon_too() -> None:
     store = await _figure_store(figure, "work_issue.by_month", (("p1@2026-08", [86_400.0]),))
 
     with pytest.raises(WindowError) as refused:
-        await serve_reading(
-            store, GRAINED, "t1", reading, DEFAULTS, ["3000"], at_day="2026-08-15"
+        await serve_reading(store, GRAINED, "t1", reading, ["3000"], at_day="2026-08-15"
         )
     assert "3660" in str(refused.value)
     assert "month" in str(refused.value), (
@@ -2148,8 +2125,7 @@ async def test_the_serving_door_refuses_a_reach_past_the_horizon_too() -> None:
 
     # Inside the horizon, the same span shape answers -- so this is the
     # ceiling talking and not the coarse rule being refused outright.
-    answer = await serve_reading(
-        store, GRAINED, "t1", reading, DEFAULTS, ["118"], at_day="2026-08-15"
+    answer = await serve_reading(store, GRAINED, "t1", reading, ["118"], at_day="2026-08-15"
     )
     assert answer.subjects[0].windows[0].span == "118"
 
@@ -2175,8 +2151,7 @@ async def test_a_week_window_walks_iso_weeks_across_the_year_edge() -> None:
         ),
     )
 
-    answer = await serve_reading(
-        store, GRAINED, "t1", reading, DEFAULTS, ["each:1-2"], at_day="2025-12-31"
+    answer = await serve_reading(store, GRAINED, "t1", reading, ["each:1-2"], at_day="2025-12-31"
     )
     this_week, last_week = answer.subjects[0].windows
     assert (this_week.bucket, this_week.frm, this_week.to) == ("week", "2026-W01", "2026-W01")
@@ -2205,8 +2180,7 @@ async def test_a_span_that_resolves_to_no_bucket_says_so_rather_than_empty_strin
     assert figure is not None and reading is not None
     store = await _figure_store(figure, "work_issue.by_month", (("p1@2026-08", [86_400.0]),))
 
-    answer = await serve_reading(
-        store, GRAINED, "t1", reading, DEFAULTS, ["2-5"], at_day="0001-01-15"
+    answer = await serve_reading(store, GRAINED, "t1", reading, ["2-5"], at_day="0001-01-15"
     )
     window = (answer.empty or answer.subjects[0]).windows[0]
     assert window.frm is None and window.to is None, (
@@ -2219,8 +2193,7 @@ async def test_a_span_that_resolves_to_no_bucket_says_so_rather_than_empty_strin
     # The control: one month later there *is* a bucket, and the edges are it.
     # Without this the assertion above would also pass on a resolver that had
     # simply stopped resolving anything.
-    reachable = await serve_reading(
-        store, GRAINED, "t1", reading, DEFAULTS, ["1-2"], at_day="0001-03-15"
+    reachable = await serve_reading(store, GRAINED, "t1", reading, ["1-2"], at_day="0001-03-15"
     )
     edges = (reachable.empty or reachable.subjects[0]).windows[0]
     assert (edges.frm, edges.to) == ("0001-02", "0001-03")

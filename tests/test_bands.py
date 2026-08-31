@@ -33,13 +33,6 @@ from uratori.results import BundleResult, Result
 
 BANDS = Schema(
     kinds=frozenset(),
-    bucket_settings=("tenant.timezone",),
-    figure_settings=("limits.carrying.over",),
-    reading_settings=("limits.drops",),
-    defaults={
-        "tenant": {"timezone": "UTC", "hoursPerDay": 8},
-        "limits": {"carrying": {"over": 3}, "drops": {"good": 5, "poor": 1}},
-    },
 )
 
 WORLD = '''

@@ -156,7 +156,7 @@ curl -s -X PUT "$BASE/schema" -H "$AUTH" -H 'Content-Type: application/json' -d 
 
 Every field defaults to empty, `kinds` included: a host that declares its
 facts **in the definition language** (`fact shop_order:` -- see
-[the language guide](language.md)) PUTs a schema of settings and defaults
+[the language guide](language.md)) PUTs a schema of name and url fields
 alone, and the kinds, name fields and url fields derive from the source at
 `PUT /definitions`. Declaring both is refused at compile time -- one world,
 one door.
@@ -327,30 +327,6 @@ definition's meaning, and either is worth stopping a deploy for. Every
 The same `200` body for whatever is currently loaded; `409` while the server
 is untaught.
 
-### `PUT /tenants/{tenant}/settings`
-
-Store one tenant's dial document:
-
-```bash
-curl -s -X PUT "$BASE/tenants/t1/settings" -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"document": {"limits": {"carrying": {"over": 10}}}}'
-```
-
-Answers `200` `{"ok": true}`.
-
-The document is **sparse** -- only the dials an operator actually moved. The
-engine completes it over the schema's `defaults` at every use; storing it
-sparse keeps "an operator chose this" distinguishable from "the default
-reached through". A non-band node merges leaf by leaf (setting one dial does
-not unset its neighbours); a band node -- a thresholds object -- replaces
-whole.
-
-Saving settings deliberately does **not** run a pass. Values computed under
-the old dial keep serving (and a moved dial a figure names will report as
-`setting-moved` until recomputed); whether to pay for the rebuild now or let
-the next fact push carry it is the host's call, and
-`POST /tenants/{t}/runs` is how the host says *now*.
-
 ### `POST /tenants/{tenant}/facts`
 
 Apply one batch of fact movement and run the pass it implies. This is the
@@ -454,7 +430,7 @@ known/unknown, not required/optional.
 | `rebuilt` | Figure names rebuilt from scratch this pass (a moved dial, a redeploy, a deletion, `full`). A figure recomputed to the value it already held writes nothing and appears nowhere; `rebuilt` is how a rebuild and a no-op stay distinguishable from outside. |
 | `covered` | The fact kinds this pass actually read, sorted. A webhook covers almost nothing and a reconcile covers everything, and the difference says which values were *confirmed* unchanged rather than merely not checked. |
 | `shown` | A **ranked sample** of the movements, capped at 40, for an activity log. See below. |
-| `results` | The re-served answers for everything the pass moved -- plus, on any pass through the facts door or one that ran `full` (an empty batch counts: the door is the sync moment, not the batch's contents, and a standing import debt upgrades a run to `full`), every projection, because the clock is one of a projection's inputs and the sync is when that contract pays out. A definition-only pass (`POST /tenants/{t}/runs` after a deploy or a settings save) re-serves exactly what the change reached: the moved figures, the figures and readings whose band compares against a figure that moved (their own stored values are byte-identical; the word beside them is not), the figures and readings a moved dial re-renders (the effort dial), and the projections whose answer can differ -- a rebuilt grouping they filter through, a moved figure they read, their own text (or a summary's over them) having changed, or a dial they render under having turned. Every **bundle** any of those members sits in re-serves whole, at its declared windows, as a `BundleResult` in the same list -- branch on `kind`. A change that reaches none of that serves nothing. The same objects `GET /tenants/{t}/results` returns and the websocket pushes; there is no run-only shape to drift. (One spelling difference: HTTP responses write absent fields as `null`, the socket omits them -- treat both as absent.) Empty when the request said `"serve": false`. |
+| `results` | The re-served answers for everything the pass moved -- plus, on any pass through the facts door or one that ran `full` (an empty batch counts: the door is the sync moment, not the batch's contents, and a standing import debt upgrades a run to `full`), every projection, because the clock is one of a projection's inputs and the sync is when that contract pays out. A definition-only pass (`POST /tenants/{t}/runs` after a deploy) re-serves exactly what the change reached: the moved figures, the figures and readings whose band compares against a figure that moved (their own stored values are byte-identical; the word beside them is not), and the projections whose answer can differ -- a rebuilt grouping they filter through, a moved figure they read, or their own text (or a summary's over them) having changed. Every **bundle** any of those members sits in re-serves whole, at its declared windows, as a `BundleResult` in the same list -- branch on `kind`. A change that reaches none of that serves nothing. The same objects `GET /tenants/{t}/results` returns and the websocket pushes; there is no run-only shape to drift. (One spelling difference: HTTP responses write absent fields as `null`, the socket omits them -- treat both as absent.) Empty when the request said `"serve": false`. |
 | `moved` | Every definition name whose served answer this pass may have changed -- bundles included, computed without evaluating anything. A **superset** of what `results` re-serves, in exactly two ways: a summary's name appears here while its numbers travel inside its projection's `Result`, and a time-keyed or dimension-split figure appears here while the bulk surface leaves it to the by-name route -- both answer `GET /tenants/{t}/results/{name}` under the names listed. For the host that owns its own delivery (per-client subscriptions): send `"serve": false`, intersect `moved` with what your clients actually watch, and fetch exactly those by name at each watcher's own arguments. Carried on every response, not only lean ones. |
 
 `"serve": false` in the request body (facts and runs alike) skips *shipping*

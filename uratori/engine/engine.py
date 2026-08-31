@@ -17,8 +17,6 @@ from typing import Any
 
 from ..lang.ast import ByAge, Zone
 from ..lang.plan import CompiledIndex, FigurePlan, Library
-from ..lang.settings import fingerprint as settings_fingerprint
-from ..lang.settings import setting_value
 from ..lang.source import declaration_source
 from ..schema import Schema
 from ..store import EngineStore, FactSource
@@ -54,7 +52,6 @@ class Engine:
     async def run(
         self,
         tenant: str,
-        settings: Mapping[str, Any],
         *,
         written: Mapping[str, Sequence[str]] | None = None,
         deleted: Mapping[str, Sequence[str]] | None = None,
@@ -84,7 +81,7 @@ class Engine:
         if not lib.figures and not lib.indexes:
             return Outcome(changes=(), covered=frozenset(), reindexed=(), rebuilt=())
 
-        pending = await self._pending(tenant, settings)
+        pending = await self._pending(tenant)
         cold = bool(pending) or full
 
         # A figure notices its indexes changed because their specs are hashed
@@ -106,7 +103,7 @@ class Engine:
         # removed ones.
         built = await self._store.index_stamps(tenant)
         wanted = {
-            name: _index_stamp(idx, settings) for name, idx in lib.indexes.items()
+            name: _index_stamp(idx) for name, idx in lib.indexes.items()
         }
         if not built:
             # The one-time upgrade window: no per-index stamps yet, but a
@@ -122,11 +119,11 @@ class Engine:
                         await self._store.set_index_stamp(tenant, name, stamp)
                     built = dict(wanted)
                 await self._store.drop_legacy_index_set(tenant)
-        # Version OR fingerprint: the spec hash excludes settings, so an age
-        # filter or a zoned calendar grouping goes stale when its dial moves
-        # even though no declaration changed -- whether or not any figure
-        # reads it. This is what lets a settings save reach the groupings no
-        # pointer notices for, at the next pass, without rebuilding the rest.
+        # A grouping is stale when its own spec version moved -- which is the
+        # whole of what can change about how its buckets are cut, now that
+        # nothing in one reads a dial. It is compared per grouping rather than
+        # through the figures above, because a grouping nobody's figure reads
+        # (a filter kept for a projection) has no pointer to notice for it.
         stale = {name for name, stamp in wanted.items() if built.get(name) != stamp}
         for name in built:
             if name not in wanted:
@@ -156,23 +153,23 @@ class Engine:
                     {"unit": plan.unit, "scope": plan.scope, "depth": plan.depth},
                 )
             if full:
-                await self._reindex(tenant, settings, now_ms=now)
+                await self._reindex(tenant, now_ms=now)
                 reindexed = tuple(sorted(lib.indexes))
             elif stale:
-                await self._reindex(tenant, settings, only=stale, now_ms=now)
+                await self._reindex(tenant, only=stale, now_ms=now)
                 reindexed = tuple(sorted(stale))
-            changes.extend(await self._remove_departed(tenant, settings))
+            changes.extend(await self._remove_departed(tenant))
             only = None if full else {p.name for p in pending}
             # A cold pass **recomputes** rather than fills gaps: the reason it is
             # cold is that a definition or a dial moved, so the values that
             # already exist are exactly the ones that may now be wrong.
-            changes.extend(await self._backfill(tenant, settings, only=only, gaps_only=False))
+            changes.extend(await self._backfill(tenant, only=only, gaps_only=False))
             rebuilt = tuple(sorted(only)) if only is not None else tuple(p.name for p in lib.figures)
             for plan in lib.figures:
                 await self._store.set_pointer(
                     tenant,
                     plan.name,
-                    _pointer_for(plan, settings),
+                    _pointer_for(plan),
                 )
         else:
             if written or deleted:
@@ -181,7 +178,7 @@ class Engine:
                 # in the library, and a definition-only pass would pay those
                 # scans to apply an empty batch.
                 changes.extend(
-                    await self._apply(tenant, settings, written or {}, deleted or {}, now_ms=now)
+                    await self._apply(tenant, written or {}, deleted or {}, now_ms=now)
                 )
             if stale:
                 # A grouping moved with no figure pointer moving -- an index
@@ -194,7 +191,7 @@ class Engine:
                 # diffs a record's old buckets against its new ones to decide
                 # whose figures moved, and a rebuild beforehand would erase
                 # the "old" half of that comparison and silence the stream.
-                await self._reindex(tenant, settings, only=stale, now_ms=now)
+                await self._reindex(tenant, only=stale, now_ms=now)
                 reindexed = tuple(sorted(stale))
                 # A wholesale rebuild is diffless -- `replace_index` cannot
                 # say whose buckets moved -- so every figure reading a
@@ -219,7 +216,7 @@ class Engine:
                 if healed:
                     changes.extend(
                         await self._backfill(
-                            tenant, settings, only=healed, gaps_only=False
+                            tenant, only=healed, gaps_only=False
                         )
                     )
                     rebuilt = tuple(sorted(healed))
@@ -229,7 +226,7 @@ class Engine:
                 # deleted between reconciles keeps every value they had, and the
                 # change stream says nothing. The scan is skipped entirely when
                 # nothing was deleted, which is every ordinary sync.
-                changes.extend(await self._remove_departed(tenant, settings))
+                changes.extend(await self._remove_departed(tenant))
             if written is not None or deleted is not None:
                 # The gap sweep runs on every pass through the facts door --
                 # `is not None`, the same rule the facade's sync gate uses,
@@ -241,7 +238,7 @@ class Engine:
                 # pass; an embedding host that mutates its FactSource out of
                 # band and polls a bare run() must reconcile with `written=`
                 # or `full` -- see `Uratori.run`.
-                changes.extend(await self._backfill(tenant, settings))
+                changes.extend(await self._backfill(tenant))
 
         # **Extension on every pass.** The pass is the event that notices
         # time -- the clock itself never is one, which is the whole reason a
@@ -311,7 +308,7 @@ class Engine:
         if downstream:
             # Depth order is `_recompute`'s own, so a total is never computed
             # before the part it reads -- including a chain of them.
-            changes.extend(await self._recompute(tenant, settings, downstream))
+            changes.extend(await self._recompute(tenant, downstream))
 
         # `covered` is what the host re-dates evidence on, so it must name
         # the kinds this pass *read*, not the kinds the batch happened to
@@ -334,13 +331,13 @@ class Engine:
     # -------------------------------------------------------------- pending --
 
     async def _pending(
-        self, tenant: str, settings: Mapping[str, Any]
+        self, tenant: str
     ) -> list[FigurePlan]:
         held = await self._store.pointers(tenant)
         out: list[FigurePlan] = []
         for plan in self._library.figures:
             pointer = held.get(plan.name)
-            wanted = _pointer_for(plan, settings)
+            wanted = _pointer_for(plan)
             if (
                 pointer is None
                 or pointer.version != wanted.version
@@ -433,7 +430,6 @@ class Engine:
     async def _reindex(
         self,
         tenant: str,
-        settings: Mapping[str, Any],
         only: set[str] | None = None,
         *,
         now_ms: float,
@@ -453,7 +449,7 @@ class Engine:
             # mid-way leaves exactly the unbuilt ones stale, and the next
             # pass pays exactly the remaining debt.
             await self._store.set_index_stamp(
-                tenant, index.name, _index_stamp(index, settings)
+                tenant, index.name, _index_stamp(index)
             )
 
     # -------------------------------------------------------- incremental --
@@ -461,7 +457,6 @@ class Engine:
     async def _apply(
         self,
         tenant: str,
-        settings: Mapping[str, Any],
         written: Mapping[str, Sequence[str]],
         deleted: Mapping[str, Sequence[str]],
         *,
@@ -536,7 +531,7 @@ class Engine:
                     ):
                         touch(bucket, plan.name)
 
-        return await self._recompute(tenant, settings, touched)
+        return await self._recompute(tenant, touched)
 
     async def _mark(
         self,
@@ -588,7 +583,7 @@ class Engine:
                 touch(bucket, plan.name)
 
     async def _recompute(
-        self, tenant: str, settings: Mapping[str, Any], touched: Mapping[str, set[str]]
+        self, tenant: str, touched: Mapping[str, set[str]]
     ) -> list[Change]:
         """Recompute in `depth` order so a part is never computed after its total.
 
@@ -613,7 +608,7 @@ class Engine:
             # was written before the rollup's turn. Per-subject rebuilding is
             # the quadratic shape that turned a season-sized bulk load into
             # tens of minutes -- tests/test_pass_cost.py holds the line.
-            readers = await self._readers(tenant, plan, settings)
+            readers = await self._readers(tenant, plan)
             for subject in sorted(subjects):
                 change = await self._recompute_one(tenant, plan, subject, readers)
                 if change is None:
@@ -704,7 +699,7 @@ class Engine:
     # -------------------------------------------------------------- roster --
 
     async def _scopes_of(
-        self, tenant: str, plan: FigurePlan, settings: Mapping[str, Any]
+        self, tenant: str, plan: FigurePlan
     ) -> list[str]:
         """Every subject this figure should have a value for.
 
@@ -794,7 +789,7 @@ class Engine:
     # --------------------------------------------------------------- departed --
 
     async def _remove_departed(
-        self, tenant: str, settings: Mapping[str, Any]
+        self, tenant: str
     ) -> list[Change]:
         """Delete values whose subject no longer exists, **and report each one**.
 
@@ -861,7 +856,6 @@ class Engine:
     async def _backfill(
         self,
         tenant: str,
-        settings: Mapping[str, Any],
         only: set[str] | None = None,
         gaps_only: bool = True,
     ) -> list[Change]:
@@ -881,7 +875,7 @@ class Engine:
             have = set(await self._store.subjects(tenant, plan.name, plan.version))
             subjects = [
                 subject
-                for subject in await self._scopes_of(tenant, plan, settings)
+                for subject in await self._scopes_of(tenant, plan)
                 if not (gaps_only and subject in have)
             ]
             if not subjects:
@@ -889,7 +883,7 @@ class Engine:
             # Hoisted for the reason `_recompute` gives: the context is fixed
             # for the whole of a figure's turn, and a cold pass over a
             # season-sized tenant recomputes every subject there is.
-            readers = await self._readers(tenant, plan, settings)
+            readers = await self._readers(tenant, plan)
             for subject in subjects:
                 change = await self._recompute_one(tenant, plan, subject, readers)
                 if change is not None:
@@ -899,7 +893,7 @@ class Engine:
     # -------------------------------------------------------------- readers --
 
     async def _readers(
-        self, tenant: str, plan: FigurePlan, settings: Mapping[str, Any]
+        self, tenant: str, plan: FigurePlan
     ) -> Readers:
         bucket_cache: dict[tuple[str, str | None], frozenset[str]] = {}
 
@@ -992,8 +986,12 @@ class Engine:
                 values=tuple(v for _, v in held), subjects=tuple(s for s, _ in held)
             )
 
-        def read_setting(path: str) -> float:
-            return float(setting_value(dict(settings), path))
+        def read_setting(path: str) -> float:  # pragma: no cover - no plan holds one
+            raise KeyError(
+                f'"{path}" is a settings dial, and no compiled definition can name one: '
+                "a threshold is a figure or a literal, a calendar is a field on a "
+                "record. Reaching here means the checker let one through."
+            )
 
         def read_field(kind: str, path: str, member: str) -> float | None:
             record = records.get(kind, {}).get(member)
@@ -1122,11 +1120,9 @@ def _index_version(index: CompiledIndex) -> str:
 
     The same `_index_hash` a figure's version is built from, so the two ways
     of noticing an index changed cannot disagree about what "changed" means.
-    Prose (a label) is not in it. Settings are not either, and that is safe
-    because a settings move reaches the dialled groupings through the pending
-    figures that read them (the cold pass's `dialled` set), and the checker
-    refuses age and fan-out indexes to a projection's `from` -- the one
-    reader with no figure to notice for it.
+    Prose (a label) is not in it, and nothing else needs to be: a grouping
+    reads no dial, so a spec version is the whole of what can change about
+    how its buckets are cut.
     """
     from ..lang.check import _index_hash  # local import: avoids a cycle at import time
     from ..lang.hash import version_of
@@ -1134,31 +1130,21 @@ def _index_version(index: CompiledIndex) -> str:
     return version_of(_index_hash(index))
 
 
-def _index_dials(index: CompiledIndex) -> list[str]:
-    """The dials this grouping's buckets can move with -- none, now.
+def _index_stamp(index: CompiledIndex) -> Any:
+    """What a grouping's buckets are built under.
 
-    An age threshold is a number in the definition or a field on the record's
-    owner, and a calendar is a field on the subject's record. Both move with
-    *records*, and a record moving is what the change stream and the
-    through-kind escalation already notice; a settings fingerprint would be
-    watching a document nothing in a grouping reads.
-
-    Kept as a function rather than deleted so the stamp keeps its shape while
-    the settings document still exists at the door.
+    A figure pointer's two-part discipline, applied to membership: the spec
+    version, and a fingerprint of what else could move the buckets. The
+    second part is empty now -- an age threshold is a number in the
+    definition or a field on the record's owner, and a calendar is a field on
+    the subject's record, so both move with *records*, which the change
+    stream and the through-kind escalation already notice. It stays in the
+    shape because it is a stored column, and a constant is cheaper than a
+    migration for a word.
     """
-    return []
-
-
-def _index_stamp(index: CompiledIndex, settings: Mapping[str, Any]) -> Any:
-    """What a grouping's buckets are built under: spec version plus a
-    fingerprint of the dials the spec reads -- a figure pointer's two-part
-    discipline, applied to membership."""
     from ..store import Pointer
 
-    return Pointer(
-        version=_index_version(index),
-        settings_fingerprint=settings_fingerprint(dict(settings), _index_dials(index)),
-    )
+    return Pointer(version=_index_version(index), settings_fingerprint="")
 
 
 def _versions_if_legacy_current(legacy: str | None, library: Library) -> dict[str, str] | None:
@@ -1187,13 +1173,16 @@ def _index_set_version(library: Library) -> str:
     return version_of([[name, _index_hash(idx)] for name, idx in sorted(library.indexes.items())])
 
 
-def _pointer_for(plan: FigurePlan, settings: Mapping[str, Any]) -> Any:
+def _pointer_for(plan: FigurePlan) -> Any:
+    """What a figure's stored values were computed under.
+
+    The version alone. The fingerprint beside it covered the dials the
+    calculation named, and a definition names none: what a stored value now
+    depends on is facts, and a fact moving is a change the stream carries.
+    """
     from ..store import Pointer
 
-    return Pointer(
-        version=plan.version,
-        settings_fingerprint=settings_fingerprint(dict(settings), list(plan.settings)),
-    )
+    return Pointer(version=plan.version, settings_fingerprint="")
 
 
 def _now_ms() -> float:

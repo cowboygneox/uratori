@@ -145,7 +145,7 @@ async def _ready(store: MemoryEngineStore, name: str) -> None:
 async def _evidence(store: MemoryEngineStore, facts: MemoryFactStore, name: str, subject: str) -> Any:
     plan = LIB.figure(name)
     assert plan is not None
-    return await serve_evidence(store, facts, LIB, WORLD, TENANT, plan, DEFAULTS, subject)
+    return await serve_evidence(store, facts, LIB, WORLD, TENANT, plan, subject)
 
 
 async def test_each_member_carries_its_record_and_its_own_measurement() -> None:
@@ -720,7 +720,7 @@ async def test_a_kind_with_no_declared_url_field_serves_no_links() -> None:
 
     unlinked = replace(WORLD, url_fields={})
     evidence = await serve_evidence(
-        store, facts, LIB, unlinked, TENANT, plan, DEFAULTS, "p1@2026-08-20"
+        store, facts, LIB, unlinked, TENANT, plan, "p1@2026-08-20"
     )
 
     (member,) = evidence.members
@@ -871,7 +871,7 @@ figure team_person.context_gap bucketed:
     facts.put(TENANT, "work_issue", "i1", {"title": "Live incident"})
     facts.put(TENANT, "code_change", "c1", {"title": "Fix the parser"})
 
-    evidence = await serve_evidence(store, facts, mixed, WORLD, TENANT, plan, DEFAULTS, "p1")
+    evidence = await serve_evidence(store, facts, mixed, WORLD, TENANT, plan, "p1")
 
     assert evidence is not None
     assert evidence.kind is None
@@ -900,7 +900,7 @@ async def test_a_kind_with_no_name_field_serves_bare_keys_still_held() -> None:
 
     nameless = replace(WORLD, name_fields={}, url_fields={})
     evidence = await serve_evidence(
-        store, facts, LIB, nameless, TENANT, plan, DEFAULTS, "p1@2026-08-20"
+        store, facts, LIB, nameless, TENANT, plan, "p1@2026-08-20"
     )
 
     (member,) = evidence.members
@@ -945,7 +945,7 @@ figure team_person.rework_effort:
     )
     await store.save(TENANT, plan.name, plan.version, "p1", 0.25, ("p1",), "Aki")
 
-    evidence = await serve_evidence(store, facts, smaller, WORLD, TENANT, plan, DEFAULTS, "p1")
+    evidence = await serve_evidence(store, facts, smaller, WORLD, TENANT, plan, "p1")
 
     assert evidence is not None
     assert evidence.parts is True

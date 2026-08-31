@@ -32,12 +32,6 @@ from uratori.results import BundleResult, Result
 WORLD = Schema(
     kinds=frozenset({"shop_order", "shop_courier", "shop_review", "shop_limit"}),
     name_fields={"shop_courier": "name", "shop_order": "ref", "shop_review": "ref"},
-    bucket_settings=("tenant.timezone",),
-    figure_settings=("limits.spare",),
-    defaults={
-        "tenant": {"hoursPerDay": 8, "timezone": "UTC"},
-        "limits": {"spare": 1},
-    },
 )
 
 SOURCE = """
@@ -486,35 +480,6 @@ async def test_serve_false_reports_what_moved_without_evaluating_answers() -> No
     settled = await redeployed.run("t1")
     assert settled.moved == frozenset(), (
         "the edit was reported once and must not be reported again"
-    )
-
-
-async def test_a_settings_save_now_re_serves_nothing_at_all() -> None:
-    """This was the effort dial's test: `format_value` divided an effort by
-    `tenant.hoursPerDay` on the way to every `display`, so moving it re-worded
-    the effort figure and the projection rendering the same efforts, while no
-    stored value moved anywhere. It was the last dial with that shape.
-
-    An effort renders in hours now, so there is nothing left for a settings
-    document to reach -- and the assertion inverts. It is worth keeping in
-    that form: the serve stamps still exist, and a stamp that started
-    fingerprinting a document nothing reads would re-serve the world on every
-    save, which is the fixed tail they were built to replace.
-    """
-    engine, facts = _engine()
-    facts.put(
-        "t1",
-        "shop_order",
-        "e1",
-        {"ref": "E-1", "courier_id": "c1", "status": "riding", "lug_seconds": 28800},
-    )
-    await _settled(engine, facts)
-
-    report = await engine.run("t1", {"tenant": {"hoursPerDay": 4}})
-
-    assert _results(report.results) == {}, (
-        "a settings save re-served something, so a definition or a renderer "
-        "still reads a dial"
     )
 
 

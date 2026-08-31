@@ -30,7 +30,6 @@ from ..lang.ast import (
     Text,
 )
 from ..lang.plan import ProjectPlan, SummarisePlan, Value
-from ..lang.settings import setting_value
 from .buckets import days_between, parse_instant, read_number, read_path
 from .evaluate import _arith, _compare  # one implementation of each, shared deliberately
 
@@ -69,7 +68,6 @@ def project(
     # row's evaluation depend on every definition on the board.
     figures: Mapping[tuple[str, bool], Value],
     joins: Mapping[tuple[str, str], Mapping[str, list[Mapping[str, Any]]]],
-    settings: Mapping[str, Any],
     at_ms: float,
 ) -> ProjectedRow | None:
     """One record's row, or None when the plan's `omit` gate holds for it.
@@ -109,10 +107,10 @@ def project(
             moments[name] = held if isinstance(held, (int, float)) else None
 
     for name, expr, unit in plan.values:
-        values[name] = _eval(expr, values, moments, settings, at_ms)
+        values[name] = _eval(expr, values, moments, at_ms)
         units[name] = unit
 
-    if plan.omit is not None and holds(plan.omit, values, settings, at_ms) is True:
+    if plan.omit is not None and holds(plan.omit, values, at_ms) is True:
         # `is True`, never `is not False`: `holds` answers three ways, and a
         # gate the engine cannot answer keeps the row. A record that has not
         # been shown to satisfy the gate has not earned removal -- dropping on
@@ -124,7 +122,7 @@ def project(
     flags = tuple(
         rendered
         for flag in plan.flags
-        if (rendered := _flag(flag, values, units, settings, at_ms)) is not None
+        if (rendered := _flag(flag, values, units, at_ms)) is not None
     )
 
     sort_key: float | str | None = None
@@ -179,15 +177,18 @@ def _eval(
     e: CalcExpr,
     values: Mapping[str, Value],
     moments: Mapping[str, float | None],
-    settings: Mapping[str, Any],
     at_ms: float,
 ) -> Value:
     if isinstance(e, Number):
         return e.value
     if isinstance(e, Text):
         return e.value
-    if isinstance(e, Setting):
-        return float(setting_value(dict(settings), e.path))
+    if isinstance(e, Setting):  # pragma: no cover - the checker refuses one
+        raise KeyError(
+            f'"{e.path}" is a settings dial, and a projection cannot name one: a row '
+            "value's threshold is a figure bound with `read:`, or a number written "
+            "where the reader can see it."
+        )
     if isinstance(e, Part):
         return values.get(e.name)
     if isinstance(e, DaysBetween):
@@ -197,20 +198,20 @@ def _eval(
     if isinstance(e, Arith):
         return _arith(
             e.op,
-            _eval(e.left, values, moments, settings, at_ms),
-            _eval(e.right, values, moments, settings, at_ms),
+            _eval(e.left, values, moments, at_ms),
+            _eval(e.right, values, moments, at_ms),
         )
     if isinstance(e, Pick):
-        left = _eval(e.left, values, moments, settings, at_ms)
-        right = _eval(e.right, values, moments, settings, at_ms)
+        left = _eval(e.left, values, moments, at_ms)
+        right = _eval(e.right, values, moments, at_ms)
         if not isinstance(left, (int, float)) or not isinstance(right, (int, float)):
             return None
         return max(left, right) if e.which == "max" else min(left, right)
     if isinstance(e, Ladder):
         for rung in e.rungs:
-            left = _eval(rung.left, values, moments, settings, at_ms)
+            left = _eval(rung.left, values, moments, at_ms)
             right = (
-                _eval(rung.right, values, moments, settings, at_ms)
+                _eval(rung.right, values, moments, at_ms)
                 if rung.right is not None
                 else None
             )
@@ -218,8 +219,8 @@ def _eval(
             if verdict is None:
                 return None
             if verdict:
-                return _eval(rung.then, values, moments, settings, at_ms)
-        return _eval(e.otherwise, values, moments, settings, at_ms)
+                return _eval(rung.then, values, moments, at_ms)
+        return _eval(e.otherwise, values, moments, at_ms)
     # `count`, `list`, `sum` and an extreme are refused to a projection by the
     # checker: a projection aggregates nothing.
     raise AssertionError(f"{type(e).__name__} cannot appear in a projection")
@@ -228,12 +229,11 @@ def _eval(
 def holds(
     condition: Condition,
     values: Mapping[str, Value],
-    settings: Mapping[str, Any],
     at_ms: float,
 ) -> bool | None:
-    left = _eval(condition.left, values, {}, settings, at_ms)
+    left = _eval(condition.left, values, {}, at_ms)
     right = (
-        _eval(condition.right, values, {}, settings, at_ms)
+        _eval(condition.right, values, {}, at_ms)
         if condition.right is not None
         else None
     )
@@ -244,10 +244,9 @@ def _flag(
     flag: FlagDecl,
     values: Mapping[str, Value],
     units: Mapping[str, FigureUnit],
-    settings: Mapping[str, Any],
     at_ms: float,
 ) -> RenderedFlag | None:
-    if holds(flag.when, values, settings, at_ms) is not True:
+    if holds(flag.when, values, at_ms) is not True:
         # **An unknown does not fire.** A flag is a claim, and the engine having
         # no answer is not evidence for one.
         #
@@ -258,9 +257,9 @@ def _flag(
         return None
     return RenderedFlag(
         name=flag.name,
-        label=render(flag.label, values, units, settings),
-        detail=render(flag.detail, values, units, settings),
-        action=render(flag.action, values, units, settings) if flag.action else None,
+        label=render(flag.label, values, units),
+        detail=render(flag.detail, values, units),
+        action=render(flag.action, values, units) if flag.action else None,
         severity=flag.severity,
     )
 
@@ -269,7 +268,6 @@ def render(
     template: str,
     values: Mapping[str, Value],
     units: Mapping[str, FigureUnit],
-    settings: Mapping[str, Any],
 ) -> str:
     """Substitution and one plural form. Not a language.
 
@@ -296,7 +294,7 @@ def render(
             singular, _, plural = forms.partition(":")
             out.append(singular if _is_one(value) else plural)
         else:
-            out.append(format_value(value, units.get(name, "count"), settings))
+            out.append(format_value(value, units.get(name, "count")))
     return "".join(out)
 
 
@@ -304,12 +302,15 @@ def _is_one(value: Value) -> bool:
     return isinstance(value, (int, float)) and abs(float(value) - 1.0) < 1e-9
 
 
-def format_value(value: Value, unit: FigureUnit, settings: Mapping[str, Any]) -> str:
+def format_value(value: Value, unit: FigureUnit) -> str:
     """The one place a number becomes text.
 
-    Server-side because a browser that formats has to know the tenant's working
-    day, and a browser that knows the working day is one step from banding
-    against a threshold.
+    Server-side because formatting a quantity is a division, and a browser
+    dividing seconds into hours is one step from comparing them against a
+    threshold -- which is banding in two places, the failure `level` exists to
+    prevent. It took a settings document until an effort stopped being
+    rendered against a tenant's working day; there is nothing left for it to
+    read.
     """
     if value is None:
         return "—"
@@ -335,7 +336,7 @@ def format_value(value: Value, unit: FigureUnit, settings: Mapping[str, Any]) ->
         # proof surface is the one nobody reports.
         if not value:
             return "—"
-        return ", ".join(format_value(v, unit, settings) for v in value)
+        return ", ".join(format_value(v, unit) for v in value)
     if unit == "share":
         return f"{value * 100:.1f}%"
     if unit == "days":
@@ -402,7 +403,6 @@ class Summary:
 def summarise(
     plan: SummarisePlan,
     rows: Sequence[ProjectedRow],
-    settings: Mapping[str, Any],
     at_ms: float,
 ) -> Summary:
     """Aggregate **every** row, never the page.
@@ -420,7 +420,7 @@ def summarise(
         # has not measured is not evidence that the thing being counted is true.
         total = 0
         for row in rows:
-            if when is None or holds(when, row.values, settings, at_ms) is True:
+            if when is None or holds(when, row.values, at_ms) is True:
                 total += 1
         values[name] = float(total)
         units[name] = "count"
@@ -434,7 +434,7 @@ def summarise(
         running = 0.0
         unknown = False
         for row in rows:
-            if when is not None and holds(when, row.values, settings, at_ms) is not True:
+            if when is not None and holds(when, row.values, at_ms) is not True:
                 continue
             held = row.values.get(of)
             if held is None:
@@ -446,13 +446,13 @@ def summarise(
         units[name] = unit
 
     for name, expr, unit in plan.values:
-        values[name] = _eval(expr, values, {}, settings, at_ms)
+        values[name] = _eval(expr, values, {}, at_ms)
         units[name] = unit
 
     flags = tuple(
         rendered
         for flag in plan.flags
-        if (rendered := _flag(flag, values, units, settings, at_ms)) is not None
+        if (rendered := _flag(flag, values, units, at_ms)) is not None
     )
     return Summary(values=values, units=units, flags=flags)
 

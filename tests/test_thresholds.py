@@ -36,13 +36,6 @@ from uratori.results import Result
 
 DIALLED = Schema(
     kinds=frozenset(),
-    bucket_settings=("tenant.timezone",),
-    figure_settings=("limits.carrying.over",),
-    project_settings=("limits.busy",),
-    defaults={
-        "tenant": {"timezone": "UTC", "hoursPerDay": 8},
-        "limits": {"carrying": {"over": 3}, "busy": 2},
-    },
 )
 
 WORLD = '''

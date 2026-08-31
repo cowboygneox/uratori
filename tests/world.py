@@ -16,32 +16,15 @@ from typing import Any
 from uratori import Library, Schema
 from uratori import compile_source as _compile
 
-DEFAULTS: dict[str, Any] = {
-    "tenant": {"timezone": "America/Los_Angeles", "hoursPerDay": 8},
-    "thresholds": {
-        "staleChangeDays": 3,
-        "longWipDays": 14,
-        "draftGraceDays": 2,
-        "openChanges": {"warn": 3, "over": 6},
-        "wip": {"warn": 3, "over": 5},
-        "reviewQueue": {"warn": 4, "over": 8},
-    },
-    "windows": {"historyDays": 90},
-    "roadmap": {"atRiskVariance": -0.1, "offTrackVariance": -0.25, "stalledDays": 14},
-    "flow": {
-        "reviewLatencyDays": {"good": 2, "poor": 5},
-        "reviewResponseDays": {"good": 1, "poor": 3},
-        "leadTimeDays": {"good": 7, "poor": 21},
-        "pendingReviews": {"good": 3, "poor": 8},
-    },
-}
+DEFAULTS: dict[str, Any] = {}
+"""The settings document, and there is nothing in it.
 
-_AGE = (
-    "thresholds.staleChangeDays",
-    "thresholds.longWipDays",
-    "thresholds.draftGraceDays",
-    "windows.historyDays",
-)
+A definition names no dial: its thresholds are figures or literals, its
+calendars are fields on subjects' records, and an effort renders in hours.
+The name survives because the engine still *accepts* a document at its door
+-- a host mid-migration should find its old one inert rather than refused --
+and because a suite that passed nothing would not prove that.
+"""
 
 WORLD = Schema(
     kinds=frozenset(
@@ -77,32 +60,6 @@ WORLD = Schema(
         "work_container": "url",
         "code_change": "url",
     },
-    bucket_settings=("tenant.timezone", *_AGE),
-    figure_settings=(
-        "thresholds.openChanges.warn",
-        "thresholds.openChanges.over",
-        "thresholds.wip.warn",
-        "thresholds.wip.over",
-        "thresholds.reviewQueue.warn",
-        "thresholds.reviewQueue.over",
-    ),
-    reading_settings=(
-        "flow.reviewLatencyDays",
-        "flow.reviewResponseDays",
-        "flow.leadTimeDays",
-        "flow.pendingReviews",
-    ),
-    project_settings=(
-        "thresholds.longWipDays",
-        "thresholds.staleChangeDays",
-        "thresholds.wip.over",
-        "thresholds.openChanges.over",
-        "windows.historyDays",
-        "roadmap.atRiskVariance",
-        "roadmap.offTrackVariance",
-        "roadmap.stalledDays",
-    ),
-    defaults=DEFAULTS,
 )
 
 

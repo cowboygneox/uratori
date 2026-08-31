@@ -14,7 +14,7 @@ a screen.
 
 Definitions compile against a [`Schema`](concepts.md) -- the host's one-time
 declaration of which fact kinds exist, which field carries a record's name,
-and which settings dials a definition may read. Source reaches the engine
+and which field carries its link. Source reaches the engine
 over `PUT /definitions` (see [the HTTP API](http-api.md)), where a definition
 that does not compile is refused whole, in the checker's own words.
 
@@ -729,9 +729,9 @@ size, a measure over a set, a bound figure, another figure, a literal.
   one it names moves, and sorts after it. That is the difference from a band,
   which only re-words -- and it is why the two are tracked apart.
 
-  A dotted name that resolves to no figure is refused, and a **settings dial**
-  named here is refused by name with the rewrite. A definition's numbers come
-  from facts, or from what the definition says outright.
+  A dotted name that resolves to no figure is refused, and the refusal
+  carries the rewrite for the case that used to work: a definition's numbers
+  come from facts, or from what the definition says outright.
 
 ### The `when` ladder
 
@@ -1722,9 +1722,9 @@ over the row's own bindings, plus the one construct legal only here:
 **A threshold here is a `read:`**, not a dial. A row value or a flag
 condition comparing against a number that varies binds the figure holding it
 above and compares against that column; a number that does not vary is
-written where the reader can see it. A settings dial in either position is
-refused with the rewrite, for the reason a band's was: it moves which rows
-earn a flag with nothing in the row to say so.
+written where the reader can see it. A dotted name that names no figure is
+refused with the rewrite, for the reason a band's was: a dial moved which
+rows earned a flag with nothing in the row to say so.
 
 `days from <moment> to <moment>` is signed calendar days between two
 instants, either of which may be `now`. It is the clock, and the rule the
@@ -2028,16 +2028,17 @@ did not change -- keeps its version.
 
 ---
 
-## Settings dials
+## No settings
 
 A definition never contains a tenant's numbers. Where a number varies it is a
 **fact** -- a figure computed from the records that set it. Where it does not,
 it is written in the definition, visible to the reader and hashed into the
 version.
 
-**Nothing reads a dial.** The lists a schema declares are accepted so a host
-need not empty them to deploy, and each of them held one kind of number that
-is now a fact:
+**Nothing reads a dial, and there is nowhere left to set one.** The lists a
+schema declares are accepted and dropped, so a host need not empty them to
+deploy; `PUT /tenants/{t}/settings` is gone. Each list held one kind of
+number, and each of those is a fact now:
 
 | List | Held | Reads it now |
 |---|---|---|

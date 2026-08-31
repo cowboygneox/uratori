@@ -794,8 +794,11 @@ class _Checker:
                     f'figure {d.name}\'s band compares against "{name}", which is not a '
                     "figure declared before it. A band's threshold is a fact: a figure "
                     "computed from records, so the number that decides whether a reader "
-                    "should worry can be cited like every other number on the card. "
-                    f"Declared so far: {', '.join(f.name for f in self.figures) or 'none'}.",
+                    "should worry can be cited like every other number on the card. If "
+                    "this was a tenant dial, declare the goal as a figure over the "
+                    "records that set it -- carried forward if it is set once and left "
+                    "alone -- and name that figure here. Declared so far: "
+                    f"{', '.join(f.name for f in self.figures) or 'none'}.",
                     line,
                 )
             if source.scope != scope:
@@ -882,38 +885,9 @@ class _Checker:
                 return replace(e, left=resolve(e.left), right=resolve(e.right))
             return e
 
-        # A dial is refused before anything else looks at it, because the
-        # author of an existing definition needs the rewrite rather than a
-        # complaint that some list does not contain their dial.
-        for path in sorted(set(_settings_in(band))):
-            if _find(self.figures, path) is None and self._looks_like_dial(path):
-                raise CheckError(
-                    f'figure {d.name}\'s band compares against "{path}", which is a '
-                    "tenant dial. A band's threshold is a fact now: declare the goal as "
-                    "a figure over the records that set it -- carried forward if it is "
-                    "set once and left alone -- and name that figure here. A dial is the "
-                    "one number on a card that no evidence can explain.",
-                    d.line,
-                )
-
         resolved = resolve(band)
         assert isinstance(resolved, Ladder)
         return (resolved, tuple(sorted(reads)))
-
-    def _looks_like_dial(self, path: str) -> bool:
-        """Whether a dotted name that resolves to no figure is a settings dial.
-
-        Kept as a question rather than an assumption so the refusal above can
-        name the mistake precisely: a typo'd figure name and a dial deserve
-        different sentences, and the dial's sentence is the one carrying the
-        rewrite.
-        """
-        return (
-            path in self._schema.figure_settings
-            or path in self._schema.reading_settings
-            or path in self._schema.project_settings
-            or path in self._schema.bucket_settings
-        )
 
     def _named_sets(self, d: FigureDecl) -> dict[str, SetExpr]:
         out: dict[str, SetExpr] = {}
@@ -1352,20 +1326,14 @@ class _Checker:
         def bind(name: str, line: int) -> None:
             source = _find(self.figures, name)
             if source is None:
-                if self._looks_like_dial(name):
-                    raise CheckError(
-                        f'figure {d.name} reads "{name}", which is a tenant dial. A '
-                        "definition's numbers come from facts: name a figure computed "
-                        "from the records that set this one, or write the number here "
-                        "where a reader can see it. A dial varies invisibly -- it moves "
-                        "the answer with nothing in the evidence to say so.",
-                        line,
-                    )
                 raise CheckError(
                     f'figure {d.name} reads "{name}", which is not a figure declared '
                     "before it. A figure may only read one declared earlier -- a cycle "
                     "has no line number, and on a cold build the wrong order stores a "
-                    "nought and never revisits it. Declared so far: "
+                    "nought and never revisits it. If this was a tenant dial: a "
+                    "definition's numbers come from facts, so name a figure computed "
+                    "from the records that set this one, or write the number where a "
+                    "reader can see it. Declared so far: "
                     f"{', '.join(f.name for f in self.figures) or 'none'}.",
                     line,
                 )
@@ -2267,20 +2235,13 @@ class _Checker:
         def threshold(name: str, line: int) -> None:
             found = _find(self.figures, name)
             if found is None:
-                if self._looks_like_dial(name):
-                    raise CheckError(
-                        f'reading {d.name}\'s band compares against "{name}", which is a '
-                        "tenant dial. A band's threshold is a fact now: declare the goal "
-                        "as a figure over the records that set it and name that figure "
-                        "here. A dial is the one number on a card that no evidence can "
-                        "explain.",
-                        line,
-                    )
                 raise CheckError(
                     f'reading {d.name}\'s band compares against "{name}", which is not a '
                     "figure. A band's threshold is a fact -- a figure computed from "
                     "records -- so the number deciding whether a reader should worry can "
-                    "be cited like every other number on the card.",
+                    "be cited like every other number on the card. If this was a tenant "
+                    "dial, declare the goal as a figure over the records that set it and "
+                    "name that figure here.",
                     line,
                 )
             if found.scope != scope:
