@@ -51,6 +51,7 @@ from .ast import (
     FieldMeasure,
     FieldPick,
     FigureDecl,
+    FigureRef,
     FigureUnit,
     FlagDecl,
     IndexBy,
@@ -70,6 +71,7 @@ from .ast import (
     SetOp,
     SetRef,
     Setting,
+    StatisticFn,
     Sum,
     SummariseDecl,
     Text,
@@ -635,7 +637,7 @@ class _Checker:
                 )
             depth = max(depth, source.depth + 1)
 
-        band_settings = self._check_band(d, unit, kind)
+        band, band_reads = self._check_band(d, unit, kind, scope, grain)
 
         plan = FigurePlan(
             name=d.name,
@@ -652,8 +654,8 @@ class _Checker:
             reads=tuple(reads),
             settings=tuple(settings),
             scope_index=scope_index,
-            band=d.band if isinstance(d.band, Ladder) else None,
-            band_settings=band_settings,
+            band=band,
+            band_reads=band_reads,
             grain=grain,
             carried=d.carried,
             ordered_by=_ordered_by_of(d.calculate),
@@ -662,8 +664,10 @@ class _Checker:
         )
         self.figures.append(_versioned_figure(plan, self.indexes, self.measures, self.figures))
 
-    def _check_band(self, d: FigureDecl, unit: FigureUnit, kind: str) -> tuple[str, ...]:
-        """The rules that keep a band a band, and the dials it may name.
+    def _check_band(
+        self, d: FigureDecl, unit: FigureUnit, kind: str, scope: str, grain: str | None
+    ) -> tuple[Ladder | None, tuple[str, ...]]:
+        """The rules that keep a band a band, and the facts it may name.
 
         A band used to be a figure of its own -- a `level`-unit figure combining
         the one below it -- and the board found the pair by scanning the library
@@ -671,11 +675,18 @@ class _Checker:
         never named, and the page showing the formula did not contain it.
 
         Folding it in is only an improvement if it cannot become a second
-        calculation hiding in the same block, which is what these four refusals
-        are for. Each of them compiles and produces something plausible.
+        calculation hiding in the same block, which is what these refusals are
+        for. Each of them compiles and produces something plausible.
+
+        The threshold it compares against is a **figure** -- a number computed
+        from records, carried forward across the buckets nobody moved it in,
+        cited like any other. It used to be a dial, and that made the one part
+        of a card that decides whether a reader should worry the one part no
+        evidence could explain. Returns the ladder with each figure reference
+        resolved, and the names it reads.
         """
         if d.band is None:
-            return ()
+            return (None, ())
         band = d.band
         if not isinstance(band, Ladder):  # pragma: no cover - the parser refuses it first
             raise CheckError(f"figure {d.name}'s band is not a ladder.", d.line)
@@ -723,37 +734,137 @@ class _Checker:
                 d.line,
             )
 
-        paths = sorted(set(_settings_in(band)))
-        for path in paths:
-            named = _find(self.figures, path)
-            if named is not None:
-                # A dotted name in a rung is a settings path *or* a figure,
-                # and a sequenced figure named bare here is the same mistake
-                # `calculate` refuses: it reads like a static declaration
-                # when it is a point-in-time value. Answered before the
-                # settings message, which would otherwise send the author
-                # looking for a dial nobody meant to name.
-                if named.grain is not None:
-                    raise CheckError(
-                        f"figure {d.name}'s band reads {path} bare, and it is one value per "
-                        f"{named.grain}. Compare against the same coordinate this figure is "
-                        f"at: `{path}:{{bucket}}`.",
-                        d.line,
-                    )
+        reads: set[str] = set()
+
+        def threshold(name: str, sequenced: bool, line: int) -> None:
+            """One figure a rung compares against, with every way it could be
+            silently wrong refused by name."""
+            source = _find(self.figures, name)
+            if source is None:
                 raise CheckError(
-                    f"figure {d.name}'s band reads {path}, which is a figure rather than a "
-                    "dial. A band compares this figure's own value against a threshold; "
-                    "reading another figure's number here would be a second calculation "
-                    "sharing the first one's name.",
+                    f'figure {d.name}\'s band compares against "{name}", which is not a '
+                    "figure declared before it. A band's threshold is a fact: a figure "
+                    "computed from records, so the number that decides whether a reader "
+                    "should worry can be cited like every other number on the card. "
+                    f"Declared so far: {', '.join(f.name for f in self.figures) or 'none'}.",
+                    line,
+                )
+            if source.scope != scope:
+                raise CheckError(
+                    f"figure {d.name}'s band compares against {name}, which is one value "
+                    f"per {source.scope}. Different scopes are different id spaces, so "
+                    "every lookup would miss and every subject would lose its word.",
+                    line,
+                )
+            if source.across != d.across:
+                raise CheckError(
+                    f"figure {d.name}'s band compares against {name}, which is split "
+                    f"{'across ' + source.across if source.across else 'across nothing'} "
+                    f"where this figure is split "
+                    f"{'across ' + d.across if d.across else 'across nothing'}. One side "
+                    "holds a value per pair and the other a value per subject, so the "
+                    "keys never meet.",
+                    line,
+                )
+            if not sequenced and source.grain is not None and grain == source.grain:
+                # Both sides are sequenced and the author wrote the bare
+                # spelling. That reads like a static declaration when it is a
+                # point-in-time value, and it is a one-word fix -- answered
+                # here rather than by the grain message, which would send the
+                # author looking for a mismatch that is not there.
+                raise CheckError(
+                    f"figure {d.name}'s band compares against {name} bare, and it holds "
+                    f"one value per {source.grain}. Name the coordinate this figure is "
+                    f"already at: `{name}:{{bucket}}`.",
+                    line,
+                )
+            # Days against days, months against months. A grain mismatch is
+            # not a near miss: the two subject keys are `c1@2026-07` and
+            # `c1@2026-07-14`, so they never meet and every row bands unknown
+            # -- which reads as missing data rather than as a wrong definition.
+            if source.grain != grain:
+                raise CheckError(
+                    f"figure {d.name}'s band compares against {name}, which holds one "
+                    f"value per {source.grain or 'subject'} where this figure holds one "
+                    f"per {grain or 'subject'}. A band and the number it judges share a "
+                    "bucketing, so days compare against days and months against months.",
+                    line,
+                )
+            if sequenced != (source.grain is not None):
+                raise CheckError(  # pragma: no cover - the grain check answers first
+                    f"figure {d.name}'s band compares against {name} at the wrong shape.",
+                    line,
+                )
+            if source.unit != unit:
+                raise CheckError(
+                    f"figure {d.name} answers a {unit} and its band compares against "
+                    f"{name}, which answers a {source.unit}. Both are numbers by the time "
+                    "the ladder sees them, so the comparison would run and be wrong by "
+                    "whatever the two units differ by.",
+                    line,
+                )
+            reads.add(name)
+
+        def resolve(e: CalcExpr) -> CalcExpr:
+            """Rewrite each dotted name into what it actually names."""
+            if isinstance(e, Setting):
+                threshold(e.path, sequenced=False, line=e.line or d.line)
+                return FigureRef(name=e.path, line=e.line)
+            if isinstance(e, Coord):
+                threshold(e.name, sequenced=True, line=e.line or d.line)
+                return e
+            if isinstance(e, Ladder):
+                return replace(
+                    e,
+                    rungs=tuple(
+                        replace(
+                            r,
+                            left=resolve(r.left),
+                            then=resolve(r.then),
+                            right=resolve(r.right) if r.right is not None else None,
+                        )
+                        for r in e.rungs
+                    ),
+                    otherwise=resolve(e.otherwise),
+                )
+            if isinstance(e, Arith):
+                return replace(e, left=resolve(e.left), right=resolve(e.right))
+            if isinstance(e, Pick):
+                return replace(e, left=resolve(e.left), right=resolve(e.right))
+            return e
+
+        # A dial is refused before anything else looks at it, because the
+        # author of an existing definition needs the rewrite rather than a
+        # complaint that some list does not contain their dial.
+        for path in sorted(set(_settings_in(band))):
+            if _find(self.figures, path) is None and self._looks_like_dial(path):
+                raise CheckError(
+                    f'figure {d.name}\'s band compares against "{path}", which is a '
+                    "tenant dial. A band's threshold is a fact now: declare the goal as "
+                    "a figure over the records that set it -- carried forward if it is "
+                    "set once and left alone -- and name that figure here. A dial is the "
+                    "one number on a card that no evidence can explain.",
                     d.line,
                 )
-            if path not in self._schema.figure_settings:
-                raise CheckError(
-                    f'figure {d.name}\'s band reads "{path}", which is not a setting a '
-                    f"calculation may name. Those are: {', '.join(self._schema.figure_settings)}.",
-                    d.line,
-                )
-        return tuple(paths)
+
+        resolved = resolve(band)
+        assert isinstance(resolved, Ladder)
+        return (resolved, tuple(sorted(reads)))
+
+    def _looks_like_dial(self, path: str) -> bool:
+        """Whether a dotted name that resolves to no figure is a settings dial.
+
+        Kept as a question rather than an assumption so the refusal above can
+        name the mistake precisely: a typo'd figure name and a dial deserve
+        different sentences, and the dial's sentence is the one carrying the
+        rewrite.
+        """
+        return (
+            path in self._schema.figure_settings
+            or path in self._schema.reading_settings
+            or path in self._schema.project_settings
+            or path in self._schema.bucket_settings
+        )
 
     def _named_sets(self, d: FigureDecl) -> dict[str, SetExpr]:
         out: dict[str, SetExpr] = {}
@@ -1492,6 +1603,14 @@ class _Checker:
             self._measure_matches_set(d.name, m, e.set, sets, e.line)
             return "moment"
 
+        if isinstance(e, FigureRef):  # pragma: no cover - band-only
+            raise CheckError(
+                f"figure {d.name} reads {e.name} in its calculation. A figure named "
+                "outright is a band's threshold; a calculation reads another figure "
+                "through `combine`.",
+                e.line,
+            )
+
         assert_never(e)
 
     def _ladder_kind(
@@ -1705,7 +1824,7 @@ class _Checker:
 
         self._statistics(d, bound, live=False, source=source)
         unit = self._reading_unit(source.unit, d)
-        self._band(d, scope)
+        band, band_on, band_reads = self._band(d, scope, source)
         requires = d.requires
         if not requires and any(s.fn in ("mean", "median", "worst") for s in d.calculate):
             # The unwritten minimum sample is one value, injected here so it is
@@ -1729,9 +1848,10 @@ class _Checker:
                     unit=unit,
                     calculate=d.calculate,
                     requires=requires,
-                    band=d.band,
+                    band=band,
+                    band_on=band_on,
+                    band_reads=band_reads,
                     source=source.name,
-                    settings=tuple(sorted({d.band.setting} if d.band else set())),
                 ),
                 self.indexes,
                 self.measures,
@@ -1801,7 +1921,7 @@ class _Checker:
             )
 
         self._statistics(d, bound, live=True, source=None)
-        self._band(d, scope)
+        band, band_on, band_reads = self._band(d, scope, None)
         self.readings.append(
             _versioned_reading(
                 ReadingPlan(
@@ -1813,11 +1933,12 @@ class _Checker:
                     unit="duration",
                     calculate=d.calculate,
                     requires=d.requires,
-                    band=d.band,
+                    band=band,
+                    band_on=band_on,
+                    band_reads=band_reads,
                     live_measure=measure,
                     live_set=expr,
                     indexes=tuple(sorted(_indexes_in(expr))),
-                    settings=tuple(sorted({d.band.setting} if d.band else set())),
                 ),
                 self.indexes,
                 self.measures,
@@ -1935,28 +2056,34 @@ class _Checker:
             )
         return "count" if source == "count" else "duration"
 
-    def _band(self, d: ReadingDecl, scope: str) -> None:
+    def _band(
+        self, d: ReadingDecl, scope: str, source: FigurePlan | None
+    ) -> tuple[Ladder | None, StatisticFn | None, tuple[str, ...]]:
+        """A reading's band: the same ladder a figure writes, judged over one
+        of the reading's statistics.
+
+        `source` is the figure a windowed reading summarises, and None for a
+        live one. It is what decides the grain a threshold figure has to share:
+        a window is a span of *that* figure's buckets, so a goal cut monthly
+        against a reading over daily buckets is a comparison whose two sides
+        never meet.
+        """
         if d.band is None:
-            return
-        if d.band.setting not in self._schema.reading_settings:
-            raise CheckError(
-                f'reading {d.name} bands against "{d.band.setting}", which is not a setting a '
-                f"band may name. Those are: {', '.join(self._schema.reading_settings)}.",
-                d.band.line,
-            )
+            return (None, None, ())
+        band = d.band
         # The default is `mean`, so a band with no `on` over a reading that
         # calculates no mean is checked too. Left unchecked it compiled and
         # `level_of` answered "unknown" for every subject at every value -- a row
         # that is permanently grey and reads as missing data rather than as a
         # broken definition.
-        wanted = d.band.on or "mean"
+        wanted = band.on or "mean"
         if wanted not in {s.fn for s in d.calculate}:
-            written = f"{d.band.on}(...)" if d.band.on else "the mean, by default"
+            written = f"{band.on}(...)" if band.on else "the mean, by default"
             raise CheckError(
                 f"reading {d.name} bands on {written}, which it does not calculate. It "
                 f"calculates {', '.join(sorted({s.fn for s in d.calculate}))}; name one of "
                 "those with `on`, or the band colours nothing and every row reads unknown.",
-                d.band.line,
+                band.line,
             )
         if wanted in ("delta", "series"):
             raise CheckError(
@@ -1966,16 +2093,121 @@ class _Checker:
                 "compile, every row would band unknown for ever, which reads as missing "
                 "data rather than as a broken definition. Band a scalar statistic, or "
                 "leave the band off.",
-                d.band.line,
+                band.line,
             )
-        if d.band.on == "count" and d.band.unit is not None:
+
+        for name in _parts_in(band.ladder):
+            if name != "value":
+                raise CheckError(
+                    f'reading {d.name}\'s band reads "{name}". The only binding in scope '
+                    'is "value" -- the statistic this band judges -- because a band says '
+                    "which state a number is in, and reading anything else would make it "
+                    "a second calculation sharing the reading's name.",
+                    band.line,
+                )
+        for expr in [*(r.then for r in band.ladder.rungs), band.ladder.otherwise]:
+            if not isinstance(expr, Text):
+                raise CheckError(
+                    f"reading {d.name}'s band must answer a word on every rung. A rung "
+                    "answering a number would be a second statistic, and it would reach "
+                    "a screen as an integer in a column of words.",
+                    getattr(expr, "line", band.line),
+                )
+        if any(isinstance(node, Coord) for node in _walk(band.ladder)):
             raise CheckError(
-                f"reading {d.name} bands on count(...) and writes the threshold in "
-                f"{d.band.unit}. A count of things has no time in it -- left to the duration "
-                "path a count of 3 becomes 3/86400 against a threshold in days and every "
-                "queue on every board bands good for ever.",
-                d.band.line,
+                f"reading {d.name}'s band reads a `:{{bucket}}` coordinate. A reading "
+                "answers over a *window* of buckets rather than at one of them, so there "
+                "is no coordinate to stand at -- name the figure bare and it is read "
+                "over the same window, through the same statistic.",
+                band.line,
             )
+
+        reads: set[str] = set()
+
+        def threshold(name: str, line: int) -> None:
+            found = _find(self.figures, name)
+            if found is None:
+                if self._looks_like_dial(name):
+                    raise CheckError(
+                        f'reading {d.name}\'s band compares against "{name}", which is a '
+                        "tenant dial. A band's threshold is a fact now: declare the goal "
+                        "as a figure over the records that set it and name that figure "
+                        "here. A dial is the one number on a card that no evidence can "
+                        "explain.",
+                        line,
+                    )
+                raise CheckError(
+                    f'reading {d.name}\'s band compares against "{name}", which is not a '
+                    "figure. A band's threshold is a fact -- a figure computed from "
+                    "records -- so the number deciding whether a reader should worry can "
+                    "be cited like every other number on the card.",
+                    line,
+                )
+            if found.scope != scope:
+                raise CheckError(
+                    f"reading {d.name}'s band compares against {name}, which is one value "
+                    f"per {found.scope} where this reading is scoped to {scope}. Different "
+                    "scopes are different id spaces, so every lookup would miss.",
+                    line,
+                )
+            if found.unit == "level":
+                raise CheckError(
+                    f"reading {d.name}'s band compares against {name}, which stores a word. "
+                    "There is no order between words, so the comparison has no answer.",
+                    line,
+                )
+            if source is None:
+                # A live reading has no window and no sequence: it counts or
+                # measures records as they stand, so its threshold is one
+                # value per subject and a sequenced figure has nothing to
+                # reduce over.
+                if found.grain is not None:
+                    raise CheckError(
+                        f"reading {d.name} measures records as they stand and its band "
+                        f"compares against {name}, which holds one value per {found.grain}. "
+                        "There is no window to reduce that sequence over, so the "
+                        "comparison would have to pick a bucket -- and whichever it picked "
+                        "would be a fabrication.",
+                        line,
+                    )
+            elif found.grain != source.grain:
+                raise CheckError(
+                    f"reading {d.name} reads {source.name}, which holds one value per "
+                    f"{source.grain}, and its band compares against {name}, which holds one "
+                    f"value per {found.grain or 'subject'}. A window is a span of the source "
+                    "figure's own buckets, so the threshold has to be cut the same way -- "
+                    "days against days, months against months.",
+                    line,
+                )
+            reads.add(name)
+
+        def resolve(e: CalcExpr) -> CalcExpr:
+            if isinstance(e, Setting):
+                threshold(e.path, e.line or band.line)
+                return FigureRef(name=e.path, line=e.line)
+            if isinstance(e, Ladder):
+                return replace(
+                    e,
+                    rungs=tuple(
+                        replace(
+                            r,
+                            left=resolve(r.left),
+                            then=resolve(r.then),
+                            right=resolve(r.right) if r.right is not None else None,
+                        )
+                        for r in e.rungs
+                    ),
+                    otherwise=resolve(e.otherwise),
+                )
+            if isinstance(e, Arith):
+                return replace(e, left=resolve(e.left), right=resolve(e.right))
+            if isinstance(e, Pick):
+                return replace(e, left=resolve(e.left), right=resolve(e.right))
+            return e
+
+        resolved = resolve(band.ladder)
+        assert isinstance(resolved, Ladder)
+        return (resolved, wanted, tuple(sorted(reads)))
 
     # --------------------------------------------------------- projection --
 
@@ -2603,6 +2835,12 @@ class _Checker:
                 "number this product claims has exactly one.",
                 e.line,
             )
+        if isinstance(e, FigureRef):  # pragma: no cover - band-only
+            raise CheckError(
+                f"{noun} {owner} names the figure {e.name} outright. A row reads a figure "
+                "through `read:`, which binds it by name.",
+                e.line,
+            )
         assert_never(e)
 
     def _condition(self, c: Condition, bound: dict[str, str], owner: str, noun: str) -> None:
@@ -2901,6 +3139,12 @@ def _calc_hash(e: CalcExpr) -> object:
         return {"op": "text", "value": e.value}
     if isinstance(e, Setting):
         return {"op": "setting", "path": e.path}
+    if isinstance(e, FigureRef):
+        # Distinct from a setting of the same spelling, deliberately: the two
+        # would resolve against different things, and a hash that could not
+        # tell them apart would let a definition swap one for the other under
+        # a version claiming nothing moved.
+        return {"op": "figure", "name": e.name}
     if isinstance(e, Ladder):
         return {
             "op": "when",
@@ -3179,15 +3423,14 @@ def _versioned_reading(
         # that never wrote one keep their historic versions.
         "calculate": [[s.fn, s.set] for s in plan.calculate],
         "requires": [[r.count, r.set] for r in plan.requires] or None,
+        # The ladder and the statistic it judges. `mean` hashes as absent, so
+        # a band that names the default explicitly is the same definition as
+        # one that leaves it out -- the same absent-unless-declared shape
+        # every other optional key here has.
         "band": (
             {
-                "direction": plan.band.direction,
-                "setting": plan.band.setting,
-                "on": plan.band.on if plan.band.on not in (None, "mean") else None,
-                # `days` hashes as absent, so a band written before the keyword
-                # existed keeps its version and `in days` written out is the same
-                # definition.
-                "unit": plan.band.unit if plan.band.unit not in (None, "days") else None,
+                "ladder": _calc_hash(plan.band),
+                "on": plan.band_on if plan.band_on not in (None, "mean") else None,
             }
             if plan.band is not None
             else None

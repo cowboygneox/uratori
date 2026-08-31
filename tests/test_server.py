@@ -904,11 +904,11 @@ async def test_the_definitions_route_serves_the_library_described(server: Server
         "catalogue cannot say what the word rests on"
     )
     assert band["settings"] == ["limits.carrying.over"]
-    assert band["band_settings"] == [], (
-        "load_band computes its word in calculate:, so the dial is a value "
-        "dial -- the split matters because band-only dials never force a "
-        "rebuild, and a description that unioned them would tell a host to "
-        "pay for one"
+    assert band["band_reads"] == [], (
+        "load_band computes its word in calculate:, so what it rests on is a "
+        "figure it combines -- the split matters because a figure a band "
+        "compares against never forces a rebuild, only a re-serve, and a "
+        "description that unioned the two would tell a host to pay for one"
     )
 
     indexes = {d["name"]: d for d in body["indexes"]}

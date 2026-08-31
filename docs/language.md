@@ -38,7 +38,7 @@ shop_order "o3"    { "ref": "B-7", "courier_id": "c2", "status": "delivered" }
 The correlations are already in the data -- each order's `courier_id` names a
 courier's key -- but nothing yet says what those fields *mean*. That is
 what a definition declares. The host has told the engine the two kinds,
-`shop_order` and `shop_courier`, and one dial, `limits.carrying.over`:
+`shop_order` and `shop_courier`:
 
 ```
 group shop_order.carried_by from courier_id
@@ -55,7 +55,7 @@ figure shop_courier.carrying:
         count(mine)
 
     band:
-        when value >= limits.carrying.over then "over"
+        when value >= 3 then "over"
         otherwise "ok"
 ```
 
@@ -63,8 +63,13 @@ Reading it back: the group puts every order in a bucket per courier --
 `o1` and `o2` land in Aki's, `o3` in Bo's; the filter holds whichever orders
 are not yet delivered, which excludes `o3`. The figure intersects the two for
 each courier and counts what is left, so Aki reads 2 and Bo reads 0 -- a
-measured nought, not a blank -- and the band turns each count into a word by
-comparing it against a dial the host declared. The `#` line above the header
+measured nought, not a blank -- and the band turns each count into a word.
+Three is written here because it is part of what this definition claims; a
+threshold that varies -- per courier, per month, set by somebody and moved
+later -- is a **figure** the band names instead, computed from the records
+that set it. It is never a control living outside the data: the number that
+decides whether a reader should worry is the last one that should be
+unciteable. The `#` line above the header
 is the figure's **explanation** -- attached by the compile, served wherever
 the number is cited, and required. Push another order at the engine and Aki's
 count moves; push `o1`'s delivery and it moves back. Nothing else needs
@@ -829,7 +834,7 @@ once it has *ever* appeared, and is absent until then.
 
 ```
     band:
-        when value >= thresholds.wip.over then "over"
+        when value >= team_person.wip_limit then "over"
         otherwise "ok"
 ```
 
@@ -839,27 +844,56 @@ word on screen sourced from a definition the page never named -- found by
 scanning the library for whatever banded this one -- is exactly the
 untraceable number this engine exists to end.
 
-Three rules keep it a band rather than a second calculation hiding in the
-same block, and one property makes it cheap:
+**The threshold is a fact.** A rung compares against a literal or against
+another **figure**, and never against a tenant dial. A dial was a number the
+host set on a settings page, outside the fact stream, cited by nothing -- so
+on a card where every figure could be traced to the records behind it, the
+one part that decided whether a reader should worry could not be. Naming a
+figure makes the threshold an answer like any other: computed from the
+records that set it, carried forward across the buckets nobody moved it in
+(see [on-change data](#on-change-data-carried-forward)), versioned, and
+citable. A literal stays legal because a number written in the definition is
+not a control outside it: the reader can see it, and moving it forks the
+version like any other semantic change.
 
-- The only binding in scope is **`value`** -- this figure's own answer.
-  Reading a set or a source here would be a second calculation sharing the
-  first one's name and version.
+The rules that keep it a band rather than a second calculation hiding in the
+same block:
+
+- The only *binding* in scope is **`value`** -- this figure's own answer.
+  Reading a set or a `combine` source here would be a second calculation
+  sharing the first one's name and version.
+- A threshold figure must **share this figure's scope, dimension and
+  grain**, and answer in the **same unit**. The join is subject-key equality:
+  a monthly number is stored under `c1@2026-07` and so is a monthly goal, so
+  the comparison lands on the same coordinate by construction. Days compare
+  against days and months against months, and a mismatch is refused at
+  compile time rather than left to produce keys that never meet -- which
+  would band every row unknown, reading as missing data rather than as a
+  wrong definition. The unit rule is the same argument one layer along: both
+  sides are numbers by the time the ladder sees them, so a duration judged
+  against a count runs and is wrong by 86,400.
+- A **sequenced** threshold is named at the coordinate -- `goal:{bucket}` --
+  and an unsequenced one bare. Bare over a sequence would have to pick a
+  bucket, and whichever it picked would be a fabrication.
 - Every rung must answer a **word**. A rung answering a number would reach a
   screen as an unexplained integer in a column of words.
 - A figure whose value is a word or a list **cannot be banded** -- there is
   nothing to compare, so every subject would fall through to the bottom rung,
   silently.
+- **An absent threshold withholds the word**, exactly as an absent value
+  does. A month before anybody set a goal has no goal, and a nought sits
+  comfortably under every comparison.
 - It is **evaluated when the figure is served and stored nowhere**: the
-  ladder is pure over the value and the tenant's dials, so turning a
-  threshold re-bands the board on the next request instead of forcing a
-  rebuild. It *is* in the version hash -- a figure that starts banding
-  differently is a different definition -- and that costs nothing, because no
-  stored value hangs off it.
+  ladder is pure over the value and the goals beside it, so a goal moving
+  re-bands the board on the next request instead of forcing a rebuild. It
+  *is* in the version hash -- a figure that starts banding differently is a
+  different definition -- and that costs nothing, because no stored value
+  hangs off it.
 
-The dials a band reads must be figure settings, and they are tracked
-separately from the calculation's dials, so a dial only the band reads never
-forces a rebuild of values it did not affect.
+The figures a band names are tracked separately from the ones a calculation
+reads, and the split is what makes the cheapness real: a goal moving
+**re-serves** this figure without **rebuilding** it, and a host asking "what
+must recompute when this figure moves?" must not be told about a band.
 
 ---
 
@@ -1143,7 +1177,10 @@ There are two kinds, told apart by what `depends` binds.
 # How long this person's changes took to merge.
 reading team_person.to_merge(range):
     display "{team_person} time to merge"
-    band low against flow.leadTimeDays
+
+    band:
+        when value > team_person.lead_time_goal then "over"
+        otherwise "ok"
 
     depends:
         merged = team_person.time_to_merge in range
@@ -1272,7 +1309,10 @@ a mean of means, weighting each person equally instead of each record.
 # Review asks waiting on this person right now.
 reading team_person.pending_reviews():
     display "{team_person} pending reviews"
-    band low on count against flow.pendingReviews
+
+    band on count:
+        when value > team_person.queue_limit then "over"
+        otherwise "ok"
 
     depends:
         waiting = code_review_request.waiting_seconds over (code_review_request.asked_of:{team_person} & code_review_request.pending)
@@ -1403,40 +1443,48 @@ the floor.
 ### `band`
 
 ```
-    band low against flow.leadTimeDays
-    band low on count against flow.pendingReviews
-    band low against ack.responseMinutes in minutes
+    band:
+        when value > site.target_month then "over"
+        otherwise "ok"
+
+    band on sum:
+        when value < site.quota_month then "under"
+        when value < site.stretch_month then "met"
+        otherwise "beaten"
 ```
 
-Which dial decides whether the number reads good, watch or poor, and which
-direction is good: `low` means lower is better (a wait, a latency), `high` is
-for a share. Declared in the definition rather than applied by the reader,
-because banding in two places is how a card reads one word while a sort
-weighs the same subject differently, with list order the only symptom. The
-dial must be one of the schema's **reading settings**, and its value is a
-two-edged band, `{good, poor}`.
+The same ladder a figure bands with, one stratum along -- `value` is the
+statistic being judged, and the thresholds are figures or literals. Declared
+in the definition rather than applied by the reader, because banding in two
+places is how a card reads one word while a sort weighs the same subject
+differently, with list order the only symptom.
 
-`on <statistic>` names which statistic is coloured -- the mean when
+`on <statistic>` names which statistic the verdict is about -- the mean when
 unwritten, and the named one must be one the reading actually calculates
 (including the default: a band over a worst-only reading colours nothing, and
-a permanently grey row reads as missing data rather than a broken
-definition).
+a permanently wordless row reads as missing data rather than a broken
+definition). It cannot name `series` or `delta`, which are a cell per bucket
+rather than a number.
 
-`in <unit>` is what the *threshold* is written in -- `minutes`, `hours` or
-`days`, days when unwritten. It matters the first time a healthy value is
-single digits of minutes: in days the tightest threshold anybody would type
-is 1, so every row bands good and the column is decoration. It is in the
-version hash, because the same numbers read in minutes are a band 1,440
-times tighter, and a colour change under a version claiming nothing moved is
-the one thing a content-addressed version must not do. `on count` bands the
-count directly and refuses a time unit -- a count of things has no time in
-it; left to the duration path, a count of 3 becomes 3/86400 against a
-threshold in days and every queue bands good for ever.
+**A threshold figure is read over the same window, through the same
+statistic.** `on sum` bands the window's total, so the goal is totalled
+across the identical buckets; `on mean` compares mean against mean. Any other
+rule compares a span against a point -- six months of deliveries beside one
+month of target -- which reads plausibly and is wrong by the length of the
+window. It follows that the goal must be **time-keyed at the source figure's
+own grain**, and the checker refuses anything else: a window is a span of
+that figure's buckets, so a goal cut a different way has labels the window
+never selects. A **live** reading has no window at all, so its threshold is
+one value per subject and a sequenced figure is refused there.
 
-There is no `work_hours` unit. It once existed, resolved to exactly 3,600
-seconds, and was therefore a synonym for `hours` with documentation claiming a
-working day mattered and nothing that made it -- removed rather than left as
-a lie. Doing it properly is a working calendar, not a scale factor.
+There is no direction and no unit. The direction was a second vocabulary for
+what the comparison operator already says. The unit existed because a dial is
+a bare number that does not know what it measures, so the definition had to
+say whether 5 meant minutes or days -- and getting it wrong banded every row
+good for ever at 1,440 times the intended threshold. A figure carries its own
+unit and the checker compares the two, so the mistake is unwritable rather
+than refused. What is hashed is the ladder itself, and `on` unless it is the
+default.
 
 ---
 
@@ -1912,19 +1960,25 @@ costs** (see [Concepts](concepts.md) for the host's side of this):
 | List | Named by | Turning it costs |
 |---|---|---|
 | bucket settings | a group's `by day in ...` and a filter's `older/younger than ...` | re-bucketing a tenant's whole history |
-| figure settings | a figure's `calculate` and `band:` | recomputing one value per subject |
-| reading settings | a reading's `band ... against ...` | nothing -- a reading stores nothing |
+| figure settings | a figure's `calculate` | recomputing one value per subject |
 | projection settings | a projection's or summary's values and flag conditions | nothing |
+
+There used to be a fourth list, **reading settings**, and it existed for one
+construct: a reading's band threshold. Bands read facts now -- a figure, or a
+literal written in the definition -- so the list has nothing left to hold, and
+a dial named from a band is refused with the rewrite. Bands are gone from
+`figure settings` for the same reason.
 
 The lists exist so a definition cannot write a dial into a position the
 engine cannot afford to honour -- and so the expensive lists stay short and
 deliberate. The checker refuses a dial named from the wrong position, with
 the list of what is allowed.
 
-Two shapes of dial: a scalar, and a **band** -- `{good, poor}`, one dial with
-two edges, read whole by `band ... against ...`. One path is reserved rather
-than declared: `tenant.hoursPerDay`, which the renderer divides by to print
-an effort as days; a host that renders efforts carries it in its defaults.
+A dial is a scalar. The two-edged `{good, poor}` shape went with the reading
+settings list -- it existed so a band clause could derive three words from one
+dial, and a ladder writes its own words. One path is reserved rather than
+declared: `tenant.hoursPerDay`, which the renderer divides by to print an
+effort as days; a host that renders efforts carries it in its defaults.
 
 A dial a definition names that resolves to nothing **raises** rather than
 falling back to something plausible -- the definition said which dial it
@@ -1966,10 +2020,10 @@ What *is* hashed, and why each one had to be:
 | the full spec of every measure it names | the same integer reading "5d" or "5" is a scale change |
 | the calculation, ladders and all | it is the number |
 | `across` | one value per subject becomes one per pair; the stored values mean something else |
-| a figure's `band:` ladder and the dials it names | the band is one of the answers the figure gives -- and it costs nothing to move, since no value is stored under it |
+| a figure's `band:` ladder, thresholds and all | the band is one of the answers the figure gives -- and it costs nothing to move, since no value is stored under it. A named figure hashes as a figure, distinctly from a settings path of the same spelling, so the two can never be swapped under a version claiming nothing moved |
 | a rollup's **source version** | redefine the parts and the total must rebuild, or it reads a number derived from a definition that no longer exists |
 | a reading's statistics and `requires` floor, written or defaulted | a floor applied at read time would let two engines render one version differently |
-| a band's direction, dial, `on` (unless the default mean) and unit (unless the default days) | the same threshold in minutes is a band 1,440 times tighter |
+| a reading's band ladder and its `on` (unless the default mean) | the band is the verdict, and a reading that starts wording it differently is a different definition |
 | a projection's fields, joins, reads (including whether a read is `band of`), values, sort and limit | a join decides *which record* a path is read off; `band of X` and `X` are different columns off one figure |
 | a projection's flag templates | a flag's sentence is the whole content of that row |
 | a summary's counts, totals, values, flags and its **projection's version** | rename what a row value means and every count moves |
@@ -2101,8 +2155,24 @@ The ones most worth recognising, in the checker's own words:
   number may be summed"* / *"...reads 'x', which nothing binds"* -- the
   summary's namespace and typing rules.
 - *"...is not a setting a group may name. Those are: ..."* (and the
-  filter, calculation, band and projection variants) -- the four settings lists, each
+  filter, calculation and projection variants) -- the settings lists, each
   enforced at the position that pays its cost.
+- *"...band compares against "x", which is a tenant dial"* -- a threshold
+  outside the fact stream is the one number on a card nothing can cite. The
+  refusal carries the rewrite, because an author staring at a definition that
+  worked yesterday needs to be told what to write instead.
+- *"...band compares against F, which holds one value per day where this
+  figure holds one per month"* -- a band and the number it judges share a
+  bucketing. Left to compile, the two subject keys never meet and every row
+  bands unknown.
+- *"...answers a share and its band compares against F, which answers a
+  count"* -- both are numbers by the time the ladder sees them, so the
+  comparison runs and is wrong by whatever the units differ by.
+- *"...band compares against F bare, and it holds one value per month"* --
+  name the coordinate: `F:{bucket}`.
+- *"a band is a ladder now, not a direction and a dial"* -- the retired
+  `band low against <dial> in minutes` clause, refused at lex time with the
+  rewrite.
 - *"bundle ... names X as a figure, but it is a projection"* -- a member is
   written under its own keyword, so what travels is never a surprise.
 - *"bundle ... names X, which is time-keyed... declare a reading over it"* /

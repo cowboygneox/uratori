@@ -946,7 +946,7 @@ def _library_out(library: Library) -> LibraryOut:
         measures: list[str] | None = None,
         reads: list[str] | None = None,
         settings: list[str] | None = None,
-        band_settings: list[str] | None = None,
+        band_reads: list[str] | None = None,
         statistics: list[str] | None = None,
         fields: list[str] | None = None,
         through: list[str] | None = None,
@@ -974,7 +974,7 @@ def _library_out(library: Library) -> LibraryOut:
             measures=measures or [],
             reads=reads or [],
             settings=settings or [],
-            band_settings=band_settings or [],
+            band_reads=band_reads or [],
             statistics=statistics or [],
             fields=fields or [],
             through=through or [],
@@ -1036,7 +1036,7 @@ def _library_out(library: Library) -> LibraryOut:
                 measures=list(p.measures),
                 reads=list(p.reads),
                 settings=list(p.settings),
-                band_settings=list(p.band_settings),
+                band_reads=list(p.band_reads),
             )
             for p in library.figures
         ],
@@ -1054,6 +1054,7 @@ def _library_out(library: Library) -> LibraryOut:
                 measures=[p.live_measure] if p.live_measure else [],
                 reads=[p.source] if p.source else [],
                 settings=list(p.settings),
+                band_reads=list(p.band_reads),
                 statistics=[stat.fn for stat in p.calculate],
             )
             for p in library.readings

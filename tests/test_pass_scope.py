@@ -70,7 +70,7 @@ figure team_person.banded:
     calculate:
         count(mine)
     band:
-        when value >= thresholds.wip.over then "over"
+        when value >= 5 then "over"
         otherwise "ok"
 
 # Cards.
@@ -193,10 +193,14 @@ async def test_a_moved_figure_dial_serves_the_figure_not_the_board() -> None:
         "watch reads the moved figure -- the value it renders changed, and "
         "a reach rule that only followed groupings would freeze it"
     )
-    assert "team_person.cards" in served, (
-        "the dial is also team_person.banded's BAND dial: no stored value "
-        "moved, but the word cards renders beside the number did -- the "
-        "serve stamp's dial fingerprint is what notices"
+    assert "team_person.cards" not in served, (
+        "cards renders `band of team_person.banded`, whose band compares "
+        "against a literal -- nothing about it reads this dial, and a pass "
+        "that re-served it anyway is the fixed tail this gate replaced. "
+        "(It used to be served: the band read the same dial, so the word "
+        "moved while the stored value did not. A band's threshold is a fact "
+        "now, and the equivalent edge -- a goal figure moving -- is pinned in "
+        "test_bands.py.)"
     )
     assert not served & {"code_change.card", "work_issue.list", "work_issue.weighted"}, (
         "nothing these render under moved, and a dial is not a sync"

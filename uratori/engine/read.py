@@ -17,10 +17,10 @@ from __future__ import annotations
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
 
+from ..lang.ast import StatisticFn
 from ..lang.plan import ReadingPlan
-from ..lang.settings import band_value, seconds_per
+from .evaluate import band_of
 
 
 @dataclass(frozen=True)
@@ -44,6 +44,36 @@ class Sample:
     buckets_requested: int
 
 
+def statistic_of(fn: StatisticFn, sample: Sample) -> float | None:
+    """One statistic over one sample.
+
+    Split out from `statistics_of` because a band's threshold figure is
+    reduced over the same window by the same statistic, and two
+    implementations of "the mean" are two chances for the number and the
+    threshold judging it to be computed differently.
+    """
+    values = sample.values
+    if fn == "mean":
+        return statistics.fmean(values) if values else None
+    if fn == "median":
+        return statistics.median(values) if values else None
+    if fn == "worst":
+        # The worst case is the largest for a duration and, for anything
+        # where lower is worse, still the largest -- every reading here is
+        # "how long did this take", so worst means most.
+        return max(values) if values else None
+    if fn == "sum":
+        # **A sum of nothing is nought and a mean of nothing is unknown.**
+        # Deliberate asymmetry: a queue that took no tickets took no
+        # tickets, where an average of no values is a claim nobody can make.
+        return float(sum(values))
+    if fn == "count":
+        return float(len(values))
+    # `series` and `delta` are one cell per bucket rather than a statistic;
+    # the checker refuses a band on either, and no caller asks for one here.
+    return None
+
+
 def statistics_of(plan: ReadingPlan, sample: Sample) -> dict[str, float | None]:
     """Only the statistics the definition asked for.
 
@@ -52,26 +82,13 @@ def statistics_of(plan: ReadingPlan, sample: Sample) -> dict[str, float | None]:
     unversioned figure.
     """
     out: dict[str, float | None] = {}
-    values = sample.values
     for stat in plan.calculate:
-        if stat.fn == "mean":
-            out["mean"] = statistics.fmean(values) if values else None
-        elif stat.fn == "median":
-            out["median"] = statistics.median(values) if values else None
-        elif stat.fn == "worst":
-            # The worst case is the largest for a duration and, for anything
-            # where lower is worse, still the largest -- every reading here is
-            # "how long did this take", so worst means most.
-            out["worst"] = max(values) if values else None
-        elif stat.fn == "sum":
-            # **A sum of nothing is nought and a mean of nothing is unknown.**
-            # Deliberate asymmetry: a queue that took no tickets took no
-            # tickets, where an average of no values is a claim nobody can make.
-            out["total"] = float(sum(values))
-        elif stat.fn == "count":
-            out["count"] = float(len(values))
-        elif stat.fn == "series":
-            pass
+        # `series` and `delta` are per-bucket answers served in their own
+        # fields; a key here holding None would put a statistic on the wire
+        # the definition never asked for, dashed.
+        if stat.fn in ("series", "delta"):
+            continue
+        out[{"sum": "total"}.get(stat.fn, stat.fn)] = statistic_of(stat.fn, sample)
     return out
 
 
@@ -141,40 +158,37 @@ def unmet_of(plan: ReadingPlan, sample: Sample) -> list[str]:
 
 
 def level_of(
-    plan: ReadingPlan, stats: Mapping[str, float | None], settings: Mapping[str, Any]
+    plan: ReadingPlan,
+    stats: Mapping[str, float | None],
+    thresholds: Mapping[str, float | None] = {},
 ) -> str:
     """Which band this reading falls in, decided here and nowhere else.
 
-    Two things this must not get wrong, both of which v1 recorded the hard way:
+    The verdict is about **one** statistic -- `band on sum:` says which -- and
+    the goals it compares against are reduced over the same window by the same
+    statistic, so a window's total is judged against the total of the goal
+    across those same buckets. Comparing a span against a point is the mistake
+    this arrangement exists to make unwritable: six months of deliveries beside
+    one month of target reads plausibly and is wrong by the length of the
+    window.
 
-    A threshold is written in a unit. A healthy acknowledgement is single digits
-    of *minutes*; in days the tightest number anybody would type is 1, so every
-    ack on every board bands good and the row is decoration.
+    This used to resolve a dial and a unit. The unit existed because a dial is
+    a bare number that does not know what it measures, and getting it wrong
+    banded every row good for ever at 1,440 times the intended threshold. A
+    figure knows its own unit and the checker has already refused a mismatch,
+    so there is nothing left here to scale.
 
-    **A count has no time in it.** Left to the duration path a count of 3 becomes
-    3/86400 against a threshold of 3 and every queue on every board bands good
-    for ever. So a band on a count compares the raw number.
+    `unknown` where the statistic is missing -- and where a *goal* is, because
+    a window nobody set a target for has no verdict, and the comfortable rung
+    is the confident wrong answer.
     """
     if plan.band is None:
         return "unknown"
-    which = plan.band.on or "mean"
-    key = {"sum": "total"}.get(which, which)
+    key = {"sum": "total"}.get(plan.band_on or "mean", plan.band_on or "mean")
     value = stats.get(key)
     if value is None:
         return "unknown"
-
-    good, poor = band_value(dict(settings), plan.band.setting)
-    if which != "count":
-        good *= seconds_per(plan.band.unit or "days", dict(settings))
-        poor *= seconds_per(plan.band.unit or "days", dict(settings))
-
-    if plan.band.direction == "low":
-        if value <= good:
-            return "ok"
-        return "over" if value >= poor else "warn"
-    if value >= good:
-        return "ok"
-    return "over" if value <= poor else "warn"
+    return band_of(plan.band, value, dict(thresholds)) or "unknown"
 
 
 def sample_over(

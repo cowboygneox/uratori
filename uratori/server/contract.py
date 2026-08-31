@@ -124,12 +124,14 @@ class DeclarationOut(BaseModel):
     stored-day source, a projection's read figures."""
 
     settings: list[str] = Field(default_factory=list)
-    band_settings: list[str] = Field(default_factory=list)
-    """A figure's band-only dials, apart from `settings` deliberately: the
-    stored value's fingerprint covers `settings` alone, so moving a dial only
-    the band reads re-words the served level without forcing a rebuild -- a
-    host asking "which figures must rebuild when this dial moves?" must not
-    be told these."""
+    band_reads: list[str] = Field(default_factory=list)
+    """The figures a band compares against, apart from `reads` deliberately.
+
+    `reads` are what a stored value is computed from, so moving one rebuilds
+    this definition; a goal a band judges against moves no stored value and
+    must not force a rebuild -- but it does re-word the served level, so a
+    host asking "what re-serves when this figure moves?" has to be told these,
+    and one asking "what must rebuild?" must not be."""
 
     statistics: list[str] = Field(default_factory=list)
     """A reading's calculated statistics (mean, worst, series, ...). The

@@ -1131,21 +1131,32 @@ reading team_person.unscoped():
     )
 
 
-def test_a_band_on_a_count_may_not_be_written_in_a_time_unit() -> None:
-    """Left to the duration path a count of 3 becomes 3/86400 against a
-    threshold in days, and every queue on every board bands good for ever."""
+def test_a_live_readings_band_may_not_compare_against_a_sequence() -> None:
+    """A live reading has no window, so there is nothing to reduce a sequenced
+    goal over -- the comparison would have to pick a bucket, and whichever it
+    picked would be a fabrication.
+
+    This replaces the old `on count ... in minutes` refusal. That rule existed
+    because a dial is a bare number: left to the duration path a count of 3
+    became 3/86400 against a threshold in days, and every queue on every board
+    banded good for ever. A threshold is a figure now, and it carries its own
+    unit for the checker to compare, so the mistake is unwritable rather than
+    refused.
+    """
     refuses(
         """
 # d
 reading team_person.queue():
     display "x"
-    band low on count against flow.pendingReviews in minutes
+    band on count:
+        when value > team_person.time_to_merge then "over"
+        otherwise "ok"
     depends:
         w = code_review_request.waiting_seconds over (code_review_request.asked_of:{team_person} & code_review_request.pending)
     calculate:
         count(w)
 """,
-        "has no time in it",
+        "no window",
     )
 
 
@@ -1155,7 +1166,9 @@ def test_a_band_may_only_colour_a_statistic_the_reading_calculates() -> None:
 # d
 reading team_person.to_merge(range):
     display "x"
-    band low on median against flow.reviewLatencyDays
+    band on median:
+        when value > 604800 then "over"
+        otherwise "ok"
     depends:
         m = team_person.time_to_merge in range
     calculate:
@@ -1773,41 +1786,52 @@ figure team_person.total:
     assert a.version != b.version
 
 
-def test_a_band_unit_is_hashed_because_the_same_numbers_read_differently() -> None:
-    """The same threshold in minutes is a band 1,440x tighter, and a colour
-    change under a version claiming nothing moved is the one thing a
-    content-addressed version must not do."""
+def test_a_readings_band_ladder_is_hashed() -> None:
+    """A reading that starts banding differently is a different definition.
+
+    This used to be a test about the band's *unit* -- the same threshold in
+    minutes was a band 1,440 times tighter, under a version claiming nothing
+    moved. The unit existed because a dial is a bare number that does not know
+    what it measures; a ladder compares against a figure or a literal written
+    in the reading's own terms, so there is no unit left to get wrong, and what
+    is hashed is the comparison itself.
+    """
     body = """
 # d
 reading team_person.to_merge(range):
     display "x"
-    band low against flow.reviewLatencyDaysUNIT
+    band:
+        when value > THRESHOLD then "over"
+        otherwise "ok"
     depends:
         m = team_person.time_to_merge in range
     calculate:
         mean(m)
 """
-    a = compile_ok(body.replace("UNIT", "")).reading("team_person.to_merge")
-    b = compile_ok(body.replace("UNIT", " in hours")).reading("team_person.to_merge")
+    a = compile_ok(body.replace("THRESHOLD", "604800")).reading("team_person.to_merge")
+    b = compile_ok(body.replace("THRESHOLD", "86400")).reading("team_person.to_merge")
     assert a is not None and b is not None
     assert a.version != b.version
 
 
-def test_days_written_out_is_the_same_definition_as_days_left_unwritten() -> None:
-    """The control: `days` hashes as absent, so a band written before the
-    keyword existed keeps its version."""
+def test_the_default_statistic_written_out_is_the_same_definition() -> None:
+    """The control: `mean` is what an unwritten `on` means, so writing it out
+    is the same definition and every reading banded before `on` existed keeps
+    its version."""
     body = """
 # d
 reading team_person.to_merge(range):
     display "x"
-    band low against flow.reviewLatencyDaysUNIT
+    band ON:
+        when value > 604800 then "over"
+        otherwise "ok"
     depends:
         m = team_person.time_to_merge in range
     calculate:
         mean(m)
 """
-    a = compile_ok(body.replace("UNIT", "")).reading("team_person.to_merge")
-    b = compile_ok(body.replace("UNIT", " in days")).reading("team_person.to_merge")
+    a = compile_ok(body.replace("ON", "")).reading("team_person.to_merge")
+    b = compile_ok(body.replace("ON", "on mean")).reading("team_person.to_merge")
     assert a is not None and b is not None
     assert a.version == b.version
 
@@ -1834,7 +1858,7 @@ figure team_person.banded:
     calculate:
         count(mine)
     band:
-        when value >= thresholds.wip.over then "over"
+        when value >= 5 then "over"
         otherwise "ok"
 """
 
@@ -1848,7 +1872,10 @@ def test_a_figure_carries_its_own_band() -> None:
     # change to what the number is -- a unit of `level` here would tell every
     # renderer downstream to stop formatting it as a quantity.
     assert plan.unit == "count"
-    assert plan.band_settings == ("thresholds.wip.over",)
+    # A literal threshold reads no figure. `band_reads` is what the serving
+    # side follows to notice a goal moving, so an empty tuple here is the
+    # claim that this band depends on nothing but its own value.
+    assert plan.band_reads == ()
 
 
 def test_a_band_reads_nothing_but_the_figures_own_value() -> None:
@@ -1867,10 +1894,15 @@ def test_a_band_must_answer_a_word() -> None:
     refuses(BANDED.replace('then "over"', "then 3"), "must answer a word")
 
 
-def test_a_band_may_only_name_a_settings_dial_a_calculation_may() -> None:
+def test_a_band_may_not_name_a_dial() -> None:
+    """A dial is a control outside the fact stream: the one number on a card
+    that no evidence can explain. The refusal carries the rewrite, because an
+    author staring at a working definition needs to be told what to write
+    instead."""
     refuses(
-        BANDED.replace("thresholds.wip.over", "flow.leadTimeDays"),
-        "not a setting a calculation may name",
+        BANDED.replace("5", "thresholds.wip.over"),
+        "tenant dial",
+        "figure",
     )
 
 

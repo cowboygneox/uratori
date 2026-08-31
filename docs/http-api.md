@@ -153,8 +153,8 @@ curl -s -X PUT "$BASE/schema" -H "$AUTH" -H 'Content-Type: application/json' -d 
 | `url_fields` | `{kind: field}` | The same decision for a record's link: which field holds the address of the record in the source system, per kind. Evidence members carry it so a reader can walk from a cited record to the source. A kind with no url field serves bare titles -- declared rather than guessed, because a field that happens to be called `url` is a host convention the engine was never taught. Stray kinds are refused, like `name_fields`. |
 | `bucket_settings` | `[string]` | Dial paths a definition may read, split by what turning the dial costs: a bucket setting re-buckets a tenant's whole history... |
 | `figure_settings` | `[string]` | ...a figure setting recomputes one value per subject... |
-| `reading_settings` | `[string]` | ...and a reading or |
-| `project_settings` | `[string]` | projection setting is free, because nothing is stored. |
+| `reading_settings` | `[string]` | Accepted and read by nothing. It held the dials a band compared against; a band's threshold is a fact now -- another figure, or a literal -- so a dial named from a band is refused. |
+| `project_settings` | `[string]` | ...and a projection setting is free, because nothing is stored. |
 | `defaults` | object | The shipped settings document, as a nested object. A tenant's stored settings are sparse; the engine completes them over these at every use. A dial a definition names that resolves to nothing under the completed document **raises** rather than guessing. |
 
 Every field defaults to empty, `kinds` included: a host that declares its
@@ -460,7 +460,7 @@ known/unknown, not required/optional.
 | `rebuilt` | Figure names rebuilt from scratch this pass (a moved dial, a redeploy, a deletion, `full`). A figure recomputed to the value it already held writes nothing and appears nowhere; `rebuilt` is how a rebuild and a no-op stay distinguishable from outside. |
 | `covered` | The fact kinds this pass actually read, sorted. A webhook covers almost nothing and a reconcile covers everything, and the difference says which values were *confirmed* unchanged rather than merely not checked. |
 | `shown` | A **ranked sample** of the movements, capped at 40, for an activity log. See below. |
-| `results` | The re-served answers for everything the pass moved -- plus, on any pass through the facts door or one that ran `full` (an empty batch counts: the door is the sync moment, not the batch's contents, and a standing import debt upgrades a run to `full`), every projection, because the clock is one of a projection's inputs and the sync is when that contract pays out. A definition-only pass (`POST /tenants/{t}/runs` after a deploy or a settings save) re-serves exactly what the change reached: the moved figures, the figures and readings a moved dial re-words or re-renders (a band threshold, the effort dial), and the projections whose answer can differ -- a rebuilt grouping they filter through, a moved figure they read, their own text (or a summary's over them) having changed, or a dial they render under having turned. Every **bundle** any of those members sits in re-serves whole, at its declared windows, as a `BundleResult` in the same list -- branch on `kind`. A change that reaches none of that serves nothing. The same objects `GET /tenants/{t}/results` returns and the websocket pushes; there is no run-only shape to drift. (One spelling difference: HTTP responses write absent fields as `null`, the socket omits them -- treat both as absent.) Empty when the request said `"serve": false`. |
+| `results` | The re-served answers for everything the pass moved -- plus, on any pass through the facts door or one that ran `full` (an empty batch counts: the door is the sync moment, not the batch's contents, and a standing import debt upgrades a run to `full`), every projection, because the clock is one of a projection's inputs and the sync is when that contract pays out. A definition-only pass (`POST /tenants/{t}/runs` after a deploy or a settings save) re-serves exactly what the change reached: the moved figures, the figures and readings whose band compares against a figure that moved (their own stored values are byte-identical; the word beside them is not), the figures and readings a moved dial re-renders (the effort dial), and the projections whose answer can differ -- a rebuilt grouping they filter through, a moved figure they read, their own text (or a summary's over them) having changed, or a dial they render under having turned. Every **bundle** any of those members sits in re-serves whole, at its declared windows, as a `BundleResult` in the same list -- branch on `kind`. A change that reaches none of that serves nothing. The same objects `GET /tenants/{t}/results` returns and the websocket pushes; there is no run-only shape to drift. (One spelling difference: HTTP responses write absent fields as `null`, the socket omits them -- treat both as absent.) Empty when the request said `"serve": false`. |
 | `moved` | Every definition name whose served answer this pass may have changed -- bundles included, computed without evaluating anything. A **superset** of what `results` re-serves, in exactly two ways: a summary's name appears here while its numbers travel inside its projection's `Result`, and a time-keyed or dimension-split figure appears here while the bulk surface leaves it to the by-name route -- both answer `GET /tenants/{t}/results/{name}` under the names listed. For the host that owns its own delivery (per-client subscriptions): send `"serve": false`, intersect `moved` with what your clients actually watch, and fetch exactly those by name at each watcher's own arguments. Carried on every response, not only lean ones. |
 
 `"serve": false` in the request body (facts and runs alike) skips *shipping*
@@ -511,8 +511,8 @@ curl -s -X POST "$BASE/tenants/t1/runs" -H "$AUTH" -H 'Content-Type: application
 The body is `{"full": bool, "serve": bool}`, both defaulted (`false`,
 `true`). Use it to pick up a settings change (the response's `rebuilt` will
 name the figures that read the moved dial, and `results` carries everything
-the dial re-worded -- a band threshold re-serves the banded figure, its
-readings and its tiles even though no stored value moved), to recompute
+the dial re-rendered -- the effort dial re-serves every figure printing an
+effort even though no stored value moved), to recompute
 after loading a changed definition, or -- with `{"full": true}` -- to
 rebuild everything a tenant has from the facts stored.
 
@@ -886,7 +886,7 @@ join.
 | `display` | `value`, rendered by the server. Both travel because they answer different questions -- the number is positional, the text is what a reader sees. Rendering is not the client's job because rendering a duration or an effort is a division against a dial the client does not have, and a client that had the dial would be one step from banding against a threshold. |
 | `windows` | For a reading: the served windows (bucket spans), below. Otherwise `null`. |
 | `row` | For a projection: the assembled row, below. Otherwise `null`. |
-| `level` | The band word, from the definition's own thresholds evaluated against the tenant's live dials. See "band words", below. |
+| `level` | The band word, from the definition's own ladder evaluated against the value beside it and the goal figures it names. See "band words", below. |
 | `dimension` | The other half of a pair when the figure is split across something (or time-keyed) -- present so two rows about one subject are told apart by a field rather than by a reader noticing. |
 
 ### `Window` (readings)
@@ -930,10 +930,13 @@ sentences the row earned.
 
 ### Band words (`level`)
 
-`level` anywhere is a word from the definition: the author's own word on a
-`when` ladder (`over`, `warn`, `at-risk`, ...), the engine's word (`good`,
-`watch`, `poor`) from a `band` clause's thresholds, `"unknown"` where nothing
-banded. A renderer maps words to colours, and an unrecognised word must render
+`level` anywhere is a word from the definition -- the author's own word on a
+ladder (`over`, `warn`, `at-risk`, ...), whether that ladder is a figure's
+`calculate`, a figure's `band:` or a reading's. `"unknown"` where nothing
+banded, *and* where a band's threshold is not known: a month before anybody
+set a goal has no verdict, and the comfortable rung would be the confident
+wrong answer. (There is no longer an engine-invented `good`/`watch`/`poor`
+trio: those came from a dial's two edges, and a ladder writes its own words.) A renderer maps words to colours, and an unrecognised word must render
 as **neutral** -- never as good, which is what a missing case silently does
 when green is the default. A renderer never compares a number to a threshold:
 banding in two places is how a card reads Watch while a sort weighs the same
@@ -1047,8 +1050,10 @@ complaints carry none.
    frame exactly when the pass impacted it, re-evaluated at ITS OWN
    arguments -- never the serving defaults -- and evaluated once however many
    clients hold the same entry. "Impacted" means: a figure that moved or
-   whose served rendering a dial turned (a band threshold, the effort dial);
-   a reading whose source figure moved or whose own dial turned; a
+   whose served rendering a dial turned (the effort dial), or whose band
+   compares against a figure that moved -- the banded figure is
+   byte-identical and its word is not; a reading whose source figure moved,
+   whose own dial turned, or whose band's goal moved; a
    projection being re-served (every sync pass -- the clock is one of its
    inputs -- or a definition-only pass whose change reaches it); a bundle
    any member of which is impacted, evaluated at its declared windows. A

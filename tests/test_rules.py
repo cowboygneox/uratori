@@ -461,7 +461,10 @@ figure team_person.volume bucketed:
 # d
 reading team_person.speed(range):
     display "x"
-    band low against flow.leadTimeDays
+    band:
+        when value > 1814400 then "over"
+        when value > 604800 then "warn"
+        otherwise "ok"
     depends:
         m = team_person.per_day in range
     requires:
@@ -489,20 +492,23 @@ reading team_person.pace(range):
 )
 
 
-def test_a_low_band_puts_small_numbers_in_the_good_column() -> None:
-    """Inverted, the fastest reviewer on the board is the one flagged red."""
+def test_a_ladder_is_tested_in_written_order_so_small_numbers_stay_good() -> None:
+    """The direction lives in the comparison operator now, where a reader can
+    see it. Inverted -- `<` where the definition means `>` -- the fastest
+    reviewer on the board is the one flagged red, and nothing but the operator
+    says which way round it should be."""
     plan = READINGS.reading("team_person.speed")
     assert plan is not None
     good, poor = 7 * 86_400.0, 21 * 86_400.0
-    assert level_of(plan, {"mean": good - 1}, DEFAULTS) == "ok"
-    assert level_of(plan, {"mean": (good + poor) / 2}, DEFAULTS) == "warn"
-    assert level_of(plan, {"mean": poor + 1}, DEFAULTS) == "over"
+    assert level_of(plan, {"mean": good - 1}) == "ok"
+    assert level_of(plan, {"mean": (good + poor) / 2}) == "warn"
+    assert level_of(plan, {"mean": poor + 1}) == "over"
 
 
 def test_a_band_over_an_absent_statistic_is_unknown_rather_than_good() -> None:
     plan = READINGS.reading("team_person.speed")
     assert plan is not None
-    assert level_of(plan, {"mean": None}, DEFAULTS) == "unknown"
+    assert level_of(plan, {"mean": None}) == "unknown"
 
 
 def test_the_serve_path_reads_both_stored_shapes() -> None:
@@ -663,7 +669,9 @@ figure team_person.spans bucketed:
 # d
 reading team_person.worst_only(range):
     display "x"
-    band low against flow.leadTimeDays
+    band:
+        when value > 604800 then "over"
+        otherwise "ok"
     depends:
         m = team_person.spans in range
     calculate:

@@ -76,6 +76,7 @@ from .read import (
     level_of,
     sample_over,
     series_of,
+    statistic_of,
     statistics_of,
     unmet_of,
 )
@@ -172,6 +173,41 @@ async def _any_index_holds(
     return False
 
 
+async def band_thresholds(
+    store: EngineStore,
+    library: Library,
+    tenant: str,
+    plan: FigurePlan,
+    settings: Mapping[str, Any],
+) -> dict[str, dict[str, Value]]:
+    """The figures a band compares against, resolved per subject key.
+
+    The join is subject-key equality and nothing cleverer, and that is the
+    whole reason the checker insists a band's threshold shares this figure's
+    grain and dimension. A monthly number is stored under `c1@2026-07` and so
+    is the monthly goal, so the lookup lands on the same coordinate by
+    construction -- misalignment is not merely unlikely, it is
+    unrepresentable. A goal cut by day against a number cut by month would
+    have keys that never meet, which is why that pairing is refused at compile
+    time rather than left to answer nothing here.
+
+    A threshold figure that is not yet servable contributes nothing, so every
+    row it would have judged keeps its word withheld. That is the honest
+    answer: the goal is not known, so whether the number clears it is not
+    known either.
+    """
+    out: dict[str, dict[str, Value]] = {}
+    for name in plan.band_reads:
+        source = library.figure(name)
+        if source is None:  # pragma: no cover - the checker resolved it
+            continue
+        if not isinstance(await availability(store, library, tenant, source, settings), Ok):
+            continue
+        for stored in await store.values(tenant, source.name, source.version):
+            out.setdefault(stored.subject, {})[name] = stored.value
+    return out
+
+
 # ------------------------------------------------------------- figures --
 
 
@@ -196,8 +232,10 @@ async def serve_figure(
     at = at_ms if at_ms is not None else now_ms()
     state = await availability(store, library, tenant, plan, settings)
     subjects: list[Subject] = []
+    thresholds: dict[str, dict[str, Value]] = {}
 
     if isinstance(state, Ok):
+        thresholds = await band_thresholds(store, library, tenant, plan, settings)
         if subject is None:
             rows = await store.values(tenant, plan.name, plan.version)
         else:
@@ -228,8 +266,11 @@ async def serve_figure(
                     # from a definition this response never named, and the page
                     # showing the formula did not contain it. It is a `band:`
                     # block on the plan now, evaluated here against the value
-                    # beside it and the tenant's live dials.
-                    level=_level_word(band_of(plan.band, stored.value, settings)),
+                    # beside it and the goal figures it names, resolved at this
+                    # row's own coordinate.
+                    level=_level_word(
+                        band_of(plan.band, stored.value, thresholds.get(stored.subject, {}))
+                    ),
                     dimension=tail,
                 )
             )
@@ -713,13 +754,37 @@ async def serve_reading(
             by_subject.setdefault(base, []).append((label, stored.value))
             names.setdefault(base, stored.label)
 
+        # The goals this reading's band compares against, over the identical
+        # buckets. Fetched by the same range and reduced by the same statistic
+        # below, so the window's total is judged against the total of the goal
+        # across those buckets rather than against one bucket's worth of it.
+        goals = await _band_goals(
+            store, library, tenant, plan, settings, min(all_labels), max(all_labels)
+        )
+
         for base, held in sorted(by_subject.items()):
             served: list[Window] = []
             for spec, labels in resolved:
                 covered = set(labels)
                 inside = [(d, v) for d, v in held if d in covered]
                 sample = sample_over(inside, labels)  # type: ignore[arg-type]
-                served.append(_window(plan, sample, spec, labels, rule, zone, settings))
+                against = {
+                    name: statistic_of(
+                        plan.band_on or "mean",
+                        sample_over(
+                            [
+                                (d, v)  # type: ignore[misc]  # a goal stores numbers
+                                for d, v in per_subject.get(base, [])
+                                if d in covered
+                            ],
+                            labels,
+                        ),
+                    )
+                    for name, per_subject in goals.items()
+                }
+                served.append(
+                    _window(plan, sample, spec, labels, rule, zone, settings, against)
+                )
             subjects.append(
                 Subject(
                     id=base,
@@ -756,6 +821,43 @@ async def serve_reading(
     )
 
 
+async def _band_goals(
+    store: EngineStore,
+    library: Library,
+    tenant: str,
+    plan: ReadingPlan,
+    settings: Mapping[str, Any],
+    frm: str,
+    to: str,
+) -> dict[str, dict[str, list[tuple[str, Value]]]]:
+    """Every goal figure a reading's band names, by figure and by subject.
+
+    One range fetch per goal, over the same label bounds the reading itself
+    fetched -- the checker has already refused a goal cut at a different grain,
+    so its labels are drawn from the same sequence and the window's `covered`
+    set selects the same buckets on both sides.
+
+    A goal that is not servable yet contributes nothing, and every window it
+    would have judged reads `unknown` rather than falling to the comfortable
+    rung.
+    """
+    out: dict[str, dict[str, list[tuple[str, Value]]]] = {}
+    for name in plan.band_reads:
+        goal = library.figure(name)
+        if goal is None:  # pragma: no cover - the checker resolved it
+            continue
+        if not isinstance(await availability(store, library, tenant, goal, settings), Ok):
+            continue
+        held: dict[str, list[tuple[str, Value]]] = {}
+        for stored in await store.values_in_range(tenant, goal.name, goal.version, frm, to):
+            if SEPARATOR not in stored.subject:  # pragma: no cover - grain is checked
+                continue
+            base, label = stored.subject.split(SEPARATOR, 1)
+            held.setdefault(base, []).append((label, stored.value))
+        out[name] = held
+    return out
+
+
 def _statistic_keys(plan: ReadingPlan) -> list[str]:
     """The declared statistics, spelled the way the wire spells them.
 
@@ -772,7 +874,7 @@ def _banded_on(plan: ReadingPlan) -> str | None:
     name a column the banding never judged."""
     if plan.band is None:
         return None
-    which = plan.band.on or "mean"
+    which = plan.band_on or "mean"
     return {"sum": "total"}.get(which, which)
 
 
@@ -784,6 +886,7 @@ def _window(
     rule: str,
     zone: str | None,
     settings: Mapping[str, Any],
+    thresholds: Mapping[str, float | None] = {},
 ) -> Window:
     unmet = unmet_of(plan, sample)
     stats: dict[str, float | None] = statistics_of(plan, sample)
@@ -857,7 +960,7 @@ def _window(
         sample=len(sample.values),
         buckets_covered=sample.buckets_covered,
         buckets_requested=sample.buckets_requested,
-        level="unknown" if unmet else _level_word_from(level_of(plan, stats, settings)),
+        level="unknown" if unmet else _level_word_from(level_of(plan, stats, thresholds)),
         unmet=unmet,
     )
 
@@ -1190,13 +1293,21 @@ async def project_rows(
         if not isinstance(state, Ok):
             missing.append(figure_name)
             continue
+        # A `band of X` column words X by X's own definition, so it needs the
+        # goals X compares against -- resolved once for the whole projection
+        # rather than per row, since every row reads the same figure.
+        against = (
+            await band_thresholds(store, library, tenant, source, settings) if band else {}
+        )
         for stored in await store.values(tenant, source.name, source.version):
             # The band is derived here rather than read: it is evaluated from
-            # the value beside it and the tenant's live dials, so a projection
-            # binding a band costs no extra query and cannot be stale against a
-            # threshold the way a stored one was.
+            # the value beside it and the goals its definition names, so a
+            # projection binding a band costs no extra query and cannot be
+            # stale against a threshold the way a stored one was.
             values.setdefault(stored.subject, {})[(figure_name, band)] = (
-                band_of(source.band, stored.value, settings) if band else stored.value
+                band_of(source.band, stored.value, against.get(stored.subject, {}))
+                if band
+                else stored.value
             )
 
     joins = await _joined(facts, tenant, plan)

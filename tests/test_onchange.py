@@ -1040,7 +1040,7 @@ figure site.actual_dialled bucketed:
         median(job.length over done)
 
     band:
-        when value > limits.target.over then "over"
+        when value > 0 then "over"
         otherwise "ok"
 '''
     )

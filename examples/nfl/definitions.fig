@@ -326,8 +326,8 @@ figure nfl_team.win_rate:
         count(won) / count(mine)
 
     band:
-        when value >= thresholds.era.strong then "powerhouse"
-        when value < thresholds.era.weak then "long-suffering"
+        when value >= 0.55 then "powerhouse"
+        when value < 0.45 then "long-suffering"
         otherwise "middling"
 
 # The era in one word, read off the win rate a screen already shows -- a
@@ -436,8 +436,8 @@ figure nfl_season.average:
         points / games
 
     band:
-        when value >= thresholds.scoring.high then "high-scoring"
-        when value < thresholds.scoring.low then "low-scoring"
+        when value >= 46 then "high-scoring"
+        when value < 41 then "low-scoring"
         otherwise "typical"
 
 # ------------------------------------------- one team, one season, a row --
@@ -513,8 +513,8 @@ figure nfl_team_season.rate:
         count(won) / count(mine)
 
     band:
-        when value >= thresholds.contending.rate then "contending"
-        when value < thresholds.fading.rate then "fading"
+        when value >= 0.65 then "contending"
+        when value < 0.35 then "fading"
         otherwise "steady"
 
 # ------------------------------------------------------------ the players --
@@ -554,7 +554,7 @@ figure nfl_player.pass_yards:
         sum(nfl_stat_line.passing over mine)
 
     band:
-        when value >= thresholds.passing.star then "star"
+        when value >= 50000 then "star"
         otherwise "working"
 
 # Career yards from scrimmage -- rushing plus receiving, as the league
@@ -742,8 +742,8 @@ figure nfl_team.third_down_rate:
         count(moved) / count(faced)
 
     band:
-        when value >= thresholds.conversion.sharp then "sharp"
-        when value < thresholds.conversion.stalling then "stalling"
+        when value >= 0.45 then "sharp"
+        when value < 0.35 then "stalling"
         otherwise "steady"
 
 # Points put on the board per quarter-hour of the day -- the grain that lets
@@ -809,8 +809,8 @@ figure nfl_team_season.conversion:
         count(moved) / count(faced)
 
     band:
-        when value >= thresholds.conversion.sharp then "sharp"
-        when value < thresholds.conversion.stalling then "stalling"
+        when value >= 0.45 then "sharp"
+        when value < 0.35 then "stalling"
         otherwise "steady"
 
 # ------------------------------------------- game number and day of week --
@@ -906,7 +906,10 @@ reading nfl_team.scoring(range):
 # case printed alone is by construction the outlier.
 reading nfl_team.rest(range):
     display "{nfl_team} rest between games"
-    band high against pace.restDays
+    band on mean:
+        when value >= 561600 then "rested"
+        when value >= 496800 then "short"
+        otherwise "quick turnaround"
 
     depends:
         spans = nfl_team.rest_by_day in range

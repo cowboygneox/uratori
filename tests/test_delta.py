@@ -255,7 +255,9 @@ def test_a_band_may_not_colour_a_delta() -> None:
 # Trend, banded.
 reading team_person.banded(range):
     display "{team_person} banded"
-    band low on delta against flow.leadTimeDays
+    band on delta:
+        when value > 0 then "over"
+        otherwise "ok"
     depends:
         t = team_person.time_to_merge in range
     calculate:
@@ -575,7 +577,9 @@ def test_a_band_may_not_colour_a_series_either() -> None:
 # Banded series.
 reading team_person.banded_series(range):
     display "{team_person} banded series"
-    band low on series against flow.leadTimeDays
+    band on series:
+        when value > 0 then "over"
+        otherwise "ok"
     depends:
         t = team_person.time_to_merge in range
     calculate:
@@ -592,7 +596,9 @@ reading team_person.banded_series(range):
 # Banded median.
 reading team_person.banded_median(range):
     display "{team_person} banded median"
-    band low on median against flow.leadTimeDays
+    band on median:
+        when value > 604800 then "over"
+        otherwise "ok"
     depends:
         t = team_person.time_to_merge in range
     calculate:

@@ -365,8 +365,14 @@ what a dial is set to -- one boundary means one truth.)
 |---|---|---|
 | `bucket_settings` | a group's `by day in ...` and a filter's `older/younger than ...` | the buckets of every grouping that reads the dial -- day boundaries moved, so those memberships are suspect (each grouping's stamp carries a fingerprint of its dials, so the untouched rest stay built) |
 | `figure_settings` | figure calculations | one stored value per subject, for each figure naming the dial |
-| `reading_settings` | reading statistics and bands | nothing stored -- the next read evaluates under the new dial |
 | `project_settings` | projection values and flags | nothing stored -- rows are assembled when asked |
+
+A fourth list, `reading_settings`, held the dials a band compared against. A
+band's threshold is a **fact** now -- another figure, or a literal in the
+definition -- so nothing reads that list, and a dial named from a band is
+refused with the rewrite. The reason is the doctrine's own: on a card where
+every number can be traced to the records behind it, the one deciding whether
+a reader should worry was the one nothing could cite.
 
 The split is not bookkeeping: merging any two lists would let a definition
 write a dial into a position the engine cannot honour. And the pointer each

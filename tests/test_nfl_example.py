@@ -1000,7 +1000,7 @@ def test_the_showcase_keeps_the_constructs_the_readme_promises() -> None:
         "by hour in tenant.timezone",  # the hour grain, declared where grains live
         "by month in tenant.timezone",  # the calendar trio's middle grain
         "by quarter in tenant.timezone",  # and its coarse end
-        "band high against pace.restDays",  # a reading's band
+        "band on mean:",  # a reading's band, over the statistic it judges
         "from nfl_game.finished & nfl_game.playoff",  # a set-expression population
         "omit when",  # the row-level gate
         "days from now to",  # the signed calendar span, forwards

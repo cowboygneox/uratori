@@ -21,7 +21,7 @@ from __future__ import annotations
 import statistics
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, assert_never
+from typing import assert_never
 
 from ..lang.ast import (
     Arith,
@@ -35,6 +35,7 @@ from ..lang.ast import (
     DaysBetween,
     Extreme,
     FieldPick,
+    FigureRef,
     Ladder,
     ListOf,
     Number,
@@ -49,7 +50,6 @@ from ..lang.ast import (
     Text,
 )
 from ..lang.plan import FigurePlan, Value
-from ..lang.settings import setting_value
 
 BucketReader = Callable[[str, str | None], frozenset[str]]
 """(index name, bucket key or None for the single bucket) -> the ids in it."""
@@ -388,6 +388,11 @@ def _eval(
             "a span reads the clock and the checker refuses it to a figure; this is a "
             "projection construct and should never reach here"
         )
+    if isinstance(e, FigureRef):  # pragma: no cover - band-only
+        raise AssertionError(
+            "a figure named outright is a band's threshold, evaluated by `band_of` "
+            "against the goals resolved for the row; it never reaches the calculation"
+        )
 
     assert_never(e)
 
@@ -498,7 +503,9 @@ def _compare(left: Value, op: Comparison | str, right: Value) -> bool | None:
     raise ValueError(f"unknown comparison {op}")
 
 
-def band_of(ladder: Ladder | None, value: Value, settings: Mapping[str, Any]) -> str | None:
+def band_of(
+    ladder: Ladder | None, value: Value, thresholds: Mapping[str, Value] = {}
+) -> str | None:
     """Which word a figure's value falls under.
 
     Evaluated here rather than stored, and that is the whole design. A band used
@@ -509,24 +516,27 @@ def band_of(ladder: Ladder | None, value: Value, settings: Mapping[str, Any]) ->
     between. All of it to store a word derivable from a number sitting next to
     it.
 
-    Deliberately its own small walker rather than a call into `_eval`. The only
-    things a band may contain are `value`, literals and dials -- the checker
-    refuses anything else -- and writing that as a separate function makes the
-    restriction structural instead of a rule somebody has to keep enforcing. A
-    band that could reach `_eval`'s sets and sources would be a second
-    calculation sharing the first one's name.
+    `thresholds` carries the figures the ladder compares against, already
+    resolved for this row -- by subject, and for a sequenced figure at this
+    row's own coordinate, so days meet days and months meet months. Passing
+    resolved values rather than a store handle is what keeps this a small
+    walker: the only things a band may contain are `value`, literals and other
+    figures' answers, and a band that could reach `_eval`'s sets and sources
+    would be a second calculation sharing the first one's name.
 
-    **`None` when the value is `None`, never the bottom rung.** A ladder stops on
-    an unknown, and the bottom rung of a band is reliably the comfortable one --
-    banding somebody the engine has never measured as comfortable is the
-    confident wrong answer this whole engine is arranged around avoiding.
+    **`None` when any operand is `None`, never the bottom rung.** A ladder stops
+    on an unknown, and the bottom rung of a band is reliably the comfortable one
+    -- banding somebody the engine has never measured as comfortable is the
+    confident wrong answer this whole engine is arranged around avoiding. That
+    covers the threshold as well as the value: a month before anybody set a goal
+    has no goal, and a nought would sit comfortably under every comparison.
     """
     if ladder is None:
         return None
     for rung in ladder.rungs:
-        left = _band_operand(rung.left, value, settings)
+        left = _band_operand(rung.left, value, thresholds)
         right = (
-            _band_operand(rung.right, value, settings) if rung.right is not None else None
+            _band_operand(rung.right, value, thresholds) if rung.right is not None else None
         )
         verdict = _compare(left, rung.op, right)
         if verdict is None:
@@ -536,7 +546,7 @@ def band_of(ladder: Ladder | None, value: Value, settings: Mapping[str, Any]) ->
     return _band_word(ladder.otherwise)
 
 
-def _band_operand(e: CalcExpr, value: Value, settings: Mapping[str, Any]) -> Value:
+def _band_operand(e: CalcExpr, value: Value, thresholds: Mapping[str, Value]) -> Value:
     if isinstance(e, Part):
         # `value`, and the checker has already refused every other name.
         return value
@@ -544,9 +554,11 @@ def _band_operand(e: CalcExpr, value: Value, settings: Mapping[str, Any]) -> Val
         return e.value
     if isinstance(e, Text):
         return e.value
-    if isinstance(e, Setting):
-        found = setting_value(dict(settings), e.path)
-        return float(found) if isinstance(found, (int, float)) else None
+    if isinstance(e, (FigureRef, Coord)):
+        # A threshold this row has no answer for reads as an absence, which
+        # withholds the word above. Never a nought: a goal nobody has set is
+        # not a goal of zero, and the difference is the whole band.
+        return thresholds.get(e.name)
     return None
 
 

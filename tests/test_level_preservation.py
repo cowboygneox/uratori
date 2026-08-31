@@ -4,17 +4,20 @@ The bug: a definition writes `over`, the translation layer maps it to `poor`,
 and the Data screen prints a word that appears nowhere in the definition rendered
 under it. That is the defect this test catches.
 
-For `when` ladders: the author wrote the word, preserve it.
-For `band` clauses: the engine generates good/watch/poor, preserve those too.
+Both band shapes -- a figure's `band:` block and a reading's -- are ladders
+written by the author, so there is nothing left for a translation layer to
+map: whatever word the definition wrote is the word the wire carries. The
+engine no longer invents good/watch/poor from a dial's two edges.
 """
 
 import pytest
 
 from uratori.engine.read import level_of
 from uratori.lang.ast import (
-    Band,
+    FigureRef,
     Ladder,
     Number,
+    Part,
     Rung,
     Text,
 )
@@ -61,8 +64,13 @@ def test_ladder_word_preserved_not_translated():
     assert value == "over", "Ladder should return 'over', not translate it"
 
 
-def test_band_clause_generates_expected_words():
-    """Band clause generates good/watch/poor based on thresholds."""
+def test_a_reading_bands_by_its_own_ladder_against_a_goal():
+    """A reading's verdict is the word its ladder wrote, judged against the
+    goal figure reduced over the same window.
+
+    This used to be a dial with two edges and a direction, from which the
+    engine derived good, watch or poor -- three words no definition contained.
+    """
     plan = ReadingPlan(
         name="test.reading",
         scope="test_scope",
@@ -72,26 +80,26 @@ def test_band_clause_generates_expected_words():
         unit="duration",
         calculate=("mean",),
         requires=(),
-        band=Band(
-            direction="low",
-            setting="test.threshold",
-            unit="days",
-            on="mean",
+        band=Ladder(
+            rungs=(
+                Rung(left=Part("value"), op=">", right=FigureRef("test.goal"), then=Text("over")),
+            ),
+            otherwise=Text("ok"),
         ),
+        band_on="mean",
+        band_reads=("test.goal",),
         source="test.figure",
     )
 
-    # Simulate stats that would band as "warn" (between thresholds)
-    # For direction="low": value <= good => "ok", value >= poor => "over", else => "warn"
-    # good=2 days = 172800 seconds, poor=7 days = 604800 seconds
-    # So mean of 5 days = 432000 seconds should be "warn"
-    stats = {"mean": 432000.0}  # 5 days in seconds, between good (2d) and poor (7d)
-    settings = {"test": {"threshold": {"good": 2.0, "poor": 7.0}}}
+    over = level_of(plan, {"mean": 432_000.0}, {"test.goal": 172_800.0})
+    assert over == "over", "five days against a two-day goal is over"
 
-    word = level_of(plan, stats, settings)
+    under = level_of(plan, {"mean": 86_400.0}, {"test.goal": 172_800.0})
+    assert under == "ok", "one day against a two-day goal is not over"
 
-    # Band clause generates "warn", and it should stay "warn"
-    assert word == "warn", "Band clause should generate 'warn' from thresholds"
+    # The goal is what the whole verdict hangs on, so a window with no goal
+    # has no verdict -- never the comfortable bottom rung.
+    assert level_of(plan, {"mean": 432_000.0}, {}) == "unknown"
 
 
 def test_translation_layer_breaks_ladder_words():

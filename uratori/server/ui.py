@@ -2191,12 +2191,17 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
             edges.append(Dependency(type="fact", name=figure.across))
         edges += [_grouping_edge(library, n) for n in figure.indexes]
         edges += [Dependency(type="measure", name=n) for n in figure.measures]
-        sources = set(figure.reads) | {src for src, _ in figure.combines.values()}
+        # A band's thresholds are figures, so they are figure edges like any
+        # other source -- which is the point of the change: the dependency
+        # graph now contains the thing that decides the word beside the
+        # number, where a dial used to sit outside it.
+        sources = (
+            set(figure.reads)
+            | {src for src, _ in figure.combines.values()}
+            | set(figure.band_reads)
+        )
         edges += [Dependency(type="figure", name=n) for n in sorted(sources)]
-        edges += [
-            Dependency(type="setting", name=n)
-            for n in (*figure.settings, *figure.band_settings)
-        ]
+        edges += [Dependency(type="setting", name=n) for n in figure.settings]
         edges += _effort_edges(figure.unit)
         out.append(
             DeclarationOut(
@@ -2218,6 +2223,9 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
         if reading.live_measure is not None:
             edges.append(Dependency(type="measure", name=reading.live_measure))
         edges += [_grouping_edge(library, n) for n in reading.indexes]
+        # The goals its band judges against, as figure edges -- the same
+        # reasoning as a figure's: what decides the word belongs in the graph.
+        edges += [Dependency(type="figure", name=n) for n in reading.band_reads]
         edges += [Dependency(type="setting", name=n) for n in reading.settings]
         edges += _effort_edges(reading.unit)
         out.append(

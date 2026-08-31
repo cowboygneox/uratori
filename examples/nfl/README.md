@@ -158,7 +158,7 @@ fabricated zero this engine refuses elsewhere.
 
 **The offence page** (`nfl_team.offense`) is where the play-scale figures
 surface: snaps run, yards gained, giveaways and the third-down conversion
-rate -- a share banded against dials -- every one computed over the actual
+rate -- a share banded by its own ladder -- every one computed over the actual
 plays, era-deep.
 `GET /tenants/nfl/evidence/nfl_team_season.giveaways?subject=2025-MIN`
 lists the exact plays a season's number counts, by name.
@@ -166,8 +166,8 @@ lists the exact plays a season's number counts, by name.
 **Rest between games** (`nfl_team.rest`) is the duration pipeline: a
 measure subtracting two moments (`kickoff - previous_kickoff`), a
 time-keyed `list` figure, and a windowed reading taking `mean`, `median`
-and `worst` -- withheld together under two games, and banded `high`
-against a `{good, poor}` dial. The gaps are within-season by construction:
+and `worst` -- withheld together under two games, and banded by a ladder
+over the mean. The gaps are within-season by construction:
 an opener carries no previous kickoff, because an off-season is not a bye
 week.
 

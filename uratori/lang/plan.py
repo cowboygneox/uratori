@@ -14,7 +14,6 @@ from typing import Literal, TypeAlias
 
 from ..windows import WindowSpec
 from .ast import (
-    Band,
     CalcExpr,
     Condition,
     FieldType,
@@ -28,6 +27,7 @@ from .ast import (
     SetExpr,
     SortDecl,
     Statistic,
+    StatisticFn,
 )
 
 Value: TypeAlias = float | str | list[float | None] | None
@@ -134,18 +134,21 @@ class FigurePlan:
     band: Ladder | None = None
     """The ladder that turns this figure's number into a word.
 
-    Evaluated when the figure is served and stored nowhere: it is pure over the
-    value and the tenant's dials, so there is nothing to keep in step. That is
-    why moving a threshold re-bands the board on the next request rather than
-    marking the figure pending and withholding the band through a rebuild.
+    Evaluated when the figure is served and stored nowhere: it is pure over
+    this figure's value and the figures it compares against, so there is
+    nothing to keep in step. That is why moving a goal re-bands the board on
+    the next request rather than marking the figure pending and withholding
+    the word through a rebuild.
 
-    `band_settings` is separate from `settings` for exactly that reason -- the
-    dials a *stored* value was computed under are what the pointer's fingerprint
-    covers, and a dial only the band reads must not force a rebuild of values it
-    did not affect.
+    `band_reads` is separate from `reads` for exactly that reason. `reads` are
+    the figures a *stored* value was computed from, and moving one rebuilds
+    this figure; a figure only the band compares against moves no stored value
+    here and must not force a rebuild -- but it does move the served answer,
+    so the serving side has to know about it or every connected screen keeps
+    the old word until a reload.
     """
 
-    band_settings: tuple[str, ...] = ()
+    band_reads: tuple[str, ...] = ()
     grain: str | None = None
     """The bucket rule of the scope index's tail part, when it has one -- a
     stored grain (`minute` through `quarter`) or a selective rule's canonical
@@ -186,7 +189,19 @@ class ReadingPlan:
     unit: Literal["count", "duration", "effort"]
     calculate: tuple[Statistic, ...]
     requires: tuple[Requirement, ...] = ()
-    band: Band | None = None
+    band: Ladder | None = None
+    """The ladder that words this reading's verdict, or None where it declares
+    no band."""
+
+    band_on: StatisticFn | None = None
+    """Which statistic the word judges -- the mean when the definition left it
+    unwritten, resolved here so no reader has to know the default. It is also
+    how a figure named in the ladder is reduced over the window: same buckets,
+    same statistic."""
+
+    band_reads: tuple[str, ...] = ()
+    """The figures the ladder compares against, in name order."""
+
     source: str | None = None
     """The figure a windowed reading summarises."""
 

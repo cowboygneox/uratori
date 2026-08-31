@@ -23,7 +23,6 @@ from .ast import (
     AbsenceTest,
     Arith,
     ArithOperator,
-    Band,
     BucketAll,
     BucketScope,
     BucketStat,
@@ -69,6 +68,7 @@ from .ast import (
     Pick,
     ProjectDecl,
     ReadDecl,
+    ReadingBand,
     ReadingDecl,
     ReadingSet,
     Requirement,
@@ -84,7 +84,6 @@ from .ast import (
     Sum,
     SummariseDecl,
     Text,
-    ThresholdUnit,
     Through,
     TotalDecl,
     Truncation,
@@ -98,7 +97,6 @@ _DECLARED_UNITS: frozenset[str] = frozenset({"share", "days", "effort", "count",
 _DERIVED_UNITS: frozenset[str] = frozenset({"level", "moment"})
 _MEASURE_UNITS: frozenset[str] = frozenset({"effort", "count"})
 _FIELD_TYPES: frozenset[str] = frozenset({"text", "date", "number", "flag"})
-_THRESHOLD_UNITS: frozenset[str] = frozenset({"minutes", "hours", "days"})
 _STATISTICS: frozenset[str] = frozenset(
     {"mean", "median", "worst", "sum", "count", "series", "delta"}
 )
@@ -1250,7 +1248,7 @@ class _Parser:
         self._expect("indent", "an indented block after the reading name")
 
         display = ""
-        band: Band | None = None
+        band: ReadingBand | None = None
         sets: list[ReadingSet] = []
         requires: list[Requirement] = []
         calculate: list[Statistic] = []
@@ -1300,46 +1298,51 @@ class _Parser:
             line=line,
         )
 
-    def _band(self) -> Band:
+    def _band(self) -> ReadingBand:
+        """`band [on <statistic>]:` and an indented ladder.
+
+        The same block a figure writes, with one extra word: which statistic
+        the verdict is about. A reading answers several numbers and a band is
+        a verdict on one of them.
+        """
         line = self._peek().line
         self._keyword("band")
-        word = self._name('"low" or "high"')
-        if word not in ("low", "high"):
+
+        if not self._at_op(":") and not self._at_word("on"):
+            # `band low against flow.leadTimeDays in minutes` -- the clause
+            # this replaced. Named here rather than left to fail as "expected
+            # a colon", because the author of an existing definition needs to
+            # be told what the rewrite is, not that a colon is missing.
             raise self._error(
-                f'"{word}" is not a direction. "low" means lower is better -- a wait, a '
-                'latency. "high" is for a share.'
+                'a band is a ladder now, not a direction and a dial: write `band:` (or '
+                '`band on <statistic>:`) and an indented `when ... then "word"` ladder. '
+                "The comparison operator carries the direction, and the threshold is a "
+                "figure -- a fact with a unit of its own -- rather than a tenant dial "
+                "that nothing on the screen could cite.",
+                line,
             )
 
         on: StatisticFn | None = None
         if self._at_word("on"):
             self._next()
-            stat = self._name("the statistic to colour")
+            stat = self._name("the statistic the band judges")
             if stat not in _STATISTICS:
                 raise self._error(f'"{stat}" is not a statistic.')
             on = stat  # type: ignore[assignment]
 
-        self._keyword("against")
-        setting = self._name("a settings path")
-
-        unit: ThresholdUnit | None = None
-        if self._at_word("in"):
-            self._next()
-            u = self._name("the unit the threshold is written in")
-            if u not in _THRESHOLD_UNITS:
-                raise self._error(
-                    f'"{u}" is not a threshold unit. Those are: '
-                    f'{", ".join(sorted(_THRESHOLD_UNITS))}.'
-                )
-            unit = u  # type: ignore[assignment]
-
+        self._punct(":")
         self._end_of_line()
-        return Band(
-            direction="low" if word == "low" else "high",
-            setting=setting,
-            on=on,
-            unit=unit,
-            line=line,
-        )
+        self._expect("indent", "an indented block after band")
+        ladder = self._calc_body()[0]
+        self._expect("dedent", "the end of the band block")
+        if not isinstance(ladder, Ladder):
+            raise self._error(
+                "a band is a `when ... then \"word\"` ladder ending in `otherwise`. "
+                "A band names which of a few states a number is in, so there is "
+                "nothing for a bare expression to answer.",
+                line,
+            )
+        return ReadingBand(ladder=ladder, on=on, line=line)
 
     def _reading_depends(self) -> list[ReadingSet]:
         self._keyword("depends")

@@ -30,29 +30,45 @@ from uratori import compile_source as compile_against
 from uratori.results import BundleResult, Result
 
 WORLD = Schema(
-    kinds=frozenset({"shop_order", "shop_courier", "shop_review"}),
+    kinds=frozenset({"shop_order", "shop_courier", "shop_review", "shop_limit"}),
     name_fields={"shop_courier": "name", "shop_order": "ref", "shop_review": "ref"},
     bucket_settings=("tenant.timezone",),
-    figure_settings=("limits.carrying.over", "limits.spare"),
-    reading_settings=("limits.rideHours",),
+    figure_settings=("limits.spare",),
     defaults={
         "tenant": {"hoursPerDay": 8, "timezone": "UTC"},
-        "limits": {
-            "carrying": {"over": 3},
-            "rideHours": {"good": 2, "poor": 5},
-            "spare": 1,
-        },
+        "limits": {"spare": 1},
     },
 )
 
 SOURCE = """
 group shop_order.carried_by from courier_id
+group shop_limit.set_for from courier_id
+group shop_limit.set_by_day from (courier_id, set_at by day in tenant.timezone)
 filter shop_order.open where status != "delivered"
 group shop_order.delivered_by_day from (courier_id, delivered_at by day in tenant.timezone)
 group shop_review.rated_by from courier_id
 
 measure shop_order.riding_seconds = delivered_at - picked_up_at
+measure shop_limit.orders = orders in count
 measure shop_order.lug_seconds = lug_seconds in effort
+
+# How many orders this courier is cleared to hold at once.
+figure shop_courier.hand_limit:
+    display "{value} allowed"
+    depends:
+        set = shop_limit.set_for:{shop_courier}
+    calculate:
+        sum(shop_limit.orders over set)
+
+# How long a ride this courier's round is meant to take, as last set --
+# carried across the days nobody changed it, so every day has a budget.
+figure shop_courier.ride_budget bucketed:
+    display "{value} budget"
+    unit duration
+    depends:
+        set = shop_limit.set_by_day:{shop_courier}
+    calculate:
+        latest(shop_limit.seconds over set) carried forward
 
 # Orders in hand right now.
 figure shop_courier.carrying:
@@ -62,7 +78,7 @@ figure shop_courier.carrying:
     calculate:
         count(mine)
     band:
-        when value >= limits.carrying.over then "over"
+        when value >= shop_courier.hand_limit then "over"
         otherwise "ok"
 
 # Every delivery's ride time, day by day.
@@ -76,7 +92,9 @@ figure shop_courier.ride_times bucketed:
 # The typical ride, over a window.
 reading shop_courier.typical_ride(range):
     display "{value}"
-    band low against limits.rideHours
+    band:
+        when value >= shop_courier.ride_budget then "over"
+        otherwise "ok"
     depends:
         rides = shop_courier.ride_times in range
     calculate:
@@ -171,6 +189,17 @@ def _feed(facts: MemoryFactStore) -> None:
     now = datetime.now(tz=UTC)
     facts.put(
         "t1",
+        "shop_limit",
+        "l1",
+        {
+            "courier_id": "c1",
+            "orders": 3,
+            "seconds": 7200,
+            "set_at": iso(now - timedelta(days=2)),
+        },
+    )
+    facts.put(
+        "t1",
         "shop_order",
         "r1",
         {
@@ -181,6 +210,10 @@ def _feed(facts: MemoryFactStore) -> None:
             "delivered_at": iso(now - timedelta(hours=1)),
         },
     )
+
+
+def _iso(at: datetime) -> str:
+    return at.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _bundles(results: tuple[Result | BundleResult, ...]) -> dict[str, BundleResult]:
@@ -314,25 +347,32 @@ async def test_first_paint_serves_every_bundle() -> None:
     }
 
 
-# ------------------------------------------------------- dial movement --
+# ------------------------------------------------------- goal movement --
+#
+# These two were dial-movement tests: a band threshold was a tenant setting,
+# so turning it moved no stored value and the change stream said nothing, and
+# the serve stamps' dial fingerprint was what noticed. A band's threshold is a
+# fact now, so the trigger is a *record*, and what has to notice is the same
+# thing: the figure it bands is byte-identical, and every connected screen
+# keeps the old word unless the pass follows the band's edge.
 
 
-async def test_a_band_dial_move_re_serves_the_banded_figure_and_its_bundles() -> None:
-    """A band dial lives outside the compute fingerprint on purpose (the
-    stored values did not move), so the change stream is silent -- and before
-    the serve stamps existed, so was the socket: the board kept the old
-    colour on every connected screen until a reload. The re-served answer
-    must carry the new word, and the tile holding the figure must follow."""
+async def test_a_goal_move_re_serves_the_banded_figure_and_its_bundles() -> None:
+    """The courier holds two open orders and is cleared for three, so the band
+    reads "ok". Cutting the allowance to one re-bands the *same stored count*
+    as "over" -- nothing about `carrying` moved, and the tile holding it must
+    follow anyway."""
     engine, facts = _engine()
     await _settled(engine, facts)
 
-    # Defaults band `carrying` (2 open orders) as "ok" (over at >= 3);
-    # lowering the dial to 1 re-bands the same stored count as "over".
-    report = await engine.run("t1", {"limits": {"carrying": {"over": 1}}})
+    facts.put(
+        "t1", "shop_limit", "l1", {"courier_id": "c1", "orders": 1, "seconds": 7200}
+    )
+    report = await engine.run("t1", written={"shop_limit": ["l1"]})
 
     served = _results(report.results)
     assert "shop_courier.carrying" in served, (
-        "the dial moved the served band and nothing was re-served"
+        "the goal moved the served band and nothing was re-served"
     )
     [subject] = served["shop_courier.carrying"].subjects
     assert subject.level == "over"
@@ -342,18 +382,29 @@ async def test_a_band_dial_move_re_serves_the_banded_figure_and_its_bundles() ->
     [carrying] = [m.result for m in bundles["shop_courier.card"].results if m.slot == "carrying"]
     assert carrying.subjects[0].level == "over"
     assert "shop_courier.reviews_card" not in bundles, (
-        "a tile whose members name no moved dial was pushed"
+        "a tile whose members band against nothing that moved was pushed"
     )
 
 
-async def test_a_reading_dial_move_re_serves_the_reading_and_its_bundles() -> None:
+async def test_a_goal_move_re_serves_the_reading_that_bands_against_it() -> None:
     engine, facts = _engine()
     await _settled(engine, facts)
 
-    report = await engine.run("t1", {"limits": {"rideHours": {"good": 1, "poor": 2}}})
+    facts.put(
+        "t1",
+        "shop_limit",
+        "l1",
+        {
+            "courier_id": "c1",
+            "orders": 3,
+            "seconds": 60,
+            "set_at": _iso(datetime.now(tz=UTC) - timedelta(days=2)),
+        },
+    )
+    report = await engine.run("t1", written={"shop_limit": ["l1"]})
 
     assert "shop_courier.typical_ride" in _results(report.results), (
-        "the reading renders under this dial and was not re-served"
+        "the reading bands against this goal and was not re-served"
     )
     bundles = _bundles(report.results)
     assert "shop_courier.card" in bundles
@@ -419,11 +470,14 @@ async def test_serve_false_reports_what_moved_without_evaluating_answers() -> No
     # serve stamp (they were settled before it), so only a dial pass can
     # prove serve=False still settles them. Skipping the settle would make
     # the second run here re-report the same dial move for ever.
-    dial = await engine.run("t1", {"limits": {"carrying": {"over": 1}}}, serve=False)
+    #
+    # It used to turn a band threshold. Band thresholds are facts now, and a
+    # fact write is the case above -- so the dial with the same shape is the
+    # effort rendering one, which re-words a display without moving a value.
+    dial = await engine.run("t1", {"tenant": {"hoursPerDay": 4}}, serve=False)
     assert dial.results == ()
-    assert "shop_courier.carrying" in dial.moved
-    assert "shop_courier.card" in dial.moved
-    settled = await engine.run("t1", {"limits": {"carrying": {"over": 1}}})
+    assert "shop_courier.lugging" in dial.moved
+    settled = await engine.run("t1", {"tenant": {"hoursPerDay": 4}})
     assert settled.moved == frozenset(), (
         "the dial move was reported once and must not be reported again"
     )

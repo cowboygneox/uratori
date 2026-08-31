@@ -212,6 +212,12 @@ def _teach_tiles(client: TestClient) -> None:
                     "o1": {"ref": "A-1", "courier_id": "c1", "status": "riding"},
                     "o2": {"ref": "A-2", "courier_id": "c1", "status": "riding"},
                 },
+                # The courier's allowance. A band's threshold is a fact, so
+                # without this record `carrying` has no goal to be judged
+                # against and every subject reads "unknown" rather than "ok".
+                "shop_limit": {
+                    "l1": {"courier_id": "c1", "orders": 3, "seconds": 7200}
+                },
             }
         },
     )
@@ -491,11 +497,16 @@ def test_a_bundle_entry_fetches_and_follows_its_members_movement(pg_dsn: str) ->
             )
 
 
-def test_a_dial_move_pushes_the_watched_recolour_through_figure_and_tile(pg_dsn: str) -> None:
-    """The settings half of the directive, end to end over the socket: a
-    band threshold saved and picked up by a definition-only run must re-serve
-    the banded figure and the tile holding it, to exactly the clients
-    watching them -- while a client on an unrelated tile hears nothing."""
+def test_a_goal_move_pushes_the_watched_recolour_through_figure_and_tile(pg_dsn: str) -> None:
+    """The recolour half of the directive, end to end over the socket: a band
+    threshold moving must re-serve the banded figure and the tile holding it,
+    to exactly the clients watching them -- while a client on an unrelated
+    tile hears nothing.
+
+    It used to be a settings save. A band's threshold is a fact now, so the
+    trigger is a record write; what has to hold is unchanged, and it is the
+    harder half -- `carrying` itself is byte-identical, so nothing in the
+    change stream mentions it."""
     with _service(pg_dsn) as client:
         _teach_tiles(client)
         with client.websocket_connect("/stream") as socket, client.websocket_connect(
@@ -525,13 +536,17 @@ def test_a_dial_move_pushes_the_watched_recolour_through_figure_and_tile(pg_dsn:
             )
             assert other.receive_json()["result"]["name"] == "shop_courier.reviews_card"
 
-            saved = client.put(
-                "/tenants/t1/settings",
-                json={"document": {"limits": {"carrying": {"over": 1}}}},
+            saved = client.post(
+                "/tenants/t1/facts",
+                json={
+                    "writes": {
+                        "shop_limit": {
+                            "l1": {"courier_id": "c1", "orders": 1, "seconds": 7200}
+                        }
+                    }
+                },
             )
-            assert saved.status_code == 200
-            ran = client.post("/tenants/t1/runs", json={})
-            assert ran.status_code == 200, ran.text
+            assert saved.status_code == 200, saved.text
 
             heard = {socket.receive_json()["result"]["name"] for _ in range(2)}
             assert heard == {"shop_courier.carrying", "shop_courier.card"}
@@ -540,7 +555,7 @@ def test_a_dial_move_pushes_the_watched_recolour_through_figure_and_tile(pg_dsn:
 
             other.send_json({"type": "ping"})
             assert other.receive_json()["type"] == "pong", (
-                "a dial nothing on this client's tile names re-served it"
+                "a goal nothing on this client's tile bands against re-served it"
             )
 
 
@@ -558,7 +573,7 @@ def test_a_bare_subscribe_paints_tiles_too_and_serve_false_keeps_the_response_le
             socket.send_json({"type": "subscribe", "tenant": "t1"})
             names = set()
             kinds = set()
-            for _ in range(9):
+            for _ in range(10):
                 frame = socket.receive_json()
                 assert frame["type"] == "result"
                 names.add(frame["result"]["name"])
@@ -568,6 +583,7 @@ def test_a_bare_subscribe_paints_tiles_too_and_serve_false_keeps_the_response_le
             # and NOT the grained figure, the live reading or the live tile.
             assert names == {
                 "shop_courier.carrying",
+                "shop_courier.hand_limit",
                 "shop_courier.reviews",
                 "shop_courier.lugging",
                 "shop_courier.typical_ride",
@@ -857,18 +873,22 @@ def test_a_serving_run_reports_moved_as_a_superset_of_its_results(pg_dsn: str) -
 
 
 def test_the_runs_route_honours_serve_false_too(pg_dsn: str) -> None:
+    """The dial here is the effort rendering one: it re-words a display
+    without moving a stored value, which is the shape this door has to
+    report. (It used to be a band threshold, before a band's threshold
+    became a fact -- a fact write is a different door.)"""
     with _service(pg_dsn) as client:
         _teach_tiles(client)
         saved = client.put(
             "/tenants/t1/settings",
-            json={"document": {"limits": {"carrying": {"over": 1}}}},
+            json={"document": {"tenant": {"hoursPerDay": 4}}},
         )
         assert saved.status_code == 200
         ran = client.post("/tenants/t1/runs", json={"serve": False})
         assert ran.status_code == 200, ran.text
         body = ran.json()
         assert body["results"] == []
-        assert "shop_courier.carrying" in body["moved"]
+        assert "shop_courier.lugging" in body["moved"]
 
 
 def test_the_editors_run_reaches_a_subscriber(pg_dsn: str) -> None:
@@ -882,23 +902,25 @@ def test_the_editors_run_reaches_a_subscriber(pg_dsn: str) -> None:
                 {
                     "type": "subscribe",
                     "tenant": "t1",
-                    "entries": [{"name": "shop_courier.carrying"}],
+                    "entries": [{"name": "shop_courier.lugging"}],
                 }
             )
-            first = socket.receive_json()
-            assert [s["level"] for s in first["result"]["subjects"]] == ["ok"]
+            socket.receive_json()
 
+            # The effort rendering dial: it re-words a display without moving
+            # a stored value, which is exactly the movement only a
+            # definition-only pass notices. (It used to be a band threshold,
+            # before a band's threshold became a fact.)
             saved = client.put(
                 "/tenants/t1/settings",
-                json={"document": {"limits": {"carrying": {"over": 1}}}},
+                json={"document": {"tenant": {"hoursPerDay": 4}}},
             )
             assert saved.status_code == 200
             ran = client.post("/ui/api/tenants/t1/runs", json={})
             assert ran.status_code == 200, ran.text
 
             pushed = socket.receive_json()
-            assert pushed["result"]["name"] == "shop_courier.carrying"
-            assert [s["level"] for s in pushed["result"]["subjects"]] == ["over"]
+            assert pushed["result"]["name"] == "shop_courier.lugging"
 
 
 def test_a_pass_landing_during_a_subscribes_fetch_is_not_lost(pg_dsn: str) -> None:

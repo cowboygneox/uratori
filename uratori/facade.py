@@ -291,12 +291,12 @@ class Uratori:
         lib = self._library
         stamps: dict[str, Pointer] = {}
         for plan in lib.projections:
+            dials: set[str]
+            # A `band of X` column used to add X's band *dials* here, because
+            # turning one re-worded the column while nothing stored moved.
+            # A band's threshold is a figure now, so what moves the column is
+            # a value -- caught by `_reached`, which follows the same edge.
             dials = set(plan.settings)
-            for _, figure, _, band in plan.reads:
-                if band:
-                    read = lib.figure(figure)
-                    if read is not None:
-                        dials.update(read.band_settings)
             # The effort rendering dial, when any row value is an effort:
             # `format_value` divides by it on the way to `display`, so the
             # rendered rows move the moment it does -- the same edge the UI's
@@ -338,7 +338,7 @@ class Uratori:
         # band threshold save updated nothing stored and pushed nothing, and
         # every connected screen kept the old colour until a reload.
         for figure_plan in lib.figures:
-            dials = set(figure_plan.band_settings)
+            dials = set()
             if figure_plan.unit == "effort":
                 dials.add(EFFORT_HOURS_SETTING)
             stamps[_serve_key(figure_plan.name)] = Pointer(
@@ -405,6 +405,17 @@ class Uratori:
         for reading in lib.readings:
             if reading.source is not None and reading.source in touched:
                 out.add(reading.name)
+            if set(reading.band_reads) & touched:
+                out.add(reading.name)
+        # A band's threshold is a figure, so a goal moving re-words a card
+        # whose own stored value did not move. Nothing in the change stream
+        # says so -- the metric is byte-identical -- and without this edge
+        # every connected screen keeps yesterday's word until a reload. It is
+        # the same edge a band dial used to get through the serve stamps,
+        # redrawn to follow a value instead of a setting.
+        for plan in lib.figures:
+            if set(plan.band_reads) & touched:
+                out.add(plan.name)
         if projections is None:
             out.update(plan.name for plan in lib.projections)
             out.update(summary.name for summary in lib.summaries)
@@ -439,12 +450,19 @@ class Uratori:
                 continue
             for member in bundle.members:
                 if member.kind == "figure":
-                    if member.name in touched or member.name in refreshed:
+                    figure = lib.figure(member.name)
+                    banded = set(figure.band_reads) if figure is not None else set()
+                    if member.name in touched or member.name in refreshed or banded & touched:
                         break
                 elif member.kind == "reading":
                     reading = lib.reading(member.name)
                     source = reading.source if reading is not None else None
-                    if member.name in refreshed or (source is not None and source in touched):
+                    banded = set(reading.band_reads) if reading is not None else set()
+                    if (
+                        member.name in refreshed
+                        or (source is not None and source in touched)
+                        or banded & touched
+                    ):
                         break
                 elif member.kind == "projection":
                     if projections is None or member.name in projections:
@@ -479,6 +497,12 @@ class Uratori:
         out: set[str] = set()
         for plan in self._library.projections:
             reads = set(plan.figures) | {name for _, name, _, _ in plan.reads}
+            # A `band of X` column is worded from X's goals, so a goal moving
+            # re-words the column though X itself is untouched.
+            for _, name, _, band in plan.reads:
+                read = self._library.figure(name)
+                if band and read is not None:
+                    reads |= set(read.band_reads)
             if (
                 set(plan.indexes) & rebuilt
                 or reads & touched
@@ -642,7 +666,18 @@ class Uratori:
                 # person-day here would spend every pass on history nobody is
                 # watching.
                 continue
-            if touched is not None and plan.name not in touched and plan.name not in refreshed:
+            if (
+                touched is not None
+                and plan.name not in touched
+                and plan.name not in refreshed
+                # A goal moving re-words this figure without moving its stored
+                # value, so the change stream is silent about it. Left out, a
+                # raised target would colour nothing until something unrelated
+                # happened to touch the figure -- the screen-keeps-lying bug
+                # the band dials' serve stamps were introduced to close, now
+                # that the threshold is a fact rather than a dial.
+                and not (set(plan.band_reads) & touched)
+            ):
                 continue
             out.append(await serve_figure(self._store, lib, tenant, plan, document))
 
@@ -653,6 +688,7 @@ class Uratori:
                 touched is not None
                 and reading.source not in touched
                 and reading.name not in refreshed
+                and not (set(reading.band_reads) & touched)
             ):
                 continue
             out.append(

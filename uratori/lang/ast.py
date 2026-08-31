@@ -597,6 +597,32 @@ class Setting:
 
 
 @dataclass(frozen=True)
+class FigureRef:
+    """Another figure, named outright in a band rung -- the threshold as a fact.
+
+    A band's threshold used to be a **dial**: a number the host set per tenant,
+    outside the fact stream, cited by nothing. So the one part of a card that
+    decides whether a reader should worry was the one part no evidence could
+    explain, and "why is this red" ended at a settings page rather than at a
+    record. Naming a figure instead makes the threshold an answer like every
+    other answer -- computed from records, versioned, and citable.
+
+    Produced by the checker rather than the parser: a dotted name parses as a
+    `Setting` and the checker rewrites it once it knows the name resolves to a
+    figure. That keeps the grammar free of a lookahead it cannot do and puts
+    the resolution in the one place that holds the declarations.
+
+    The bare spelling reads one value per subject. A *sequenced* source is read
+    at a coordinate instead -- see `Coord` -- because bare over a sequence
+    would have to pick a bucket, and whichever it picked would be a
+    fabrication.
+    """
+
+    name: str
+    line: int = 0
+
+
+@dataclass(frozen=True)
 class Rung:
     left: CalcExpr
     op: Comparison | AbsenceTest
@@ -846,8 +872,8 @@ class Coord:
 
 
 CalcExpr: TypeAlias = (
-    Count | ListOf | Sum | Part | Number | Text | Setting | Ladder | Arith | Pick | DaysBetween
-    | Extreme | FieldPick | Coord | BucketStat
+    Count | ListOf | Sum | Part | Number | Text | Setting | FigureRef | Ladder | Arith | Pick
+    | DaysBetween | Extreme | FieldPick | Coord | BucketStat
 )
 
 
@@ -1111,48 +1137,39 @@ class Requirement:
     line: int = 0
 
 
-ThresholdUnit: TypeAlias = Literal["minutes", "hours", "days"]
-
-THRESHOLD_SECONDS: dict[str, float] = {
-    "minutes": 60.0,
-    "hours": 3_600.0,
-    "days": 86_400.0,
-}
-"""Seconds per threshold unit.
-
-`work_hours` is deliberately absent: it is the one unit whose length is a tenant
-setting rather than a constant, so it is resolved against the tenant's working
-day at read time. See `seconds_per` in `settings.py`.
-"""
-
-
 @dataclass(frozen=True)
-class Band:
-    """`band low on count against flow.pendingReviews in minutes`
+class ReadingBand:
+    """`band on sum:` and an indented ladder -- the same ladder a figure bands
+    with, one stratum along.
 
-    Which dial decides whether the number reads good, watch or poor, and which
-    direction is good. Declared rather than applied by the reader, because
-    banding in two places is how a card reads Watch while the sort weighs the
-    same person as Good with list order the only symptom.
+    It used to be a clause: `band low against flow.leadTimeDays in minutes`, a
+    direction and a two-edged dial that the engine turned into good, watch or
+    poor. Three things were wrong with it and only the last is fatal.
 
-    `on` names which statistic is coloured -- the mean when unwritten. Named
-    rather than inferred from the statistics present, because inference would
-    silently re-colour a row the day a second one was added.
+    The direction was a second vocabulary -- `low` versus `high` -- for
+    something a comparison operator already says. The unit existed because a
+    dial is a bare number with no idea what it measures, so the definition had
+    to say whether 5 meant minutes or days, and getting it wrong banded every
+    row good for ever at 1,440 times the intended threshold. And the dial
+    itself was a control outside the fact stream: the one number on the card
+    that no evidence could explain.
 
-    `unit` is what the *threshold* is written in, days when unwritten. That held
-    while every figure was a multi-day one and breaks completely on the first
-    that is not: a healthy acknowledgement is single digits of minutes, and in
-    days the tightest threshold anybody would type is 1, so every ack on every
-    board bands good and the row is decoration. In the version hash, because the
-    same numbers read in minutes are a band 1,440x tighter and a colour change
-    under a version claiming nothing moved is the one thing a content-addressed
-    version must not do.
+    A ladder fixes all three at once. The operator carries the direction, the
+    threshold is a figure that knows its own unit, and the threshold is a fact.
+
+    `on` names which statistic the word judges -- the mean when unwritten,
+    named rather than inferred from whichever statistics happen to be present,
+    because inference silently re-colours a row the day a second one is added.
+    It also decides how a **figure named in the ladder is reduced**: the
+    reference is read over the same window and through the same statistic as
+    the number being banded, so a window's total is judged against the total of
+    the goal across those same buckets. Any other rule compares a span against
+    a point -- six months of deliveries against one month of target -- which
+    reads plausibly and is wrong by a factor of the window's length.
     """
 
-    direction: Literal["low", "high"]
-    setting: str
+    ladder: Ladder
     on: StatisticFn | None = None
-    unit: ThresholdUnit | None = None
     line: int = 0
 
 
@@ -1195,7 +1212,7 @@ class ReadingDecl:
     sets: tuple[ReadingSet, ...]
     calculate: tuple[Statistic, ...]
     requires: tuple[Requirement, ...] = ()
-    band: Band | None = None
+    band: ReadingBand | None = None
     line: int = 0
 
 

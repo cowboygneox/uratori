@@ -75,12 +75,41 @@ fact shop_tag:
     name label
     label as text
 
+# What a courier is cleared for: how many orders in hand, and how long a
+# round should take. One record per courier, moved when somebody moves it.
+fact shop_limit:
+    courier_id as text
+    orders as number
+    seconds as number
+    set_at as moment
+
 group shop_order.carried_by from courier_id
 filter shop_order.open where status != "delivered"
 group shop_order.delivered_by_day from (courier_id, delivered_at by day in tenant.timezone)
 group shop_order.by_tag from tag_ids.tag
+group shop_limit.set_for from courier_id
+group shop_limit.set_by_day from (courier_id, set_at by day in tenant.timezone)
 
 measure shop_order.riding_seconds = delivered_at - picked_up_at
+measure shop_limit.orders_allowed = orders in count
+
+# How many orders this courier is cleared to hold at once.
+figure shop_courier.hand_limit:
+    display "{shop_courier} may hold {value}"
+    depends:
+        set = shop_limit.set_for:{shop_courier}
+    calculate:
+        sum(shop_limit.orders_allowed over set)
+
+# How long a round is meant to take, as last set -- carried across the days
+# nobody moved it.
+figure shop_courier.ride_budget bucketed:
+    display "{shop_courier} ride budget"
+    unit duration
+    depends:
+        set = shop_limit.set_by_day:{shop_courier}
+    calculate:
+        latest(shop_limit.seconds over set) carried forward
 
 # Orders in hand right now.
 figure shop_courier.carrying:
@@ -90,7 +119,7 @@ figure shop_courier.carrying:
     calculate:
         count(mine)
     band:
-        when value >= limits.carrying.over then "over"
+        when value >= shop_courier.hand_limit then "over"
         otherwise "ok"
 
 # Every delivery's ride time, day by day.
@@ -112,7 +141,9 @@ figure shop_tag.orders:
 # The typical ride, over a window.
 reading shop_courier.typical_ride(range):
     display "{shop_courier} typical ride"
-    band low on worst against limits.ride
+    band on worst:
+        when value > shop_courier.ride_budget then "over"
+        otherwise "ok"
     depends:
         rides = shop_courier.ride_times in range
     requires:
@@ -274,7 +305,9 @@ async def test_a_sum_statistic_travels_under_its_wire_name(pg_dsn: str) -> None:
 # All riding time, totalled, banded on the total.
 reading shop_courier.ride_total(range):
     display "{shop_courier} total riding"
-    band low on sum against limits.ride
+    band on sum:
+        when value > 36000 then "over"
+        otherwise "ok"
     depends:
         rides = shop_courier.ride_times in range
     calculate:
@@ -283,7 +316,9 @@ reading shop_courier.ride_total(range):
 # The band's unwritten default: it judges the mean.
 reading shop_courier.usual_ride(range):
     display "{shop_courier} usual ride"
-    band low against limits.ride
+    band:
+        when value > 3600 then "over"
+        otherwise "ok"
     depends:
         rides = shop_courier.ride_times in range
     calculate:
@@ -1029,7 +1064,7 @@ def test_every_result_kind_has_a_renderer() -> None:
         )
 
 
-async def test_every_dial_entry_point_reaches_the_page_as_a_setting_edge(
+async def test_every_threshold_entry_point_reaches_the_page_as_an_edge(
     pg_dsn: str,
 ) -> None:
     """Settings enter the language in several places -- day-bucketing zones,
@@ -1047,23 +1082,31 @@ async def test_every_dial_entry_point_reaches_the_page_as_a_setting_edge(
             d["name"]: {(e["type"], e["name"]) for e in d["rests_on"]}
             for d in world["declarations"]
         }
-        assert ("setting", "limits.carrying.over") in edges["shop_courier.carrying"], (
-            "a figure's band dial"
+        assert ("figure", "shop_courier.hand_limit") in edges["shop_courier.carrying"], (
+            "a figure's band threshold -- the goal it is judged against"
         )
-        assert ("setting", "limits.ride") in edges["shop_courier.typical_ride"], (
-            "a reading's band dial"
-        )
+        assert ("figure", "shop_courier.ride_budget") in edges[
+            "shop_courier.typical_ride"
+        ], "a reading's band threshold"
         assert ("setting", "tenant.timezone") in edges["shop_order.delivered_by_day"], (
             "a group's day-bucketing zone"
         )
-        # And the closure carries them to the tile, whose page shows the
-        # same dial lines through the same moved_by rendering.
+        # And the closure carries them to the tile, whose page shows the same
+        # lines through the same moved_by rendering. `moved_by` is leaves
+        # only, so what has to arrive there is the *fact* the goals are
+        # computed from -- and `shop_limit` enters this world through nothing
+        # else, so its presence is the band edge and only the band edge. A
+        # band threshold used to be a dial and this was a `setting` leaf; the
+        # claim is the same one either way, and it is the point of the change:
+        # what decides the word beside a number is now a record a reader can
+        # go and look at.
         card = next(
             d for d in world["declarations"] if d["name"] == "shop_courier.card"
         )
         moved = {(e["type"], e["name"]) for e in card["moved_by"]}
-        assert ("setting", "limits.ride") in moved
-        assert ("setting", "limits.carrying.over") in moved
+        assert ("fact", "shop_limit") in moved, (
+            "the tile's page never names the records that decide its colours"
+        )
 
     # The page joins those edges to the tenant's current values through the
     # dials payload.

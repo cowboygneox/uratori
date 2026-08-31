@@ -14,9 +14,7 @@
     "thresholds.scoring.high",
     "thresholds.scoring.low"
   ],
-  "reading_settings": [
-    "pace.restDays"
-  ],
+  "reading_settings": [],
   "project_settings": [
     "thresholds.blowout",
     "thresholds.thisWeek",
@@ -55,12 +53,6 @@
         "low": 41
       },
       "giveaways": 30
-    },
-    "pace": {
-      "restDays": {
-        "good": 6.5,
-        "poor": 5.75
-      }
     }
   }
 }
