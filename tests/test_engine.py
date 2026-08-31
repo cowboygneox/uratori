@@ -56,8 +56,8 @@ figure team_person.wip_level:
     combine:
         wip = team_person.wip
     calculate:
-        when wip >= thresholds.wip.over then "over"
-        when wip >= thresholds.wip.warn then "warn"
+        when wip >= 5 then "over"
+        when wip >= 3 then "warn"
         otherwise "ok"
 
 # Effort in flight.
@@ -67,6 +67,15 @@ figure team_person.wip_effort:
         mine = work_issue.assigned_to:{team_person} & work_issue.active
     calculate:
         sum(work_issue.estimate over mine)
+
+# Merge times, day by day -- the one figure here whose bucketing reads a
+# dial, and so the only one a settings move can still rebuild.
+figure team_person.merge_times bucketed:
+    display "{team_person} merges"
+    depends:
+        merged = code_change.merged_by_day:{team_person}
+    calculate:
+        list(code_change.open_seconds over merged)
 
 # Open MRs per source.
 figure team_person.open_mrs_by_source across data_connection:
@@ -411,18 +420,21 @@ async def test_identity_decides_the_subject_so_two_accounts_are_one_person() -> 
 
 
 async def test_a_pointer_moves_only_when_a_definition_or_a_named_dial_does() -> None:
+    """The dial here is the bucketing calendar, because it is the only kind
+    left that reaches a stored value: thresholds are facts now, so a figure's
+    fingerprint covers the dials its *grouping* reads and nothing else."""
     engine, facts, store = build()
     await seed(facts)
     await engine.run(TENANT, DEFAULTS, full=True)
-    before = await store.pointer(TENANT, "team_person.wip_level")
+    before = await store.pointer(TENANT, "team_person.merge_times")
     assert before is not None
 
     await engine.run(TENANT, DEFAULTS, full=True)
-    assert await store.pointer(TENANT, "team_person.wip_level") == before
+    assert await store.pointer(TENANT, "team_person.merge_times") == before
 
-    moved = {**DEFAULTS, "thresholds": {**DEFAULTS["thresholds"], "wip": {"warn": 1, "over": 2}}}
+    moved = {**DEFAULTS, "tenant": {**DEFAULTS["tenant"], "timezone": "Asia/Tokyo"}}
     await engine.run(TENANT, moved, full=True)
-    after = await store.pointer(TENANT, "team_person.wip_level")
+    after = await store.pointer(TENANT, "team_person.merge_times")
     assert after is not None and after.settings_fingerprint != before.settings_fingerprint
 
 
@@ -434,10 +446,13 @@ async def test_moving_a_dial_only_rebuilds_the_figures_that_name_it() -> None:
     await seed(facts)
     await engine.run(TENANT, DEFAULTS, full=True)
 
-    moved = {**DEFAULTS, "thresholds": {**DEFAULTS["thresholds"], "wip": {"warn": 1, "over": 2}}}
+    moved = {**DEFAULTS, "tenant": {**DEFAULTS["tenant"], "timezone": "Asia/Tokyo"}}
     outcome = await engine.run(TENANT, moved)
 
-    assert outcome.rebuilt == ("team_person.wip_level",)
+    assert outcome.rebuilt == ("team_person.merge_times",), (
+        "the calendar moved, so the day-bucketed figure rebuilds and the rest "
+        "-- which name no dial at all now -- must not"
+    )
 
 
 async def test_a_failed_run_raises_rather_than_reporting_nothing() -> None:

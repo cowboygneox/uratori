@@ -609,32 +609,26 @@ class _Checker:
                 d.line,
             )
 
+        # A figure named outright in the calculation is a scalar read of
+        # another figure, joined by this subject's own key. It desugars into
+        # a `combine` binding here, so everything downstream -- the kind
+        # check, the unit, the reads, the depth ordering, the evaluator, the
+        # invalidation -- sees the construct it already knows. See
+        # `_resolve_figure_reads` for why the sugar exists at all.
+        d = replace(d, calculate=self._resolve_figure_reads(d, combines, scope))
+
         kind = self._calc_kind(d.calculate, d, set_names, combines, scope)
         unit = self._figure_unit(d, kind, combines)
 
         indexes = sorted(_indexes_in_sets(d.sets))
         measures = sorted(_measures_in(d.calculate))
-        reads = [c.figure for c in d.combines]
+        reads = sorted({source for source, _ in combines.values()})
         settings = sorted(set(_settings_in(d.calculate)) | _zone_settings(indexes, self.indexes))
-        for path in _settings_in(d.calculate):
-            if path not in self._schema.figure_settings:
-                raise CheckError(
-                    f'figure {d.name} reads "{path}", which is not a setting a calculation '
-                    f"may name. Those are: {', '.join(self._schema.figure_settings)}.",
-                    d.line,
-                )
 
         depth = 0
-        for c in d.combines:
-            source = _find(self.figures, c.figure)
-            if source is None:
-                raise CheckError(
-                    f'there is no figure called "{c.figure}". A figure may only read one '
-                    "declared before it -- a cycle has no line number, and on a cold build "
-                    "the wrong order stores a nought and never revisits it. Declared so far: "
-                    f"{', '.join(f.name for f in self.figures) or 'none'}.",
-                    c.line,
-                )
+        for source_name in reads:
+            source = _find(self.figures, source_name)
+            assert source is not None  # resolved above, or by `_combines`
             depth = max(depth, source.depth + 1)
 
         band, band_reads = self._check_band(d, unit, kind, scope, grain)
@@ -1269,6 +1263,97 @@ class _Checker:
                 e.line,
             )
         return source
+
+    def _resolve_figure_reads(
+        self,
+        d: FigureDecl,
+        combines: dict[str, tuple[str, str | None]],
+        scope: str,
+    ) -> CalcExpr:
+        """Turn a dotted name in a calculation into the figure it names.
+
+        A calculation needs three kinds of number: its own population's
+        (a count, a sum), another figure's, and a fixed one. The middle one
+        used to arrive through `combine` alone, and a figure has `depends`
+        **or** `combine` -- so "how much room is left before this courier's
+        limit" was unwritable, because it needs a count of records *and* a
+        stored value. The gap did not show while a threshold could be a dial;
+        taking dials away is what made it the thing standing in the way.
+
+        So a figure may be named outright, and it means one value looked up
+        under this subject's own key -- not a second population. That is why
+        it desugars into a `combine` binding rather than becoming a construct
+        of its own: the read, the depth ordering and the invalidation are the
+        ones already there, and a second path to "this figure rests on that
+        one" is a second chance for the two to disagree about what must
+        rebuild.
+
+        The exclusivity rule is untouched. `depends` beside an explicit
+        `combine:` block is still refused, because *that* really is two
+        populations arriving at one calculation with no rule for how they
+        relate.
+        """
+
+        def bind(name: str, line: int) -> None:
+            source = _find(self.figures, name)
+            if source is None:
+                if self._looks_like_dial(name):
+                    raise CheckError(
+                        f'figure {d.name} reads "{name}", which is a tenant dial. A '
+                        "definition's numbers come from facts: name a figure computed "
+                        "from the records that set this one, or write the number here "
+                        "where a reader can see it. A dial varies invisibly -- it moves "
+                        "the answer with nothing in the evidence to say so.",
+                        line,
+                    )
+                raise CheckError(
+                    f'figure {d.name} reads "{name}", which is not a figure declared '
+                    "before it. A figure may only read one declared earlier -- a cycle "
+                    "has no line number, and on a cold build the wrong order stores a "
+                    "nought and never revisits it. Declared so far: "
+                    f"{', '.join(f.name for f in self.figures) or 'none'}.",
+                    line,
+                )
+            if source.scope != scope:
+                raise CheckError(
+                    f"figure {d.name} reads {name}, which is one value per "
+                    f"{source.scope}. Different scopes are different id spaces, so every "
+                    "lookup would miss and every subject would read nothing.",
+                    line,
+                )
+            combines.setdefault(name, (name, None))
+
+        def walk(e: CalcExpr) -> CalcExpr:
+            if isinstance(e, Setting):
+                bind(e.path, e.line or d.line)
+                # A bare `Part` from here on: the checker's Part branch already
+                # holds every rule about reading a combined figure, including
+                # the refusal of a sequenced one named without its coordinate.
+                return Part(name=e.path, line=e.line)
+            if isinstance(e, Coord) and e.name not in combines:
+                bind(e.name, e.line or d.line)
+                return e
+            if isinstance(e, Ladder):
+                return replace(
+                    e,
+                    rungs=tuple(
+                        replace(
+                            r,
+                            left=walk(r.left),
+                            then=walk(r.then),
+                            right=walk(r.right) if r.right is not None else None,
+                        )
+                        for r in e.rungs
+                    ),
+                    otherwise=walk(e.otherwise),
+                )
+            if isinstance(e, Arith):
+                return replace(e, left=walk(e.left), right=walk(e.right))
+            if isinstance(e, Pick):
+                return replace(e, left=walk(e.left), right=walk(e.right))
+            return e
+
+        return walk(d.calculate)
 
     def _resolve_field_reads(
         self, d: FigureDecl, scope_index: str | None, grain: str | None
@@ -2393,12 +2478,14 @@ class _Checker:
             | _condition_settings(d.omit)
         )
         for path in settings:
-            if path not in self._schema.project_settings:
-                raise CheckError(
-                    f'projection {d.name} reads "{path}", which is not a setting a projection '
-                    f"may name. Those are: {', '.join(self._schema.project_settings)}.",
-                    d.line,
-                )
+            raise CheckError(
+                f'projection {d.name} reads "{path}", which is a tenant dial. A '
+                "definition's numbers come from facts: bind the figure that holds this "
+                "threshold with `read:` and compare against that column, or write the "
+                "number here where a reader can see it. A dial varies invisibly -- it "
+                "moves which rows earn a flag with nothing in the row to say so.",
+                d.line,
+            )
 
         plan = ProjectPlan(
             name=d.name,
@@ -2528,13 +2615,24 @@ class _Checker:
         for flag in d.flags:
             self._flag(flag, bound, d.name, "summary")
 
-        settings = sorted({p for _, e, _ in values for p in _settings_in(e)} | _flag_settings(d.flags))
+        # The `where` of a count and of a total are walked too. They were not
+        # before, so a dial named there reached no fingerprint -- moving it
+        # changed the tally with nothing noticing. Refused now rather than
+        # collected, which closes the hole from the other side.
+        settings = sorted(
+            {p for _, e, _ in values for p in _settings_in(e)}
+            | _flag_settings(d.flags)
+            | {p for c in d.counts for p in _condition_settings(c.when)}
+            | {p for t in d.totals for p in _condition_settings(t.when)}
+        )
         for path in settings:
-            if path not in self._schema.project_settings:
-                raise CheckError(
-                    f'summary {d.name} reads "{path}", which is not a setting it may name.',
-                    d.line,
-                )
+            raise CheckError(
+                f'summary {d.name} reads "{path}", which is a tenant dial. A summary '
+                "counts the rows a projection produced, so a threshold belongs on the "
+                "projection: bind the figure that holds it with `read:` and compare "
+                "against that column, or write the number where a reader can see it.",
+                d.line,
+            )
 
         plan = SummarisePlan(
             name=d.name,

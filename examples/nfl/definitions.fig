@@ -339,8 +339,8 @@ figure nfl_team.form:
         rate = nfl_team.win_rate
 
     calculate:
-        when rate >= thresholds.era.strong then "powerhouse"
-        when rate < thresholds.era.weak then "long-suffering"
+        when rate >= 0.55 then "powerhouse"
+        when rate < 0.45 then "long-suffering"
         otherwise "middling"
 
 # Wins inside the recent-form window. Alive during a season, honestly
@@ -1007,7 +1007,7 @@ projection nfl_game.scoreboard:
             when margin < 0 then "road-win"
             otherwise "tie"
 
-    flag blowout when swing >= thresholds.blowout:
+    flag blowout when swing >= 17:
         label "Blowout"
         detail "{away_name} at {home_name} was decided by {swing} points."
         severity info
@@ -1041,7 +1041,7 @@ projection nfl_game.upcoming:
 
     omit when settled == 1
 
-    flag this-week when days_until <= thresholds.thisWeek:
+    flag this-week when days_until <= 7:
         label "This week"
         detail "{away_name} at {home_name} in {days_until} days."
         severity info
@@ -1165,7 +1165,7 @@ projection nfl_team_season.best:
         detail "{wins} wins from {played} games."
         severity info
 
-    flag generous when giveaways >= thresholds.giveaways:
+    flag generous when giveaways >= 30:
         label "Generous"
         detail "{giveaways} giveaways in one season."
         severity attention
@@ -1251,7 +1251,7 @@ projection nfl_player.leaders:
 # row, never the page.
 summarise nfl_game.history over nfl_game.scoreboard:
     count games
-    count blowouts where swing >= thresholds.blowout
+    count blowouts where swing >= 17
     count overtime_games where went_overtime == 1
     total points in count = total_points
 

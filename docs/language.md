@@ -141,7 +141,7 @@ The pieces:
 - **Strings** are double-quoted, on one line, with `\` escaping the next
   character.
 - **Numbers** are unsigned literals like `3` or `0.25`. There are no negative
-  literals; a negative threshold lives in a settings dial, and a negative
+  literals; a negative threshold is a figure that holds one, and a negative
   value comes out of subtraction.
 - **Names** may contain dots, and the dot is meaningful. Every declaration is
   named `<fact kind>.<name>` -- `shop_courier.carrying` -- because a citation
@@ -624,7 +624,7 @@ Two structural rules, both refused with the failure named:
 ### `calculate`
 
 The expression language, whose leaves a sentence can always name: a set's
-size, a measure over a set, a bound figure, a literal, a settings dial.
+size, a measure over a set, a bound figure, another figure, a literal.
 
 - `count(mine)` -- how many records the set holds. A count of an empty bucket
   is a real nought, not an absence.
@@ -654,9 +654,28 @@ size, a measure over a set, a bound figure, a literal, a settings dial.
   not compete, so `max(a, nothing)` is `a` -- is wrong in this engine, because
   a missing value means *not computed*, never "the subject has none of it";
   the engine writes a real nought for anybody who genuinely has none.
-- A dotted name (`thresholds.wip.over`) reads a settings dial declared in the
-  schema's **figure settings**; a bare name reads a binding from `depends` or
-  `combine`.
+- A dotted name reads **another figure**, at this subject's own key -- a
+  scalar lookup, not a second population, and it is how a calculation reaches
+  a number it did not compute itself. A bare name reads a binding from
+  `depends` or `combine`.
+
+  It exists because the two blocks did not cover the case between them.
+  `depends` gives a population and cannot reach a stored value; `combine`
+  gives a stored value and cannot count records; and a figure has one or the
+  other. So "how much room is left before this courier's limit" -- a count
+  of records measured against a stored number -- was unwritable. The gap did
+  not show while a threshold could be a dial, and taking dials away is what
+  put it in the way.
+
+  The named figure must be declared earlier and share this figure's scope,
+  and a sequenced one is read at its coordinate (`goal:{bucket}`) exactly as
+  in a band. It becomes an ordinary **read**: this figure is rebuilt when the
+  one it names moves, and sorts after it. That is the difference from a band,
+  which only re-words -- and it is why the two are tracked apart.
+
+  A dotted name that resolves to no figure is refused, and a **settings dial**
+  named here is refused by name with the rewrite. A definition's numbers come
+  from facts, or from what the definition says outright.
 
 ### The `when` ladder
 
@@ -1113,8 +1132,8 @@ unrepresentable. A coordinate one side holds and the other does not answers
 an **absence** there -- never a nought, and never a shift.
 
 The same selector works in a `band:` rung, comparing this figure's value
-against another figure at the same coordinate. A settings dial keeps its
-bare spelling, so bare-means-scalar and selector-means-sequenced are
+against another figure at the same coordinate. Bare means one value per
+subject and a selector means one per coordinate, so the two shapes are
 visually distinct by construction.
 
 **There is no `:{bucket - 1}`.** Offsets are refused in the grammar, because
@@ -1626,7 +1645,8 @@ ever. Day-keyed and `across` figures are refused for the same
 one-value-per-row reason.
 
 `band of <figure>` binds the *word* the figure's own `band:` block answers,
-as a `level`, derived at serve time from the value and the live dials. It is
+as a `level`, derived at serve time from the value and the goals that
+figure's band names. It is
 a second spelling rather than a binding that appears automatically beside
 every read, because a name in scope that appears nowhere in the text is the
 thing this language is arranged against -- and it is refused over a figure
@@ -1635,13 +1655,19 @@ gated on it would silently never fire.
 
 ### `value` -- derived per row
 
-The figure expression language again -- arithmetic, `max`/`min`, ladders,
-settings dials (the schema's **projection settings**) -- over the row's own
-bindings, plus the one construct legal only here:
+The figure expression language again -- arithmetic, `max`/`min`, ladders --
+over the row's own bindings, plus the one construct legal only here:
 
 ```
         age_days in days = days from status_changed to now
 ```
+
+**A threshold here is a `read:`**, not a dial. A row value or a flag
+condition comparing against a number that varies binds the figure holding it
+above and compares against that column; a number that does not vary is
+written where the reader can see it. A settings dial in either position is
+refused with the rewrite, for the reason a band's was: it moves which rows
+earn a flag with nothing in the row to say so.
 
 `days from <moment> to <moment>` is signed calendar days between two
 instants, either of which may be `now`. It is the clock, and the rule the
@@ -1947,36 +1973,35 @@ did not change -- keeps its version.
 
 ## Settings dials
 
-A definition never contains a tenant's numbers. It names **dials** --
-`thresholds.wip.over`, `tenant.timezone`, `flow.leadTimeDays` -- and the
-host's schema declares which dials exist, their defaults, and *where* a
-definition may read each one. The name, never the value, is compiled into the
-plan: one plan is shared by every tenant, and naming the dial is what makes
-the dependency derivable, so turning it recomputes exactly what read it.
+A definition never contains a tenant's numbers. Where a number varies it is a
+**fact** -- a figure computed from the records that set it. Where it does not,
+it is written in the definition, visible to the reader and hashed into the
+version.
 
-The schema splits the dials into **four lists, by what turning the dial
-costs** (see [Concepts](concepts.md) for the host's side of this):
+What remains of the dials is one thing that is not a number at all: the
+**calendar** a group cuts its buckets on. A definition names it --
+`tenant.timezone` -- and the host's schema declares which such names exist and
+their defaults. The name, never the value, is compiled into the plan: one plan
+is shared by every tenant, and naming it is what makes the dependency
+derivable, so turning it re-buckets exactly what read it (see
+[Concepts](concepts.md) for the host's side of this).
 
 | List | Named by | Turning it costs |
 |---|---|---|
 | bucket settings | a group's `by day in ...` and a filter's `older/younger than ...` | re-bucketing a tenant's whole history |
-| figure settings | a figure's `calculate` | recomputing one value per subject |
-| projection settings | a projection's or summary's values and flag conditions | nothing |
 
-There used to be a fourth list, **reading settings**, and it existed for one
-construct: a reading's band threshold. Bands read facts now -- a figure, or a
-literal written in the definition -- so the list has nothing left to hold, and
-a dial named from a band is refused with the rewrite. Bands are gone from
-`figure settings` for the same reason.
-
-The lists exist so a definition cannot write a dial into a position the
-engine cannot afford to honour -- and so the expensive lists stay short and
-deliberate. The checker refuses a dial named from the wrong position, with
-the list of what is allowed.
+One list, where there were four. **Reading settings** held band thresholds,
+**figure settings** held the numbers a calculation compared against, and
+**projection settings** held the ones a row value or a flag did. All three
+are thresholds, and a threshold is a fact now: another figure, computed from
+the records that set it, or a number written in the definition where a reader
+can see it. A dial named from any of those positions is refused, with the
+rewrite in the message. The three lists are still *accepted* in a schema, so
+a host does not have to empty them to deploy; nothing reads them.
 
 A dial is a scalar. The two-edged `{good, poor}` shape went with the reading
-settings list -- it existed so a band clause could derive three words from one
-dial, and a ladder writes its own words. One path is reserved rather than
+settings list -- it existed so a band clause could derive three words from
+one dial, and a ladder writes its own words. One path is reserved rather than
 declared: `tenant.hoursPerDay`, which the renderer divides by to print an
 effort as days; a host that renders efforts carries it in its defaults.
 

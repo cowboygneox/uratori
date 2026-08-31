@@ -400,7 +400,12 @@ async def test_a_departed_subject_is_a_reported_removal(server: Server) -> None:
     )
 
 
-async def test_a_moved_dial_rebuilds_and_rebands(server: Server) -> None:
+async def test_a_moved_threshold_rebuilds_and_rebands(server: Server) -> None:
+    """The threshold moved here by editing the definition, because that is
+    where a threshold lives now: it used to be a dial, and a settings save was
+    the trigger. What must hold is unchanged either way -- the figures whose
+    answer the threshold decides go pending, and silently keeping their
+    pointers means banding against the old number for ever."""
     await _teach(server.http)
     await server.http.post(
         "/tenants/t1/facts",
@@ -410,15 +415,14 @@ async def test_a_moved_dial_rebuilds_and_rebands(server: Server) -> None:
     assert before["subjects"][0]["value"] == "over"
 
     saved = await server.http.put(
-        "/tenants/t1/settings",
-        json={"document": {"limits": {"carrying": {"over": 10}}}},
+        "/definitions",
+        json={"source": COURIER_SOURCE.replace("carrying >= 3", "carrying >= 10")},
     )
-    assert saved.status_code == 200
+    assert saved.status_code == 200, saved.text
 
     ran = await server.http.post("/tenants/t1/runs", json={})
     assert "shop_courier.load_band" in ran.json()["rebuilt"], (
-        "a moved dial must make the figures naming it pending -- silently "
-        "keeping their pointers means banding against the old number for ever"
+        "the moved threshold must make the figure pending"
     )
     after = (await server.http.get("/tenants/t1/results/shop_courier.load_band")).json()
     assert after["subjects"][0]["value"] == "ok"
@@ -903,7 +907,10 @@ async def test_the_definitions_route_serves_the_library_described(server: Server
         "a rollup's derivation is the figure it combines; without it the "
         "catalogue cannot say what the word rests on"
     )
-    assert band["settings"] == ["limits.carrying.over"]
+    assert band["settings"] == [], (
+        "a calculation reads no dials now -- its numbers come from the figures "
+        "it combines and from what the definition says outright"
+    )
     assert band["band_reads"] == [], (
         "load_band computes its word in calculate:, so what it rests on is a "
         "figure it combines -- the split matters because a figure a band "

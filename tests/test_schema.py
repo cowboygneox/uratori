@@ -46,7 +46,7 @@ figure shop_courier.load_band:
     combine:
         carrying = shop_courier.carrying
     calculate:
-        when carrying >= limits.carrying.over then "over"
+        when carrying >= 3 then "over"
         otherwise "ok"
 '''
 

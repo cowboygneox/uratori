@@ -228,8 +228,8 @@ figure team_person.band:
     combine:
         n = team_person.count
     calculate:
-        when n >= thresholds.wip.over then "over"
-        when n >= thresholds.wip.warn then "warn"
+        when n >= 5 then "over"
+        when n >= 3 then "warn"
         otherwise "ok"
 """
 )

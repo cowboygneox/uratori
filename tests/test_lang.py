@@ -791,7 +791,7 @@ figure team_person.banded:
         when w >= flow.leadTimeDays then "over"
         otherwise "ok"
 """,
-        "not a setting a calculation may name",
+        "tenant dial",
     )
 
 
@@ -1216,7 +1216,7 @@ projection work_issue.item:
         age_days in days = days from status_changed to now
         stuck in count =
             when active == 0 then 0
-            when age_days >= thresholds.longWipDays then 1
+            when age_days >= 14 then 1
             otherwise 0
     flag issue-long-wip when stuck == 1:
         label "Stuck {age_days}"
@@ -1361,12 +1361,15 @@ projection work_issue.aged:
         status_changed = statusChangedAt as date
     value:
         age_days in days = days from status_changed to now
-    omit when age_days >= thresholds.longWipDays
+    omit when age_days >= 14
 """
     )
     plan = lib.projection("work_issue.aged")
     assert plan is not None
-    assert "thresholds.longWipDays" in plan.settings
+    assert plan.settings == (), (
+        "a projection reads no dials at all now -- its thresholds are figures "
+        "bound with `read:`, or numbers written where the reader can see them"
+    )
 
     refuses(
         """
@@ -1376,9 +1379,9 @@ projection work_issue.misdialed:
         status_changed = statusChangedAt as date
     value:
         age_days in days = days from status_changed to now
-    omit when age_days >= thresholds.nope
+    omit when age_days >= thresholds.longWipDays
 """,
-        "not a setting a projection may name",
+        "tenant dial",
     )
 
 
@@ -1569,7 +1572,7 @@ def test_a_summary_hashes_its_projections_version() -> None:
     """Rename what a row value means and every count moves, so a version that
     did not follow would claim nothing had changed."""
     first = compile_ok(SUMMARY).summary("work_issue.backlog")
-    second = compile_ok(SUMMARY.replace("age_days >= thresholds.longWipDays", "age_days >= 99")).summary(
+    second = compile_ok(SUMMARY.replace("age_days >= 14", "age_days >= 99")).summary(
         "work_issue.backlog"
     )
     assert first is not None and second is not None
@@ -1581,13 +1584,18 @@ def test_a_projection_with_no_population_keeps_its_historic_version() -> None:
     `from` (`canonical` drops None-valued keys), so every projection and
     summary written before populations existed keeps its version -- pinned as
     literals, because the alternative is every deployed library.json moving
-    for no semantic reason and nothing here noticing."""
+    for no semantic reason and nothing here noticing.
+
+    The pins moved once, deliberately: this fixture used to read
+    `thresholds.longWipDays` and now writes the number, which is a change to
+    what the definition says and so a change to what it hashes. That is the
+    pin doing its job rather than failing at it."""
     lib = compile_ok(SUMMARY)
     item = lib.projection("work_issue.item")
     backlog = lib.summary("work_issue.backlog")
     assert item is not None and backlog is not None
-    assert item.version == "b59d90e17c81", "the pre-population hash of PROJECTION"
-    assert backlog.version == "45dabf0dbc72", "the pre-population hash of SUMMARY"
+    assert item.version == "309bfe9aceb7", "the pre-population hash of PROJECTION"
+    assert backlog.version == "cbf1b637abfa", "the pre-population hash of SUMMARY"
 
 
 def test_a_projection_population_is_part_of_its_version() -> None:

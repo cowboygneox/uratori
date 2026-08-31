@@ -141,7 +141,10 @@ async def test_the_world_payload_lists_every_declaration_with_its_dependencies(
         load_band = by_name["shop_courier.load_band"]
         rests = {(d["type"], d["name"]) for d in load_band["rests_on"]}
         assert ("figure", "shop_courier.carrying") in rests
-        assert ("setting", "limits.carrying.over") in rests
+        assert not any(d["type"] == "setting" for d in load_band["rests_on"]), (
+            "a calculation reads no dials now, so a setting edge here would "
+            "point at something no definition names"
+        )
 
 
 async def test_dependencies_walk_all_the_way_to_the_original_fact(pg_dsn: str) -> None:
@@ -842,13 +845,12 @@ async def test_moved_by_is_the_closure_to_leaves(pg_dsn: str) -> None:
         def moved(name: str) -> set[tuple[str, str]]:
             return {(d["type"], d["name"]) for d in by_name[name]["moved_by"]}
 
-        # load_band's direct rests_on names only the figure it combines and
-        # its own dial; the closure must reach through the figure to both
-        # fact kinds without listing the figure itself.
+        # load_band's direct rests_on names only the figure it combines; the
+        # closure must reach through that figure to both fact kinds without
+        # listing the figure itself.
         assert moved("shop_courier.load_band") == {
             ("fact", "shop_order"),
             ("fact", "shop_courier"),
-            ("setting", "limits.carrying.over"),
         }
         assert moved("shop_courier.carrying") == {
             ("fact", "shop_order"),

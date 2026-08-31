@@ -47,7 +47,7 @@ figure team_person.wip_level:
     combine:
         wip = team_person.wip
     calculate:
-        when wip >= thresholds.wip.over then "over"
+        when wip >= 5 then "over"
         otherwise "ok"
 
 # Open changes.
@@ -83,14 +83,19 @@ projection team_person.watch:
     read:
         w = team_person.wip_level
 
-# Weighted issues.
+# Weighted issues, and the working time each carries. The effort is the one
+# thing here a dial still touches -- the renderer divides by the working day
+# on the way to the text -- now that a threshold is written where a reader
+# can see it rather than read from a settings page.
 projection work_issue.weighted:
     field:
         key = title as text
+        estimate = estimate_seconds as number
     value:
         weight in count =
-            when thresholds.openChanges.over > 3 then 2
+            when estimate > 3600 then 2
             otherwise 0
+        load in effort = estimate
 
 # The tally.
 summarise work_issue.tally over work_issue.weighted:
@@ -173,37 +178,29 @@ async def test_a_definition_pass_serves_exactly_what_it_reached() -> None:
     )
 
 
-async def test_a_moved_figure_dial_serves_the_figure_not_the_board() -> None:
-    """A figure dial turns: the figure recomputes and re-serves (its value
-    moved), and no projection does -- neither reads it. The definition-only
-    gate is about reach, not about kinds of change."""
+async def test_a_threshold_dial_now_reaches_nothing_at_all() -> None:
+    """This test used to turn `thresholds.wip.over` and watch the figure
+    reading it recompute, the projection reading *that* follow, and the rest
+    of the board stay still. Every one of those edges was real; what has gone
+    is the dial at the end of them.
+
+    A threshold cannot be named from a calculation, a band, a projection value
+    or a flag any more, so a threshold-shaped dial reaches nothing whatever it
+    is set to -- and the pass must serve nothing rather than fall back to the
+    fixed tail. The edges themselves did not disappear with it: a figure
+    moving still reaches the projection reading it (the facts pass below), and
+    a goal figure moving still re-words the figure banded against it
+    (test_bands.py)."""
     store, facts = MemoryEngineStore(), MemoryFactStore()
     _seed(facts)
     facade = _facade(LIB, store, facts)
     await facade.run(TENANT, full=True)
 
-    turned = {"thresholds": {"wip": {"over": 1}}}
-    report = await facade.run(TENANT, turned)
-    served = _served(report.results)
+    report = await facade.run(TENANT, {"thresholds": {"wip": {"over": 1}}})
     assert report.outcome.reindexed == ()
-    assert "team_person.wip_level" in served, (
-        "the band flipped under the new dial; the moved figure must re-serve"
-    )
-    assert "team_person.watch" in served, (
-        "watch reads the moved figure -- the value it renders changed, and "
-        "a reach rule that only followed groupings would freeze it"
-    )
-    assert "team_person.cards" not in served, (
-        "cards renders `band of team_person.banded`, whose band compares "
-        "against a literal -- nothing about it reads this dial, and a pass "
-        "that re-served it anyway is the fixed tail this gate replaced. "
-        "(It used to be served: the band read the same dial, so the word "
-        "moved while the stored value did not. A band's threshold is a fact "
-        "now, and the equivalent edge -- a goal figure moving -- is pinned in "
-        "test_bands.py.)"
-    )
-    assert not served & {"code_change.card", "work_issue.list", "work_issue.weighted"}, (
-        "nothing these render under moved, and a dial is not a sync"
+    assert _served(report.results) == set(), (
+        "a dial no definition can name moved something, so either a "
+        "definition still reads one or the pass fell back to serving the world"
     )
 
 
@@ -263,18 +260,23 @@ async def test_a_projections_own_edit_reaches_it() -> None:
 
 
 async def test_a_dial_a_projection_renders_under_reaches_it() -> None:
-    """`value:` ladders read dials at serve time; no stored value moves when
-    one turns, and before serve stamps the pass served nothing while every
-    subscribed row silently went stale. The dialled projection (and the
-    summary riding it) re-serves; its neighbours do not."""
+    """A projection is rendered at serve time; no stored value moves when a
+    dial it renders under turns, and before serve stamps the pass served
+    nothing while every subscribed row silently went stale. The projection
+    rendering under the dial re-serves; its neighbours do not.
+
+    The dial used to be a threshold in the weight ladder. Thresholds are
+    facts now, so the surviving instance is the working day, which the
+    renderer divides an effort by on the way to the text."""
     store, facts = MemoryEngineStore(), MemoryFactStore()
     _seed(facts)
     facade = _facade(LIB, store, facts)
     await facade.run(TENANT, full=True)
 
-    report = await facade.run(TENANT, {"thresholds": {"openChanges": {"over": 1}}})
+    report = await facade.run(TENANT, {"tenant": {"hoursPerDay": 4}})
     assert _served(report.results) == {"work_issue.weighted"}, (
-        "the weight ladder reads the dial; every row's rendered weight moved"
+        "the row's effort renders against the working day; every rendered "
+        "load moved and only this projection prints one"
     )
 
 

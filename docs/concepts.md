@@ -67,8 +67,7 @@ about the world is a class of bug the object exists to make unwritable.
   "kinds": ["shop_courier", "shop_order"],
   "name_fields": {"shop_courier": "name", "shop_order": "ref"},
   "url_fields": {"shop_order": "url"},
-  "figure_settings": ["limits.carrying.over"],
-  "defaults": {"tenant": {"hoursPerDay": 8}, "limits": {"carrying": {"over": 3}}}
+  "defaults": {"tenant": {"hoursPerDay": 8, "timezone": "UTC"}}
 }
 ```
 
@@ -162,7 +161,7 @@ figure shop_courier.load_band:
         carrying = shop_courier.carrying
 
     calculate:
-        when carrying >= limits.carrying.over then "over"
+        when carrying >= 3 then "over"
         otherwise "ok"
 ```
 
@@ -346,8 +345,8 @@ or a different dial.
 
 ## Settings dials
 
-Definitions read named dials -- `limits.carrying.over` in the banding figure
-above -- and tenants set them. Two design decisions carry the weight here.
+Definitions read named dials -- `tenant.timezone` on a day-bucketed group --
+and tenants set them. Two design decisions carry the weight here.
 
 **A tenant's stored settings are sparse; completion happens once, at the
 boundary.** A tenant's document contains only what an operator changed. Every
@@ -359,25 +358,29 @@ band every subject against a number nobody chose. (Two layers each applying
 defaults is also how an evaluation and an invalidation come to disagree about
 what a dial is set to -- one boundary means one truth.)
 
-**Dials are declared in four lists, split by what turning one costs:**
+**One list is read, where there were four:**
 
 | List | Read from | Moving it invalidates |
 |---|---|---|
 | `bucket_settings` | a group's `by day in ...` and a filter's `older/younger than ...` | the buckets of every grouping that reads the dial -- day boundaries moved, so those memberships are suspect (each grouping's stamp carries a fingerprint of its dials, so the untouched rest stay built) |
-| `figure_settings` | figure calculations | one stored value per subject, for each figure naming the dial |
-| `project_settings` | projection values and flags | nothing stored -- rows are assembled when asked |
 
-A fourth list, `reading_settings`, held the dials a band compared against. A
-band's threshold is a **fact** now -- another figure, or a literal in the
-definition -- so nothing reads that list, and a dial named from a band is
-refused with the rewrite. The reason is the doctrine's own: on a card where
-every number can be traced to the records behind it, the one deciding whether
-a reader should worry was the one nothing could cite.
+`figure_settings`, `reading_settings` and `project_settings` held
+**thresholds**: the numbers a calculation compared against, a band judged by,
+and a row value or flag tested. A threshold is a fact now -- another figure,
+computed from the records that set it -- or a number written in the definition
+where a reader can see it. A dial named from any of those positions is
+refused with the rewrite; the lists are still accepted so a host need not
+empty them to deploy, and nothing reads them.
+
+The reason is the doctrine's own. On a card where every number can be traced
+to the records behind it, a dial was the one input that could not be: it moved
+the answer with nothing in the evidence to say so, and the number it moved
+hardest was the one deciding whether a reader should worry.
 
 The split is not bookkeeping: merging any two lists would let a definition
 write a dial into a position the engine cannot honour. And the pointer each
 tenant carries includes a *fingerprint* of the dials that definition names,
-so moving `limits.carrying.over` rebuilds `shop_courier.load_band` and
+so moving `tenant.timezone` re-buckets the groupings that cut days by it and
 nothing else -- and a dial explicitly set to its default fingerprints
 identically to an unset one, so a no-op save costs no rebuild.
 

@@ -48,7 +48,7 @@ figure shop_courier.load_band:
         carrying = shop_courier.carrying
 
     calculate:
-        when carrying >= limits.carrying.over then "over"
+        when carrying >= 3 then "over"
         otherwise "ok"
 EOF
 ```
@@ -141,8 +141,7 @@ curl -s -X PUT "$BASE/schema" -H "$AUTH" -H 'Content-Type: application/json' -d 
   "kinds": ["shop_courier", "shop_order"],
   "name_fields": {"shop_courier": "name", "shop_order": "ref"},
   "url_fields": {"shop_order": "url"},
-  "figure_settings": ["limits.carrying.over"],
-  "defaults": {"tenant": {"hoursPerDay": 8}, "limits": {"carrying": {"over": 3}}}
+  "defaults": {"tenant": {"hoursPerDay": 8, "timezone": "UTC"}}
 }'
 ```
 
@@ -152,9 +151,7 @@ curl -s -X PUT "$BASE/schema" -H "$AUTH" -H 'Content-Type: application/json' -d 
 | `name_fields` | `{kind: field}` | Which field of a record carries its human name, per kind. The engine freezes this name when a value is written. A name field for a kind not in `kinds` is refused as a typo rather than ignored -- ignoring it would leave the intended kind rendering raw ids for ever while everything looked configured. |
 | `url_fields` | `{kind: field}` | The same decision for a record's link: which field holds the address of the record in the source system, per kind. Evidence members carry it so a reader can walk from a cited record to the source. A kind with no url field serves bare titles -- declared rather than guessed, because a field that happens to be called `url` is a host convention the engine was never taught. Stray kinds are refused, like `name_fields`. |
 | `bucket_settings` | `[string]` | Dial paths a definition may read, split by what turning the dial costs: a bucket setting re-buckets a tenant's whole history... |
-| `figure_settings` | `[string]` | ...a figure setting recomputes one value per subject... |
-| `reading_settings` | `[string]` | Accepted and read by nothing. It held the dials a band compared against; a band's threshold is a fact now -- another figure, or a literal -- so a dial named from a band is refused. |
-| `project_settings` | `[string]` | ...and a projection setting is free, because nothing is stored. |
+| `figure_settings`, `reading_settings`, `project_settings` | `[string]` | Accepted and read by nothing. They held **thresholds** -- the numbers a calculation compared against, a band judged by, a row value or flag tested. A threshold is a fact now (another figure) or a number written in the definition, and a dial named from any of those positions is refused with the rewrite. Still accepted so a host need not empty them to deploy. |
 | `defaults` | object | The shipped settings document, as a nested object. A tenant's stored settings are sparse; the engine completes them over these at every use. A dial a definition names that resolves to nothing under the completed document **raises** rather than guessing. |
 
 Every field defaults to empty, `kinds` included: a host that declares its
