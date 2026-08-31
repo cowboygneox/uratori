@@ -53,11 +53,9 @@ figure team_person.wip:
 # Load band.
 figure team_person.wip_level:
     display "{team_person} load"
-    combine:
-        wip = team_person.wip
     calculate:
-        when wip >= 5 then "over"
-        when wip >= 3 then "warn"
+        when team_person.wip >= 5 then "over"
+        when team_person.wip >= 3 then "warn"
         otherwise "ok"
 
 # Effort in flight.

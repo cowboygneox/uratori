@@ -666,7 +666,11 @@ class Uratori:
                 and not (set(plan.band_reads) & touched)
             ):
                 continue
-            out.append(await serve_figure(self._store, lib, tenant, plan))
+            out.append(
+                await serve_figure(
+                    self._store, lib, tenant, plan, facts=self._facts
+                )
+            )
 
         for reading in lib.readings:
             if reading.mode != "window" or reading.source is None:
@@ -767,7 +771,9 @@ class Uratori:
             # is that the evidence is visible. Their rows carry the day or the
             # dimension in `dimension`; what still never travels is a numeric
             # list (`_wire`).
-            return await serve_figure(self._store, lib, tenant, figure)
+            return await serve_figure(
+                self._store, lib, tenant, figure, facts=self._facts
+            )
 
         reading = lib.reading(name)
         if reading is not None:

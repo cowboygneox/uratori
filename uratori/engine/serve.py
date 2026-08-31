@@ -17,7 +17,19 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from ..lang.ast import Count, Extreme, ListOf, SetExpr, SetIndex, SetOp, SetRef
+from ..lang.ast import (
+    Arith,
+    Count,
+    Extreme,
+    Ladder,
+    ListOf,
+    Pick,
+    SetExpr,
+    SetIndex,
+    SetOp,
+    SetRef,
+    SubjectField,
+)
 from ..lang.ast import Sum as LangSum
 from ..lang.plan import (
     BundlePlan,
@@ -57,6 +69,7 @@ from .buckets import (
     end_of_day_ms,
     measure_of,
     ordinal_rule_of,
+    read_number,
     resolve_span,
     subject_of,
     tail_of,
@@ -172,6 +185,7 @@ async def band_thresholds(
     library: Library,
     tenant: str,
     plan: FigurePlan,
+    facts: FactSource | None = None,
 ) -> dict[str, dict[str, Value]]:
     """The figures a band compares against, resolved per subject key.
 
@@ -198,7 +212,43 @@ async def band_thresholds(
             continue
         for stored in await store.values(tenant, source.name, source.version):
             out.setdefault(stored.subject, {})[name] = stored.value
+
+    # A threshold read straight off the subject's record: one fetch of the
+    # scope kind, keyed by the subject the row is about. A bucketed row is
+    # `c1@2026-07`, and the record is the courier's, so the lookup drops the
+    # coordinate -- a courier has one allowance, not one per month.
+    fields = _subject_fields_in(plan.band)
+    if fields and facts is not None:
+        held = {row.key: row.value for row in await facts.of_kind(tenant, plan.scope)}
+        for subject, record in held.items():
+            for kind, field in fields:
+                value = read_number(record, field)
+                if value is not None:
+                    out.setdefault(subject, {})[f"{kind}.{field}"] = value
     return out
+
+
+def _subject_fields_in(e: Any) -> set[tuple[str, str]]:
+    """Every `<kind>.<field>` a ladder reads off the subject's record."""
+    found: set[tuple[str, str]] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, SubjectField):
+            found.add((node.kind, node.field))
+        elif isinstance(node, Ladder):
+            for rung in node.rungs:
+                walk(rung.left)
+                walk(rung.then)
+                if rung.right is not None:
+                    walk(rung.right)
+            walk(node.otherwise)
+        elif isinstance(node, (Arith, Pick)):
+            walk(node.left)
+            walk(node.right)
+
+    if e is not None:
+        walk(e)
+    return found
 
 
 # ------------------------------------------------------------- figures --
@@ -211,6 +261,7 @@ async def serve_figure(
     plan: FigurePlan,
     at_ms: float | None = None,
     subject: str | None = None,
+    facts: FactSource | None = None,
 ) -> Result:
     """One figure's current answer; with `subject`, only that subject's rows.
 
@@ -227,7 +278,7 @@ async def serve_figure(
     thresholds: dict[str, dict[str, Value]] = {}
 
     if isinstance(state, Ok):
-        thresholds = await band_thresholds(store, library, tenant, plan)
+        thresholds = await band_thresholds(store, library, tenant, plan, facts)
         if subject is None:
             rows = await store.values(tenant, plan.name, plan.version)
         else:
@@ -1299,7 +1350,7 @@ async def project_rows(
         # goals X compares against -- resolved once for the whole projection
         # rather than per row, since every row reads the same figure.
         against = (
-            await band_thresholds(store, library, tenant, source) if band else {}
+            await band_thresholds(store, library, tenant, source, facts) if band else {}
         )
         for stored in await store.values(tenant, source.name, source.version):
             # The band is derived here rather than read: it is evaluated from
@@ -1469,7 +1520,9 @@ async def answer_bundle(
             results.append(
                 slotted(
                     member.slot,
-                    await serve_figure(store, library, tenant, figure, at_ms=at),
+                    await serve_figure(
+                        store, library, tenant, figure, at_ms=at, facts=facts
+                    ),
                 )
             )
         elif member.kind == "reading":

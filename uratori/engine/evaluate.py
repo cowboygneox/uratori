@@ -35,6 +35,7 @@ from ..lang.ast import (
     DaysBetween,
     Extreme,
     FieldPick,
+    FieldTotal,
     FigureRef,
     Ladder,
     ListOf,
@@ -46,10 +47,12 @@ from ..lang.ast import (
     SetOp,
     SetRef,
     Setting,
+    SubjectField,
     Sum,
     Text,
 )
 from ..lang.plan import FigurePlan, Value
+from .buckets import SEPARATOR
 
 BucketReader = Callable[[str, str | None], frozenset[str]]
 """(index name, bucket key or None for the single bucket) -> the ids in it."""
@@ -63,6 +66,13 @@ SettingReader = Callable[[str], float]
 
 MomentReader = Callable[[str, str], float | None]
 """(measure name, record id) -> an epoch in milliseconds."""
+
+SubjectFieldReader = Callable[[str, str, str], float | None]
+"""(fact kind, field, subject key) -> the number that subject's record holds.
+
+The subject's *own* record, which is why the key is the subject rather than a
+member: a threshold on a courier is read for the courier the value is about.
+"""
 
 FieldReader = Callable[[str, str, str], float | None]
 """(fact kind, field path, record id) -> the number the record carries there.
@@ -120,6 +130,7 @@ class Readers:
         settings: SettingReader,
         fields: FieldReader | None = None,
         instants: InstantReader | None = None,
+        subject_fields: SubjectFieldReader | None = None,
     ) -> None:
         self.buckets = buckets
         self.measures = measures
@@ -128,6 +139,7 @@ class Readers:
         self.settings = settings
         self.fields = fields or (lambda kind, path, member: None)
         self.instants = instants or (lambda kind, path, member: None)
+        self.subject_fields = subject_fields or (lambda kind, field, subject: None)
 
 
 def evaluate(plan: FigurePlan, subject: str, readers: Readers) -> Result:
@@ -171,6 +183,15 @@ def _members_of(
             member
             for member in sorted(resolved.get(e.set, frozenset()))
             if readers.measures(e.measure, member) is not None
+        )
+    if isinstance(e, FieldTotal):
+        # Only the records that contributed: one the field is blank on added
+        # nothing, and citing it would send a reader to a record with no part
+        # in the number.
+        return tuple(
+            member
+            for member in sorted(resolved.get(e.set, frozenset()))
+            if readers.fields(e.kind, e.field, member) is not None
         )
     if isinstance(e, FieldPick):
         # **The one record, not the whole bucket.** A field read's answer came
@@ -388,6 +409,15 @@ def _eval(
             "a span reads the clock and the checker refuses it to a figure; this is a "
             "projection construct and should never reach here"
         )
+    if isinstance(e, FieldTotal):
+        # An unreadable member contributes nothing and is not an absence: the
+        # same rule a measure sum keeps, because a record the field is blank
+        # on carries no weight, literally.
+        members = sets.get(e.set, frozenset())
+        held = [readers.fields(e.kind, e.field, member) for member in sorted(members)]
+        return float(sum(v for v in held if v is not None))
+    if isinstance(e, SubjectField):
+        return readers.subject_fields(e.kind, e.field, subject.split(SEPARATOR, 1)[0])
     if isinstance(e, FigureRef):  # pragma: no cover - band-only
         raise AssertionError(
             "a figure named outright is a band's threshold, evaluated by `band_of` "
@@ -559,6 +589,11 @@ def _band_operand(e: CalcExpr, value: Value, thresholds: Mapping[str, Value]) ->
         # withholds the word above. Never a nought: a goal nobody has set is
         # not a goal of zero, and the difference is the whole band.
         return thresholds.get(e.name)
+    if isinstance(e, SubjectField):
+        # Same rule one route along: a record with nothing in that field is a
+        # subject nobody has set a limit for, and a nought would sit
+        # comfortably under every comparison.
+        return thresholds.get(f"{e.kind}.{e.field}")
     return None
 
 

@@ -926,12 +926,8 @@ figure site.gap_month bucketed:
     display "{site} gap"
     unit duration
 
-    combine:
-        actual = site.actual_month
-        goal = site.target_month
-
     calculate:
-        actual:{bucket} - goal:{bucket}
+        site.actual_month:{bucket} - site.target_month:{bucket}
 
     band:
         when value > 0 then "over"
@@ -963,12 +959,8 @@ figure site.bare bucketed:
     display "{site} bare"
     unit duration
 
-    combine:
-        actual = site.actual_month
-        goal = site.target_month
-
     calculate:
-        actual - goal
+        site.actual_month - site.target_month
 ''',
         "bucket",
     )
@@ -1065,12 +1057,8 @@ figure site.offset bucketed:
     display "{site} offset"
     unit duration
 
-    combine:
-        actual = site.actual_month
-        goal = site.target_month
-
     calculate:
-        actual:{bucket} - goal:{bucket - 1}
+        site.actual_month:{bucket} - site.target_month:{bucket - 1}
 '''
         )
     assert "bucket - 1" in caught.value.message, (
@@ -1102,12 +1090,8 @@ figure site.nonsense bucketed:
     display "{site} nonsense"
     unit count
 
-    combine:
-        a = site.actual_month
-        c = site.changes
-
     calculate:
-        a:{bucket} - c:{bucket}
+        site.actual_month:{bucket} - site.changes:{bucket}
 ''',
         "site.changes",
         "one value per subject",
@@ -1169,11 +1153,8 @@ def test_a_bucket_statistic_may_not_run_over_a_combined_figure() -> None:
 figure site.worse bucketed:
     display "{site} worse"
 
-    combine:
-        m = site.actual_month
-
     calculate:
-        median(m over m)
+        median(site.actual_month over site.actual_month)
 ''',
         "m",
     )
@@ -1387,11 +1368,8 @@ figure site.echo_month bucketed:
     display "{site} echo"
     unit duration
 
-    combine:
-        goal = site.target_month
-
     calculate:
-        goal:{bucket} carried forward
+        site.target_month:{bucket} carried forward
 ''',
         "carried forward",
         "records",
@@ -1420,12 +1398,8 @@ figure site.mixed bucketed:
     display "{site} mixed"
     unit count
 
-    combine:
-        actual = site.actual_month
-        total = site.changes
-
     calculate:
-        actual:{bucket} - total
+        site.actual_month:{bucket} - site.changes
 ''',
         "site.changes",
     )
@@ -1447,11 +1421,8 @@ def test_a_coordinate_passthrough_keeps_the_sources_unit() -> None:
 figure site.echo_month bucketed:
     display "{site} echo"
 
-    combine:
-        goal = site.target_month
-
     calculate:
-        goal:{bucket}
+        site.target_month:{bucket}
 '''
     )
     plan = lib.figure("site.echo_month")

@@ -525,6 +525,23 @@ class Engine:
                     continue
                 if plan.scope_index is None:
                     continue
+                if kind == plan.scope:
+                    # The written record IS the subject, so the figure to
+                    # recompute is that subject's own -- it is not a *member*
+                    # of the grouping that fans the figure out, so asking
+                    # which buckets hold it would find none and the change
+                    # would be missed entirely. This is the shape a threshold
+                    # read off the subject's record has: raise a courier's
+                    # allowance and nothing about their orders moves.
+                    for key in keys:
+                        touch(key, plan.name)
+                        if plan.grain is not None or plan.across is not None:
+                            for bucket in await self._store.bucket_keys(
+                                tenant, plan.scope_index
+                            ):
+                                if subject_of(bucket) == key:
+                                    touch(bucket, plan.name)
+                    continue
                 for key in keys:
                     for bucket in await self._store.buckets_holding(
                         tenant, plan.scope_index, key
@@ -993,6 +1010,10 @@ class Engine:
                 "record. Reaching here means the checker let one through."
             )
 
+        def read_subject_field(kind: str, field: str, subject: str) -> float | None:
+            record = records.get(kind, {}).get(subject)
+            return None if record is None else read_number(record, field)
+
         def read_field(kind: str, path: str, member: str) -> float | None:
             record = records.get(kind, {}).get(member)
             return None if record is None else read_number(record, path)
@@ -1009,6 +1030,7 @@ class Engine:
             settings=read_setting,
             fields=read_field,
             instants=read_when,
+            subject_fields=read_subject_field,
         )
 
     def _indexes_over(self, kind: str) -> list[CompiledIndex]:
@@ -1068,13 +1090,17 @@ async def subject_zones(
 def _field_kinds(plan: FigurePlan) -> frozenset[str]:
     """Fact kinds a figure reads declared fields off, which its readers must
     load. Distinct from `plan.measures` because a field read names no
-    measure -- that is the whole point of it."""
-    from ..lang.ast import Arith, FieldPick, Ladder, Pick
+    measure -- that is the whole point of it.
+
+    Both shapes count: `latest(kind.field over set)`, which reads a member's
+    record, and `kind.field` bare, which reads the subject's own.
+    """
+    from ..lang.ast import Arith, FieldPick, FieldTotal, Ladder, Pick, SubjectField
 
     found: set[str] = set()
 
     def walk(e: Any) -> None:
-        if isinstance(e, FieldPick):
+        if isinstance(e, (FieldPick, FieldTotal, SubjectField)):
             found.add(e.kind)
         elif isinstance(e, Ladder):
             for rung in e.rungs:

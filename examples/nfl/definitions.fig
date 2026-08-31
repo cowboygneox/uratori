@@ -221,7 +221,7 @@ filter nfl_team_game.wins where won == true label "won"
 filter nfl_team_game.ties where tied == true label "tied"
 filter nfl_team_game.regular where game_type == "REG" label "regular season"
 
-# An age filter reads the wall clock, in whole days, against a bucket dial.
+# An age filter reads the wall clock, in whole days, against a written line.
 # Over finished history it is honestly empty; during a live season it is
 # what "recent form" means.
 filter nfl_team_game.recent where kickoff younger than 45 days label "recently played"
@@ -309,17 +309,15 @@ figure nfl_team.point_diff:
     display "{nfl_team} point differential"
     unit count
 
-    combine:
-        scored = nfl_team.points_scored
-        allowed = nfl_team.points_allowed
-
     calculate:
-        scored - allowed
+        nfl_team.points_scored - nfl_team.points_allowed
 
 # Share of regular-season games won across the era. The band puts a word
-# beside the number, judged against dials a tenant can move; a quarter of a
-# century of football pulls every franchise towards a half, which is why
-# the era dials sit tighter than a single season's would.
+# beside the number; a quarter of a century of football pulls every
+# franchise towards a half, which is why these lines sit tighter than a
+# single season's would. They are written here because they are part of
+# what this definition claims -- the league does not publish a "powerhouse"
+# threshold on a record anywhere.
 figure nfl_team.win_rate:
     display "{nfl_team} era win rate"
     unit share
@@ -341,12 +339,9 @@ figure nfl_team.win_rate:
 figure nfl_team.form:
     display "{nfl_team} era form"
 
-    combine:
-        rate = nfl_team.win_rate
-
     calculate:
-        when rate >= 0.55 then "powerhouse"
-        when rate < 0.45 then "long-suffering"
+        when nfl_team.win_rate >= 0.55 then "powerhouse"
+        when nfl_team.win_rate < 0.45 then "long-suffering"
         otherwise "middling"
 
 # Wins inside the recent-form window. Alive during a season, honestly
@@ -427,19 +422,14 @@ figure nfl_season.points:
         sum(nfl_game.points over played)
 
 # Points per game across the season -- the number the "is scoring up?"
-# argument is actually about, banded against dials so the eras page can
-# say it in a word. Division by nought answers nothing: a season with no
+# argument is actually about, banded so the eras page can say it in a word. Division by nought answers nothing: a season with no
 # finished games has no average, never a confident zero.
 figure nfl_season.average:
     display "{nfl_season} points per game"
     unit count
 
-    combine:
-        points = nfl_season.points
-        games = nfl_season.games
-
     calculate:
-        points / games
+        nfl_season.points / nfl_season.games
 
     band:
         when value >= 46 then "high-scoring"
@@ -495,12 +485,8 @@ figure nfl_team_season.margin:
     display "{nfl_team_season} point differential"
     unit count
 
-    combine:
-        scored = nfl_team_season.points
-        allowed = nfl_team_season.allowed
-
     calculate:
-        scored - allowed
+        nfl_team_season.points - nfl_team_season.allowed
 
 # Share of that season's games won, banded at single-season scale: a
 # contender wins two of three, a fading season loses that many. This is
@@ -734,8 +720,7 @@ figure nfl_team.turnovers:
 
 # Third downs converted, as a share of the regular-season third downs the
 # offence actually snapped and the league judged -- a nullified play was
-# replayed, not faced, and a blank judgement is no judgement. Banded
-# against dials a tenant can move.
+# replayed, not faced, and a blank judgement is no judgement.
 figure nfl_team.third_down_rate:
     display "{nfl_team} third-down conversion"
     unit share
@@ -849,12 +834,8 @@ figure nfl_game_slot.average:
     display "{nfl_game_slot}: points per team-game"
     unit count
 
-    combine:
-        points = nfl_game_slot.points
-        sides = nfl_game_slot.sides
-
     calculate:
-        points / sides
+        nfl_game_slot.points / nfl_game_slot.sides
 
 # Finished games on this day of the week, across the era.
 figure nfl_weekday.games:
@@ -883,12 +864,8 @@ figure nfl_weekday.average:
     display "{nfl_weekday}: points per game"
     unit count
 
-    combine:
-        points = nfl_weekday.points
-        games = nfl_weekday.games
-
     calculate:
-        points / games
+        nfl_weekday.points / nfl_weekday.games
 
 # ------------------------------------------------------------- readings --
 

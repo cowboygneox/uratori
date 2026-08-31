@@ -44,10 +44,8 @@ figure team_person.wip:
 # Load band.
 figure team_person.wip_level:
     display "{value}"
-    combine:
-        wip = team_person.wip
     calculate:
-        when wip >= 5 then "over"
+        when team_person.wip >= 5 then "over"
         otherwise "ok"
 
 # Open changes.

@@ -50,6 +50,7 @@ from .ast import (
     FieldDecl,
     FieldMeasure,
     FieldPick,
+    FieldTotal,
     FigureDecl,
     FigureRef,
     FigureUnit,
@@ -72,6 +73,7 @@ from .ast import (
     SetRef,
     Setting,
     StatisticFn,
+    SubjectField,
     Sum,
     SummariseDecl,
     Text,
@@ -581,6 +583,19 @@ class _Checker:
         self._claim(d.name, "figure", d.line)
         scope = d.name.split(".", 1)[0]
         self._fact_kind(scope, f"figure {d.name} is scoped to", d.line)
+        # A figure and a field of its scope are both `<kind>.<name>`, and an
+        # expression reads either. Two things under one spelling is what this
+        # language exists to refuse, so the collision is refused where it is
+        # made rather than left to whichever resolution order won.
+        leaf = d.name.split(".", 1)[1]
+        fact = self.facts.get(scope)
+        if fact is not None and any(f.name == leaf for f in fact.fields):
+            raise CheckError(
+                f'figure {d.name} takes a name that {scope} already has as a field. '
+                "Both are read as `<kind>.<name>`, so one spelling would answer two "
+                "things and a reader could not tell which. Rename the figure.",
+                d.line,
+            )
 
         if d.sets and d.combines:
             raise CheckError(
@@ -602,20 +617,26 @@ class _Checker:
 
         set_names = self._named_sets(d)
         combines = self._combines(d)
-        scope_index, grain, dimension_part = self._scope_index(d, set_names, scope)
+        # Resolved before the scope check, because a figure that reads another
+        # figure and names no group takes its subjects the way a rollup does --
+        # and until the dotted names are resolved, nothing knows it reads one.
+        d = replace(d, calculate=self._resolve_figure_reads(d, combines, scope))
+        scope_index, grain, dimension_part = self._scope_index(
+            d, set_names, scope, reads=bool(combines)
+        )
         # Rewritten before anything reads the calculation, so the plan, the
         # hash, the kind check and the evaluator all see one tree. `latest`
         # over a measure and `latest` over a declared field are different
         # operations wearing one word; which one was meant is decidable here
         # and nowhere later, because only the checker holds the library.
         d = replace(d, calculate=self._resolve_field_reads(d, scope_index, grain))
-        if grain is None and d.bucketed and d.combines:
+        if grain is None and d.bucketed and combines:
             # A figure built on other figures has no group to read a grain
             # from, so it inherits the sequence it is declared over. Without
             # this it would compile as one-value-per-subject and store a
             # single row per site under a coordinate key -- readable by
             # nothing, and visibly empty only to whoever wrote the reading.
-            grain = self._grain_of(d)
+            grain = self._grain_of(d, combines)
         if d.carried and scope_index is None:
             raise CheckError(
                 f"figure {d.name} is carried forward, and it is built from other figures "
@@ -658,14 +679,6 @@ class _Checker:
                 "over and never find a bucket in.",
                 d.line,
             )
-
-        # A figure named outright in the calculation is a scalar read of
-        # another figure, joined by this subject's own key. It desugars into
-        # a `combine` binding here, so everything downstream -- the kind
-        # check, the unit, the reads, the depth ordering, the evaluator, the
-        # invalidation -- sees the construct it already knows. See
-        # `_resolve_figure_reads` for why the sugar exists at all.
-        d = replace(d, calculate=self._resolve_figure_reads(d, combines, scope))
 
         kind = self._calc_kind(d.calculate, d, set_names, combines, scope)
         unit = self._figure_unit(d, kind, combines)
@@ -858,8 +871,21 @@ class _Checker:
             reads.add(name)
 
         def resolve(e: CalcExpr) -> CalcExpr:
-            """Rewrite each dotted name into what it actually names."""
+            """Rewrite each dotted name into what it actually names.
+
+            A figure first, then a field on the subject's own record. The two
+            are the same shape (`<kind>.<name>`), which is why a figure taking
+            a name one of its scope's fields already has is refused where it
+            is declared -- one spelling answering two things is the thing this
+            language is arranged against.
+            """
             if isinstance(e, Setting):
+                if _find(self.figures, e.path) is None:
+                    field = self._subject_field(
+                        f"figure {d.name}'s band", e.path, scope, e.line or d.line
+                    )
+                    if field is not None:
+                        return field
                 threshold(e.path, sequenced=False, line=e.line or d.line)
                 return FigureRef(name=e.path, line=e.line)
             if isinstance(e, Coord):
@@ -943,7 +969,7 @@ class _Checker:
     def _field_matches_set(
         self,
         owner: str,
-        pick: FieldPick,
+        pick: FieldPick | FieldTotal,
         sets: dict[str, SetExpr],
         line: int,
     ) -> None:
@@ -1058,6 +1084,18 @@ class _Checker:
             # does not resolve, and "there is no figure called X" is the honest
             # message -- an unreachable refusal is worse than none, because it
             # reads as a guard somebody is relying on.
+            if c.over is None:
+                # `combine` is the rollup block now, and nothing else. Reading
+                # one figure's value was its other job, and a calculation can
+                # name a figure outright -- so the binding was an alias for a
+                # name, declared above the only line that used it.
+                raise CheckError(
+                    f"figure {d.name} binds {c.figure} in a combine block, and combine "
+                    "adds up the parts of a figure split across a dimension "
+                    f"(`{c.name} = {c.figure} over <kind>`). To read one figure's value, "
+                    f"name it in the calculation: `{c.figure}` where `{c.name}` is now.",
+                    c.line,
+                )
             if c.over is not None:
                 seen_over += 1
                 if source.across is None:
@@ -1081,59 +1119,29 @@ class _Checker:
                         "be indistinguishable once stored.",
                         c.line,
                     )
-            else:
-                if source.across is not None:
-                    raise CheckError(
-                        f"figure {d.name} reads {c.figure} as a single value, but {c.figure} "
-                        f"is split across {source.across}. A bare read would take whichever "
-                        "part sorted first -- a number about one source under a heading that "
-                        f"says nothing about a source. Write `over {source.across}`.",
-                        c.line,
-                    )
-                if source.grain is not None and not d.bucketed:
-                    raise CheckError(
-                        f"figure {d.name} reads {c.figure} as a single value, but {c.figure} "
-                        f"is time-keyed, so it has one value per {source.grain} rather than "
-                        "one per subject. A figure that is itself `bucketed` at the same "
-                        "grain may read it per coordinate, as `<binding>:{bucket}`.",
-                        c.line,
-                    )
-                if source.grain is not None and self._grain_of(d) != source.grain:
-                    # Two sequences that are not the same sequence. A
-                    # coordinate means "the same bucket in both", and months
-                    # against days share no bucket key at all -- the join
-                    # would match nothing and every coordinate would answer an
-                    # absence, which looks exactly like a figure waiting to be
-                    # computed.
-                    raise CheckError(
-                        f"figure {d.name} is keyed by {self._grain_of(d)} and reads "
-                        f"{c.figure}, which is keyed by {source.grain}. A coordinate is the "
-                        "same bucket in both sequences, and these are two different "
-                        "sequences.",
-                        c.line,
-                    )
-            if source.scope != d.name.split(".", 1)[0]:
-                raise CheckError(
-                    f"figure {d.name} is scoped to {d.name.split('.', 1)[0]} but reads "
-                    f"{c.figure}, which is scoped to {source.scope}. The two are different id "
-                    "spaces, so every lookup would miss and the figure would be empty.",
-                    c.line,
-                )
             out[c.name] = (c.figure, c.over)
         return out
 
     def _scope_index(
-        self, d: FigureDecl, sets: dict[str, SetExpr], scope: str
+        self,
+        d: FigureDecl,
+        sets: dict[str, SetExpr],
+        scope: str,
+        reads: bool = False,
     ) -> tuple[str | None, str | None, str | None]:
         """Exactly one group must fan the figure out, and this works out which.
 
-        A rollup has none, and that is legitimate -- its subjects come from the
-        roster. Everything else must have exactly one, because two would mean a
-        value keyed by two different things and none would mean the figure has
-        no subjects at all while still computing a number, which renders as a
-        board-wide total attributed to nobody.
+        A figure built on another figure has none, and that is legitimate --
+        its subjects come from the roster and from whatever the figures it
+        reads are stored under. Everything else must have exactly one, because
+        two would mean a value keyed by two different things and none would
+        mean the figure has no subjects at all while still computing a number,
+        which renders as a board-wide total attributed to nobody.
+
+        `reads` covers both shapes of that: a `combine` rollup, and a figure
+        named outright in the calculation.
         """
-        if d.combines:
+        if reads and not sets:
             return None, None, None
 
         found: list[tuple[str, CompiledIndex]] = []
@@ -1243,7 +1251,9 @@ class _Checker:
                     )
         return name, grain, dimension_part
 
-    def _grain_of(self, d: FigureDecl) -> str | None:
+    def _grain_of(
+        self, d: FigureDecl, combines: dict[str, tuple[str, str | None]]
+    ) -> str | None:
         """This figure's own grain.
 
         From the group that fans it out, or -- for a figure built on other
@@ -1264,8 +1274,8 @@ class _Checker:
                 found = _ordering_grain(spec)
                 if found is not None:
                     return found
-        for c in d.combines:
-            source = _find(self.figures, c.figure)
+        for source_name, _ in combines.values():
+            source = _find(self.figures, source_name)
             if source is not None and source.grain is not None:
                 return str(source.grain)
         return None
@@ -1292,6 +1302,53 @@ class _Checker:
                 e.line,
             )
         return source
+
+    def _subject_field(
+        self, owner: str, name: str, scope: str, line: int
+    ) -> SubjectField | None:
+        """`shop_courier.max_orders`, where the figure is scoped to couriers.
+
+        None when the name does not look like a field of the subject's kind at
+        all, so the caller can go on to say what it *did* expect. A name that
+        clearly means this and is wrong -- another kind, a field nobody
+        declared, a word where a number belongs -- is refused here, because
+        each of those has a different fix and one message for all three would
+        name none of them.
+        """
+        kind, _, field = name.partition(".")
+        if not field or kind not in self._kinds:
+            return None
+        if self.facts.get(kind) is None:
+            # A schema-taught world declares no fields, so there is nothing to
+            # check a name against -- and an unchecked field read is a silent
+            # absence for every subject. The route opens when the world is
+            # declared in the language, where the checker can see the field.
+            return None
+        if kind != scope:
+            raise CheckError(
+                f'{owner} reads "{name}", and {kind} is not what this value is about '
+                f"-- it is one value per {scope}. A field is read off the subject's own "
+                "record, because that is the only record there is a key for; picking "
+                f"one of {kind}'s would be a fabrication. Read it through a figure "
+                f"scoped to {scope}, or through a group.",
+                line,
+            )
+        found = self._record_field(kind, field, f"{owner} reads {name}", line)
+        if found is not None and found[0].type not in ("number", None):
+            raise CheckError(
+                f'{owner} reads "{name}", which is declared as {found[0].type}. A '
+                "threshold is a number: a word read off a record would be arbitrary "
+                "text compared against a quantity.",
+                line,
+            )
+        if found is not None and found[1]:
+            raise CheckError(
+                f'{owner} reads "{name}", whose path crosses a list, so one record '
+                "holds several of them. Which one is the subject's has no answer, and "
+                "first-wins would be a fabrication about the wrong element.",
+                line,
+            )
+        return SubjectField(kind=kind, field=field, line=line)
 
     def _resolve_figure_reads(
         self,
@@ -1344,10 +1401,25 @@ class _Checker:
                     "lookup would miss and every subject would read nothing.",
                     line,
                 )
+            if source.across is not None and d.across != source.across:
+                raise CheckError(
+                    f"figure {d.name} reads {name}, which is split across "
+                    f"{source.across} -- it holds one value per pair, not one per "
+                    "subject, so a bare read would take whichever part sorted first "
+                    "and look right for ever. Add them up: "
+                    f"`combine: parts = {name} over {source.across}`.",
+                    line,
+                )
             combines.setdefault(name, (name, None))
 
         def walk(e: CalcExpr) -> CalcExpr:
             if isinstance(e, Setting):
+                if _find(self.figures, e.path) is None:
+                    field = self._subject_field(
+                        f"figure {d.name}", e.path, scope, e.line or d.line
+                    )
+                    if field is not None:
+                        return field
                 bind(e.path, e.line or d.line)
                 # A bare `Part` from here on: the checker's Part branch already
                 # holds every rule about reading a combined figure, including
@@ -1381,13 +1453,14 @@ class _Checker:
     def _resolve_field_reads(
         self, d: FigureDecl, scope_index: str | None, grain: str | None
     ) -> CalcExpr:
-        """Turn `latest(<kind>.<field> over <set>)` into a `FieldPick`.
+        """Turn `latest(<kind>.<field> over <set>)` into a `FieldPick`, and
+        `sum(<kind>.<field> over <set>)` into a `FieldTotal`.
 
-        The dotted name is a measure or it is a fact field, and the two mean
-        genuinely different things: over a moment measure `latest` answers
-        *when*, over a field it answers *what the value was then*. A measure
-        wins if one exists by that name -- otherwise declaring a measure
-        could silently change what an existing figure computes.
+        The dotted name is a measure or it is a fact field, and over `latest`
+        the two mean genuinely different things: over a moment measure it
+        answers *when*, over a field it answers *what the value was then*. A
+        measure wins if one exists by that name -- otherwise declaring a
+        measure could silently change what an existing figure computes.
         """
 
         def walk(e: CalcExpr) -> CalcExpr:
@@ -1395,6 +1468,17 @@ class _Checker:
                 kind, _, field = e.measure.partition(".")
                 if kind in self._kinds and field:
                     return self._field_pick(d, e, kind, field, scope_index, grain)
+            if (
+                isinstance(e, Sum)
+                and e.measure is not None
+                and e.measure not in self.measures
+            ):
+                kind, _, field = e.measure.partition(".")
+                if kind in self._kinds and field:
+                    self._record_field(
+                        kind, field, f"figure {d.name} totals {kind}.{field}", e.line
+                    )
+                    return FieldTotal(kind=kind, field=field, set=e.set, line=e.line)
             if isinstance(e, Ladder):
                 return replace(
                     e,
@@ -1561,11 +1645,11 @@ class _Checker:
                 )
             return "number"
 
-        if isinstance(e, Part) and e.name in combines and self._grain_of(d) is not None:
+        if isinstance(e, Part) and e.name in combines and self._grain_of(d, combines) is not None:
             bound = _find(self.figures, combines[e.name][0])
             if bound is not None and bound.grain is None:
                 raise CheckError(
-                    f'figure {d.name} is keyed by {self._grain_of(d)} and reads "{e.name}" '
+                    f'figure {d.name} is keyed by {self._grain_of(d, combines)} and reads "{e.name}" '
                     f"as a single value, but {bound.name} holds one value per subject. The "
                     "coordinate read beside it looks the source up under `subject@bucket` "
                     "and this one under `subject`, so the scalar resolves to nothing at "
@@ -1676,6 +1760,19 @@ class _Checker:
 
         if isinstance(e, Coord):
             source = self._coord_source(d, e, combines)
+            mine = self._grain_of(d, combines)
+            if source.grain is not None and mine is not None and mine != source.grain:
+                # Two sequences that are not the same sequence. A coordinate
+                # means "the same bucket in both", and months against days
+                # share no bucket key at all -- the join would match nothing
+                # and every coordinate would answer an absence, which looks
+                # exactly like a figure waiting to be computed.
+                raise CheckError(
+                    f"figure {d.name} is keyed by {mine} and reads {e.name}, which is "
+                    f"keyed by {source.grain}. A coordinate is the same bucket in both "
+                    "sequences, and these are two different sequences.",
+                    e.line,
+                )
             if source.grain is None:
                 raise CheckError(
                     f"figure {d.name} reads {e.name}:{{bucket}}, but {source.name} holds one "
@@ -1697,6 +1794,11 @@ class _Checker:
             self._field_matches_set(d.name, e, sets, e.line)
             return "number"
 
+        if isinstance(e, FieldTotal):
+            self._require_set(d.name, e.set, sets, e.line)
+            self._field_matches_set(d.name, e, sets, e.line)
+            return "number"
+
         if isinstance(e, Extreme):
             m = self._require_measure(d.name, e.measure, e.line)
             self._require_set(d.name, e.set, sets, e.line)
@@ -1710,6 +1812,9 @@ class _Checker:
                 )
             self._measure_matches_set(d.name, m, e.set, sets, e.line)
             return "moment"
+
+        if isinstance(e, SubjectField):
+            return "number"
 
         if isinstance(e, FigureRef):  # pragma: no cover - band-only
             raise CheckError(
@@ -1792,7 +1897,7 @@ class _Checker:
         # tell which was meant. That is the rule in its sharpened form:
         # declare only what cannot be derived, and a redundant declaration
         # is still refused above.
-        arithmetic = isinstance(d.calculate, (Arith, Pick, FieldPick))
+        arithmetic = isinstance(d.calculate, (Arith, Pick, FieldPick, FieldTotal))
         if d.unit is not None and not arithmetic:
             raise CheckError(
                 f'figure {d.name} declares "unit {d.unit}", and its calculation already says '
@@ -2932,7 +3037,7 @@ class _Checker:
                 "reading.",
                 e.line,
             )
-        if isinstance(e, (Count, ListOf, Sum, Extreme, FieldPick, BucketStat)):
+        if isinstance(e, (Count, ListOf, Sum, Extreme, FieldPick, FieldTotal, BucketStat)):
             verb = {
                 "Count": "counts",
                 "ListOf": "lists",
@@ -2941,6 +3046,7 @@ class _Checker:
                 # A projection has one record per row already, so "the latest
                 # of a set" is an aggregate here exactly as a count is.
                 "FieldPick": "takes the extreme of",
+                "FieldTotal": "totals",
                 "BucketStat": "averages",
             }[type(e).__name__]
             raise CheckError(
@@ -2953,6 +3059,12 @@ class _Checker:
             raise CheckError(
                 f"{noun} {owner} names the figure {e.name} outright. A row reads a figure "
                 "through `read:`, which binds it by name.",
+                e.line,
+            )
+        if isinstance(e, SubjectField):  # pragma: no cover - figure-only
+            raise CheckError(
+                f"{noun} {owner} reads {e.kind}.{e.field} off a subject's record. A row "
+                "IS a record: name the field in `field:` and it is bound for the row.",
                 e.line,
             )
         assert_never(e)
@@ -3239,6 +3351,14 @@ def _calc_hash(e: CalcExpr) -> object:
         return {"op": "text", "value": e.value}
     if isinstance(e, Setting):
         return {"op": "setting", "path": e.path}
+    if isinstance(e, FieldTotal):
+        return {"op": "total", "kind": e.kind, "field": e.field, "set": e.set}
+    if isinstance(e, SubjectField):
+        # Which record and which field: two figures reading two fields of one
+        # record are two definitions, and a hash that could not tell them
+        # apart would let one become the other under a version claiming
+        # nothing moved.
+        return {"op": "subject", "kind": e.kind, "field": e.field}
     if isinstance(e, FigureRef):
         # Distinct from a setting of the same spelling, deliberately: the two
         # would resolve against different things, and a hash that could not

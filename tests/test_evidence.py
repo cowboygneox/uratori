@@ -93,11 +93,8 @@ figure team_person.rework_share:
     display "{team_person} rework share"
     unit share
 
-    combine:
-        redone = team_person.rework_effort
-        planned = team_person.planned_effort
     calculate:
-        redone / planned
+        team_person.rework_effort / team_person.planned_effort
 
 # When this person last delivered anything.
 figure team_person.last_delivery:

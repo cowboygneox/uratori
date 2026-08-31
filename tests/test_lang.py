@@ -337,7 +337,12 @@ figure team_person.bad:
     )
 
 
-def test_a_figure_may_not_have_both_depends_and_combine() -> None:
+def test_a_figure_may_not_have_both_depends_and_a_rollup() -> None:
+    """`combine` is the rollup block and nothing else now, so this is the rule
+    in the only form left to break: a population of records beside a total of
+    another figure's parts, with no rule for how they relate. Reading one
+    figure's *value* beside a population is fine and expected -- that is a
+    number, not a second population, and it is named in the calculation."""
     refuses(
         """
 # d
@@ -346,7 +351,7 @@ figure team_person.mixed:
     depends:
         m = work_issue.assigned_to:{team_person}
     combine:
-        w = team_person.wip
+        w = team_person.open_mrs_by_source over data_connection
     calculate:
         count(m)
 """,
@@ -447,10 +452,8 @@ figure team_person.pairs across data_connection:
 # d
 figure team_person.total:
     display "x"
-    combine:
-        s = team_person.pairs
     calculate:
-        s
+        team_person.pairs
 """,
         "whichever part sorted first",
     )
@@ -507,10 +510,8 @@ def test_a_figure_may_not_read_one_declared_after_it() -> None:
 # d
 figure team_person.first:
     display "x"
-    combine:
-        s = team_person.second
     calculate:
-        s
+        team_person.second
 
 # d
 figure team_person.second:
@@ -520,7 +521,7 @@ figure team_person.second:
     calculate:
         count(m)
 """,
-        "there is no figure called",
+        "not a figure declared before it",
     )
 
 
@@ -530,12 +531,10 @@ def test_a_figure_may_not_read_itself() -> None:
 # d
 figure team_person.loop:
     display "x"
-    combine:
-        s = team_person.loop
     calculate:
-        s
+        team_person.loop
 """,
-        "there is no figure called",
+        "not a figure declared before it",
     )
 
 
@@ -602,11 +601,8 @@ def test_arithmetic_must_declare_a_unit_because_the_same_operands_mean_two_thing
 # d
 figure team_person.ratio:
     display "x"
-    combine:
-        a = team_person.wip
-        b = team_person.wip
     calculate:
-        a / b
+        team_person.wip / team_person.wip
 """,
         "produces a number nothing can name",
     )
@@ -636,10 +632,8 @@ def test_a_ladder_must_return_a_word_not_a_number() -> None:
 # d
 figure team_person.numeric_ladder:
     display "x"
-    combine:
-        w = team_person.wip
     calculate:
-        when w >= 5 then 1
+        when team_person.wip >= 5 then 1
         otherwise 0
 """,
         "returns a number from its when ladder",
@@ -652,10 +646,8 @@ def test_a_ladder_may_not_mix_words_and_numbers() -> None:
 # d
 figure team_person.mixed_ladder:
     display "x"
-    combine:
-        w = team_person.wip
     calculate:
-        when w >= 5 then "over"
+        when team_person.wip >= 5 then "over"
         otherwise 0
 """,
         "a number from one branch and a word from another",
@@ -672,10 +664,8 @@ def test_a_ladder_must_end_in_otherwise() -> None:
 # d
 figure team_person.open_ladder:
     display "x"
-    combine:
-        w = team_person.wip
     calculate:
-        when w >= 5 then "over"
+        when team_person.wip >= 5 then "over"
 """
         )
     assert "otherwise" in caught.value.message
@@ -687,20 +677,16 @@ def test_a_word_may_not_be_combined_arithmetically() -> None:
 # d
 figure team_person.level:
     display "x"
-    combine:
-        w = team_person.wip
     calculate:
-        when w >= 5 then "over"
+        when team_person.wip >= 5 then "over"
         otherwise "ok"
 
 # d
 figure team_person.uses_level:
     display "x"
     unit count
-    combine:
-        l = team_person.level
     calculate:
-        l + 1
+        team_person.level + 1
 """,
         "stores a word rather than a number",
     )
@@ -786,10 +772,8 @@ def test_a_figure_may_only_name_a_figure_setting() -> None:
 # d
 figure team_person.banded:
     display "x"
-    combine:
-        w = team_person.wip
     calculate:
-        when w >= flow.leadTimeDays then "over"
+        when team_person.wip >= flow.leadTimeDays then "over"
         otherwise "ok"
 """,
         "tenant dial",
@@ -1923,10 +1907,8 @@ def test_a_word_cannot_be_banded() -> None:
 # d
 figure team_person.worded:
     display "x"
-    combine:
-        w = team_person.wip
     calculate:
-        when w >= 5 then "over"
+        when team_person.wip >= 5 then "over"
         otherwise "ok"
     band:
         when value == "over" then "over"
@@ -2735,12 +2717,10 @@ def test_a_time_keyed_figure_cannot_be_read_as_a_single_value() -> None:
 # d
 figure team_person.merge_total:
     display "x"
-    combine:
-        rate = team_person.merge_rate
     calculate:
-        rate
+        team_person.merge_rate
 """,
-        "time-keyed",
+        "one value per",
     )
 
 
@@ -2757,7 +2737,7 @@ projection team_person.card:
     read:
         rate = team_person.merge_rate
 """,
-        "time-keyed",
+        "one value per",
     )
 
 

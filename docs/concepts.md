@@ -155,11 +155,8 @@ figure shop_courier.carrying:
 figure shop_courier.load_band:
     display "{value}"
 
-    combine:
-        carrying = shop_courier.carrying
-
     calculate:
-        when carrying >= 3 then "over"
+        when shop_courier.carrying >= 3 then "over"
         otherwise "ok"
 ```
 
@@ -174,12 +171,14 @@ they are plumbing, not numbers a reader meets.
   files each order under its courier. **Filters** hold the records matching a
   test: `open` holds the undelivered ones. Together they are the only way a
   definition reaches a population.
-- **Measures** read quantities off records, with a declared unit, so a number
-  is never a bare float of unknown meaning.
+- **Measures** name a quantity a record does not already carry -- a duration
+  between two moments, an instant, a wait against the clock -- with a declared
+  unit, so a computed number is never a bare float of unknown meaning. A field
+  the record already holds needs no measure: a calculation reads it directly.
 - **Figures** are stored, per-subject values, recomputed incrementally as
   facts move. `carrying` counts each courier's open orders; `load_band` is a
-  figure built *on* a figure (the `combine` block), turning the count into a
-  word.
+  figure built *on* a figure -- it names `shop_courier.carrying` and turns the
+  count into a word, so it needs no group of its own.
 - **Readings** summarise a time-keyed figure over windows -- spans of
   integer positions in the figure's own bucket sequence, counted back from
   the anchor: "orders delivered over the last 30 days" (`30` on a

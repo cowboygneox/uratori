@@ -27,8 +27,8 @@ an identity -- a *kind* and a *key* -- and a body of fields
 ([Concepts](concepts.md) carries the full model, over this same dataset):
 
 ```
-shop_courier "c1"  { "name": "Aki" }
-shop_courier "c2"  { "name": "Bo" }
+shop_courier "c1"  { "name": "Aki", "max_orders": 3 }
+shop_courier "c2"  { "name": "Bo",  "max_orders": 1 }
 
 shop_order "o1"    { "ref": "A-1", "courier_id": "c1", "status": "riding" }
 shop_order "o2"    { "ref": "A-2", "courier_id": "c1", "status": "riding" }
@@ -36,11 +36,23 @@ shop_order "o3"    { "ref": "B-7", "courier_id": "c2", "status": "delivered" }
 ```
 
 The correlations are already in the data -- each order's `courier_id` names a
-courier's key -- but nothing yet says what those fields *mean*. That is
-what a definition declares. The host has told the engine the two kinds,
-`shop_order` and `shop_courier`:
+courier's key -- but nothing yet says what those fields *mean*. That is what a
+definition declares, starting with the world itself:
 
 ```
+# Somebody who carries orders, and how many they are cleared for.
+fact shop_courier:
+    name name
+    name as text
+    max_orders as number
+
+# One order, from pickup to doorstep.
+fact shop_order:
+    name ref
+    ref as text
+    courier_id as text
+    status as text
+
 group shop_order.carried_by from courier_id
 filter shop_order.open where status != "delivered"
 
@@ -55,7 +67,7 @@ figure shop_courier.carrying:
         count(mine)
 
     band:
-        when value >= 3 then "over"
+        when value > shop_courier.max_orders then "over"
         otherwise "ok"
 ```
 
@@ -63,13 +75,17 @@ Reading it back: the group puts every order in a bucket per courier --
 `o1` and `o2` land in Aki's, `o3` in Bo's; the filter holds whichever orders
 are not yet delivered, which excludes `o3`. The figure intersects the two for
 each courier and counts what is left, so Aki reads 2 and Bo reads 0 -- a
-measured nought, not a blank -- and the band turns each count into a word.
-Three is written here because it is part of what this definition claims; a
-threshold that varies -- per courier, per month, set by somebody and moved
-later -- is a **figure** the band names instead, computed from the records
-that set it. It is never a control living outside the data: the number that
-decides whether a reader should worry is the last one that should be
-unciteable. The `#` line above the header
+measured nought, not a blank -- and the band turns each count into a word by
+comparing it against `max_orders` **on that courier's own record**. Aki is
+cleared for three and holding two; Bo is cleared for one and holding none.
+
+That threshold is a fact, and it costs no declaration: it is a field on a
+record, read for the subject the value is about. A threshold that is computed,
+or that has history worth keeping, is a **figure** the band names instead. What
+it is never is a control living outside the data -- the number that decides
+whether a reader should worry is the last one that should be unciteable.
+
+The `#` line above the header
 is the figure's **explanation** -- attached by the compile, served wherever
 the number is cited, and required. Push another order at the engine and Aki's
 count moves; push `o1`'s delivery and it moves back. Nothing else needs
@@ -632,8 +648,10 @@ figure team_person.wip:
 A figure is named `<fact kind>.<name>`, and the prefix is its **scope** -- the
 kind of subject it is one-value-per. It requires an explanation (the `#` lines
 above it -- the definition a reader is shown), a `display` template (the
-sentence a movement is reported under), exactly one of `depends` or `combine`,
-and a `calculate` block. `unit` and `band` are optional.
+sentence a movement is reported under) and a `calculate` block. A figure over
+records also declares `depends`; one built only on other figures needs no
+group at all, and takes its subjects from what it reads. `unit`, `band` and
+`combine` are optional.
 
 The `display` template is prose, written by convention with the scope kind,
 the `across` kind for a split figure, and `{value}` as placeholders --
@@ -710,28 +728,32 @@ size, a measure over a set, a bound figure, another figure, a literal.
   not compete, so `max(a, nothing)` is `a` -- is wrong in this engine, because
   a missing value means *not computed*, never "the subject has none of it";
   the engine writes a real nought for anybody who genuinely has none.
-- A dotted name reads **another figure**, at this subject's own key -- a
-  scalar lookup, not a second population, and it is how a calculation reaches
-  a number it did not compute itself. A bare name reads a binding from
-  `depends` or `combine`.
+- A dotted name is **another figure**, or a **field on the subject's own
+  record**, in that order. Both are `<kind>.<name>`, which is why a figure may
+  not take a name one of its scope's fields already has -- one spelling
+  answering two things is what this language exists to refuse, and it is
+  refused where the collision is made rather than where it is read. A bare
+  name reads a binding from `depends` or `combine`.
 
-  It exists because the two blocks did not cover the case between them.
-  `depends` gives a population and cannot reach a stored value; `combine`
-  gives a stored value and cannot count records; and a figure has one or the
-  other. So "how much room is left before this courier's limit" -- a count
-  of records measured against a stored number -- was unwritable. The gap did
-  not show while a threshold could be a dial, and taking dials away is what
-  put it in the way.
+  **`shop_courier.max_orders`** -- the field -- is the short road, and the one
+  most thresholds want: a number somebody typed onto a record. It costs no
+  declaration. The record is always the subject's, because that is the only
+  record there is a key for; another kind's field is refused rather than
+  resolved by picking one. It reads only in a **fact-taught** world, where the
+  field is declared and the checker can see it -- an unchecked field read
+  would be a silent absence for every subject.
 
-  The named figure must be declared earlier and share this figure's scope,
-  and a sequenced one is read at its coordinate (`goal:{bucket}`) exactly as
-  in a band. It becomes an ordinary **read**: this figure is rebuilt when the
-  one it names moves, and sorts after it. That is the difference from a band,
-  which only re-words -- and it is why the two are tracked apart.
+  **`team_person.wip`** -- the figure -- is for a threshold that is computed,
+  or that has history worth keeping. The named figure must be declared
+  earlier and share this figure's scope, and a sequenced one is read at its
+  coordinate (`goal:{bucket}`). It becomes an ordinary **read**: this figure
+  is rebuilt when the one it names moves, and sorts after it.
 
-  A dotted name that resolves to no figure is refused, and the refusal
-  carries the rewrite for the case that used to work: a definition's numbers
-  come from facts, or from what the definition says outright.
+  Either way a calculation can now reach a number it did not compute itself,
+  which the two blocks did not cover between them: `depends` gives a
+  population and cannot reach a value, `combine` totals parts and cannot
+  count records. "How much room is left before this courier's limit" was
+  unwritable.
 
 ### The `when` ladder
 
@@ -791,7 +813,7 @@ A figure built on another figure inherits its unit from **the binding it
 actually reads**, not from whichever binding happens to carry an inheritable
 one.
 
-### `combine` -- a figure reading another figure
+### `combine` -- adding up a split figure's parts
 
 ```
 # Open changes, all sources together.
@@ -805,25 +827,29 @@ figure team_person.open_mrs:
         sum(sources)
 ```
 
-`combine` binds another figure's stored values, so that **a total and its
-parts cannot disagree**: there is one count, and this adds it up. Agreement by
-construction is worth more than two independent counts held together by a
-test.
+`combine` totals the parts of a figure split `across` a dimension, so that **a
+total and its parts cannot disagree**: there is one count, and this adds it
+up. Agreement by construction is worth more than two independent counts held
+together by a test.
 
-`over <kind>` present reads the *parts* of a figure split `across` that kind;
-`over` absent reads the one value the source holds for this same subject
-(read it by its bare name in `calculate`, or feed it to a ladder or
-arithmetic). Neither mistake fails loudly -- a bare read of a dimensioned
-figure would take whichever part sorts first, and a rollup of an
-undimensioned one would total a single value and look right for ever -- so
-the checker refuses both by name, and also checks `over` against the source's
-own `across`, so a source later split across something else fails the build
-here rather than quietly changing what this is a total of.
+`over <kind>` is not optional. It was, and the version without it bound one
+figure's value to a name -- an alias, declared above the single line that used
+it, for something a calculation can now say directly. What is left is the
+rollup, which is a genuinely different operation: many values in, one out.
+
+Both mistakes around it fail quietly, so both are refused by name. A bare read
+of a dimensioned figure would take whichever part sorts first; a rollup of an
+undimensioned one would total a single value and look right for ever. The
+checker also holds `over` against the source's own `across`, so a source later
+split across something else fails the build here rather than quietly changing
+what this is a total of.
 
 The rules around it:
 
-- A figure has `depends` **or** `combine`, never both: two populations
-  arriving at one calculation with no rule for how they relate.
+- A figure has `depends` **or** a rollup, never both: two populations
+  arriving at one calculation with no rule for how they relate. Reading one
+  figure's *value* beside a population is fine -- that is a number, not a
+  second population.
 - The source must share this figure's scope -- different scopes are different
   id spaces, so every lookup would miss.
 - The source must be declared **earlier in the source**. That is also why a
@@ -1021,10 +1047,18 @@ knows about calendars.
 ### Reading a declared field
 
 `latest(setting_change.value over sets)` reads the field the most recent
-record in the bucket set it to. There is deliberately no measure in the way:
+record in the bucket set it to, and `sum(shop_order.weight over mine)` adds a
+field up across a set. There is deliberately no measure in the way:
 `measure setting_change.goal = value in count` would be a second name for one
 field, written only to satisfy the grammar, in a language that refuses a
 second place to write one thing everywhere else.
+
+A **measure** is for a quantity a record does not already carry -- a duration
+between two moments, an instant, a wait against the clock -- or for one
+meaning several figures share, declared once and named three times rather than
+a unit repeated at each reader. `sum` demanded one anyway until the asymmetry
+was noticed: only `latest` needs an *ordering*, which is why only `latest` is
+confined to a `bucketed` figure, and a total has no ordering to get wrong.
 
 `latest` therefore covers two operations, and they do not blur. Over a
 **moment measure** it answers *when* -- the most recent instant in a
@@ -1162,12 +1196,8 @@ figure site.gap_month bucketed:
     display "{site} gap"
     unit duration
 
-    combine:
-        actual = site.actual_month
-        goal = site.target_month
-
     calculate:
-        actual:{bucket} - goal:{bucket}
+        site.actual_month:{bucket} - site.target_month:{bucket}
 
     band:
         when value > 0 then "over"
@@ -2155,8 +2185,13 @@ The ones most worth recognising, in the checker's own words:
 - *"...names no group addressed by `{scope}`, so it has no subjects"* /
   *"...is fanned out by more than one group"* -- exactly one group fans a
   figure out.
-- *"...has both a depends and a combine block"* -- two populations, one
-  calculation, no rule for how they relate.
+- *"...has both a depends and a combine block"* -- a population of records
+  and a total of another figure's parts, with no rule for how they relate.
+- *"...binds X in a combine block, and combine adds up the parts of a figure
+  split across a dimension"* -- to read one figure's value, name it in the
+  calculation.
+- *"...takes a name that <kind> already has as a field"* -- both are read as
+  `<kind>.<name>`, so one spelling would answer two things.
 - *"...lists M, which is measured to now"* / *"...measures days from ... to
   ..., which reads the clock"* -- a stored value may not read a clock; a live
   reading or a projection may.

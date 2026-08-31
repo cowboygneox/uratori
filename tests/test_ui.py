@@ -1844,10 +1844,8 @@ figure shop_courier.carrying:
 # Whether this courier is carrying anything at all.
 figure shop_courier.idle:
     display "{value}"
-    combine:
-        carrying = shop_courier.carrying
     calculate:
-        when carrying == 0 then "idle"
+        when shop_courier.carrying == 0 then "idle"
         otherwise "busy"
 '''
 """COURIER_SOURCE with one edit of every diff class: the filter's predicate

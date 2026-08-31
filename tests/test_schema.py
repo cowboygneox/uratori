@@ -40,10 +40,8 @@ figure shop_courier.carrying:
 # Whether a courier is over the carrying limit.
 figure shop_courier.load_band:
     display "{value}"
-    combine:
-        carrying = shop_courier.carrying
     calculate:
-        when carrying >= 3 then "over"
+        when shop_courier.carrying >= 3 then "over"
         otherwise "ok"
 '''
 

@@ -69,7 +69,7 @@ from ..results import (
     Unavailable,
 )
 from ..schema import Schema
-from ..store.postgres import PostgresEngineStore
+from ..store.postgres import PostgresEngineStore, PostgresFactStore
 from ..windows import WindowError, expand_window_args, window_token
 from . import db
 from .runtime import (
@@ -1122,7 +1122,12 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 if plan.scope != kind:
                     continue
                 result = await serve_figure(
-                    store, library, tenant, plan, subject=key
+                    store,
+                    library,
+                    tenant,
+                    plan,
+                    subject=key,
+                    facts=PostgresFactStore(s.pool),
                 )
                 total = len(result.subjects)
                 more = total > ABOUT_ROWS
@@ -1388,6 +1393,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 tenant=tenant,
                 plan=plan,
                 subject=key,
+                facts=PostgresFactStore(s.pool),
             )
         except KeyError as gap:
             # The same fixable dial gap the about route wears as a 409.

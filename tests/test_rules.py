@@ -244,11 +244,9 @@ LADDER = compile_source(
 # d
 figure team_person.band:
     display "x"
-    combine:
-        n = team_person.count
     calculate:
-        when n >= 5 then "over"
-        when n >= 3 then "warn"
+        when team_person.count >= 5 then "over"
+        when team_person.count >= 3 then "warn"
         otherwise "ok"
 """
 )
@@ -290,11 +288,8 @@ def test_max_propagates_an_absence_rather_than_letting_the_known_side_win() -> N
 figure team_person.bigger:
     display "x"
     unit count
-    combine:
-        a = team_person.count
-        b = team_person.count
     calculate:
-        max(a, b)
+        max(team_person.count, team_person.count)
 """
     ).figure("team_person.bigger")
     assert plan is not None
@@ -721,11 +716,8 @@ figure team_person.effort:
 # d
 figure team_person.reads_the_count:
     display "x"
-    combine:
-        e = team_person.effort
-        c = team_person.count
     calculate:
-        c
+        team_person.count
 """
     )
     plan = lib.figure("team_person.reads_the_count")

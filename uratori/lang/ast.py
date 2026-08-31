@@ -687,6 +687,43 @@ class FigureRef:
 
 
 @dataclass(frozen=True)
+class SubjectField:
+    """`shop_courier.max_orders` -- a number read off the record the value is
+    *about*.
+
+    The shortest thing in the language, and it exists because its absence was
+    the most expensive. A threshold that varies per subject is usually a
+    number somebody typed onto that subject's record: a courier's allowance, a
+    site's target, a repository's staleness window. Reaching it used to mean a
+    group pairing a record with itself, a measure renaming one field, and a
+    figure summing a set of one -- three declarations of ceremony before
+    anything could name the number. A group had been reading the same record
+    with none of that (`by day in shop_courier.timezone`); nothing else could.
+
+    The record is the subject's, always, and the kind is written out so a
+    reader sees which record without tracing the figure's scope. Another
+    kind's field is refused: there is no key to pick a record of it by, and
+    picking one would be a fabrication.
+
+    **A figure is still the other route**, and it is the right one whenever
+    the threshold is computed from something, or has history worth keeping --
+    a target set in June that June's rows should still be judged against.
+    This is for the case where the number is simply written down.
+
+    No unit travels with it. A field is structural (`max_orders as number`)
+    and the fact layer claims a shape, never a meaning -- so the comparison
+    is what fixes the quantity, exactly as it does for a literal. That is the
+    one thing this shares with the dial it replaces, and the reason it is
+    tolerable here is the reason a literal is tolerable: the number is
+    visible to the reader, on a record they can open.
+    """
+
+    kind: str
+    field: str
+    line: int = 0
+
+
+@dataclass(frozen=True)
 class Rung:
     left: CalcExpr
     op: Comparison | AbsenceTest
@@ -828,6 +865,37 @@ class Extreme:
 
 
 @dataclass(frozen=True)
+class FieldTotal:
+    """`sum(shop_order.weight over mine)` -- a field, added up across a set.
+
+    The same argument `FieldPick` makes, at the other statistic. A measure
+    decorates a record with a quantity a definition *names* -- a duration
+    between two moments, a field re-labelled with what its number means --
+    and where the field already is the number, a measure is a second name
+    for one thing.
+
+    `latest` had always been allowed to read a field directly and `sum` had
+    not, which was an asymmetry with no argument behind it: the rule that
+    confines `latest` to a `bucketed` figure is about *ordering* -- which
+    record came last -- and a total has no ordering to get wrong.
+
+    A measure is still the right declaration for a quantity that is computed
+    (`merged_at - created_at`), or one whose meaning several figures share:
+    declared once, named three times, rather than a unit repeated at each
+    reader. What it is no longer is the toll on adding up a column somebody
+    typed.
+
+    The unit is the figure's to declare, because nothing here can derive it:
+    a fact field claims a shape (`weight as number`) and never a meaning.
+    """
+
+    kind: str
+    field: str
+    set: str
+    line: int = 0
+
+
+@dataclass(frozen=True)
 class FieldPick:
     """`latest(setting_change.value over sets)` -- the value the most recent
     record in the set carries.
@@ -936,8 +1004,9 @@ class Coord:
 
 
 CalcExpr: TypeAlias = (
-    Count | ListOf | Sum | Part | Number | Text | Setting | FigureRef | Ladder | Arith | Pick
-    | DaysBetween | Extreme | FieldPick | Coord | BucketStat
+    Count | ListOf | Sum | Part | Number | Text | Setting | FigureRef | SubjectField | Ladder
+    | Arith | Pick | DaysBetween | Extreme | FieldPick | FieldTotal | Coord
+    | BucketStat
 )
 
 
