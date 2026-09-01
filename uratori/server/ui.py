@@ -265,6 +265,16 @@ class DeclChange(BaseModel):
 class CheckOut(BaseModel):
     ok: bool
     refusal: RefusalOut | None
+    unchanged: int = 0
+    """How many declarations the candidate source leaves exactly as they
+    serve. The page renders the moves and prints this beside them, and it was
+    subtracting one list length from another to get it -- a number on a screen
+    that no definition and no route produced.
+
+    Its own field rather than a filter over `declarations`, because the two
+    disagree the moment the diff is capped or paged, and the page would go on
+    printing a total it derived from a sample."""
+
     adoption: str | None = None
     """Stated when the candidate source declares facts over a schema that
     declared kinds: the save retires the schema's kinds, name fields and url
@@ -712,6 +722,11 @@ class CitedPageOut(BaseModel):
     rows: list[CitedRowOut]
     more: bool
     total: int
+    order: str = "subject order"
+    """The total order the pages walk, in words -- the server's to state, for
+    the reason `ComputedPageOut.order` gives. The page was composing this
+    sentence itself, which is a client making a claim about a sequence it did
+    not choose and cannot verify."""
 
 
 def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
@@ -825,11 +840,13 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             library, _schema, _document, adopted = compile_for_teach(body.source, s.world)
         except DefinitionError as refusal:
             return CheckOut(ok=False, refusal=_refusal_out(refusal), declarations=[])
+        changes = _changes(s.world.library, library)
         return CheckOut(
             ok=True,
             refusal=None,
+            unchanged=sum(1 for d in changes if d.change == "unchanged"),
             adoption=_ADOPTION if adopted else None,
-            declarations=_changes(s.world.library, library),
+            declarations=changes,
         )
 
     @ui.put("/ui/api/source", response_model=SaveOut, include_in_schema=False)
@@ -1516,6 +1533,30 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         buckets, more, members, buckets_total = await db.bucket_counts(
             s.pool, tenant, name, after=buckets_after, limit=buckets_limit
         )
+        population = await db.count_kind(s.pool, tenant, index.id_space)
+        if population == 0 and members == 0:
+            # **The third absence, stated rather than inferred.** The page was
+            # deriving this itself -- two zeroes on an `Ok` response, rendered
+            # as "Nothing collected" -- which is a client deciding why there
+            # is no answer. It is the same finding a figure over this grouping
+            # already states, and it belongs on the same side of the wire.
+            return MembershipOut(
+                name=name,
+                kind=_grouping_kind(index),
+                fact_kind=index.kind,
+                id_space=index.id_space,
+                state=Unavailable(
+                    because="nothing-collected",
+                    detail=(
+                        f"no {index.id_space} record has been collected for this "
+                        "board, so there is nothing to file"
+                    ),
+                ),
+                members=0,
+                population=0,
+                buckets=[],
+                buckets_total=0,
+            )
         # An age filter is decided against the clock, so its filing is as old
         # as the last pass whether or not it reads a dial -- and where its
         # threshold comes off the record's owner, moving that owner moves the
@@ -1533,7 +1574,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             id_space=index.id_space,
             state=state,
             members=members,
-            population=await db.count_kind(s.pool, tenant, index.id_space),
+            population=population,
             buckets=[MembershipBucket(**b) for b in buckets],
             buckets_total=buckets_total,
             buckets_more=more,

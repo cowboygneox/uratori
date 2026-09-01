@@ -206,8 +206,9 @@ function roster(selected) {
     }
     for (const [group, members] of [...groups.entries()].sort()) {
       list.append(el('div', { class: 'kind-head' }, group));
-      members.sort((a, b) =>
-        KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || a.name.localeCompare(b.name));
+      // No re-sort here. The catalogue arrives in the server's order, and
+      // `localeCompare` is locale-dependent -- two readers of one deployment
+      // would see the list in two orders, with nothing on the page saying so.
       for (const declaration of members) {
         // The name is its own span so it may ellipsise; the stamp keeps the
         // row's right edge whatever the name's length.
@@ -502,13 +503,20 @@ async function factCountLine(declaration) {
   const answer = await get(`tenants/${encodeURIComponent(tenant())}/facts`);
   if (!answer.ok) return problem(answer, 'Could not count the records:');
   const entry = answer.body.kinds.find((k) => k.kind === kind);
-  const held = entry ? entry.records : 0;
-  if (!held) {
+  if (!entry) {
+    // Absent from the payload is not a stored nought. A kind the definitions
+    // declare and the schema has not caught up with -- or one renamed since
+    // -- has no entry at all, and reading that as zero turned "the server
+    // did not mention it" into a positive claim that the store holds none.
+    return el('p', { class: 'finding' },
+      'The server did not report this kind, so how much is stored is unknown.');
+  }
+  if (!entry.records) {
     return el('p', { class: 'finding' },
       'Nothing collected — declared, and no record of this kind is stored.');
   }
   return el('p', { class: 'dim' },
-    `${held} records stored. `,
+    `${entry.records} records stored. `,
     el('a', { href: `#/facts/${encodeURIComponent(kind)}` }, 'Browse them →'));
 }
 
@@ -523,15 +531,6 @@ async function membershipSection(declaration, params) {
   if (!answer.ok) return problem(answer, 'The engine declined to answer:');
   const m = answer.body;
   if (!m.state.ok) return unavailable(m.state);
-  if (m.population === 0 && m.members === 0) {
-    // The pass ran and found nothing to read: the same finding sentence the
-    // measured section and the facts list use, not a "0 of 0" that dresses
-    // an empty collection up as a filter verdict.
-    return el('p', { class: 'faint' },
-      'Nothing collected for ', el('span', { class: 'mono' }, m.id_space),
-      ', so there is nothing to file.');
-  }
-
   const blocks = [];
   // Chrome, not a computation: every number in these sentences arrived from
   // the server; this only places them side by side. Under `keyed as` the
@@ -964,7 +963,10 @@ function evidencePanel(evidence) {
   // into the visible word "null", el() skips it.
   return el('div', {}, el('p', { class: 'dim' },
     evidence.members.length
-      ? [`This value cites ${evidence.members.length} ${evidence.parts ? 'parts' : 'records'}`,
+      ? [`This value cites ${evidence.members.length} `
+         + (evidence.parts
+             ? (evidence.members.length === 1 ? 'part' : 'parts')
+             : (evidence.members.length === 1 ? 'record' : 'records')),
          // The definition the numbers travel through, named on the panel:
          // "these records, measured as this definition says" is what makes
          // the rows lead to the amount rather than merely sit under it.
@@ -1122,7 +1124,7 @@ async function citedPage(kind, key, entry, after) {
     el('td', { class: 'mono num' }, row.display ?? '—')));
   return {
     ok: true,
-    summary: `${rows.length} of ${body.total} citations — subject order`,
+    summary: `${body.rows.length} of ${body.total} citations — ${body.order}`,
     header: el('tr', {}, el('th', {}, 'whose row'), el('th', { class: 'num' }, 'value')),
     rows,
     lastKey: body.rows.length ? body.rows[body.rows.length - 1].id : null,
@@ -1307,8 +1309,12 @@ async function recordView(kind, key) {
               subject.dimension
                 ? el('span', { class: 'dim' }, ` × ${subject.dimension}`) : null),
             el('td', { class: 'mono num' }, subject.display ?? '—'),
+            // An em-dash, not a blank: the column exists because *some*
+            // figure in this table is banded, and an empty cell beside rows
+            // reading "ok" reads as a word withheld rather than as a figure
+            // that has no band at all.
             banded ? el('td', { class: 'mono dim' },
-              figure.banded ? subject.level : '') : null,
+              figure.banded ? subject.level : '—') : null,
             el('td', {}, el('button', {
               onclick: () => evidenceRow(row, figure.name, subject.id),
             }, 'evidence')));
@@ -2036,7 +2042,7 @@ async function editorView(params) {
     errorAt = null;
     paint();
     const moves = checked.declarations.filter((d) => d.change !== 'unchanged');
-    const untouched = checked.declarations.length - moves.length;
+    const untouched = checked.unchanged;
     status.textContent = `compiles — ${checked.declarations.length} declarations`;
     status.className = 'ed-status good';
     // The compile just proved these names; let the completion learn them,
@@ -2065,7 +2071,10 @@ async function editorView(params) {
         el('span', { class: `badge change-${d.change}` }, d.change), ' ',
         el('span', { class: `badge ${d.kind}` }, d.kind), ' ',
         el('span', { class: 'mono' }, d.name)))),
-      untouched ? el('p', { class: 'faint' }, `${untouched} declarations untouched.`) : null));
+      untouched
+        ? el('p', { class: 'faint' },
+            `${untouched} declaration${untouched === 1 ? '' : 's'} untouched.`)
+        : null));
   }
 
   // ---- saving ------------------------------------------------------------

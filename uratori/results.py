@@ -150,6 +150,16 @@ class Window(BaseModel):
     case's honesty."""
 
     zone: str | None = None
+    """The calendar *this subject's* buckets were cut on, which is a fact
+    about the row rather than about the response: a courier in Tokyo and one
+    in London have different dates under one heading reading "the last seven
+    days", and nothing else on the row would say so.
+
+    Carried on every window, including where the whole board agrees, because
+    a row that means "cut in Europe/London" should say so whoever else is on
+    the page -- a reader filtering to one subject must not lose the label. It
+    is `Result.zone` that collapses: null there means the subjects disagree,
+    and a screen prints the per-row answer instead of one heading."""
 
     mean: float | None = None
     median: float | None = None
@@ -405,9 +415,14 @@ class Result(BaseModel):
     with itself and an `at` that describes one row of it."""
 
     zone: str | None = None
-    """The tenant's calendar, so a screen can say *when* rather than printing an
-    ISO instant verbatim. A client cannot work this out: it knows its own
-    timezone and the board belongs to a team that may not share it."""
+    """The one calendar every subject in this answer was cut on, or null where
+    they do not agree.
+
+    Not "the tenant's calendar" any more -- there is no such thing. A calendar
+    is a field on each subject's own record, so a board can hold couriers in
+    two zones and the honest top-level answer is then *none*: each window
+    carries its own, and a screen prints those instead of one heading over
+    dates that mean different things."""
 
     unit: Unit
     label: str

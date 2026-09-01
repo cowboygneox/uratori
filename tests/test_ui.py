@@ -996,6 +996,33 @@ async def test_a_group_shows_its_buckets_with_counts(pg_dsn: str) -> None:
         assert {r["key"] for r in c1["records"]} == {"o0", "o1", "o2"}
 
 
+async def test_a_grouping_over_an_uncollected_kind_states_the_absence_itself(
+    pg_dsn: str,
+) -> None:
+    """The page was deciding this: two zeroes on an `Ok` response, rendered as
+    "Nothing collected". That is a client working out *why* there is no
+    answer, which is exactly what the third rule puts on the server -- and it
+    is the same finding a figure over the same grouping already states, in the
+    same vocabulary. Now the response says it.
+    """
+    async with serve(pg_dsn) as http:
+        await _teach(http)
+        # A pass with no records at all: bucketed, so not never-computed, and
+        # current, so not behind-deploy.
+        run = await http.post("/tenants/t1/runs", json={"full": True})
+        assert run.status_code == 200, run.text
+
+        empty = (
+            await http.get("/ui/api/tenants/t1/membership/shop_order.open")
+        ).json()
+        assert empty["state"]["ok"] is False, (
+            "a grouping over a kind nothing was collected for reported a "
+            "confident Ok with two zeroes under it"
+        )
+        assert empty["state"]["because"] == "nothing-collected"
+        assert "shop_order" in (empty["state"]["detail"] or "")
+
+
 async def test_membership_before_any_run_is_an_absence_not_a_zero(
     pg_dsn: str,
 ) -> None:

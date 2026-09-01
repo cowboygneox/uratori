@@ -43,12 +43,10 @@ STATIC = Path(__file__).parent.parent / "uratori" / "server" / "static"
 
 # ------------------------------------------------------------- fixtures --
 
-PARITY_SCHEMA = {
-    "defaults": {
-        "tenant": {"hoursPerDay": 8, "timezone": "UTC"},
-        "limits": {"carrying": {"over": 3}, "ride": {"good": 3600, "poor": 7200}},
-    },
-}
+PARITY_SCHEMA: dict[str, object] = {}
+"""Empty, and that is the whole document a fact-taught world needs: the kinds
+and their fields are declared in the source below. It used to carry a
+`defaults` block of dials that nothing had read for a release."""
 
 PARITY_SOURCE = """
 # A courier on the road.
@@ -818,8 +816,6 @@ UNRENDERED: dict[str, str] = {
     "Evidence.source": "the members already name their figure per row",
     "CitedPageOut.figure": "the opener already names the figure; the echo is for API readers of the page",
     "TenantOut.facts": "the switcher is an address list; per-kind counts live on the Facts tab it switches",
-    "SourceOut.refusal": "the editor shows the refusal the check route serves; the boot copy is the same text",
-    "CheckOut.ok": "the editor branches on the refusal being present, the same fact",
 }
 
 _REQUEST_MODELS = {"CheckIn", "SaveIn", "EditRunIn"}
@@ -838,26 +834,20 @@ def _wire_models() -> list[type]:
     from uratori import results
     from uratori.server import ui
 
-    served = [
-        results.Result,
-        results.BundleResult,
-        results.BundleMemberResult,
-        results.Subject,
-        results.Window,
-        results.Row,
-        results.Flag,
-        results.Evidence,
-        results.EvidenceMember,
-        results.Ok,
-        results.Unavailable,
-    ]
-    for _name, model in inspect.getmembers(ui, inspect.isclass):
-        if (
-            issubclass(model, BaseModel)
-            and model.__module__ == ui.__name__
-            and model.__name__ not in _REQUEST_MODELS
-        ):
-            served.append(model)
+    served: list[type] = []
+    # Both modules enumerated, for the reason only one of them used to be:
+    # a hand-list is complete on the day it is written and silently is not
+    # afterwards. `results` was the hand-listed half, so a model added there
+    # -- the shape a figure, a reading and every subscription frame arrive in
+    # -- reached the page unguarded.
+    for module in (results, ui):
+        for _name, model in inspect.getmembers(module, inspect.isclass):
+            if (
+                issubclass(model, BaseModel)
+                and model.__module__ == module.__name__
+                and model.__name__ not in _REQUEST_MODELS
+            ):
+                served.append(model)
     return served
 
 
