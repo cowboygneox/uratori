@@ -41,6 +41,7 @@ from uratori import (
     Uratori,
     compile_source,
 )
+from uratori.lang.ast import Sum
 
 WORLD = Schema(kinds=frozenset())
 
@@ -58,7 +59,23 @@ fact ad_campaign:
     account_id as text
     starts_at as moment
     ends_at as moment
+    booked_at as moment
     budget_cents as number
+
+# One impression, so a per-campaign-per-week figure can hold a *different*
+# number in each of a campaign's own weeks. Every other figure a span produces
+# is constant across the buckets it spans -- an even division is the same
+# number five times -- and a total that read a member at its bare subject key
+# instead of at the bucket would be indistinguishable from a correct one
+# against a constant source.
+fact ad_impression:
+    name ref
+    ref as text
+    campaign_id as text
+    at as moment
+
+# Impressions per campaign per week.
+group ad_impression.by_week from (campaign_id, at by week in "UTC")
 
 # Every week a campaign is booked to run in, for the account that booked it.
 group ad_campaign.booked_weeks from (account_id, starts_at until ends_at by week in ad_account.timezone)
@@ -74,6 +91,27 @@ figure ad_account.running bucketed:
     calculate:
         count(live)
 
+# How many impressions this campaign drew in each week.
+figure ad_campaign.shown bucketed:
+    display "{ad_campaign} impressions that week"
+    depends:
+        seen = ad_impression.by_week:{ad_campaign}
+    calculate:
+        count(seen)
+
+# The account's impressions in each week, added up from its campaigns'.
+figure ad_account.shown bucketed:
+    display "{ad_account} impressions that week"
+    depends:
+        live = ad_campaign.booked_weeks:{ad_account}
+    calculate:
+        sum(ad_campaign.shown over live)
+
+# A span keyed by nothing but the dates -- one bucket sequence for the whole
+# kind, no subject part. Here because every other group in this file is a
+# composite, and the clip is detected on two code paths.
+group ad_campaign.any_week from starts_at until ends_at by week excluding weeks gone in "UTC"
+
 # The same, counting only weeks that have not gone.
 figure ad_account.still_running bucketed:
     display "{ad_account} campaigns still to run that week"
@@ -87,6 +125,10 @@ figure ad_account.still_running bucketed:
 # 2026-08-03 is a Monday, so W32 starts there and W36 starts 2026-08-31.
 AUG_3 = "2026-08-03T09:00:00Z"
 SEP_6 = "2026-09-06T17:00:00Z"
+
+# 2026-08-03T12:00Z, the Monday W32 begins on -- a pass instant inside the
+# first week of the long span, so nothing is clipped from it.
+EARLY_AUGUST = 1_785_758_400_000.0
 
 # 2026-08-17T12:00Z, a Monday inside W34 -- the pass instant for the clipping
 # tests, so W32 and W33 have gone and W34 is the week in progress.
@@ -102,6 +144,7 @@ async def board(
     campaigns: dict[str, dict[str, object]],
     *,
     at_ms: float | None = None,
+    impressions: dict[str, dict[str, object]] | None = None,
 ):
     facts = MemoryFactStore()
     store = MemoryEngineStore()
@@ -111,6 +154,8 @@ async def board(
         facts.put("t1", "ad_account", key, {"name": key.upper(), "timezone": zone})
     for key, body in campaigns.items():
         facts.put("t1", "ad_campaign", key, body)
+    for key, body in (impressions or {}).items():
+        facts.put("t1", "ad_impression", key, body)
     await engine.run("t1", full=True, at_ms=at_ms)
     return engine, store, library, facts
 
@@ -189,19 +234,26 @@ async def test_each_end_is_cut_by_the_subjects_own_calendar() -> None:
     would agree with this test on the London row and quietly disagree on the
     Auckland one.
     """
-    across = "2026-08-02T13:00:00Z"
+    # Both ends land on a Sunday-in-London that is already a Monday in
+    # Auckland, so *each* end alone decides a different week for the two
+    # accounts. With only the near end straddling, truncating the far end in
+    # UTC passed this test unchanged -- proved by mutation, which is why both
+    # instants are chosen this way now.
+    starts = "2026-08-02T13:00:00Z"
+    ends = "2026-08-09T13:00:00Z"
     _e, store, library, _f = await board(
         {"a1": "Europe/London", "a2": "Pacific/Auckland"},
-        {
-            "c1": campaign("a1", across, "2026-08-05T09:00:00Z"),
-            "c2": campaign("a2", across, "2026-08-05T09:00:00Z"),
-        },
+        {"c1": campaign("a1", starts, ends), "c2": campaign("a2", starts, ends)},
     )
     found = await rows(store, library, "ad_account.running")
-    assert found.get("a1@2026-W31") == 1.0, f"London's Sunday start was lost: {found}"
-    assert found.get("a1@2026-W32") == 1.0, f"London's span is short: {found}"
-    assert "a2@2026-W31" not in found, f"Auckland was given a week it never ran: {found}"
-    assert found.get("a2@2026-W32") == 1.0, f"Auckland's span is wrong: {found}"
+    assert set(k for k in found if k.startswith("a1@")) == {
+        "a1@2026-W31",
+        "a1@2026-W32",
+    }, f"London's span is wrong: {found}"
+    assert set(k for k in found if k.startswith("a2@")) == {
+        "a2@2026-W32",
+        "a2@2026-W33",
+    }, f"Auckland's span is wrong: {found}"
 
 
 async def test_an_account_with_no_calendar_is_in_no_bucket() -> None:
@@ -424,10 +476,16 @@ group ad_campaign.to_text from (account_id, starts_at until ref by week in ad_ac
 
 
 def test_a_span_may_not_be_read_by_a_projections_population() -> None:
-    """The rule an age filter is already behind. Membership that moves with the
-    clock is as fresh as the last reconcile, and no pointer covers a group only
-    a `from` reads -- so the page would change under a reader with nothing to
-    rebuild it."""
+    """A span is a *bucketed* group, so the rule it falls under is the one
+    every bucketed group falls under: read whole by a `from`, it looks for a
+    bucket keyed by the empty string, finds nothing, and the page is empty
+    while looking complete.
+
+    Asserted on that reason and not on a clock one. The first version of this
+    test claimed the age-filter rationale -- membership as fresh as the last
+    reconcile -- and passed on an error that says nothing of the kind, which
+    is a test agreeing with itself about a rule that was never written.
+    """
     with pytest.raises(CheckError) as caught:
         compile_world('''
 # A page of campaigns, which may not take its population from a span.
@@ -437,6 +495,7 @@ projection ad_campaign.sheet:
         ref = ref as text
 ''')
     assert "weeks_left" in str(caught.value)
+    assert "rather than holding a single bucket" in str(caught.value)
 
 
 # ------------------------------------------------------------- the refresh --
@@ -506,7 +565,10 @@ async def test_an_unclipped_span_never_moves_with_the_clock() -> None:
         at_ms=MID_AUGUST,
     )
     outcome = await _pass(engine, MID_AUGUST + 30 * DAY_MS)
-    assert "ad_campaign.booked_weeks" not in outcome.reindexed
+    # Exact, not `not in`: a refresh disabled outright would leave this empty
+    # and satisfy the negative on its own, so the clipped group's presence is
+    # what proves the pass did the work it was meant to skip for the other.
+    assert outcome.reindexed == ("ad_campaign.any_week", "ad_campaign.weeks_left")
 
 
 async def test_crossing_the_period_boundary_drops_the_week_that_went() -> None:
@@ -622,7 +684,7 @@ async def test_a_spread_value_is_shared_across_the_buckets_it_spans() -> None:
     reporting five times the money as though it were a fact."""
     _e, store, library = await spread_board(
         {"c1": {**campaign("a1", AUG_3, SEP_6), "ref": "c1", "budget_cents": 1000}},
-        at_ms=1_785_758_400_000.0,  # 2026-08-02, before the span begins
+        at_ms=EARLY_AUGUST,
     )
     found = await rows(store, library, "ad_campaign.weekly_spend")
     assert found == {
@@ -646,7 +708,7 @@ async def test_a_spread_over_one_bucket_is_the_whole_value() -> None:
                 "budget_cents": 900,
             }
         },
-        at_ms=1_785_758_400_000.0,
+        at_ms=EARLY_AUGUST,
     )
     assert await rows(store, library, "ad_campaign.weekly_spend") == {"c1@2026-W32": 900.0}
 
@@ -674,7 +736,7 @@ async def test_a_spread_of_an_absent_value_is_absent_not_nought() -> None:
     that costs nothing -- which is a number a reader would act on."""
     _e, store, library = await spread_board(
         {"c1": {**campaign("a1", AUG_3, SEP_6), "ref": "c1", "budget_cents": 1000}},
-        at_ms=1_785_758_400_000.0,
+        at_ms=EARLY_AUGUST,
     )
     found = await rows(store, library, "ad_campaign.weekly_unknown")
     assert set(found) == {
@@ -709,7 +771,7 @@ async def test_a_figure_can_be_totalled_across_the_records_in_a_bucket() -> None
                 "budget_cents": 400,
             },
         },
-        at_ms=1_785_758_400_000.0,
+        at_ms=EARLY_AUGUST,
     )
     assert await rows(store, library, "ad_account.weekly_spend") == {
         "a1@2026-W32": 200.0,
@@ -725,26 +787,35 @@ async def test_the_total_reads_each_record_in_its_own_bucket() -> None:
     *subject's* key rather than at the coordinate would give every week the
     same number -- whichever value the campaign happened to store first -- and
     the chart would be flat while looking computed.
+
+    The source has to **vary between a member's own buckets** for that to be
+    detectable, which is why this is over impressions rather than over a
+    spread. An even division is the same number in all five weeks, so a
+    first-value read and a coordinate read agree exactly; a review proved the
+    earlier version of this test green against the very bug it names.
     """
-    _e, store, library = await spread_board(
+    _e, store, library, _f = await board(
+        {"a1": "UTC"},
         {
-            "c1": {**campaign("a1", AUG_3, "2026-08-14T09:00:00Z"), "ref": "c1", "budget_cents": 200},
-            "c2": {
-                **campaign("a1", "2026-08-17T09:00:00Z", "2026-09-04T09:00:00Z"),
-                "ref": "c2",
-                "budget_cents": 900,
-            },
+            "c1": campaign("a1", AUG_3, "2026-08-14T09:00:00Z"),
+            "c2": campaign("a1", "2026-08-17T09:00:00Z", "2026-08-28T09:00:00Z"),
         },
-        at_ms=1_785_758_400_000.0,
+        impressions={
+            # c1: one in W32, two in W33. c2: three in W34, one in W35.
+            "i1": {"ref": "i1", "campaign_id": "c1", "at": "2026-08-04T09:00:00Z"},
+            "i2": {"ref": "i2", "campaign_id": "c1", "at": "2026-08-11T09:00:00Z"},
+            "i3": {"ref": "i3", "campaign_id": "c1", "at": "2026-08-12T09:00:00Z"},
+            "i4": {"ref": "i4", "campaign_id": "c2", "at": "2026-08-18T09:00:00Z"},
+            "i5": {"ref": "i5", "campaign_id": "c2", "at": "2026-08-19T09:00:00Z"},
+            "i6": {"ref": "i6", "campaign_id": "c2", "at": "2026-08-20T09:00:00Z"},
+            "i7": {"ref": "i7", "campaign_id": "c2", "at": "2026-08-25T09:00:00Z"},
+        },
     )
-    found = await rows(store, library, "ad_account.weekly_spend")
-    # c1: 200 over W32-W33 -> 100 each. c2: 900 over W34-W36 -> 300 each.
-    assert found == {
-        "a1@2026-W32": 100.0,
-        "a1@2026-W33": 100.0,
-        "a1@2026-W34": 300.0,
-        "a1@2026-W35": 300.0,
-        "a1@2026-W36": 300.0,
+    assert await rows(store, library, "ad_account.shown") == {
+        "a1@2026-W32": 1.0,
+        "a1@2026-W33": 2.0,
+        "a1@2026-W34": 3.0,
+        "a1@2026-W35": 1.0,
     }
 
 
@@ -765,38 +836,385 @@ figure ad_campaign.wrong bucketed:
 def test_spreading_inside_an_unbucketed_figure_is_refused() -> None:
     """Without a sequence there are no buckets to spread across, and the
     natural misreading -- divide by one -- is a figure that silently equals its
-    source."""
+    source.
+
+    Over the *unbucketed* group, so the refusal reached is this one. Written
+    over the span group instead, the figure is refused earlier for being fanned
+    out by a bucketed group without saying `bucketed`, and the assertion below
+    matched that other message by accident.
+    """
     with pytest.raises(CheckError) as caught:
         compile_world(MEASURE + SPREAD + '''
-# No `bucketed`, so there is no sequence to divide across.
+# No sequence anywhere: neither the figure nor the group it names is bucketed.
 figure ad_campaign.flat:
     display "flat"
     depends:
-        weeks = ad_campaign.my_weeks:{ad_campaign}
+        mine = ad_campaign.own:{ad_campaign}
     calculate:
-        spread(ad_campaign.budget over weeks)
+        spread(ad_campaign.budget over mine)
 ''')
-    assert "bucketed" in str(caught.value)
+    assert "no buckets to divide across" in str(caught.value)
 
 
 # ----------------------------------------------------------- on the page --
 
 
-def test_a_clipped_span_tells_a_reader_its_filing_is_from_the_last_pass() -> None:
+async def test_a_clipped_span_tells_a_reader_its_filing_is_from_the_last_pass(
+    pg_dsn: str,
+) -> None:
     """The caveat an age filter already carries, for the same reason: a
     grouping whose membership moves with the calendar shows the filing the last
     pass drew, and a reader looking at it deserves to be told rather than left
     to wonder why a week they expected is missing.
 
-    Asserted against the *unclipped* group in the same library, so a note wired
-    to fire on every grouping would fail here.
+    Asserted on the **served response**, not on the helpers behind it. Written
+    against `_membership_note` and `_spec_clipped` directly it passed with the
+    router hardcoded to `clipped=False` -- a test that the helper exists rather
+    than that a reader is told, which is the shape the age filter's own test
+    (`test_ui.py`) already avoids.
     """
-    from uratori.server.ui import _membership_note, _spec_clipped
+    from tests.test_ui import serve
 
+    source = (
+        "# Every week a campaign is booked to run in.\n"
+        "group ad_campaign.booked from "
+        "(account_id, starts_at until ends_at by week in \"UTC\")\n"
+        "# Every week it has left.\n"
+        "group ad_campaign.left from "
+        "(account_id, starts_at until ends_at by week excluding weeks gone in \"UTC\")\n"
+    )
+    world = Schema(kinds=frozenset({"ad_campaign"}))
+    async with serve(pg_dsn) as http:
+        assert (await http.put("/schema", json=world.to_document())).status_code == 200
+        put = await http.put("/definitions", json={"source": source})
+        assert put.status_code == 200, put.text
+        await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "ad_campaign": {
+                        "c1": {
+                            "account_id": "a1",
+                            "starts_at": AUG_3,
+                            "ends_at": SEP_6,
+                        }
+                    }
+                }
+            },
+        )
+        clipped = (
+            await http.get("/ui/api/tenants/t1/membership/ad_campaign.left")
+        ).json()
+        assert clipped["note"] is not None and "already gone" in clipped["note"], (
+            "a clipped span's filing is as old as the last pass, and a reader "
+            "looking at it must be told so"
+        )
+        plain = (
+            await http.get("/ui/api/tenants/t1/membership/ad_campaign.booked")
+        ).json()
+        assert plain["note"] is None, "an unclipped span carries no such caveat"
+
+
+async def test_a_week_passing_redivides_what_is_left(engine_service: None = None) -> None:
+    """The feature's headline, end to end and on the *incremental* path: no
+    facts move, a week goes by, and the money left re-divides over the weeks
+    left. Every other test here runs one full pass; this is the one that shows
+    the thing the chart exists for actually happening.
+    """
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(MEASURE + SPREAD)
+    engine = Uratori(schema=WORLD, library=library, store=store, facts=facts)
+    facts.put("t1", "ad_account", "a1", {"name": "A1", "timezone": "UTC"})
+    facts.put(
+        "t1",
+        "ad_campaign",
+        "c1",
+        {**campaign("a1", AUG_3, SEP_6), "ref": "c1", "budget_cents": 900},
+    )
+    await engine.run("t1", full=True, at_ms=MID_AUGUST)
+    assert await rows(store, library, "ad_campaign.weekly_spend") == {
+        "c1@2026-W34": 300.0,
+        "c1@2026-W35": 300.0,
+        "c1@2026-W36": 300.0,
+    }
+
+    await engine.run("t1", at_ms=MID_AUGUST + 7 * DAY_MS)
+    assert await rows(store, library, "ad_campaign.weekly_spend") == {
+        "c1@2026-W35": 450.0,
+        "c1@2026-W36": 450.0,
+    }, "the same money over one week fewer is more money a week"
+
+    await engine.run("t1", at_ms=MID_AUGUST + 21 * DAY_MS)
+    assert await rows(store, library, "ad_campaign.weekly_spend") == {}, (
+        "a span wholly in the past still has rows"
+    )
+
+
+async def test_a_span_at_quarter_grain_walks_quarters_not_every_third_month() -> None:
+    """Quarter is in the spannable grains and carries the fiddliest arithmetic
+    in the walk: the cursor has to snap to the quarter's own boundary first, or
+    a span starting in February steps February, May, August -- periods three
+    months apart that are not quarters. February to July is Q1, Q2 and Q3.
+    """
+    extra = '''
+# Every quarter a campaign runs in.
+group ad_campaign.booked_quarters from (account_id, starts_at until ends_at by quarter in ad_account.timezone)
+
+# How many campaigns run in each quarter.
+figure ad_account.quarters bucketed:
+    display "{ad_account} quarters"
+    depends:
+        live = ad_campaign.booked_quarters:{ad_account}
+    calculate:
+        count(live)
+'''
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(extra)
+    engine = Uratori(schema=WORLD, library=library, store=store, facts=facts)
+    facts.put("t1", "ad_account", "a1", {"name": "A1", "timezone": "UTC"})
+    facts.put(
+        "t1",
+        "ad_campaign",
+        "c1",
+        campaign("a1", "2026-02-10T09:00:00Z", "2026-07-04T09:00:00Z"),
+    )
+    await engine.run("t1", full=True)
+    assert set(await rows(store, library, "ad_account.quarters")) == {
+        "a1@2026-Q1",
+        "a1@2026-Q2",
+        "a1@2026-Q3",
+    }
+
+
+async def test_a_span_ending_at_the_calendars_edge_answers_rather_than_dying() -> None:
+    """`9999-12-31` is how a provider spells "runs for ever", so it arrives
+    through the facts door. Stepping a cursor past the last representable day
+    raises, and `Engine.run` raises on failure -- so one such record killed the
+    whole tenant's pass, on every pass, until somebody edited the record.
+
+    The same overflow this repo has already fixed twice elsewhere; the walker
+    added here inherited neither the guard nor a test.
+    """
+    _e, store, library, _f = await board(
+        {"a1": "UTC"},
+        {"c1": campaign("a1", "9999-12-01T00:00:00Z", "9999-12-31T00:00:00Z")},
+        at_ms=MID_AUGUST,
+    )
+    found = await rows(store, library, "ad_account.running")
+    assert found, "a span at the calendar's edge produced no buckets at all"
+    assert "a1@9999-W52" in found
+
+
+async def test_a_span_with_no_subject_part_is_clipped_too() -> None:
+    """The clip is detected on two code paths -- a bare field spec and a
+    composite -- and every other group in this file is a composite, so the
+    first was unexercised in both the engine's copy and the page's.
+    """
     library = compile_world()
-    assert _spec_clipped(library.indexes["ad_campaign.weeks_left"].spec) is True
-    assert _spec_clipped(library.indexes["ad_campaign.booked_weeks"].spec) is False
+    from uratori.engine.engine import _clipped
+    from uratori.server.ui import _spec_clipped
 
-    note = _membership_note(aged=False, clipped=True, owner=None)
-    assert note is not None and "already gone" in note
-    assert _membership_note(aged=False, clipped=False, owner=None) is None
+    bare = library.indexes["ad_campaign.any_week"]
+    assert _clipped(bare) is True
+    assert _spec_clipped(bare.spec) is True
+    assert _clipped(library.indexes["ad_campaign.booked_weeks"]) is False
+
+
+# ------------------------------------------------------- what a version is --
+
+
+def _index_version_of(source: str, name: str) -> str:
+    from uratori.engine.engine import _index_version
+
+    return _index_version(compile_world(source).indexes[name])
+
+
+def test_the_span_and_the_clip_are_both_in_the_version() -> None:
+    """A rule that files a record differently is a different rule, and a
+    version that could not tell them apart would let a board's whole chart
+    change under a hash claiming nothing moved.
+
+    Four spellings of one part, four versions -- and the pair that matters
+    most is the last two, which differ only by `excluding weeks gone`: that
+    clause is the difference between the weeks a campaign was booked for and
+    the weeks it has left.
+    """
+    base = '''
+# One instant, one bucket.
+group ad_campaign.probe from (account_id, starts_at by week in ad_account.timezone)
+'''
+    span = '''
+# A span, unclipped.
+group ad_campaign.probe from (account_id, starts_at until ends_at by week in ad_account.timezone)
+'''
+    other_end = '''
+# The same span, to a different far end.
+group ad_campaign.probe from (account_id, starts_at until booked_at by week in ad_account.timezone)
+'''
+    clipped = '''
+# The same span, clipped.
+group ad_campaign.probe from (account_id, starts_at until ends_at by week excluding weeks gone in ad_account.timezone)
+'''
+    versions = [
+        _index_version_of(src, "ad_campaign.probe")
+        for src in (base, span, other_end, clipped)
+    ]
+    assert len(set(versions)) == 4, f"two rules share a version: {versions}"
+
+
+def test_a_spread_and_a_total_are_not_the_same_calculation() -> None:
+    """One divides a value across a sequence and the other adds values up
+    across a population, and a hash that confused them would let a figure
+    become the other under a version claiming nothing moved."""
+    from uratori.lang.ast import FigureTotal, Spread
+    from uratori.lang.check import _calc_hash
+
+    spread = _calc_hash(Spread(figure="ad_campaign.budget", set="weeks"))
+    total = _calc_hash(FigureTotal(figure="ad_campaign.budget", set="weeks"))
+    measure_sum = _calc_hash(Sum(set="weeks", measure="ad_campaign.budget"))
+    assert spread != total
+    assert total != measure_sum
+
+
+# ------------------------------------------------- the rest of the refusals --
+
+
+def test_totalling_a_figure_that_is_not_time_keyed_is_refused() -> None:
+    """The shape a reader writes by accident, and the one that used to answer a
+    confident nought. A total reads each member at `<member>@<bucket>`; a source
+    holding one value per subject is stored under the bare id, so every lookup
+    missed and every bucket read 0.0 with nothing thrown.
+    """
+    with pytest.raises(CheckError) as caught:
+        compile_world(MEASURE + SPREAD + '''
+# The campaign's whole budget, totalled per week -- which is not a thing.
+figure ad_account.flat_total bucketed:
+    display "flat"
+    depends:
+        live = ad_campaign.weeks_left:{ad_account}
+    calculate:
+        sum(ad_campaign.budget over live)
+''')
+    assert "one value per subject" in str(caught.value)
+    assert "spread(" in str(caught.value), "the message should name the construct meant"
+
+
+def test_a_name_that_is_both_a_field_and_a_figure_is_refused() -> None:
+    """`sum(<dotted>)` can mean a measure, a declared field or a figure, and
+    the order between the last two would decide an existing total's meaning --
+    except that the collision cannot be declared in the first place.
+
+    This pins the rule the precedence *rests* on rather than the precedence:
+    a figure may not take a name its own kind already has as a field. Remove
+    that rule and the ordering in `_resolve_field_reads` silently starts
+    deciding what `sum(ad_campaign.budget_cents over ...)` means.
+    """
+    with pytest.raises(CheckError) as caught:
+        compile_world('''
+# A figure named exactly like a field on its own kind.
+figure ad_campaign.budget_cents:
+    display "collision"
+    unit count
+    depends:
+        mine = ad_campaign.own_probe:{ad_campaign}
+    calculate:
+        count(mine)
+
+# The campaign itself.
+group ad_campaign.own_probe from ref
+
+# Totalling the ambiguous name.
+figure ad_account.ambiguous:
+    display "ambiguous"
+    unit count
+    depends:
+        mine = ad_campaign.booked_weeks:{ad_account}
+    calculate:
+        sum(ad_campaign.budget_cents over mine)
+''')
+    assert "already has as a field" in str(caught.value)
+
+
+def test_a_selective_rule_cannot_be_spanned() -> None:
+    """A selective rule picks one day a month and is deliberately partial; a
+    span enumerates a stretch. The refusal used to be unreachable -- the
+    missing-grain rule fired first and told an author who had written `by first
+    monday of month` that they had given no grain.
+    """
+    with pytest.raises(CheckError) as caught:
+        compile_world('''
+# Nonsense: a partial rule and a stretch.
+group ad_campaign.selective from (account_id, starts_at until ends_at by first monday of month in ad_account.timezone)
+''')
+    assert "selective rule" in str(caught.value)
+
+
+def test_the_clip_clause_needs_a_span_and_must_name_the_right_grain() -> None:
+    """Both halves of the clause's own grammar. The plural is checked against
+    the grain rather than accepted as noise: it is the only part a reader can
+    use to tell what is being dropped, and `excluding days gone` on a week rule
+    reads as a finer promise than the rule can keep.
+    """
+    from uratori.lang.lex import SyntaxError_
+
+    with pytest.raises((CheckError, SyntaxError_)) as no_span:
+        compile_world('''
+# A clip with nothing to clip.
+group ad_campaign.clip_alone from (account_id, starts_at by week excluding weeks gone in ad_account.timezone)
+''')
+    assert "only means something for a span" in str(no_span.value)
+
+    with pytest.raises((CheckError, SyntaxError_)) as wrong_plural:
+        compile_world('''
+# A week rule promising to drop days.
+group ad_campaign.clip_mismatch from (account_id, starts_at until ends_at by week excluding days gone in ad_account.timezone)
+''')
+    assert "excluding weeks gone" in str(wrong_plural.value)
+
+
+async def test_a_derived_figure_retires_the_buckets_its_source_gave_up() -> None:
+    """A figure keyed by a grain with no group of its own -- built on another
+    at `:{bucket}` -- has rows exactly where its source has them. When the
+    source retires a bucket, the derived row must go too.
+
+    It did not, and it survived a **full** pass: a full pass rebuilds what
+    exists rather than removing what does not. The bug was reachable before
+    spans (a corrected timestamp refiles a record) and is a certainty with
+    them, because a clipped span retires a bucket every period by design. The
+    money-in-pence row for a week nobody is working is the shape of it:
+    stored, versioned, current, and wrong.
+    """
+    derived = '''
+# The same spend, in whole units -- keyed by its source's buckets and nothing
+# else, so it has no group of its own to be retired against.
+figure ad_campaign.weekly_units bucketed:
+    display "{ad_campaign} units that week"
+    unit count
+    calculate:
+        ad_campaign.weekly_spend:{bucket} / 100
+'''
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(MEASURE + SPREAD + derived)
+    engine = Uratori(schema=WORLD, library=library, store=store, facts=facts)
+    facts.put("t1", "ad_account", "a1", {"name": "A1", "timezone": "UTC"})
+    facts.put(
+        "t1",
+        "ad_campaign",
+        "c1",
+        {**campaign("a1", AUG_3, SEP_6), "ref": "c1", "budget_cents": 900},
+    )
+    await engine.run("t1", full=True, at_ms=MID_AUGUST)
+    assert set(await rows(store, library, "ad_campaign.weekly_units")) == {
+        "c1@2026-W34",
+        "c1@2026-W35",
+        "c1@2026-W36",
+    }
+
+    await engine.run("t1", at_ms=MID_AUGUST + 7 * DAY_MS)
+    assert set(await rows(store, library, "ad_campaign.weekly_units")) == {
+        "c1@2026-W35",
+        "c1@2026-W36",
+    }, "a derived row outlived the bucket its source was retired from"

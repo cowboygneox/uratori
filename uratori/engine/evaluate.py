@@ -216,17 +216,12 @@ def _members_of(
         winner = _picked(e, resolved, readers)
         return () if winner is None else (winner,)
     if isinstance(e, FigureTotal):
-        # Only the members that contributed: one the source has no value for
-        # added nothing, and citing it would send a reader to a record with no
-        # part in the number.
-        tail = tail_of(subject)
-        return tuple(
-            member
-            for member in sorted(resolved.get(e.set, frozenset()))
-            if readers.parts(
-                e.figure, f"{member}{SEPARATOR}{tail}" if tail is not None else member
-            ).values
-        )
+        # Every member, not only the ones with a number. An absent
+        # contribution takes the answer away rather than being skipped, so
+        # there is no such thing here as a member that took no part -- and
+        # when the answer *is* absent, the member with no value is precisely
+        # the record a reader needs to be sent to.
+        return tuple(sorted(resolved.get(e.set, frozenset())))
     if isinstance(e, Spread):
         # The subject's own source value is the evidence: the division is
         # arithmetic over one number, and the buckets it is shared across are
@@ -344,12 +339,21 @@ def _eval(
         for member in sorted(sets.get(e.set, frozenset())):
             key = f"{member}{SEPARATOR}{tail}" if tail is not None else member
             share = _scalar(readers.parts(e.figure, key))
-            if isinstance(share, (int, float)):
-                # A member the source could not answer for counts as nothing,
-                # which is the reading `sum` already takes of a record its
-                # measure cannot read: the total is the size of the *known*
-                # part, and the evidence below cites only what contributed.
-                total += float(share)
+            if not isinstance(share, (int, float)):
+                # **An absent contribution makes the whole total absent**, and
+                # this is the opposite decision from `sum(<measure> over ...)`
+                # deliberately. The two are summing different kinds of absence.
+                # A measure's is *the record's column is blank* -- a fact about
+                # the data, stable, and genuinely worth nothing. A figure's is
+                # *not computed*, which is reachable through every deliberate
+                # absence this engine has, `spread` among them -- and adding up
+                # whichever members happened to have a number is arithmetic
+                # over a population nobody chose. It reads low, plausibly, and
+                # repairs itself as the cascade fills in: the sawtooth a
+                # summary's `total` refuses for the same reason and in almost
+                # the same words.
+                return None
+            total += float(share)
         return total
 
     if isinstance(e, Part):

@@ -1009,13 +1009,29 @@ def test_the_editor_knows_every_word_a_figure_header_can_carry() -> None:
     keywords around it, which reads as a typo in the definition.
 
     `series` sat unhighlighted for two releases and nothing went red, so the
-    words are enumerated here rather than trusted to whoever adds one. Held
-    against the *language's* own vocabulary: the source of truth is the
-    parser, so a keyword added there without a colour is caught by this
-    listing rather than by somebody noticing.
+    words are held against the *language's* own vocabulary rather than
+    trusted to whoever adds one -- and they are **read out of the parser**,
+    not restated here. Restated, this test grows stale the moment somebody
+    adds a construct without thinking of it, which is exactly the case it
+    exists for: it was a hardcoded list of six when `spread`, `until`,
+    `excluding` and `gone` arrived, and it stayed green over all four.
+
+    The short explicit list below is the words with no constant behind them.
+    Everything generative -- calls, statistics, grains, the selective rule --
+    comes from `uratori.lang.parse`.
     """
+    from uratori.lang import parse as _parse
+
     source = _app_source_sans_comments()
-    for word in ("bucketed", "carried", "forward", "median", "worst", "mean"):
+    words = (
+        set(_parse._CALLS)
+        | set(_parse._STATISTICS)
+        | set(_parse._Parser._GRAINS)
+        | set(_parse._Parser._ORDINALS)
+        | set(_parse._Parser._WEEKDAYS)
+        | {"bucketed", "carried", "forward", "until", "excluding", "gone", "of"}
+    )
+    for word in sorted(words):
         assert f"'{word}'" in source, (
             f"the editor does not know the word {word!r}, so a definition using it "
             "renders it as plain text beside the keywords around it"

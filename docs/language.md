@@ -548,6 +548,41 @@ by hour          2026-08-25T14:00      by quarter  2026-Q3   (calendar quarters)
 by day           2026-08-25
 ```
 
+**A span** names two moments instead of one, and the record joins every
+bucket between them -- both ends inclusive, so a stretch that begins and ends
+inside one week is in that week rather than in none:
+
+```
+# Every week an item is planned to be worked in.
+group work_issue.planned_weeks from (container_id, start_date until due_date by week in "UTC")
+```
+
+That is the right question about a *commitment*, where the single-instant
+rule is the right question about an event. Work planned from August to
+October did not happen in August; it occupies eleven weeks, and a chart of
+what is in flight each week needs it in all eleven. Both ends are truncated in
+the same calendar as any other label. A span missing either end is in no
+bucket -- never one silently running to now or to for ever, because a plan
+with no end is one nobody has scheduled -- and ends in the wrong order produce
+nothing rather than being reversed.
+
+Adding `excluding weeks gone` drops the buckets whose period has already
+passed, which turns the rule from a fact about a plan into a claim about the
+future: an item half way through occupies the weeks it has *left*. The
+period in progress is kept; dropping it would make the near future, the only
+part anybody can still act on, the one part missing. The plural must match the
+grain, because it is the only part of the clause a reader can use to tell what
+is being dropped.
+
+This is the second place membership moves with the clock (an
+[age filter](#filter) is the first), and it costs the same thing: **the filing
+is as fresh as the last pass.** The engine notices for itself -- a clipped
+span's stored buckets carry the day they were built on, so the grouping
+rebuilds on the first pass of a new day and everything over it recomputes
+through the ordinary cascade. The cron a forward chart needs is the pass that
+already runs. Fenced to day grain and coarser, for the reason
+`carried forward` is: a pass is the only clock membership has.
+
 A label is the *local* instant reduced to the grain, in the calendar the
 definition names: the zone is applied once, to find the local time, and a
 coarser label is calendar arithmetic on the local day -- so a month figure
@@ -741,9 +776,25 @@ size, a measure over a set, a bound figure, another figure, a literal.
 - `count(mine)` -- how many records the set holds. A count of an empty bucket
   is a real nought, not an absence.
 - `sum(work_issue.estimate over mine)` -- a field measure totalled across the
-  set. Only a field measure may be summed: totalling a *duration* is a
-  quantity nobody asked for (a list is what a span reads), and totalling
-  moments is a date in the future.
+  set. A *duration* measure may not be summed -- that is a quantity nobody
+  asked for, and a list is what a span reads -- nor may moments, since
+  totalling dates is a date in the future.
+- `sum(work_issue.weekly_effort over live)` -- another **figure's** values,
+  totalled across the records in this bucket. What a measure cannot give: a
+  number some other definition worked out, where no column holds it. Each
+  member is read at the bucket being answered for, so the source must be
+  keyed at the same grain, and **an absent contribution makes the whole total
+  absent** -- adding up whichever members happened to have a number is
+  arithmetic over a population nobody chose.
+- `spread(work_issue.remaining over weeks)` -- one value shared **evenly**
+  across the buckets the subject occupies. The counterpart a span makes
+  necessary: membership in five weeks means a quantity counts in full in all
+  five, which is right for a count of what is running and five times the
+  truth for an amount of money. Evenly rather than by overlap, so the ends of
+  a span round up -- a bounded error at two buckets, in the direction that
+  never hides a peak, against a model that does not know which day the work
+  lands on anyway. The divisor is the buckets the subject occupies *now*, so
+  a clipped span divides what is left over what is left.
 - `list(code_change.open_seconds over merged)` -- the measure's value for
   every member, in evidence order, with unmeasurable records left out of both
   the values and the evidence. **`list` does not aggregate**: averaging at the

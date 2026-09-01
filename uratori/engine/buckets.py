@@ -464,8 +464,29 @@ def labels_between(
     cursor = first
     while cursor <= last:
         out.append(label_of_day(cursor, grain))
+        if cursor >= _LAST_PERIOD[grain]:
+            # **The calendar's far edge, guarded rather than stepped past.**
+            # `9999-12-31` is how a provider spells "runs for ever", so it
+            # arrives through the facts door -- and stepping a cursor past it
+            # raises, which `Engine.run` turns into a dead pass for the whole
+            # tenant, on every pass, until somebody edits the record. The
+            # sibling walker `resolve_span` learned this the same way; the
+            # comment above it records that the traceback moved once already.
+            break
         cursor = _next_period(cursor, grain)
     return out
+
+
+_LAST_PERIOD: dict[str, date] = {
+    "day": date.max,
+    # The Monday of the last ISO week that fits, and the first day of the last
+    # month and quarter: stepping from any earlier day inside those periods is
+    # safe, and stepping from these is what overflows.
+    "week": date.max - timedelta(days=date.max.weekday()),
+    "month": date(date.max.year, date.max.month, 1),
+    "quarter": date(date.max.year, ((date.max.month - 1) // 3) * 3 + 1, 1),
+}
+"""The last period at each grain, as the day a walk must stop on."""
 
 
 def resolve_span(at_ms: float, zone: str | None, spec: WindowSpec, rule: str) -> list[str]:

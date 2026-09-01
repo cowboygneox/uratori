@@ -82,6 +82,7 @@ fact work_issue:
     estimate_seconds as number
     active as flag
     start_date as moment
+    due_date as moment
     status_changed_at as moment
     updated_at as moment
 

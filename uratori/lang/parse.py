@@ -112,6 +112,19 @@ _STATISTICS: frozenset[str] = frozenset(
 )
 _COMPARISONS: frozenset[str] = frozenset({">=", ">", "<=", "<", "==", "!="})
 
+_CALLS: frozenset[str] = frozenset(
+    {
+        "count", "list", "sum", "spread", "max", "min", "latest", "earliest",
+        "mean", "median", "worst",
+    }
+)
+"""Every word that opens a call in a calculation.
+
+A constant rather than a tuple inline at the dispatch, so the editor's
+vocabulary can be held against it: a call added here without a colour renders
+as plain text beside the ones around it, which reads as a typo in the
+definition. `series` sat unhighlighted for two releases that way."""
+
 
 def parse(source: str) -> Document:
     document = _Parser(lex(source)).document()
@@ -1263,10 +1276,7 @@ class _Parser:
 
         name = self._next().value
 
-        if name in (
-            "count", "list", "sum", "spread", "max", "min", "latest", "earliest",
-            "mean", "median", "worst",
-        ) and self._at_op("("):
+        if name in _CALLS and self._at_op("("):
             return self._call(name, line)
 
         if name == "days" and self._at_word("from"):

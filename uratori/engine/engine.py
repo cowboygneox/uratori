@@ -917,14 +917,27 @@ class Engine:
             # Carried figures are exempt, and that is the whole distinction
             # between them: their rows exist precisely where no record does,
             # and their own retirement rule is the one that governs them.
+            # A **derived** sequenced figure -- one keyed by a grain with no
+            # group of its own, built from other figures at `:{bucket}` -- has
+            # its rows exactly where its sources have theirs, so its retirement
+            # question is the same one asked of the coordinates it was built
+            # over. Without this arm the branch above simply skipped it, and a
+            # source retiring a bucket left the derived row behind holding a
+            # number about a period nothing is in: stored, versioned, current,
+            # and believed. It survived a *full* pass, because a full pass
+            # rebuilds what exists rather than removing what does not.
+            #
+            # Latent until now, and no longer: a clipped span retires a bucket
+            # every period by design, so what used to need a corrected
+            # timestamp to reproduce is now a certainty on a schedule.
+            #
+            # `_scopes_of` already answers "which coordinates should this
+            # figure have", for both shapes, and is what the backfill writes
+            # against -- so asking it here is what keeps the two halves of the
+            # same question from drifting apart.
             buckets = (
-                {
-                    key
-                    for key in await self._store.bucket_keys(tenant, plan.scope_index)
-                }
-                if plan.grain is not None
-                and not plan.carried
-                and plan.scope_index is not None
+                set(await self._scopes_of(tenant, plan))
+                if plan.grain is not None and not plan.carried
                 else None
             )
             for stored in await self._store.values(tenant, plan.name, plan.version):
@@ -1011,17 +1024,26 @@ class Engine:
                 loaded[(name, None)] = await store.members(tenant, name, "")
         bucket_cache.update(loaded)
 
-        # How many buckets of each grouping hold a given member -- the divisor
-        # a `spread` needs. Counted off the table just loaded rather than asked
-        # of the store, so it costs nothing: the buckets are in hand because
-        # every figure over a bucketed grouping needs them anyway.
+        # How many buckets of each grouping a given **subject** has -- the
+        # divisor a `spread` needs. Counted off the table just loaded rather
+        # than asked of the store, so it costs nothing: the buckets are in hand
+        # because every figure over a bucketed grouping needs them anyway.
+        #
+        # Keyed by the bucket's *subject part*, not by its members, and the
+        # difference is the whole correctness of it. The two coincide only when
+        # a grouping's subject and its members are the same ids -- true of
+        # `from (ref, <span>)`, false of `from (account_id, <span>)`, where the
+        # buckets are an account's and the members are its campaigns. Counted
+        # by membership, an account-level spread divides by nought members
+        # found, takes the no-sequence branch, and the whole figure is blank
+        # for ever with nothing thrown. A subject's divisor is how many buckets
+        # it has, which is what it is being answered at.
         span_counts: dict[tuple[str, str], int] = {}
-        for (index_name, held_bucket), held_members in loaded.items():
+        for (index_name, held_bucket), _members in loaded.items():
             if held_bucket is None:
                 continue
-            for held_member in held_members:
-                counted = (index_name, held_member)
-                span_counts[counted] = span_counts.get(counted, 0) + 1
+            counted = (index_name, subject_of(held_bucket))
+            span_counts[counted] = span_counts.get(counted, 0) + 1
 
         records: dict[str, dict[str, Mapping[str, Any]]] = {}
         for measure_name in plan.measures:

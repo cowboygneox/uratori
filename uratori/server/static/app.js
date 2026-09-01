@@ -1814,9 +1814,18 @@ const FIG_WORDS = new Set([
   'when', 'then', 'otherwise', 'now', 'days', 'moment', 'ascending', 'descending',
   'bucketed', 'carried', 'forward',
   'detail', 'action', 'severity', 'info', 'attention', 'true', 'false',
-  'mean', 'median', 'worst', 'sum', 'series', 'delta', 'list', 'latest', 'earliest', 'max', 'min',
+  'mean', 'median', 'worst', 'sum', 'spread', 'series', 'delta', 'list', 'latest', 'earliest',
+  'max', 'min',
+  // A span's own words, and the clip that makes it a question about the future.
+  'until', 'excluding', 'gone',
   ...FIG_UNITS, ...FIG_FACT_TYPES, ...FIG_FIELD_TYPES,
-  'hour', 'hours', 'minute', 'minutes', 'day',
+  // Every grain, singular and plural, and the selective rule's vocabulary.
+  // The coarse three were missing before spans arrived: `by week` rendered
+  // half-coloured in a language that has had week buckets all along.
+  'hour', 'hours', 'minute', 'minutes', 'day', 'days', 'week', 'weeks',
+  'month', 'months', 'quarter', 'quarters',
+  'first', 'second', 'third', 'fourth', 'fifth', 'of',
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
 ]);
 
 // The draft outlives the view: a tenant switch or a wander to the Facts tab

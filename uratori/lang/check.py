@@ -289,21 +289,6 @@ class _Checker:
             self._kinds = self._schema.kinds
             self._name_fields = dict(self._schema.name_fields)
 
-    def _declares_field(self, dotted: str) -> bool:
-        """Whether `<kind>.<field>` names a field somebody declared.
-
-        A probe rather than a lookup: `_record_field` raises on a miss, which
-        is right where a miss is a build failure and wrong here, where a miss
-        is how we learn the name belongs to another namespace. Only the first
-        segment of a path is tested, because that is all the precedence
-        question needs -- a name that starts at a real field is a field read.
-        """
-        kind, _, path = dotted.partition(".")
-        fact = self.facts.get(kind)
-        if fact is None or not path:
-            return False
-        return path.split(".")[0] in {f.name for f in fact.fields}
-
     def _record_field(
         self, kind: str, path: str, what: str, line: int, *, named: bool = False
     ) -> tuple[CompiledFactField, bool] | None:
@@ -536,20 +521,25 @@ class _Checker:
         rule, so the pair cannot drift apart.
         """
         what = f"{word} {d.name}"
+        if part.select is not None:
+            # Before the missing-grain rule, not after it: `_bucket_rule`
+            # answers a grain *or* a selective rule and never both, so a
+            # selective span arrives here with `truncate` unset -- and tested
+            # in the other order this said "gives no grain" to an author who
+            # had written one, and the message below could never be shown.
+            raise CheckError(
+                f"{what} spans {part.field} until {part.until} by "
+                f"{part.select}. A selective rule picks one day a month and is "
+                "deliberately partial; a span enumerates a stretch. The two say "
+                "opposite things about what membership means.",
+                d.line,
+            )
         if part.truncate is None:
             raise CheckError(
                 f"{what} spans {part.field} until {part.until} and gives no grain. "
                 "There is nothing to enumerate between two instants without one -- "
                 "write `by week`, `by day`, or another grain, and the record joins "
                 "every bucket the two ends cross.",
-                d.line,
-            )
-        if part.select is not None:
-            raise CheckError(
-                f"{what} spans {part.field} until {part.until} by "
-                f"{part.select}. A selective rule picks one day a month and is "
-                "deliberately partial; a span enumerates a stretch. The two say "
-                "opposite things about what membership means.",
                 d.line,
             )
         if part.truncate not in self._SPANNABLE:
@@ -1706,6 +1696,19 @@ class _Checker:
 
         def walk(e: CalcExpr) -> CalcExpr:
             if isinstance(e, Spread):
+                # Checked before binding, because `bind`'s own "not a figure"
+                # message is about reading one and this is about dividing one
+                # -- and the commonest mistake here is naming a *measure*,
+                # which that message would not address. Left after, the
+                # sentence below could never be shown.
+                if _find(self.figures, e.figure) is None:
+                    raise CheckError(
+                        f'figure {d.name} spreads "{e.figure}", which is not a figure '
+                        "declared before it. `spread` divides a subject's own computed "
+                        "value across the buckets it occupies -- a measure is a number "
+                        "per record, and there is nothing about a record to divide.",
+                        e.line or d.line,
+                    )
                 # Same subject, so the ordinary binding and its scope check
                 # are exactly right: a spread divides *this* subject's value.
                 bind(e.figure, e.line or d.line)
@@ -1715,8 +1718,11 @@ class _Checker:
                 and e.measure is not None
                 and e.measure not in self.measures
                 and _find(self.figures, e.measure) is not None
-                and not self._declares_field(e.measure)
             ):
+                # Ambiguity is refused in `_resolve_field_reads`, which runs
+                # after this one; binding here is harmless either way, and
+                # binding on the same condition is what keeps the two walks
+                # agreeing about which names are figures.
                 bind_across(e.measure, e.line or d.line)
                 return e
             if isinstance(e, Setting):
@@ -1779,14 +1785,24 @@ class _Checker:
                 and e.measure is not None
                 and e.measure not in self.measures
             ):
-                # Three namespaces, one spelling, and the order is the rule:
-                # a measure wins, then a declared *field*, then a figure.
-                # Field before figure so that declaring a figure can never
-                # silently change what an existing total computes -- the same
-                # argument the measure precedence above rests on.
-                if _find(self.figures, e.measure) is not None and not self._declares_field(
-                    e.measure
-                ):
+                # Three namespaces, one spelling: a measure wins (above), then
+                # a figure, then a declared field.
+                #
+                # Figure before field is safe here and would not be on its own
+                # reasoning. What makes it safe is a rule that already exists:
+                # a figure may not take a name its own kind already has as a
+                # field ("one spelling would answer two things"). So in a
+                # **fact-taught** world the collision cannot be declared, and
+                # the order between these two can never decide anything.
+                #
+                # In a **schema-taught** world no fields are declared, so
+                # neither that rule nor `_declares_field` can see a collision,
+                # and the figure wins. That is a real if narrow hazard rather
+                # than a safe default: a host whose figure happens to be named
+                # `<kind>.<field-name>` had a field total before this release
+                # and has a figure total after it, at a version that moves. It
+                # is written down here because nothing can catch it.
+                if _find(self.figures, e.measure) is not None:
                     return FigureTotal(figure=e.measure, set=e.set, line=e.line)
                 kind, _, field = e.measure.partition(".")
                 if kind in self._kinds and field:
@@ -2183,20 +2199,39 @@ class _Checker:
                     f"itself `bucketed`. Write `figure {d.name} bucketed:`.",
                     e.line,
                 )
+            if source.grain is None and grain is not None:
+                # The mirror, and the one a reader writes by accident. A total
+                # reads each member at *this* bucket -- `<member>@<bucket>` --
+                # and a source with one value per subject is stored under the
+                # bare id, so every lookup misses and the figure answers nought
+                # for every bucket with nothing thrown. Which is the failure the
+                # id-space message above names, arrived at from the other side.
+                raise CheckError(
+                    f"figure {d.name} is keyed by {grain} and totals {e.figure}, which "
+                    "holds one value per subject rather than one per bucket. A total "
+                    "reads each member at the bucket it is answering for, so every "
+                    "lookup would miss. If the intent is to share that one value out "
+                    f"across the buckets, that is `spread({e.figure} over ...)`; if it "
+                    f"is to add up a per-bucket number, {e.figure} needs a sequence of "
+                    "its own.",
+                    e.line,
+                )
+            if source.across is not None:
+                raise CheckError(
+                    f"figure {d.name} totals {e.figure}, which is split across "
+                    f"{source.across}. A total reads each member at `<member>@<bucket>`, "
+                    "and a dimensioned figure is stored at `<member>@<part>` -- the two "
+                    "keys are the same shape and mean different things, so every lookup "
+                    "would land on a coordinate nobody wrote.",
+                    e.line,
+                )
             return "number"
 
         if isinstance(e, Spread):
             self._require_set(d.name, e.set, sets, e.line)
             grain = self._grain_of(d, combines)
             source = _find(self.figures, e.figure)
-            if source is None:
-                raise CheckError(
-                    f"figure {d.name} spreads \"{e.figure}\", which is not a figure "
-                    "declared before it. `spread` divides a subject's own computed value "
-                    "across the buckets it occupies -- a measure is a number per record, "
-                    "and there is nothing about a record to divide.",
-                    e.line,
-                )
+            assert source is not None  # refused in `_resolve_figure_reads`
             if grain is None:
                 raise CheckError(
                     f"figure {d.name} spreads {e.figure} and is not `bucketed`. Without a "
