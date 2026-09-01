@@ -832,7 +832,6 @@ rather than a fabricated zero.
 |---|---|
 | `never-computed` | This tenant has never run this definition. A new board, or the window between a deploy and the next pass. |
 | `behind-deploy` | Values exist, at an **older version** of the definition. They are not shown, because a number computed by a definition that no longer exists is worse than a dash. Run a pass to recompute. |
-| `setting-moved` | A dial the definition names has changed and the rebuild has not finished; the stored values describe the old dial. |
 | `nothing-collected` | The definition ran, and nothing it reads holds anything. A board with no source connected -- as opposed to a team whose queue is genuinely empty, which is a *measured* answer with real subjects and real zeroes. |
 
 The last distinction matters more than it looks: a fully-backfilled tenant

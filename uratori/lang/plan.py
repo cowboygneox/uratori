@@ -123,7 +123,6 @@ class FigurePlan:
     indexes: tuple[str, ...] = ()
     measures: tuple[str, ...] = ()
     reads: tuple[str, ...] = ()
-    settings: tuple[str, ...] = ()
     scope_index: str | None = None
     """The index that fans this figure out. Absent for a rollup, which has no
     index at all -- its subjects come from the roster and from whatever its parts
@@ -219,7 +218,6 @@ class ReadingPlan:
     live_measure: str | None = None
     live_set: SetExpr | None = None
     indexes: tuple[str, ...] = ()
-    settings: tuple[str, ...] = ()
     version: str = ""
 
 
@@ -246,7 +244,6 @@ class ProjectPlan:
     joins: tuple[Join, ...] = ()
     indexes: tuple[str, ...] = ()
     figures: tuple[str, ...] = ()
-    settings: tuple[str, ...] = ()
     version: str = ""
 
 
@@ -259,7 +256,6 @@ class SummarisePlan:
     totals: tuple[tuple[str, str, FigureUnit, Condition | None], ...] = ()
     values: tuple[tuple[str, CalcExpr, FigureUnit], ...] = ()
     flags: tuple[FlagDecl, ...] = ()
-    settings: tuple[str, ...] = ()
     version: str = ""
 
 

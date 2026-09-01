@@ -102,7 +102,6 @@ DeclarationKind = Literal[
 
 DependencyType = Literal[
     "fact",
-    "setting",
     "group",
     "filter",
     "measure",
@@ -114,8 +113,9 @@ DependencyType = Literal[
 
 
 class Dependency(BaseModel):
-    """One edge of the trace. `fact` and `setting` are the leaves: a fact kind
-    is where the records live, a setting is a dial the tenant turns."""
+    """One edge of the trace. `fact` is the only leaf: a fact kind is where
+    the records live, and with dials gone there is nothing else a trace can
+    bottom out in."""
 
     type: DependencyType
     name: str
@@ -434,14 +434,16 @@ class MembershipOut(BaseModel):
     """Whether buckets follow the last one listed -- the pager's fact."""
 
     note: str | None = None
-    """A server-rendered caveat the counts cannot carry themselves. Today:
-    this index's spec reads dials (an age threshold, a zone), and a dial that
-    moved since the last pass shows here only after the next one -- spec
-    hashes deliberately exclude settings, so `state` cannot see it (the
-    engine's own stamp carries a dial fingerprint and rebuilds at that next
-    pass; this page compares specs alone). Figures over the same index
-    refuse with `setting-moved` in that window; membership states its weaker
-    guarantee instead of silently wearing an Ok it has not earned."""
+    """A server-rendered caveat the counts cannot carry themselves.
+
+    A bucket table can describe a world that has already moved, in two ways
+    this page cannot see. An age filter is decided against the clock, so its
+    filing ages between passes. A threshold read off an owner's record moves
+    when that record does, and nothing about the filed records changed -- the
+    grouping's spec is unmoved, so `state` reads Ok quite correctly.
+
+    Both settle at the next pass. Saying which one applies is the difference
+    between a reader trusting a stale count and knowing why it is stale."""
 
 
 class MemberRecordOut(BaseModel):
@@ -2094,7 +2096,6 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
             | set(figure.band_reads)
         )
         edges += [Dependency(type="figure", name=n) for n in sorted(sources)]
-        edges += [Dependency(type="setting", name=n) for n in figure.settings]
         out.append(
             DeclarationOut(
                 name=figure.name,
@@ -2118,7 +2119,6 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
         # The goals its band judges against, as figure edges -- the same
         # reasoning as a figure's: what decides the word belongs in the graph.
         edges += [Dependency(type="figure", name=n) for n in reading.band_reads]
-        edges += [Dependency(type="setting", name=n) for n in reading.settings]
         out.append(
             DeclarationOut(
                 name=reading.name,
@@ -2146,7 +2146,6 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
         edges += [Dependency(type="figure", name=n) for n in sorted(figures)]
         edges += [_grouping_edge(library, n) for n in projection.indexes]
         edges += [Dependency(type="fact", name=j.kind) for j in projection.joins]
-        edges += [Dependency(type="setting", name=n) for n in projection.settings]
         out.append(
             DeclarationOut(
                 name=projection.name,
@@ -2161,7 +2160,6 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
 
     for summary in library.summaries:
         edges = [Dependency(type="projection", name=summary.over)]
-        edges += [Dependency(type="setting", name=n) for n in summary.settings]
         out.append(
             DeclarationOut(
                 name=summary.name,
@@ -2224,7 +2222,7 @@ def _fill_moved_by(declarations: list[DeclarationOut]) -> None:
         frontier = list(declaration.rests_on)
         while frontier:
             edge = frontier.pop()
-            if edge.type in ("fact", "setting"):
+            if edge.type == "fact":
                 leaves[(edge.type, edge.name)] = edge
             elif edge.name not in seen:
                 seen.add(edge.name)

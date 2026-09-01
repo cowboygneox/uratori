@@ -28,11 +28,10 @@ import pytest
 from uratori.engine.read import Sample, delta_of
 from uratori.engine.serve import serve_reading
 from uratori.lang.check import CheckError
-from uratori.lang.settings import fingerprint
 from uratori.results import Ok
 from uratori.store import MemoryEngineStore, Pointer
 
-from .world import DEFAULTS, compile_source
+from .world import compile_source
 
 
 def sample(*points: tuple[str, float | None]) -> Sample:
@@ -355,7 +354,7 @@ async def _seeded() -> tuple[SpyStore, float]:
         figure.name,
         Pointer(
             version=figure.version,
-            settings_fingerprint=fingerprint(dict(DEFAULTS), list(figure.settings)),
+            settings_fingerprint="",
         ),
     )
     await store.set_buckets(tenant, "code_change.merged_by_day", "c1", ["p1@2026-03-10"])

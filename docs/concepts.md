@@ -406,8 +406,6 @@ four reasons.
 - **`behind-deploy`** -- values exist, at an older version of the definition.
   They are not shown, because a number computed by a definition that no
   longer exists is worse than a dash.
-- **`setting-moved`** -- a dial the definition names has changed and the
-  rebuild has not finished. The stored values describe the old dial.
 - **`nothing-collected`** -- the definition ran and nothing it reads holds
   anything. A board with no source connected, rather than a courier fleet
   with an empty queue.

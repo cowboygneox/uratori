@@ -139,6 +139,30 @@ def test_schema_documents_round_trip() -> None:
     assert Schema.from_document(COURIER_WORLD.to_document()) == COURIER_WORLD
 
 
+def test_a_document_still_naming_the_retired_settings_keys_is_accepted() -> None:
+    """Deliberate migration compatibility, and worth a test because the
+    tempting alternative -- refusing the unknown keys -- shuts the door on
+    every host whose stored document predates the deletion, at boot, with no
+    way in to correct it. The keys are dropped, not honoured.
+    """
+    from uratori.server.contract import SchemaIn
+
+    stale = {
+        "kinds": ["shop_courier"],
+        "name_fields": {"shop_courier": "name"},
+        "bucket_settings": ["tenant.timezone"],
+        "figure_settings": ["thresholds.wip.warn"],
+        "reading_settings": [],
+        "project_settings": [],
+        "defaults": {"thresholds": {"wip": {"warn": 5}}},
+    }
+    wanted = Schema(
+        kinds=frozenset({"shop_courier"}), name_fields={"shop_courier": "name"}
+    )
+    assert Schema.from_document(stale) == wanted
+    assert SchemaIn(**stale).build() == wanted
+
+
 def test_the_server_contract_parses_documents_identically() -> None:
     from uratori.server.contract import SchemaIn
 
@@ -242,15 +266,33 @@ async def test_a_full_pass_reports_the_kinds_it_read_as_covered() -> None:
     # never confirmed.
     idle = await engine.run("t1")
     assert idle.outcome.covered == frozenset()
-    """The round trip must carry all four settings lists, not whichever ones a
-    convenient fixture happened to populate: a list dropped by `to_document`
-    reaches the service empty, every definition naming one of its dials is
-    refused at the next teach, and the affected boards read `setting-moved`
-    for ever."""
-    full = Schema(
-        kinds=frozenset({"shop_order", "shop_courier"}),
-        name_fields={"shop_courier": "name"},
+
+
+def test_every_absence_reason_is_one_something_can_produce() -> None:
+    """A reason nobody emits is worse than a missing one: it is on the wire
+    contract and in every generated client, so a host writes a branch for a
+    state that cannot happen and believes the list is the whole truth.
+
+    `setting-moved` outlived the dials it described by a release. It sat in
+    the union, in the README's statement of the absence rule, and in three
+    documents, while nothing anywhere could answer it.
+    """
+    import re
+    from pathlib import Path
+    from typing import get_args
+
+    from uratori.results import Unavailable
+
+    declared = set(get_args(Unavailable.model_fields["because"].annotation))
+    root = Path(__file__).resolve().parent.parent / "uratori"
+    produced = {
+        found
+        for path in root.rglob("*.py")
+        for found in re.findall(r'because="([a-z-]+)"', path.read_text())
+    }
+    assert declared == produced, (
+        f"declared but unreachable: {sorted(declared - produced)}; "
+        f"produced but undeclared: {sorted(produced - declared)}"
     )
-    assert Schema.from_document(full.to_document()) == full
 
 

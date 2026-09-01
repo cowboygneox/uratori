@@ -41,13 +41,12 @@ from uratori.engine.read import (
 from uratori.engine.serve import serve_reading
 from uratori.lang.ast import Condition, Number, Part, SortDecl
 from uratori.lang.plan import ProjectPlan
-from uratori.lang.settings import fingerprint, seconds_per
 from uratori.results import Ok
 from uratori.store import MemoryFactStore
 from uratori.store.base import Pointer
 from uratori.store.memory import MemoryEngineStore
 
-from .world import DEFAULTS, compile_source
+from .world import compile_source
 
 # --------------------------------------------------------------- buckets --
 
@@ -584,38 +583,6 @@ def test_one_value_renders_and_only_an_empty_window_is_withheld_with_a_reason() 
     # The full sentence, because "at least 1 value" is also a substring of the
     # plural and would pass against "at least 1 values".
     assert unmet == ["needs at least 1 value; there are 0"]
-
-
-# --------------------------------------------------------------- settings --
-
-
-def test_a_dial_set_to_nought_moves_the_fingerprint() -> None:
-    """`or` treats nought, false and "" as unset. The fingerprint then does not
-    move, the figure is never listed as pending, no rebuild happens, and the
-    pointer keeps validating -- so the board bands against the old number for
-    ever while the settings page shows the new one.
-
-    `setting_value` already had this right, which is what made the disagreement
-    invisible: evaluation used the nought and invalidation did not.
-    """
-    named = ["thresholds.wip.warn"]
-    default = fingerprint({}, named)
-    zeroed = fingerprint({"thresholds": {"wip": {"warn": 0}}}, named)
-    assert default != zeroed, "a dial set to nought looked identical to unset"
-
-    moved = fingerprint({"thresholds": {"wip": {"warn": 9}}}, named)
-    assert moved not in (default, zeroed)
-
-
-def test_the_threshold_units_are_the_ones_a_definition_can_write() -> None:
-    """`work_hours` was declared, resolved to exactly 3,600 seconds, and was
-    therefore a synonym for `hours` -- with a docstring claiming a working day
-    mattered and nothing that made it."""
-    assert seconds_per("minutes", DEFAULTS) == 60.0
-    assert seconds_per("hours", DEFAULTS) == 3_600.0
-    assert seconds_per("days", DEFAULTS) == 86_400.0
-    with pytest.raises(ValueError, match="not a threshold unit"):
-        seconds_per("work_hours", DEFAULTS)
 
 
 # ---------------------------------------------------------------- checker --
@@ -1308,9 +1275,8 @@ def test_a_coarse_bucket_holds_the_records_of_its_own_period_directly() -> None:
 
 async def _figure_store(figure, index_name, rows):  # type: ignore[no-untyped-def]
     store = MemoryEngineStore()
-    stamp = fingerprint(dict(DEFAULTS), [])
     await store.set_pointer(
-        "t1", figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
+        "t1", figure.name, Pointer(version=figure.version, settings_fingerprint="")
     )
     await store.set_buckets("t1", index_name, "w1", ["seed"])
     for subject, value in rows:
@@ -1359,9 +1325,8 @@ async def test_a_failed_floor_withholds_the_series_with_everything_else() -> Non
     assert figure is not None and reading is not None
 
     tenant = "t1"
-    stamp = fingerprint(dict(DEFAULTS), [])
     await store.set_pointer(
-        tenant, figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
+        tenant, figure.name, Pointer(version=figure.version, settings_fingerprint="")
     )
     await store.set_buckets(tenant, "work_issue.by_quarter", "w1", ["p1@2025-08-24T04:45"])
     await store.save(
@@ -1678,9 +1643,8 @@ async def test_an_anchor_day_ends_the_windows_in_the_readings_own_zone() -> None
     assert figure is not None and reading is not None
 
     tenant = "t1"
-    stamp = fingerprint(dict(DEFAULTS), [])
     await store.set_pointer(
-        tenant, figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
+        tenant, figure.name, Pointer(version=figure.version, settings_fingerprint="")
     )
     await store.set_buckets(tenant, "work_issue.by_day", "w1", ["p1@2025-08-24"])
     for subject, values in (
@@ -1726,9 +1690,8 @@ async def test_a_declared_floor_and_band_apply_unchanged_under_an_anchor() -> No
     assert figure is not None and reading is not None
 
     tenant = "t1"
-    stamp = fingerprint(dict(DEFAULTS), [])
     await store.set_pointer(
-        tenant, figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
+        tenant, figure.name, Pointer(version=figure.version, settings_fingerprint="")
     )
     await store.set_buckets(tenant, "work_issue.by_day", "w1", ["p1@2025-08-24"])
     for subject, values in (
@@ -1767,9 +1730,8 @@ async def test_a_sub_day_reading_under_an_anchor_ends_in_the_anchor_days_last_bu
     assert figure is not None and reading is not None
 
     tenant = "t1"
-    stamp = fingerprint(dict(DEFAULTS), [])
     await store.set_pointer(
-        tenant, figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
+        tenant, figure.name, Pointer(version=figure.version, settings_fingerprint="")
     )
     await store.set_buckets(tenant, "work_issue.by_quarter", "w1", ["p1@2025-08-24T23:45"])
     for subject, value in (
@@ -1802,9 +1764,8 @@ async def test_a_sub_day_reading_under_an_anchor_ends_in_the_anchor_days_last_bu
 
 async def _day_reading_store(figure, days):  # type: ignore[no-untyped-def]
     store = MemoryEngineStore()
-    stamp = fingerprint(dict(DEFAULTS), [])
     await store.set_pointer(
-        "t1", figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
+        "t1", figure.name, Pointer(version=figure.version, settings_fingerprint="")
     )
     await store.set_buckets("t1", "work_issue.by_day", "w1", ["p1@2025-08-24"])
     for subject, values in days:
@@ -1814,9 +1775,8 @@ async def _day_reading_store(figure, days):  # type: ignore[no-untyped-def]
 
 async def _quarter_store(figure, buckets):  # type: ignore[no-untyped-def]
     store = MemoryEngineStore()
-    stamp = fingerprint(dict(DEFAULTS), [])
     await store.set_pointer(
-        "t1", figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
+        "t1", figure.name, Pointer(version=figure.version, settings_fingerprint="")
     )
     await store.set_buckets("t1", "work_issue.by_quarter", "w1", ["p1@2025-08-24T04:45"])
     for subject, value in buckets:
@@ -2023,9 +1983,8 @@ async def test_a_minute_figure_serves_its_minutes_bucket_for_bucket() -> None:
     reading = GRAINED.reading("team_person.minute_typical")
     assert figure is not None and reading is not None
     store = MemoryEngineStore()
-    stamp = fingerprint(dict(DEFAULTS), [])
     await store.set_pointer(
-        "t1", figure.name, Pointer(version=figure.version, settings_fingerprint=stamp)
+        "t1", figure.name, Pointer(version=figure.version, settings_fingerprint="")
     )
     await store.set_buckets("t1", "work_issue.by_minute", "w1", ["p1@2025-08-24T04:45"])
     for subject, values in (

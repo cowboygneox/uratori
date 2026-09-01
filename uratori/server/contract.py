@@ -123,7 +123,6 @@ class DeclarationOut(BaseModel):
     """The figures this rests on: a rollup's combine sources, a reading's
     stored-day source, a projection's read figures."""
 
-    settings: list[str] = Field(default_factory=list)
     band_reads: list[str] = Field(default_factory=list)
     """The figures a band compares against, apart from `reads` deliberately.
 

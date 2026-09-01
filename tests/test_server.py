@@ -906,9 +906,10 @@ async def test_the_definitions_route_serves_the_library_described(server: Server
         "a rollup's derivation is the figure it combines; without it the "
         "catalogue cannot say what the word rests on"
     )
-    assert band["settings"] == [], (
-        "a calculation reads no dials now -- its numbers come from the figures "
-        "it combines and from what the definition says outright"
+    assert "settings" not in band, (
+        "the wire still carries a dial list. It is always empty, so a host "
+        "writes a branch for a control that cannot exist and believes the "
+        "catalogue is telling it something"
     )
     assert band["band_reads"] == [], (
         "load_band computes its word in calculate:, so what it rests on is a "
@@ -1057,17 +1058,19 @@ summarise shop_order.flow over shop_order.board:
 
     stale = {d["name"]: d for d in body["indexes"]}["shop_order.stale"]
     assert stale["declaration"] == "filter"
-    assert stale["settings"] == [], (
-        "an age filter against a written threshold reads no dial at all -- a "
-        "host told otherwise would offer an operator a control that moves "
-        "nothing"
+    assert "settings" not in stale, (
+        "an age filter against a written threshold reads no dial at all, and "
+        "the wire should not be carrying an empty list saying so"
     )
 
     by_day = {d["name"]: d for d in body["indexes"]}["shop_order.delivered_by_day"]
-    assert by_day["settings"] == [], (
+    assert "settings" not in by_day, (
         "a grouping reads no dial now -- its calendar is a field on the "
-        "subject's record, and a host told to offer an operator a timezone "
-        "control would be offering one that moves nothing"
+        "subject's record, reported as `through` where a host will find it"
+    )
+    assert by_day["through"] == ["shop_courier.timezone"], (
+        "the calendar has to reach the catalogue as the fact it is, or a host "
+        "reading the declaration alone cannot see what cuts these buckets"
     )
     assert by_day["grain"] == "day", "the declaration that carries the truncation says so"
 

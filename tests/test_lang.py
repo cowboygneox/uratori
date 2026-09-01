@@ -1332,12 +1332,15 @@ projection work_issue.ghosted:
     )
 
 
-def test_an_omit_reading_a_dial_registers_it_and_an_unknown_dial_is_refused() -> None:
-    """The gate's condition may compare against a tenant dial, and the dial
-    has to land in the plan's settings the way a value's or a flag's would --
-    an unregistered dial would evaluate to nothing, the gate would never
-    fire, and a narrowing everyone can read on library.json would silently
-    not happen: the exact class of lie the checker exists for."""
+def test_an_omit_gates_on_a_number_written_here_and_refuses_a_dial() -> None:
+    """A gate decides which rows are *on the page*, so a threshold it cannot
+    show is a narrowing nobody can see. A number written in the definition is
+    visible and forks the version when it moves; a dial varies invisibly.
+
+    (This used to assert `plan.settings == ()` for the accepted half, which
+    the checker set unconditionally -- a projection with no `omit` at all
+    reported the same, so nothing about the gate was being tested.)
+    """
     lib = compile_ok(
         """
 # d
@@ -1351,10 +1354,7 @@ projection work_issue.aged:
     )
     plan = lib.projection("work_issue.aged")
     assert plan is not None
-    assert plan.settings == (), (
-        "a projection reads no dials at all now -- its thresholds are figures "
-        "bound with `read:`, or numbers written where the reader can see them"
-    )
+    assert plan.omit is not None, "the gate did not reach the plan"
 
     refuses(
         """

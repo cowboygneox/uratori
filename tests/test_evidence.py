@@ -18,10 +18,9 @@ from __future__ import annotations
 from typing import Any
 
 from uratori.engine.serve import serve_evidence
-from uratori.lang.settings import fingerprint as settings_fingerprint
 from uratori.store import MemoryEngineStore, MemoryFactStore, Pointer
 
-from .world import DEFAULTS, WORLD, compile_source
+from .world import WORLD, compile_source
 
 TENANT = "t1"
 
@@ -134,7 +133,7 @@ async def _ready(store: MemoryEngineStore, name: str) -> None:
         name,
         Pointer(
             version=plan.version,
-            settings_fingerprint=settings_fingerprint(dict(DEFAULTS), list(plan.settings)),
+            settings_fingerprint="",
         ),
     )
 
@@ -861,7 +860,7 @@ figure team_person.context_gap bucketed:
         plan.name,
         Pointer(
             version=plan.version,
-            settings_fingerprint=settings_fingerprint(dict(DEFAULTS), list(plan.settings)),
+            settings_fingerprint="",
         ),
     )
     await store.save(TENANT, plan.name, plan.version, "p1", 1, ("c1", "i1"), "Aki")
@@ -937,7 +936,7 @@ figure team_person.rework_effort:
         plan.name,
         Pointer(
             version=plan.version,
-            settings_fingerprint=settings_fingerprint(dict(DEFAULTS), list(plan.settings)),
+            settings_fingerprint="",
         ),
     )
     await store.save(TENANT, plan.name, plan.version, "p1", 0.25, ("p1",), "Aki")

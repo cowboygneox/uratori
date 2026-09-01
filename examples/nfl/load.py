@@ -4,7 +4,7 @@ The data is nflverse (https://github.com/nflverse/nflverse-data): the
 community-maintained public record of NFL games, weekly player stat lines and
 play-by-play. This script is a *host*: it downloads the seasons, shapes them
 into plain records -- **every single play is a fact** -- teaches the engine
-its settings (schema.json) and its world and numbers (definitions.fig, where
+its schema (schema.json, empty) and its world and numbers (definitions.fig, where
 the fact declarations live), and pushes it all over the HTTP API into a
 single tenant. The bucketing -- per season, per game number, per day of the
 week, per franchise across relocations -- is the definitions' job, not a
@@ -616,11 +616,11 @@ KIND_ORDER = (
 def teach(client: Client) -> Record:
     """Schema then definitions -- with the one migration the fixed order
     cannot make. A server taught before facts joined the language holds a
-    kind-declaring schema and a source with no fact blocks; a settings-only
+    kind-declaring schema and a source with no fact blocks; the empty
     schema is refused against that stored source (it names kinds nothing
     would declare). The engine's own repair is definitions-first: loading
     the fact-declaring source retires the stored kinds without blanking a
-    single tenant, and the settings schema then lands clean. Only a schema
+    single tenant, and the empty schema then lands clean. Only a schema
     refusal takes the detour, so a fresh server keeps the plain path."""
     schema_document = json.loads((HERE / "schema.json").read_text())
     source = {"source": (HERE / "definitions.fig").read_text()}

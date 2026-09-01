@@ -140,7 +140,7 @@ container, `localhost` is the container.
 2. **Clients compute nothing.** Values arrive rendered beside their magnitudes;
    the payload carries no raw collection to recompute from.
 3. **An absence is never a zero.** Missing means *not computed*, and every
-   response says why (`never-computed`, `behind-deploy`, `setting-moved`,
+   response says why (`never-computed`, `behind-deploy`,
    `nothing-collected`).
 4. **A cheap path may not narrow a population** -- not the one a calculation
    runs over, nor the one it is reported over.

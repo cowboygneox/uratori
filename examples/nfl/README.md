@@ -21,7 +21,7 @@ Three files do all the work:
 
 | | |
 |---|---|
-| `schema.json` | The dials a tenant can turn, and their defaults. |
+| `schema.json` | Empty, and worth looking at for that reason: the world is declared in the language, so there is nothing left for a host to configure outside it. It exists because `PUT /schema` is still the door a host knocks on first. |
 | `definitions.fig` | The world -- ten `fact` declarations, every field typed -- and every number the demo serves, defined beside it. Each construct the language has appears at least once, with its explanation attached. |
 | `load.py` | The host: downloads seasons from [nflverse](https://github.com/nflverse/nflverse-data), shapes them into plain records, teaches the engine and pushes the facts. Stdlib only. |
 
@@ -75,7 +75,7 @@ around an hour for the era. Until it finishes, results honestly answer
 `never-computed`.
 
 Reloading against a database taught before the fact declarations existed
-is handled in place: the settings-only schema is refused beside the stored
+is handled in place: the empty schema is refused beside the stored
 kind-declaring world, so the loader teaches the new definitions first --
 which retires the stored kinds without touching a single tenant -- and
 then lands the schema. Nothing needs wiping.
@@ -196,21 +196,26 @@ standings count both under one row -- the identity join a person with two
 logins needs, wearing shoulder pads. The team-*seasons* stay era-spelt on
 purpose: relocation is franchise identity, not a rename of history.
 
-**The dials.** Every threshold in the definitions is a named setting a
-tenant can move -- and moving one recomputes exactly what read it. The
-stored document is the tenant's whole (sparse) settings document, so send
-everything you mean in one `PUT`:
+**No dials.** Every threshold in the definitions is either a number
+written in the definition -- visible to a reader, and forked into the
+version hash if somebody moves it -- or a field on a record, which arrives
+through the same door as every other fact and is cited the same way. There
+is no settings endpoint and nothing outside the fact stream to turn, which
+is the point: the one number on a card that decides whether a reader should
+worry used to be the one number nothing could explain.
+
+To move a threshold that lives on a record, push the record:
 
 ```bash
-# Blowouts start at 10 points now, and a contending season starts at 75%.
-# The first is a projection dial (free to turn); the second is a figure
-# dial, which marks what read it `setting-moved` until a pass recomputes.
-curl -s -X PUT localhost:8080/tenants/nfl/settings \
+# A franchise's calendar, which cuts that team's days.
+curl -s -X POST localhost:8080/tenants/nfl/facts \
   -H 'Content-Type: application/json' \
-  -d '{"document": {"thresholds": {"blowout": 10, "contending": {"rate": 0.75}}}}'
-curl -s -X POST localhost:8080/tenants/nfl/runs \
-  -H 'Content-Type: application/json' -d '{}'
+  -d '{"kind": "nfl_team", "records": {"SEA": {"timezone": "America/Los_Angeles"}}}'
 ```
+
+To move one written in a definition, edit the definition and re-teach it.
+The version hash moves with it, which is what tells every stored value
+computed under the old number to stand aside.
 
 **A live season.** `nfl_team.recent_wins` and the age filter behind it read
 the wall clock; between seasons they are honestly nought. Re-run the loader

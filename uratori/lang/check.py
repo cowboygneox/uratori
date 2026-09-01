@@ -713,12 +713,6 @@ class _Checker:
         indexes = sorted(_indexes_in_sets(d.sets))
         measures = sorted(_measures_in(d.calculate))
         reads = sorted({source for source, _ in combines.values()})
-        # A figure names no dial at all now: its thresholds are figures or
-        # literals, and its groupings' calendars are fields on records. The
-        # tuple stays because a pointer's fingerprint is keyed on it and an
-        # empty one is the honest claim that nothing tenant-set moves this
-        # value.
-        settings: list[str] = []
 
         depth = 0
         for source_name in reads:
@@ -741,7 +735,6 @@ class _Checker:
             indexes=tuple(indexes),
             measures=tuple(measures),
             reads=tuple(reads),
-            settings=tuple(settings),
             scope_index=scope_index,
             band=band,
             band_reads=band_reads,
@@ -2704,12 +2697,13 @@ class _Checker:
                 d.line,
             )
 
-        settings = sorted(
+        # Whatever survived as a bare dotted name here named no figure, no
+        # column and no field, so there is nothing left for it to be.
+        for path in sorted(
             {p for _, e, _ in values for p in _settings_in(e)}
             | _flag_settings(d.flags)
             | _condition_settings(d.omit)
-        )
-        for path in settings:
+        ):
             raise CheckError(
                 f'projection {d.name} reads "{path}", which is a tenant dial. A '
                 "definition's numbers come from facts: bind the figure that holds this "
@@ -2734,7 +2728,6 @@ class _Checker:
             joins=tuple(joins),  # type: ignore[arg-type]
             indexes=tuple(sorted(_indexes_in(d.frm))) if d.frm is not None else (),
             figures=tuple(r.figure for r in d.reads),
-            settings=tuple(settings),
         )
         self.projections.append(
             ProjectPlan(**{**plan.__dict__, "version": version_of(_project_hash(plan, self.indexes))})
@@ -2851,13 +2844,12 @@ class _Checker:
         # before, so a dial named there reached no fingerprint -- moving it
         # changed the tally with nothing noticing. Refused now rather than
         # collected, which closes the hole from the other side.
-        settings = sorted(
+        for path in sorted(
             {p for _, e, _ in values for p in _settings_in(e)}
             | _flag_settings(d.flags)
             | {p for c in d.counts for p in _condition_settings(c.when)}
             | {p for t in d.totals for p in _condition_settings(t.when)}
-        )
-        for path in settings:
+        ):
             raise CheckError(
                 f'summary {d.name} reads "{path}", which is a tenant dial. A summary '
                 "counts the rows a projection produced, so a threshold belongs on the "
@@ -2874,7 +2866,6 @@ class _Checker:
             totals=tuple((t.name, t.of, t.unit, t.when) for t in d.totals),
             values=tuple(values),
             flags=d.flags,
-            settings=tuple(settings),
         )
         self.summaries.append(
             SummarisePlan(

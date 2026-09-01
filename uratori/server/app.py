@@ -902,8 +902,15 @@ def _library_out(library: Library) -> LibraryOut:
     call (`declaration_prose`/`declaration_source`), so the HTTP door and the
     library door describe one library identically and cannot drift.
     """
+    from ..lang.ast import ByAge, IndexBy
     from ..lang.check import _index_fields
     from ..lang.source import declaration_prose, declaration_source
+
+    def _age_join(spec: IndexBy) -> set[str]:
+        """The owner record an age filter reads its threshold off, if any."""
+        if isinstance(spec, ByAge) and spec.through is not None:
+            return {f"{spec.through.kind}.{spec.through.path}"}
+        return set()
 
     def described(
         name: str,
@@ -924,7 +931,6 @@ def _library_out(library: Library) -> LibraryOut:
         indexes: list[str] | None = None,
         measures: list[str] | None = None,
         reads: list[str] | None = None,
-        settings: list[str] | None = None,
         band_reads: list[str] | None = None,
         statistics: list[str] | None = None,
         fields: list[str] | None = None,
@@ -952,7 +958,6 @@ def _library_out(library: Library) -> LibraryOut:
             indexes=indexes or [],
             measures=measures or [],
             reads=reads or [],
-            settings=settings or [],
             band_reads=band_reads or [],
             statistics=statistics or [],
             fields=fields or [],
@@ -1014,7 +1019,6 @@ def _library_out(library: Library) -> LibraryOut:
                 indexes=list(p.indexes),
                 measures=list(p.measures),
                 reads=list(p.reads),
-                settings=list(p.settings),
                 band_reads=list(p.band_reads),
             )
             for p in library.figures
@@ -1032,7 +1036,6 @@ def _library_out(library: Library) -> LibraryOut:
                 indexes=list(p.indexes),
                 measures=[p.live_measure] if p.live_measure else [],
                 reads=[p.source] if p.source else [],
-                settings=list(p.settings),
                 band_reads=list(p.band_reads),
                 statistics=[stat.fn for stat in p.calculate],
             )
@@ -1046,7 +1049,6 @@ def _library_out(library: Library) -> LibraryOut:
                 kind=p.kind,
                 indexes=list(p.indexes),
                 reads=list(p.figures),
-                settings=list(p.settings),
                 # For a joined field the path on OUR record is the join's
                 # linking field; the declared path is read off the other
                 # kind and travels in `through`. Serving the remote path
@@ -1067,7 +1069,6 @@ def _library_out(library: Library) -> LibraryOut:
                 declaration="summary",
                 version=p.version,
                 over=p.over,
-                settings=list(p.settings),
             )
             for p in library.summaries
         ],
@@ -1098,19 +1099,27 @@ def _library_out(library: Library) -> LibraryOut:
                     None,
                 ),
                 fields=[part.field for part in parts],
+                # Every record this grouping rests on besides the one it
+                # buckets: the identity hop, the calendar it cuts on, and an
+                # age filter's owner join. All three used to be dials, which
+                # a host could enumerate from the settings list; they are
+                # facts now, and this is where a host reading the declaration
+                # alone finds out what moving them would move. Leaving the
+                # calendar out was the last of them, and the comment here
+                # already claimed it was included.
                 through=sorted(
                     {
                         f"{part.through.kind}.{part.through.path}"
                         for part in parts
                         if part.through is not None
                     }
+                    | {
+                        f"{part.zone.kind}.{part.zone.field}"
+                        for part in parts
+                        if part.zone is not None
+                    }
+                    | _age_join(i.spec)
                 ),
-                # A grouping reads no dial at all now. Its calendar is a
-                # field on the subject's record and its age threshold a
-                # number or a field on the owner's, so what it rests on is
-                # *facts* -- reported as `through`, where a host reading the
-                # declaration alone will find it.
-                settings=[],
             )
             for i in library.indexes.values()
             for parts in [_index_fields(i.spec)]

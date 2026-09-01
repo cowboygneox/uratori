@@ -69,18 +69,15 @@ class Unavailable(BaseModel):
     because: Literal[
         "never-computed",
         "behind-deploy",
-        "setting-moved",
         "nothing-collected",
     ]
-    """Why there is no answer, in the four ways there can be no answer.
+    """Why there is no answer, in the three ways there can be no answer.
 
     - `never-computed` -- this tenant has never run this definition. A new
       board, or the window between a deploy and the next sync.
     - `behind-deploy` -- values exist at an older version of the definition. They
       are not shown, because a number computed by a definition that no longer
       exists is worse than a dash.
-    - `setting-moved` -- a dial the definition names has changed and the rebuild
-      has not finished. The stored values describe the old dial.
     - `nothing-collected` -- the definition ran and nothing it reads holds
       anything. A board with no source connected, rather than a team that merged
       nothing.
