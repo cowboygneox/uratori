@@ -806,14 +806,15 @@ Top level:
 
 `unit` is one of `count`, `duration`, `effort`, `share`, `days`, `level`,
 `moment`. The distinction that matters: `duration` is wall-clock and `effort`
-is working time. Both render in hours, so 28,800 seconds reads "8h" either
-way -- but they are not the same quantity, and the unit travels so a renderer
-never treats them as one. (An effort used to render as "1d" against a
-`tenant.hoursPerDay` dial. It was the last number on a screen a tenant could
-move from a form, and hours say the same thing without a reader having to
-find out whose working day the engine had in mind.)
+is working time. Both render in hours, so they agree at 28,800 seconds ("8h"
+either way) and part company above a day: 144,000 seconds is "1.7d" as a
+duration and "40.0h" as an effort. They are not the same quantity, and the
+unit travels so a renderer never treats them as one. (An effort used to render
+as "1d" against a `tenant.hoursPerDay` dial. It was the last number on a screen
+a tenant could move from a form, and hours say the same thing without a reader
+having to find out whose working day the engine had in mind.)
 
-### `state`, and the four ways an answer can be missing
+### `state`, and the three ways an answer can be missing
 
 `state` is a tagged union on `ok`:
 

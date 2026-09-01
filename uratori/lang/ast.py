@@ -434,12 +434,12 @@ construction. A field measure reads whatever the record carries, and the same
 integer means different things -- `estimateSeconds` is an amount of work,
 `reopens` is a tally.
 
-`effort` is not a synonym for `duration`. A duration is wall-clock: 28,800
-seconds is eight hours. Effort is *working* time, rendered against the tenant's
-working day, so the same 28,800 seconds is one day. Both renderings are right
-about their own quantity and one number cannot have both -- filing effort under
-duration would put "8h" on one screen beside "1d" on another, which is the
-disagreement this engine exists to end.
+`effort` is not a synonym for `duration`. A duration is wall-clock; effort is
+*working* time. Both render in hours, so they agree at eight and part company
+above a day: 144,000 seconds is "1.7d" as a duration and "40.0h" as an effort,
+because a working week is forty hours and nobody means "one and two-thirds
+days" by it. One number cannot be both, and filing effort under duration puts
+the two readings on two screens -- the disagreement this engine exists to end.
 """
 
 
@@ -476,9 +476,9 @@ class FieldMeasure:
     Still not arithmetic: one field, no expression. The unit is **required**
     rather than defaulted, and that is why this is a separate variant rather
     than an optional attribute. A default of `count` prints an estimate as
-    `144000`; a default of `effort` prints a tally of reopens as `5d`. Neither
-    throws, both render, and the wrong one is a plausible number in the wrong
-    scale.
+    `144000`; a default of `effort` prints a tally of five reopens as `0.0h`.
+    Neither throws, both render, and the wrong one is a plausible number in
+    the wrong scale.
     """
 
     name: str

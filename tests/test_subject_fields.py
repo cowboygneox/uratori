@@ -552,20 +552,19 @@ figure shop_courier.state:
 # ------------------------------------------------------- the docs' own example --
 
 
-def test_the_language_guides_first_example_compiles_as_written() -> None:
-    """The first thing a reader meets, held to the compiler.
-
-    A guide's opening example is the one piece of source most people will ever
-    copy, and it is the piece most likely to rot: it is prose to everybody
-    editing the language and code to everybody reading it. This is the cheapest
-    possible guard -- the block is lifted from the file and compiled.
-    """
+def test_the_language_guides_first_example_still_says_what_this_is_for() -> None:
+    """The whole guide compiles in tests/test_docs.py now. What that harness
+    cannot say is that the *opening* example is the one demonstrating this
+    feature -- and it is the piece most people will ever copy."""
     import pathlib
 
     guide = pathlib.Path(__file__).parent.parent / "docs" / "language.md"
     # The third fenced block: the two before it are the records, as JSON.
     block = guide.read_text().split("```", 3)[3].split("```")[0]
     lib = compile_source(block, Schema(kinds=frozenset()))
-    assert [f.name for f in lib.figures] == ["shop_courier.carrying"]
     plan = lib.figure("shop_courier.carrying")
     assert plan is not None and plan.band is not None
+    assert plan.band_fields == ("shop_courier.max_orders",), (
+        "the opening example stopped comparing against a field on the "
+        f"subject's record: {plan.band_fields}"
+    )

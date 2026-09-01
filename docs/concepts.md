@@ -76,7 +76,7 @@ takes. `GET /schema` answers it back with every absent list made explicit --
 `name_fields: {}` and friends -- so a diff against what you sent compares
 shapes, not omissions.)
 
-Four things live here, and each is a decision the host owns:
+Three things live here, and each is a decision the host owns:
 
 - **Kinds** are the closed set of record kinds a definition may name. Closed
   because kinds are compile-time: they are written into definitions and
@@ -199,9 +199,8 @@ they are plumbing, not numbers a reader meets.
   no storage key and no number's citation.
 
 Compilation is a real checker, not a parser with opinions kept to itself. A
-definition that names an unknown kind, reads a dial from a position the
-schema did not grant, or composes statistics into something no definition
-claims (a `sum` beside a `mean` is two numbers a reader can divide) is
+definition that names an unknown kind, reads a field the record does not
+declare, or composes statistics into something no definition claims (a `sum` beside a `mean` is two numbers a reader can divide) is
 refused, with a line number and the reason in the checker's own words. The
 full language, and the reasoning behind each refusal, is in
 [the definition language](language.md).
@@ -302,10 +301,9 @@ deliberately narrowed run that *disagrees* -- to prove the assertion can fail.
 Some situations rebuild a figure from all facts rather than incrementally:
 
 - **A cold pointer.** Each tenant carries a pointer per definition: which
-  version it has computed, under which settings fingerprint. After a deploy
-  ships a changed definition, or a dial moves, the pointer no longer matches,
-  and the next pass rebuilds that figure -- and only that figure -- from
-  scratch.
+  version it has computed. After a deploy ships a changed definition the
+  pointer no longer matches, and the next pass rebuilds that figure -- and
+  only that figure -- from scratch.
 - **A pass that observed a deletion runs full, whatever shape it had.** The
   warm path honours a deletion list, but the cold branch -- the ordinary
   state between a deploy and the next sync -- never reads it. A deletion
@@ -332,13 +330,13 @@ neither should depend on anyone remembering.
 ## Tenants
 
 A tenant is a pure data partition of one world. Facts, index memberships,
-computed values, pointers and settings are all keyed by tenant; the schema
-and the definitions are not. Two tenants running the same definition are
-running *the same definition* -- the content hash says so -- and what differs
-per tenant is only which version it has computed and what its dials are set
-to. There is no per-tenant code path anywhere, and no per-tenant
-configuration either, which is what makes "this tenant sees a different
-number" always answerable the same way: different facts.
+computed values and pointers are all keyed by tenant; the schema and the
+definitions are not. Two tenants running the same definition are running *the
+same definition* -- the content hash says so -- and what differs per tenant is
+only which version it has computed. There is no per-tenant code path anywhere,
+and since the dials went, no per-tenant configuration either -- which is what
+makes "this tenant sees a different number" always answerable the same way:
+different facts.
 
 ## No settings
 
@@ -396,10 +394,10 @@ records -- titles and links resolved through the schema's name and url fields
 fetch rather than a field on `Result`, because every row dragging its members
 along would make the common read pay for the rare check.
 
-### The four absences
+### The three absences
 
 `state` is a discriminated value: `ok`, or unavailable with one of exactly
-four reasons.
+three reasons.
 
 - **`never-computed`** -- this tenant has never run this definition. A new
   board, or the window between a deploy and the next sync.

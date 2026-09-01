@@ -1,0 +1,269 @@
+# Supporting declarations for the guide's examples.
+#
+# `docs/language.md` is written as a tour, so most of its blocks are
+# fragments: a figure shown to explain `depends` names a group that was
+# introduced three sections earlier, or one the guide never shows because it
+# is not what that section is about. Compiled alone, every one of those reads
+# as a broken example.
+#
+# `tests/test_docs.py` compiles this file, then every fenced block in the
+# guide on top of it, in document order. So the guide's examples are held to
+# the compiler -- which is how a flagship example went on banding against
+# tenant dials for a release after the dials were deleted -- without the
+# prose having to carry a working file's worth of scaffolding.
+#
+# Everything here is *scaffolding the guide assumes*. Anything the guide is
+# actually teaching belongs in the guide.
+
+# A person on the team, and the accounts they hold in other systems.
+fact team_person:
+    name name
+    name as text
+    many accounts:
+        account_id as text
+    display_name as text
+    timezone as text
+    wip_over as number
+    wip_warn as number
+    lead_time_target as number
+    review_queue_limit as number
+
+# Where records came from.
+fact data_connection:
+    name name
+    name as text
+
+# A change proposed against a repository.
+fact code_change:
+    name title
+    title as text
+    author_id as text
+    author_account_id as text
+    repo_id as text
+    source as text
+    connection_id as text
+    created_at as moment
+    merged_at as moment
+    updated_at as moment
+
+# A repository, and how long its changes may sit.
+fact code_repo:
+    name name
+    id as text
+    name as text
+    stale_days as number
+
+# One person's verdict on one change.
+fact code_review:
+    name ref
+    ref as text
+    change_id as text
+    reviewer_id as text
+    approved as flag
+    was_approved as flag
+
+# An outstanding request for a review.
+fact code_review_request:
+    name ref
+    ref as text
+    reviewer_id as text
+    requested_at as moment
+    answered_at as moment
+
+# A unit of work somebody is tracking.
+fact work_issue:
+    name key
+    key as text
+    assignee_id as text
+    assignee_account_id as text
+    container_id as text
+    status as text
+    estimate_seconds as number
+    active as flag
+    start_date as moment
+    status_changed_at as moment
+    updated_at as moment
+
+# What work items are gathered under.
+fact work_container:
+    name name
+    id as text
+    name as text
+    start_date as text
+
+# Somebody who carries orders.
+fact shop_courier:
+    name name
+    name as text
+    timezone as text
+    max_orders as number
+
+# One order, from pickup to doorstep.
+fact shop_order:
+    name ref
+    ref as text
+    courier_id as text
+    status as text
+    delivered_at as moment
+
+# A place work happens, and the calendar its days are cut on.
+fact site:
+    name name
+    name as text
+    timezone as text
+
+# One job at one site.
+fact job:
+    name ref
+    ref as text
+    site_id as text
+    started_at as moment
+    finished_at as moment
+
+# One change to one setting, at one site.
+fact setting_change:
+    name ref
+    ref as text
+    site_id as text
+    setting as text
+    value as number
+    set_at as moment
+    set_by as text
+
+# ---------------------------------------------------------------------------
+
+group work_issue.assigned_to from assignee_id
+
+filter work_issue.active where active == true
+
+filter work_issue.sized where estimate_seconds is set
+
+group code_change.by_author from author_id
+
+group code_change.authored_in from (author_account_id through team_person.accounts.account_id, connection_id)
+
+group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in team_person.timezone)
+
+filter code_change.open where merged_at is not set
+
+group code_review_request.asked_of from reviewer_id
+
+filter code_review_request.pending where answered_at is not set
+
+group job.by_month from (site_id, finished_at by month in site.timezone)
+
+group setting_change.by_month from (site_id, set_at by month in site.timezone)
+
+# How long one change stayed open.
+measure code_change.open_seconds = merged_at - created_at
+
+# How long a review request has been waiting.
+measure code_review_request.waiting_seconds = now - requested_at
+
+# How long one job took.
+measure job.length = finished_at - started_at
+
+# The lead time this person is aiming at, day by day.
+figure team_person.lead_time_goal bucketed:
+    display "{team_person} lead time target"
+    unit duration
+
+    depends:
+        merged = code_change.merged_by_day:{team_person}
+
+    calculate:
+        team_person.lead_time_target
+
+# How many reviews this person should have waiting at once.
+figure team_person.queue_limit:
+    display "{team_person} queue limit"
+    unit count
+
+    depends:
+        mine = work_issue.assigned_to:{team_person}
+
+    calculate:
+        team_person.review_queue_limit
+
+# In progress -- how many work items this person has actively underway.
+figure team_person.wip:
+    display "{team_person}'s work in progress"
+
+    depends:
+        mine = work_issue.assigned_to:{team_person} & work_issue.active
+
+    calculate:
+        count(mine)
+
+    band:
+        when value >= team_person.wip_over then "over"
+        when value >= team_person.wip_warn then "warn"
+        otherwise "ok"
+
+# Open changes per person per source, the split the rollup adds up.
+figure team_person.open_mrs_by_source across data_connection:
+    display "{team_person} open in {data_connection}"
+
+    depends:
+        mine = code_change.authored_in:{team_person}
+
+    calculate:
+        count(mine)
+
+# How long this person's changes take to merge, month by month.
+figure team_person.time_to_merge bucketed:
+    display "{team_person} time to merge"
+
+    depends:
+        merged = code_change.merged_by_day:{team_person}
+
+    calculate:
+        mean(code_change.open_seconds over merged)
+
+# Time to merge per person per day.
+figure team_person.merge_days bucketed:
+    display "{team_person} merges that day"
+
+    depends:
+        merged = code_change.merged_by_day:{team_person}
+
+    calculate:
+        list(code_change.open_seconds over merged)
+
+# How long changes take to merge, over the window.
+reading team_person.to_merge(range):
+    display "{team_person} time to merge"
+
+    depends:
+        days = team_person.merge_days in range
+
+    calculate:
+        median(days)
+
+# The monthly target in force at this site.
+figure site.target_month bucketed:
+    display "{site} target that month"
+    unit duration
+
+    depends:
+        sets = setting_change.by_month:{site}
+
+    calculate:
+        latest(setting_change.value over sets) carried forward
+
+# One row per work item.
+projection work_issue.item:
+    field:
+        key = key as text
+        status_changed = status_changed_at as date
+        active = active as flag
+    value:
+        age_days in days = days from status_changed to now
+        stuck in count =
+            when active == 0 then 0
+            when age_days >= 14 then 1
+            otherwise 0
+
+# How many work items are on the board, over the rows the projection shows.
+summarise work_issue.backlog over work_issue.item:
+    count items

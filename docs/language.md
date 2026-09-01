@@ -126,8 +126,8 @@ The pieces:
   run of `#` lines directly above a declaration is attached by the compile as
   that declaration's explanation -- the customer-facing definition of the
   number, a product surface rather than a code comment, served wherever the
-  number is cited. Every figure, reading, projection and summarise is refused
-  without one, in these words: *"figure shop_courier.carrying has no
+  number is cited. Every `fact`, `figure`, `reading`, `projection` and
+  `summarise` is refused without one, in these words: *"figure shop_courier.carrying has no
   explanation. Write `#` comment lines directly above the declaration -- they
   are the customer-facing definition, rendered wherever the number is cited,
   and a figure nobody can read is the thing this language exists to
@@ -157,15 +157,17 @@ The pieces:
 - **Strings** are double-quoted, on one line, with `\` escaping the next
   character.
 - **Numbers** are unsigned literals like `3` or `0.25`. There are no negative
-  literals; a negative threshold is a figure that holds one, and a negative
-  value comes out of subtraction.
+  literals, because `-` is already two operators here -- subtraction and set
+  difference -- and `mine -3` would be a difference or a literal depending on
+  a space. A negative value comes out of a subtraction; a negative threshold
+  is written the other way up (`when value + 100 < 0`).
 - **Names** may contain dots, and the dot is meaningful. Every declaration is
   named `<fact kind>.<name>` -- `shop_courier.carrying` -- because a citation
   is `name@version` and the prefix says what the definition is about. Inside
-  an expression, a *dotted* name is a settings path, a group or a filter,
-  and a *bare* name is something the definition bound above; nothing else can produce
-  either shape, so a typo is reported with the list of what was actually
-  bound.
+  an expression, a *dotted* name is a group, a filter, another figure, or a
+  field on the subject's own record, and a *bare* name is something the
+  definition bound above; nothing else can produce either shape, so a typo is
+  reported with the list of what was actually bound.
 
 **One namespace covers all nine declaration kinds.** Two definitions sharing a
 name would make a citation ambiguous, so the checker refuses the second
@@ -600,12 +602,12 @@ construction, so it needs no unit.
 what that number *is*: `in effort` for seconds of working time, `in count`
 for a tally. Required rather than defaulted, because the same integer means
 different things -- a default of `count` prints an estimate as `144000`, a
-default of `effort` prints a tally of reopens as `5d`, and neither throws.
-Note that **`effort` is not a synonym for `duration`**: a duration is
-wall-clock, so 28,800 seconds is eight hours; effort is working time,
-rendered against the tenant's working day, so the same 28,800 seconds is one
-day. Both renderings are right about their own quantity and one number cannot
-have both. A field holding several numbers, or a numeric *string*, reads as
+default of `effort` prints a tally of five reopens as `0.0h`, and neither
+throws. Note that **`effort` is not a synonym for `duration`**: a duration is
+wall-clock and effort is working time. Both render in hours, so they agree at
+eight and part company above a day -- 144,000 seconds is `1.7d` as a duration
+and `40.0h` as an effort, because a working week is forty hours and nobody
+means "one and two-thirds days" by it. One number cannot be both. A field holding several numbers, or a numeric *string*, reads as
 nothing -- first-wins would answer with whichever value the provider happened
 to order first.
 
@@ -640,8 +642,8 @@ figure team_person.wip:
         count(mine)
 
     band:
-        when value >= thresholds.wip.over then "over"
-        when value >= thresholds.wip.warn then "warn"
+        when value >= team_person.wip_over then "over"
+        when value >= team_person.wip_warn then "warn"
         otherwise "ok"
 ```
 
@@ -759,8 +761,8 @@ size, a measure over a set, a bound figure, another figure, a literal.
 
 ```
     calculate:
-        when wip >= thresholds.wip.over then "over"
-        when wip >= thresholds.wip.warn then "warn"
+        when wip >= team_person.wip_over then "over"
+        when wip >= team_person.wip_warn then "warn"
         otherwise "ok"
 ```
 
@@ -1359,7 +1361,7 @@ group shop_order.drops_by_month   from (courier_id, delivered_at by month in sho
 group shop_order.drops_by_quarter from (courier_id, delivered_at by quarter in shop_courier.timezone)
 
 # Deliveries per courier per day.
-figure shop_courier.daily_drops:
+figure shop_courier.daily_drops bucketed:
     display "{shop_courier} deliveries that day"
     depends:
         done = shop_order.drops_by_day:{shop_courier}
@@ -1376,7 +1378,7 @@ figure shop_courier.monthly_drops bucketed:
         count(done)
 
 # Deliveries per courier per calendar quarter.
-figure shop_courier.quarterly_drops:
+figure shop_courier.quarterly_drops bucketed:
     display "{shop_courier} deliveries that quarter"
     depends:
         done = shop_order.drops_by_quarter:{shop_courier}
@@ -1611,7 +1613,7 @@ projection work_issue.item:
         age_days in days = days from status_changed to now
         stuck in count =
             when active == 0 then 0
-            when age_days >= thresholds.longWipDays then 1
+            when age_days >= 14 then 1
             otherwise 0
 
     flag issue-long-wip when stuck == 1:
@@ -1760,9 +1762,9 @@ rows earned a flag with nothing in the row to say so.
 instants, either of which may be `now`. It is the clock, and the rule the
 clock has always had is that a *stored* value may not read one; a projection
 stores nothing, so the question does not arise. Days rather than seconds
-because every calendar dial is in days, and the first definition that forgot
-to divide by 86,400 would compare seconds against days and read as never
-crossing. Signed, so "overdue by three" and "three days left" are one
+because a written threshold about an age is written in days -- "fourteen" is
+what somebody says -- and the first definition that forgot to divide by 86,400
+would compare seconds against days and read as never crossing. Signed, so "overdue by three" and "three days left" are one
 expression. Both ends must be moments -- a `date` field, a `moment` read, or
 `now`.
 
@@ -2119,7 +2121,7 @@ What *is* hashed, and why each one had to be:
 | the full spec of every measure it names | the same integer reading "5d" or "5" is a scale change |
 | the calculation, ladders and all | it is the number |
 | `across` | one value per subject becomes one per pair; the stored values mean something else |
-| a figure's `band:` ladder, thresholds and all | the band is one of the answers the figure gives -- and it costs nothing to move, since no value is stored under it. A named figure hashes as a figure, distinctly from a settings path of the same spelling, so the two can never be swapped under a version claiming nothing moved |
+| a figure's `band:` ladder, thresholds and all | the band is one of the answers the figure gives -- and it costs nothing to move, since no value is stored under it. A named figure hashes as a figure, distinctly from a subject-field read of the same spelling, so the two can never be swapped under a version claiming nothing moved |
 | a rollup's **source version** | redefine the parts and the total must rebuild, or it reads a number derived from a definition that no longer exists |
 | a reading's statistics and `requires` floor, written or defaulted | a floor applied at read time would let two engines render one version differently |
 | a reading's band ladder and its `on` (unless the default mean) | the band is the verdict, and a reading that starts wording it differently is a different definition |
@@ -2258,15 +2260,19 @@ The ones most worth recognising, in the checker's own words:
 - *"summary ... binds 'x', which is already a value of ..."* / *"Only a
   number may be summed"* / *"...reads 'x', which nothing binds"* -- the
   summary's namespace and typing rules.
-- *"...is not a setting a group may name. Those are: ..."* -- the one
-  surviving settings list, enforced at the position that pays its cost.
+- *"...reads its calendar from "x", which is not a fact kind"* -- a calendar
+  is a field on the subject's own record, so it names a kind and a field.
+- *"...is fanned out by P, but G reads its calendar from Q.field"* -- the
+  same rule at the figure, which is the only place that knows which kind the
+  group's subject keys belong to.
 - *"... is a dotted name, so it reads a tenant dial"* on an age filter --
-  refused at lex time, with both answers: read the threshold off the record's
-  owner, or write the number of days.
-- *"...band compares against "x", which is a tenant dial"* -- a threshold
-  outside the fact stream is the one number on a card nothing can cite. The
-  refusal carries the rewrite, because an author staring at a definition that
-  worked yesterday needs to be told what to write instead.
+  with both answers: read the threshold off the record's owner, or write the
+  number of days.
+- *"...band compares against "x", which is not a figure declared before it"*
+  (a reading says *"which is not a figure"*) -- a threshold outside the fact
+  stream is the one number on a card nothing can cite. The refusal carries
+  the rewrite, because an author staring at a definition that worked
+  yesterday needs to be told what to write instead.
 - *"...band compares against F, which holds one value per day where this
   figure holds one per month"* -- a band and the number it judges share a
   bucketing. Left to compile, the two subject keys never meet and every row
@@ -2277,8 +2283,8 @@ The ones most worth recognising, in the checker's own words:
 - *"...band compares against F bare, and it holds one value per month"* --
   name the coordinate: `F:{bucket}`.
 - *"a band is a ladder now, not a direction and a dial"* -- the retired
-  `band low against <dial> in minutes` clause, refused at lex time with the
-  rewrite.
+  `band low against <dial> in minutes` clause, refused by the parser with the
+  rewrite, on a figure and on a reading alike.
 - *"bundle ... names X as a figure, but it is a projection"* -- a member is
   written under its own keyword, so what travels is never a surprise.
 - *"bundle ... names X, which is time-keyed... declare a reading over it"* /
@@ -2313,6 +2319,6 @@ construct nobody has checked.
 | a unit on a fact field | what a number means is the measure's claim; a fact is structural, and grams filed as a `count` would compile |
 | a list of scalars in a fact | no construct can read one -- a predicate cannot test membership -- and a declared-but-unreadable field is a construct nobody has checked |
 | `work_hours` as a threshold unit | as shipped it was a synonym for `hours`; doing it honestly is a working calendar |
-| negative literals | a negative threshold is a dial; a negative value is a subtraction |
+| negative literals | `-` already means subtraction *and* set difference, so `mine -3` would parse two ways depending on a space. A negative value comes out of a subtraction; a negative threshold is written the other way up |
 | `:{bucket - 1}` and other offsets | an answer needing a bucket outside the population in view cannot be checked against the response that carries it; the change between adjacent buckets is `delta`, where the range bounds it |
 | a unit inherited from a fact field | the fact layer is structural, so there is nothing there to inherit; a declared-field read names its unit because nothing can derive it |

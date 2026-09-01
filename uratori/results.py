@@ -40,10 +40,15 @@ from pydantic import BaseModel, Field
 Unit: TypeAlias = Literal["count", "duration", "effort", "share", "days", "level", "moment"]
 """What a value *is*, so a renderer never guesses.
 
-`duration` is wall-clock and `effort` is working time -- the same 28,800 seconds
-is "8h" under one and "1d" under the other, and both are right about their own
-quantity. Filing one under the other is the disagreement this engine exists to
-end.
+`duration` is wall-clock and `effort` is working time. Both render in hours,
+so they part company as the number grows: 144,000 seconds is "1.7d" as a
+duration and "40.0h" as an effort, because forty hours of work is a week and
+nobody means "one and two-thirds days" by it. They are different quantities,
+and the unit travels so a renderer never treats them as one.
+
+(Effort used to render against a working-day dial, so 28,800 seconds read "1d".
+Hours say the same thing without a reader having to find out whose working day
+the engine had in mind.)
 """
 
 Level: TypeAlias = str

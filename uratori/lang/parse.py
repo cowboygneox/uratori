@@ -917,7 +917,22 @@ class _Parser:
         only binding in scope is `value`, this figure's own answer, and every
         rung must produce a word.
         """
+        line = self._peek().line
         self._keyword("band")
+        if not self._at_op(":"):
+            # The retired `band low against <dial> in minutes`, on the figure
+            # side. The reading's parser has said this since the clause went;
+            # here the author got `expected ":", got "low"`, which is the bare
+            # failure that message exists to prevent -- and the error
+            # catalogue in docs/language.md claimed otherwise.
+            raise self._error(
+                'a band is a ladder now, not a direction and a dial: write `band:` and '
+                'an indented `when ... then "word"` ladder. The comparison operator '
+                "carries the direction, and the threshold is a fact -- a figure, or a "
+                "field on the subject's own record -- rather than a tenant dial that "
+                "nothing on the screen could cite.",
+                line,
+            )
         self._punct(":")
         self._end_of_line()
         self._expect("indent", "an indented block after band")
