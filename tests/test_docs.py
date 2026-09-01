@@ -93,7 +93,7 @@ def test_every_fig_block_in_the_guide_compiles(line: int, body: str) -> None:
     )
     try:
         compile_source(preamble + "\n" + body, WORLD)
-    except Exception as refusal:  # noqa: BLE001 - the message is the report
+    except Exception as refusal:
         pytest.fail(
             f"docs/language.md:{line} does not compile:\n  {refusal}\n\n"
             "Either the example is wrong, or the scaffolding it assumes is "
