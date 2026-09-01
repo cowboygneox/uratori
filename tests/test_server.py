@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -1244,7 +1244,10 @@ async def test_an_unanchored_reading_still_ends_today(server: Server) -> None:
     """The control: `at` absent means now, exactly as before the anchor
     existed. The June rides sit outside a window ending today, so the honest
     unanchored answer is the absence machinery -- no subjects, a floor that
-    names what fell short -- rather than June's mean served as current."""
+    names what fell short -- rather than June's mean served as current.
+
+    Today is the board's today, not UTC's: every courier here keeps the same
+    calendar, so the window that reports nobody is cut on it too."""
     await _teach_rides(server.http)
 
     got = await server.http.get(
@@ -1255,11 +1258,19 @@ async def test_an_unanchored_reading_still_ends_today(server: Server) -> None:
     assert result["state"]["ok"] is True
 
     # The empty subject is what somebody with nothing looks like, and there is
-    # no record to read a calendar off -- so its window is cut in UTC and says
-    # so, rather than borrowing a calendar from whoever happens to exist.
-    today = datetime.now(tz=UTC).date().isoformat()
+    # no record to read a calendar off -- but this board agrees on one, so that
+    # is its answer too, and "today" means today there.
+    #
+    # The zone is asserted outright because `to` alone cannot carry this. UTC
+    # and Kiritimati share a date for ten hours of every day, so a window cut
+    # in the wrong one of them agrees with the right one most of the time: the
+    # older form of this test asserted UTC, went on passing after the board's
+    # calendar started reaching the empty row, and only failed once the suite
+    # happened to run inside the fourteen-hour window where they differ.
+    today = datetime.now(tz=ZoneInfo(RIDES_ZONE)).date().isoformat()
     assert result["subjects"] == []
     [window] = result["empty"]["windows"]
+    assert window["zone"] == RIDES_ZONE
     assert window["to"] == today
     assert window["mean"] is None
     assert window["buckets_covered"] == 0

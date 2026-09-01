@@ -211,6 +211,13 @@ async def test_a_window_covers_each_subjects_own_dates() -> None:
         "each window must say whose calendar it was cut on, or a reader "
         "comparing two rows cannot tell they cover different dates"
     )
+    # The other half of the rule the empty row follows. Where the board agrees
+    # on one calendar the empty row is cut on it too, because bounds that
+    # disagreed with every row beside it would be the wrong kind of honest.
+    # There is no such calendar here, so it falls back to UTC and says UTC --
+    # rather than borrowing whichever of the two sorted first.
+    assert served.empty is not None and served.empty.windows
+    assert served.empty.windows[0].zone is None
 
 
 async def test_a_courier_whose_calendar_is_not_a_calendar_is_in_no_bucket() -> None:
