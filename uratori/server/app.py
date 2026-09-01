@@ -1126,7 +1126,15 @@ def _library_out(library: Library) -> LibraryOut:
                     | {
                         f"{part.zone.kind}.{part.zone.field}"
                         for part in parts
-                        if part.zone is not None
+                        # A calendar written in the definition (`in "UTC"`)
+                        # resolves through no record, and `kind` is None for
+                        # exactly that case. Formatting it anyway produced the
+                        # literal string "None.None" -- a host's drift guard
+                        # reads this list as fact kinds it must carry, and
+                        # cannot tell that from a definition naming a kind the
+                        # host retired. Nothing to resolve is an empty set, not
+                        # a placeholder.
+                        if part.zone is not None and part.zone.kind is not None
                     }
                     | _age_join(i.spec)
                 ),

@@ -950,6 +950,7 @@ async def test_the_described_library_covers_reading_projection_and_summary(
         COURIER_SOURCE
         + """
 group shop_order.delivered_by_day from (courier_id, delivered_at by day in shop_courier.timezone)
+group shop_order.delivered_by_week from (courier_id, delivered_at by week in "UTC")
 filter shop_order.stale where picked_up_at older than 5 days
 filter shop_review.signed_off keyed as shop_order where approved == true
 
@@ -1073,6 +1074,20 @@ summarise shop_order.flow over shop_order.board:
         "reading the declaration alone cannot see what cuts these buckets"
     )
     assert by_day["grain"] == "day", "the declaration that carries the truncation says so"
+
+    # A calendar written in the definition resolves through **no record**, and
+    # saying otherwise is worse than saying nothing: a host's own drift guard
+    # reads this list as "kinds my facts must carry", and the placeholder it
+    # used to serve -- built by formatting two `None`s -- named a fact kind
+    # called "None". A guard cannot tell that from a definition naming a kind
+    # the host has retired, so the wire alarmed about a record nobody could
+    # ever collect.
+    by_week = {d["name"]: d for d in body["indexes"]}["shop_order.delivered_by_week"]
+    assert by_week["grain"] == "week"
+    assert by_week["through"] == [], (
+        "a written calendar is not a record to resolve through; the reader can "
+        "see it in the source, and moving it forks the version"
+    )
 
     keyed = {d["name"]: d for d in body["indexes"]}["shop_review.signed_off"]
     assert keyed["kind"] == "shop_review"
