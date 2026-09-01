@@ -26,6 +26,7 @@ from ..windows import (
     window_token,
 )
 from .ast import (
+    SECONDS_PER,
     Arith,
     BucketAll,
     BucketScope,
@@ -903,7 +904,11 @@ class _Checker:
             if isinstance(e, Setting):
                 if _find(self.figures, e.path) is None:
                     field = self._subject_field(
-                        f"figure {d.name}'s band", e.path, scope, e.line or d.line
+                        f"figure {d.name}'s band",
+                        e.path,
+                        scope,
+                        e.line or d.line,
+                        e.scale,
                     )
                     if field is not None:
                         return field
@@ -932,7 +937,7 @@ class _Checker:
                 return replace(e, left=resolve(e.left), right=resolve(e.right))
             return e
 
-        resolved = resolve(band)
+        resolved = _scaled(resolve(band), unit, f"figure {d.name}")
         assert isinstance(resolved, Ladder)
         fields = tuple(
             sorted(
@@ -1350,7 +1355,7 @@ class _Checker:
         return source
 
     def _subject_field(
-        self, owner: str, name: str, scope: str, line: int
+        self, owner: str, name: str, scope: str, line: int, scale: str | None = None
     ) -> SubjectField | None:
         """`shop_courier.max_orders`, where the figure is scoped to couriers.
 
@@ -1396,7 +1401,7 @@ class _Checker:
                 "first-wins would be a fabrication about the wrong element.",
                 line,
             )
-        return SubjectField(kind=kind, field=field, line=line)
+        return SubjectField(kind=kind, field=field, line=line, scale=scale)
 
     def _resolve_figure_reads(
         self,
@@ -2515,7 +2520,13 @@ class _Checker:
                 return replace(e, left=resolve(e.left), right=resolve(e.right))
             return e
 
-        resolved = resolve(band.ladder)
+        # The reading's own unit is the figure it windows -- a window over
+        # durations answers a duration -- so a literal in its ladder needs the
+        # same scale a figure's does. `count` is the one statistic that
+        # changes the quantity: how many buckets held a value is a tally
+        # whatever the buckets held.
+        answered = "count" if wanted == "count" else (source.unit if source else "count")
+        resolved = _scaled(resolve(band.ladder), answered, f"reading {d.name}")
         assert isinstance(resolved, Ladder)
         return (resolved, wanted, tuple(sorted(reads)))
 
@@ -3834,3 +3845,92 @@ def _project_hash(plan: ProjectPlan, indexes: dict[str, CompiledIndex]) -> objec
 
 
 __all__ = ["CheckError", "WorldConflict", "compile_source"]
+
+
+_TIMED_UNITS = frozenset({"duration", "effort"})
+
+
+def _scaled(e: CalcExpr, unit: FigureUnit | None, owner: str) -> CalcExpr:
+    """Every literal in a ladder, converted to what the figure stores.
+
+    A figure whose value is a span of time stores seconds, and a threshold
+    written against it has to say which scale it was written in -- `561600`
+    is six and a half days and nobody reads it as one. The scale is converted
+    here rather than carried into the plan so the evaluator compares two
+    numbers in one unit and the version hash records the seconds, which is
+    what the comparison actually is.
+
+    Refused on any other unit, by the rule the whole language follows:
+    declare what a reader downstream would otherwise get silently wrong,
+    never what the declaration already says. A count of deliveries is a
+    tally, and `3 days` beside it is a second claim about what the number
+    measures, disagreeing with the calculation that produced it.
+    """
+    timed = unit in _TIMED_UNITS
+
+    def walk(node: CalcExpr) -> CalcExpr:
+        if isinstance(node, SubjectField):
+            if node.scale is not None and not timed:
+                raise CheckError(
+                    f"{owner}'s band compares against {node.kind}.{node.field} in "
+                    f"{node.scale}, and the figure answers a {unit or 'level'}. A "
+                    "scale says what a span of time is measured in, and this number "
+                    "is not one.",
+                    node.line,
+                )
+            if node.scale is None and timed:
+                raise CheckError(
+                    f"{owner} answers a {unit}, which is stored in seconds, and its "
+                    f"band compares against {node.kind}.{node.field} with no scale. A "
+                    "field is structural -- the record says a number is there and "
+                    f"nothing about what it measures -- so write "
+                    f"`{node.kind}.{node.field} minutes` (or seconds, hours, days, "
+                    "weeks). Read as seconds when it meant minutes, the comparison "
+                    "runs and is wrong by sixty for ever.",
+                    node.line,
+                )
+            return node
+        if isinstance(node, Number):
+            if node.scale is not None and not timed:
+                raise CheckError(
+                    f"{owner}'s band compares against {node.value:.10g} {node.scale}, and "
+                    f"the figure answers a {unit or 'level'}. A scale says what a span "
+                    "of time is measured in, and this number is not one -- the "
+                    "calculation already says what it is.",
+                    node.line,
+                )
+            if node.scale is None and timed and node.value != 0:
+                written = f"{node.value:.10g}"
+                days = node.value / SECONDS_PER["days"]
+                raise CheckError(
+                    f"{owner} answers a {unit}, which is stored in seconds, and its "
+                    f"band compares against {written} with no scale. Read as seconds "
+                    f"that is {days:.10g} days -- write it that way "
+                    f"(`{days:.10g} days`, or seconds, minutes, hours, weeks). "
+                    "561600 is six and a half days and nobody reads it as one.",
+                    node.line,
+                )
+            if node.scale is not None:
+                return replace(
+                    node, value=node.value * SECONDS_PER[node.scale], scale=None
+                )
+            return node
+        if isinstance(node, Ladder):
+            return replace(
+                node,
+                rungs=tuple(
+                    replace(
+                        r,
+                        left=walk(r.left),
+                        then=walk(r.then),
+                        right=walk(r.right) if r.right is not None else None,
+                    )
+                    for r in node.rungs
+                ),
+                otherwise=walk(node.otherwise),
+            )
+        if isinstance(node, (Arith, Pick)):
+            return replace(node, left=walk(node.left), right=walk(node.right))
+        return node
+
+    return walk(e)

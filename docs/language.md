@@ -1584,14 +1584,34 @@ that figure's buckets, so a goal cut a different way has labels the window
 never selects. A **live** reading has no window at all, so its threshold is
 one value per subject and a sequenced figure is refused there.
 
-There is no direction and no unit. The direction was a second vocabulary for
-what the comparison operator already says. The unit existed because a dial is
-a bare number that does not know what it measures, so the definition had to
-say whether 5 meant minutes or days -- and getting it wrong banded every row
-good for ever at 1,440 times the intended threshold. A figure carries its own
-unit and the checker compares the two, so the mistake is unwritable rather
-than refused. What is hashed is the ladder itself, and `on` unless it is the
-default.
+There is no direction: it was a second vocabulary for what the comparison
+operator already says.
+
+**A threshold about a span of time says what scale it is written in.** Where
+the figure being judged answers a `duration` or an `effort` -- both stored in
+seconds -- a rung writes `when value >= 6.5 days`, or, reading a record,
+`when value >= shop_courier.max_minutes minutes`. The scales are `seconds`,
+`minutes`, `hours`, `days` and `weeks`, each a plain multiple of a second.
+
+This is the one clause the retired `band low against <dial> in minutes` had
+that was worth keeping, and it was removed with the dial on the argument that
+a figure carries its own unit for the checker to compare. That is true when
+the threshold *is* a figure, and false of both roads that replaced the dial
+for the common case: a fact field is structural by design (`max_minutes as
+number` claims a shape and never a meaning) and a literal claims nothing at
+all. So a duration in seconds could be judged against a number meaning
+minutes and be wrong by sixty for ever -- the dial's exact failure, on the
+path this guide recommends.
+
+The scale is refused on any other unit, by the rule the rest of the language
+follows: declare what a reader downstream would otherwise get silently wrong,
+never what the declaration already says. A count of deliveries is a tally,
+and `3 days` beside it is a second claim about what the number measures. It
+is also a *spelling* rather than a semantic -- folded to seconds before
+anything is hashed -- so `168 hours` and `7 days` are one definition with one
+version.
+
+What is hashed is the ladder itself, and `on` unless it is the default.
 
 ---
 
@@ -2285,6 +2305,11 @@ The ones most worth recognising, in the checker's own words:
 - *"a band is a ladder now, not a direction and a dial"* -- the retired
   `band low against <dial> in minutes` clause, refused by the parser with the
   rewrite, on a figure and on a reading alike.
+- *"...answers a duration, which is stored in seconds, and its band compares
+  against 561600 with no scale"* -- and the message does the division, because
+  the whole point is that nobody reads 561600 as six and a half days.
+- *"...band compares against 3 days, and the figure answers a count"* -- the
+  same rule from the other side.
 - *"bundle ... names X as a figure, but it is a projection"* -- a member is
   written under its own keyword, so what travels is never a surprise.
 - *"bundle ... names X, which is time-keyed... declare a reading over it"* /
@@ -2318,7 +2343,7 @@ construct nobody has checked.
 | `key of <kind>` on a fact field | the correlation is the group's `through` claim; on the fact it would be declared twice, and nothing in a record marks a field as special |
 | a unit on a fact field | what a number means is the measure's claim; a fact is structural, and grams filed as a `count` would compile |
 | a list of scalars in a fact | no construct can read one -- a predicate cannot test membership -- and a declared-but-unreadable field is a construct nobody has checked |
-| `work_hours` as a threshold unit | as shipped it was a synonym for `hours`; doing it honestly is a working calendar |
+| `work_hours` as a scale | as shipped it was a synonym for `hours` -- 3,600 seconds, with a docstring claiming a working day mattered and nothing that made it. Doing it honestly is a working calendar, and doing it dishonestly is a dial wearing a keyword |
 | negative literals | `-` already means subtraction *and* set difference, so `mine -3` would parse two ways depending on a space. A negative value comes out of a subtraction; a negative threshold is written the other way up |
 | `:{bucket - 1}` and other offsets | an answer needing a bucket outside the population in view cannot be checked against the response that carries it; the change between adjacent buckets is `delta`, where the range bounds it |
 | a unit inherited from a fact field | the fact layer is structural, so there is nothing there to inherit; a declared-field read names its unit because nothing can derive it |

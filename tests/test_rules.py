@@ -499,8 +499,8 @@ figure team_person.volume bucketed:
 reading team_person.speed(range):
     display "x"
     band:
-        when value > 1814400 then "over"
-        when value > 604800 then "warn"
+        when value > 21 days then "over"
+        when value > 7 days then "warn"
         otherwise "ok"
     depends:
         m = team_person.per_day in range
@@ -675,7 +675,7 @@ figure team_person.spans bucketed:
 reading team_person.worst_only(range):
     display "x"
     band:
-        when value > 604800 then "over"
+        when value > 7 days then "over"
         otherwise "ok"
     depends:
         m = team_person.spans in range

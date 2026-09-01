@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import assert_never
 
 from ..lang.ast import (
+    SECONDS_PER,
     Arith,
     BucketAll,
     BucketScope,
@@ -593,7 +594,14 @@ def _band_operand(e: CalcExpr, value: Value, thresholds: Mapping[str, Value]) ->
         # Same rule one route along: a record with nothing in that field is a
         # subject nobody has set a limit for, and a nought would sit
         # comfortably under every comparison.
-        return thresholds.get(f"{e.kind}.{e.field}")
+        held = thresholds.get(f"{e.kind}.{e.field}")
+        if e.scale is None or not isinstance(held, (int, float)):
+            return held
+        # The record says a number and nothing about what it measures, so the
+        # definition said -- and a figure about a span of time stores seconds.
+        # A literal's scale is folded at compile time; a field's cannot be,
+        # because the number is not there yet.
+        return held * SECONDS_PER[e.scale]
     return None
 
 

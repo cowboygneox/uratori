@@ -1154,7 +1154,7 @@ def test_a_band_may_only_colour_a_statistic_the_reading_calculates() -> None:
 reading team_person.to_merge(range):
     display "x"
     band on median:
-        when value > 604800 then "over"
+        when value > 7 days then "over"
         otherwise "ok"
     depends:
         m = team_person.time_to_merge in range
@@ -1803,10 +1803,19 @@ reading team_person.to_merge(range):
     calculate:
         mean(m)
 """
-    a = compile_ok(body.replace("THRESHOLD", "604800")).reading("team_person.to_merge")
-    b = compile_ok(body.replace("THRESHOLD", "86400")).reading("team_person.to_merge")
+    a = compile_ok(body.replace("THRESHOLD", "7 days")).reading("team_person.to_merge")
+    b = compile_ok(body.replace("THRESHOLD", "1 days")).reading("team_person.to_merge")
     assert a is not None and b is not None
     assert a.version != b.version
+
+    # And the scale is a spelling, not a semantic: the same span written two
+    # ways is the same threshold, so the hash must not fork on how it was
+    # said. (It cannot -- the scale is folded to seconds before hashing --
+    # and a reader has to be able to rely on that to write `168 hours`.)
+    same = compile_ok(body.replace("THRESHOLD", "168 hours")).reading(
+        "team_person.to_merge"
+    )
+    assert same is not None and same.version == a.version
 
 
 def test_the_default_statistic_written_out_is_the_same_definition() -> None:
@@ -1818,7 +1827,7 @@ def test_the_default_statistic_written_out_is_the_same_definition() -> None:
 reading team_person.to_merge(range):
     display "x"
     band ON:
-        when value > 604800 then "over"
+        when value > 7 days then "over"
         otherwise "ok"
     depends:
         m = team_person.time_to_merge in range

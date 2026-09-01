@@ -888,3 +888,146 @@ figure shop_courier.mixed:
 ''',
         "shop_courier.by_status",
     )
+
+
+# ------------------------------------- a threshold about a span of time --
+#
+# The retired clause was `band low against <dial> in minutes`, and the unit
+# went with it on the argument that "a figure carries its own unit and the
+# checker compares the two, so the mistake is unwritable rather than refused".
+#
+# True of a figure and false of everything else a threshold can now be. A fact
+# field is structural by design -- `max_minutes as number` claims a shape and
+# never a meaning -- and a literal claims nothing at all. So on the two roads
+# the guide actually recommends, a duration in seconds could be judged against
+# a number meaning minutes, and be wrong by sixty for ever. That is the exact
+# failure the retired clause let an author avoid.
+
+TIMED = '''
+# How long this courier's deliveries take, and the line they may not cross.
+measure shop_order.ride = delivered_at - delivered_at
+
+# The typical ride, per courier.
+figure shop_courier.ride bucketed:
+    display "{shop_courier} typical ride"
+
+    depends:
+        done = shop_order.dropped_by_month:{shop_courier}
+
+    calculate:
+        mean(shop_order.ride over done)
+'''
+
+
+def test_a_duration_band_says_what_scale_its_number_is_in() -> None:
+    """`561600` is six and a half days, and nobody reads it as one. The
+    showcase's only duration band was written exactly that way, in a language
+    whose stated purpose is that somebody who does not write code can say
+    whether a definition is right."""
+    refuses(
+        TIMED + '''
+# Rides against a line nobody can read.
+figure shop_courier.ride_band bucketed:
+    display "x"
+
+    depends:
+        done = shop_order.dropped_by_month:{shop_courier}
+
+    calculate:
+        mean(shop_order.ride over done)
+
+    band:
+        when value >= 561600 then "slow"
+        otherwise "ok"
+''',
+        "561600",
+        "duration",
+    )
+
+
+async def test_a_duration_band_reads_a_literal_with_its_scale() -> None:
+    """And the number is written the way it is said."""
+    engine, _store, library, _facts = await _board(
+        TIMED + '''
+# Rides against six and a half days.
+figure shop_courier.ride_band bucketed:
+    display "x"
+
+    depends:
+        done = shop_order.dropped_by_month:{shop_courier}
+
+    calculate:
+        mean(shop_order.ride over done)
+
+    band:
+        when value >= 6.5 days then "slow"
+        otherwise "ok"
+'''
+    )
+    plan = library.figure("shop_courier.ride_band")
+    assert plan is not None and plan.unit == "duration"
+    words = await _words(engine, "shop_courier.ride_band")
+    assert set(words.values()) == {"ok"}, (
+        f"every ride is instantaneous in this fixture, so nothing is slow: {words}"
+    )
+
+
+def test_a_count_band_may_not_claim_a_scale_it_has_no_use_for() -> None:
+    """The rule stays "declare what cannot be derived". A count of deliveries
+    is a tally, and `3 days` beside it is a second claim about what the number
+    measures, disagreeing with the calculation."""
+    refuses(
+        BANDED_MONTH.replace("value < shop_courier.goal_month:{bucket}", "value < 3 days"),
+        "days",
+        "count",
+    )
+
+
+def test_a_duration_band_reading_a_record_says_what_scale_the_field_is_in() -> None:
+    """The road the guide recommends for a threshold somebody typed. A fact
+    field is structural by design -- `max_minutes as number` claims a shape
+    and never a meaning -- so nothing carries the scale but the definition."""
+    refuses(
+        TIMED + '''
+# Rides against whatever is on the courier's record.
+figure shop_courier.ride_vs_limit bucketed:
+    display "x"
+
+    depends:
+        done = shop_order.dropped_by_month:{shop_courier}
+
+    calculate:
+        mean(shop_order.ride over done)
+
+    band:
+        when value >= shop_courier.max_orders then "slow"
+        otherwise "ok"
+''',
+        "shop_courier.max_orders",
+        "scale",
+    )
+
+
+async def test_a_duration_band_reads_a_record_with_its_scale() -> None:
+    engine, _store, _library, _facts = await _board(
+        TIMED + '''
+# Rides against the courier's own limit, in minutes.
+figure shop_courier.ride_vs_limit bucketed:
+    display "x"
+
+    depends:
+        done = shop_order.dropped_by_month:{shop_courier}
+
+    calculate:
+        mean(shop_order.ride over done)
+
+    band:
+        when value >= shop_courier.max_orders minutes then "slow"
+        otherwise "ok"
+''',
+        allowance=30.0,
+    )
+    words = await _words(engine, "shop_courier.ride_vs_limit")
+    assert set(words.values()) == {"ok"}, (
+        f"an instantaneous ride is under thirty minutes: {words}"
+    )

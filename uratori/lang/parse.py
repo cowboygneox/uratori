@@ -95,6 +95,14 @@ from .lex import SyntaxError_, Token, lex, prose_above
 
 _FACT_TYPES: frozenset[str] = frozenset({"text", "number", "flag", "moment"})
 _DECLARED_UNITS: frozenset[str] = frozenset({"share", "days", "effort", "count", "duration"})
+
+_TIME_SCALES: tuple[str, ...] = ("seconds", "minutes", "hours", "days", "weeks")
+"""The scales a number about a span of time may be written in.
+
+Not configurable, and not extended with a working week: `work_hours` was
+declared once, resolved to exactly 3,600 seconds, and was therefore a synonym
+for `hours` -- with a docstring claiming a working day mattered and nothing
+that made it. A scale here is a plain multiple of a second and says so."""
 _DERIVED_UNITS: frozenset[str] = frozenset({"level", "moment"})
 _MEASURE_UNITS: frozenset[str] = frozenset({"effort", "count"})
 _FIELD_TYPES: frozenset[str] = frozenset({"text", "date", "number", "flag"})
@@ -1173,7 +1181,15 @@ class _Parser:
 
         if tok.kind == "number":
             self._next()
-            return Number(value=float(tok.value), line=line)
+            # `6.5 days`. Parsed wherever a number is written, and *whether*
+            # it is allowed is the checker's call, because only the checker
+            # knows what the figure around it measures.
+            scale = None
+            for word in _TIME_SCALES:
+                if self._at_word(word):
+                    scale = self._next().value
+                    break
+            return Number(value=float(tok.value), line=line, scale=scale)
 
         if tok.kind == "string":
             self._next()
@@ -1230,12 +1246,17 @@ class _Parser:
             self._punct("}")
             return Coord(name=name, line=line)
 
-        # A dotted name is a settings path; a bare one is something the
-        # definition bound above. Nothing else can produce either shape, so no
-        # lookahead is needed and a typo is named by the checker with the list
-        # of what *was* bound.
+        # A dotted name is a figure or a field on the subject's own record; a
+        # bare one is something the definition bound above. Nothing else can
+        # produce either shape, so no lookahead is needed and a typo is named
+        # by the checker with the list of what *was* bound.
         if "." in name:
-            return Setting(path=name, line=line)
+            scale = None
+            for word in _TIME_SCALES:
+                if self._at_word(word):
+                    scale = self._next().value
+                    break
+            return Setting(path=name, line=line, scale=scale)
         return Part(name=name, line=line)
 
     def _call(self, name: str, line: int) -> CalcExpr:

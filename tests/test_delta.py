@@ -597,7 +597,7 @@ reading team_person.banded_series(range):
 reading team_person.banded_median(range):
     display "{team_person} banded median"
     band on median:
-        when value > 604800 then "over"
+        when value > 7 days then "over"
         otherwise "ok"
     depends:
         t = team_person.time_to_merge in range

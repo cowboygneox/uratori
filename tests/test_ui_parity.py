@@ -302,7 +302,7 @@ async def test_a_sum_statistic_travels_under_its_wire_name(pg_dsn: str) -> None:
 reading shop_courier.ride_total(range):
     display "{shop_courier} total riding"
     band on sum:
-        when value > 36000 then "over"
+        when value > 10 hours then "over"
         otherwise "ok"
     depends:
         rides = shop_courier.ride_times in range
@@ -313,7 +313,7 @@ reading shop_courier.ride_total(range):
 reading shop_courier.usual_ride(range):
     display "{shop_courier} usual ride"
     band:
-        when value > 3600 then "over"
+        when value > 1 hours then "over"
         otherwise "ok"
     depends:
         rides = shop_courier.ride_times in range

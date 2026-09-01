@@ -895,8 +895,8 @@ reading nfl_team.scoring(range):
 reading nfl_team.rest(range):
     display "{nfl_team} rest between games"
     band on mean:
-        when value >= 561600 then "rested"
-        when value >= 496800 then "short"
+        when value >= 6.5 days then "rested"
+        when value >= 5.75 days then "short"
         otherwise "quick turnaround"
 
     depends:

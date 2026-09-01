@@ -629,6 +629,26 @@ class Number:
     value: float
     line: int = 0
 
+    scale: str | None = None
+    """`6.5 days` -- the unit the number was written in, where a bare figure
+    would leave it ambiguous.
+
+    A band's threshold used to carry `in minutes`, and it was retired with the
+    dials on the argument that a figure carries its own unit for the checker
+    to compare. That is true when the threshold *is* a figure and false of the
+    two roads that replaced the dial for the common case: a fact field is
+    structural by design -- `max_minutes as number` claims a shape and never a
+    meaning -- and a literal claims nothing at all. So a duration in seconds
+    could be judged against a number meaning minutes, and be wrong by sixty
+    for ever.
+
+    Required where the figure's own unit is a span of time and refused
+    everywhere else, which is the same rule the rest of the language follows:
+    declare what a reader downstream would otherwise get silently wrong, never
+    what the declaration already says. `561600` is six and a half days and
+    nobody reads it as one.
+    """
+
 
 @dataclass(frozen=True)
 class Text:
@@ -645,19 +665,41 @@ class Text:
     line: int = 0
 
 
+SECONDS_PER: dict[str, float] = {
+    "seconds": 1.0,
+    "minutes": 60.0,
+    "hours": 3_600.0,
+    "days": 86_400.0,
+    "weeks": 604_800.0,
+}
+"""What each scale a threshold may be written in is worth.
+
+Plain multiples of a second, deliberately. `work_hours` was declared once,
+resolved to exactly 3,600 seconds, and was therefore a synonym for `hours` --
+with a docstring claiming a working day mattered and nothing that made it. A
+scale that depended on a tenant's working day would be a dial wearing a
+keyword.
+"""
+
+
 @dataclass(frozen=True)
 class Setting:
-    """`thresholds.openChanges.warn` -- a dial from the tenant's settings.
+    """A dotted name in an expression, before the checker says what it names.
 
-    The name, never the value, for the reason an index's zone is. What makes it
-    safe is that the dependency is *derivable*: the checker walks the
-    calculation, so moving the dial makes this figure pending and rebuilds it,
-    and a definition that starts reading a new one cascades the day it is
-    written.
+    Once it was always a dial. Now it is a figure, or a field on the subject's
+    own record, or -- where neither resolves -- the refusal that names both
+    and says a dial is not a third option. The parser cannot tell which
+    without the library, so it carries the spelling and the checker rewrites
+    it into a `FigureRef` or a `SubjectField`.
+
+    `scale` rides along for the field case, where the figure being judged is a
+    span of time and the record's number does not say which one it is written
+    in. See `Number.scale`.
     """
 
     path: str
     line: int = 0
+    scale: str | None = None
 
 
 @dataclass(frozen=True)
@@ -710,17 +752,17 @@ class SubjectField:
     a target set in June that June's rows should still be judged against.
     This is for the case where the number is simply written down.
 
-    No unit travels with it. A field is structural (`max_orders as number`)
-    and the fact layer claims a shape, never a meaning -- so the comparison
-    is what fixes the quantity, exactly as it does for a literal. That is the
-    one thing this shares with the dial it replaces, and the reason it is
-    tolerable here is the reason a literal is tolerable: the number is
-    visible to the reader, on a record they can open.
+    No unit travels with it, and a field is structural on purpose:
+    `max_minutes as number` claims a shape and never a meaning. Where the
+    figure it judges is a span of time, `scale` is what says which -- for the
+    reason `Number.scale` gives, and refused everywhere else for the same
+    reason a literal's is.
     """
 
     kind: str
     field: str
     line: int = 0
+    scale: str | None = None
 
 
 @dataclass(frozen=True)
