@@ -38,6 +38,7 @@ from ..lang.ast import (
     FieldPick,
     FieldTotal,
     FigureRef,
+    FigureTotal,
     Ladder,
     ListOf,
     Number,
@@ -48,12 +49,13 @@ from ..lang.ast import (
     SetOp,
     SetRef,
     Setting,
+    Spread,
     SubjectField,
     Sum,
     Text,
 )
 from ..lang.plan import FigurePlan, Value
-from .buckets import SEPARATOR
+from .buckets import SEPARATOR, subject_of, tail_of
 
 BucketReader = Callable[[str, str | None], frozenset[str]]
 """(index name, bucket key or None for the single bucket) -> the ids in it."""
@@ -110,6 +112,15 @@ class Parts:
 PartReader = Callable[[str, str], Parts]
 """(figure name, subject) -> the parts stored under it."""
 
+SpanReader = Callable[[str, str], int]
+"""(index name, member) -> how many of its buckets hold that member.
+
+The divisor a `spread` needs. Answered from the bucket table the pass has
+already loaded for this figure, so it costs no read of its own -- and it is a
+count of the buckets that exist *now*, which is what makes a spread compose
+with a clipped span: a subject half way through its stretch divides what is
+left over the buckets it has left."""
+
 
 @dataclass(frozen=True)
 class Result:
@@ -132,6 +143,7 @@ class Readers:
         fields: FieldReader | None = None,
         instants: InstantReader | None = None,
         subject_fields: SubjectFieldReader | None = None,
+        spans: SpanReader | None = None,
     ) -> None:
         self.buckets = buckets
         self.measures = measures
@@ -141,6 +153,7 @@ class Readers:
         self.fields = fields or (lambda kind, path, member: None)
         self.instants = instants or (lambda kind, path, member: None)
         self.subject_fields = subject_fields or (lambda kind, field, subject: None)
+        self.spans = spans or (lambda index, member: 0)
 
 
 def evaluate(plan: FigurePlan, subject: str, readers: Readers) -> Result:
@@ -202,6 +215,23 @@ def _members_of(
         # answer among the ones that lost.
         winner = _picked(e, resolved, readers)
         return () if winner is None else (winner,)
+    if isinstance(e, FigureTotal):
+        # Only the members that contributed: one the source has no value for
+        # added nothing, and citing it would send a reader to a record with no
+        # part in the number.
+        tail = tail_of(subject)
+        return tuple(
+            member
+            for member in sorted(resolved.get(e.set, frozenset()))
+            if readers.parts(
+                e.figure, f"{member}{SEPARATOR}{tail}" if tail is not None else member
+            ).values
+        )
+    if isinstance(e, Spread):
+        # The subject's own source value is the evidence: the division is
+        # arithmetic over one number, and the buckets it is shared across are
+        # this figure's own sequence rather than records to cite.
+        return readers.parts(e.figure, subject_of(subject)).subjects
     if isinstance(e, Sum) and e.measure is None:
         source, _ = plan.combines[e.set]
         return readers.parts(source, subject).subjects
@@ -282,6 +312,45 @@ def _eval(
             return total
         parts = readers.parts(*_source_of(plan, e.set), subject)
         return float(sum(parts.values))
+
+    if isinstance(e, Spread):
+        # This subject's own value, shared evenly across the buckets it
+        # occupies. The value is stored under the *base* subject -- the source
+        # is one number per subject, not one per bucket -- while this figure is
+        # being answered at a coordinate, so the read drops the tail.
+        whole = _scalar(readers.parts(e.figure, subject_of(subject)))
+        if whole is None or isinstance(whole, (str, list)):
+            # **An absent value spread is absent, not nought.** A subject whose
+            # source nobody could compute spends an unknown amount in each of
+            # its buckets, and a nought would read as one that spends nothing --
+            # a number somebody would act on.
+            return None
+        buckets_held = readers.spans(plan.scope_index or "", subject_of(subject))
+        if buckets_held <= 0:
+            # No sequence to divide across. Never the whole value, which is
+            # what a division by one would give: this subject is in no bucket,
+            # so there is no bucket for the value to be in either.
+            return None
+        return float(whole) / buckets_held
+
+    if isinstance(e, FigureTotal):
+        # **Each member at this bucket**, never at its bare subject. The
+        # members are records, and what is wanted from each is its value in the
+        # bucket being answered for -- read bare, every bucket would get
+        # whichever of a member's values was stored first and the sequence
+        # would be flat while looking computed.
+        tail = tail_of(subject)
+        total = 0.0
+        for member in sorted(sets.get(e.set, frozenset())):
+            key = f"{member}{SEPARATOR}{tail}" if tail is not None else member
+            share = _scalar(readers.parts(e.figure, key))
+            if isinstance(share, (int, float)):
+                # A member the source could not answer for counts as nothing,
+                # which is the reading `sum` already takes of a record its
+                # measure cannot read: the total is the size of the *known*
+                # part, and the evidence below cites only what contributed.
+                total += float(share)
+        return total
 
     if isinstance(e, Part):
         parts = readers.parts(*_source_of(plan, e.name), subject)

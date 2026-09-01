@@ -55,6 +55,7 @@ from .ast import (
     FieldTotal,
     FigureDecl,
     FigureRef,
+    FigureTotal,
     FigureUnit,
     FlagDecl,
     IndexBy,
@@ -74,6 +75,7 @@ from .ast import (
     SetOp,
     SetRef,
     Setting,
+    Spread,
     StatisticFn,
     SubjectField,
     Sum,
@@ -286,6 +288,21 @@ class _Checker:
         else:
             self._kinds = self._schema.kinds
             self._name_fields = dict(self._schema.name_fields)
+
+    def _declares_field(self, dotted: str) -> bool:
+        """Whether `<kind>.<field>` names a field somebody declared.
+
+        A probe rather than a lookup: `_record_field` raises on a miss, which
+        is right where a miss is a build failure and wrong here, where a miss
+        is how we learn the name belongs to another namespace. Only the first
+        segment of a path is tested, because that is all the precedence
+        question needs -- a name that starts at a real field is a field read.
+        """
+        kind, _, path = dotted.partition(".")
+        fact = self.facts.get(kind)
+        if fact is None or not path:
+            return False
+        return path.split(".")[0] in {f.name for f in fact.fields}
 
     def _record_field(
         self, kind: str, path: str, what: str, line: int, *, named: bool = False
@@ -1655,7 +1672,53 @@ class _Checker:
                 )
             combines.setdefault(name, (name, None))
 
+        def bind_across(name: str, line: int) -> None:
+            """Register a figure this one totals **across a set**.
+
+            The same registration `bind` does -- so the parts loading, the
+            depth ordering and the invalidation are the ones already there,
+            and there is no second path for the two to disagree about what
+            must rebuild -- with the scope equality dropped, because that is
+            the one thing this read deliberately is not. An account's figure
+            totalling its campaigns' is cross-scope by construction; what
+            replaces the equality is a check that the source's scope matches
+            the ids the *set* holds, which is the honest version of the same
+            question and is made where the set is in hand.
+            """
+            source = _find(self.figures, name)
+            if source is None:
+                raise CheckError(
+                    f'figure {d.name} totals "{name}", which is not a figure declared '
+                    "before it. A figure may only read one declared earlier -- a cycle "
+                    "has no line number, and on a cold build the wrong order stores a "
+                    "nought and never revisits it. Declared so far: "
+                    f"{', '.join(f.name for f in self.figures) or 'none'}.",
+                    line,
+                )
+            if source.across is not None:
+                raise CheckError(
+                    f"figure {d.name} totals {name}, which is split across "
+                    f"{source.across} -- it holds one value per pair, so each member "
+                    "would contribute whichever part sorted first.",
+                    line,
+                )
+            combines.setdefault(name, (name, None))
+
         def walk(e: CalcExpr) -> CalcExpr:
+            if isinstance(e, Spread):
+                # Same subject, so the ordinary binding and its scope check
+                # are exactly right: a spread divides *this* subject's value.
+                bind(e.figure, e.line or d.line)
+                return e
+            if (
+                isinstance(e, Sum)
+                and e.measure is not None
+                and e.measure not in self.measures
+                and _find(self.figures, e.measure) is not None
+                and not self._declares_field(e.measure)
+            ):
+                bind_across(e.measure, e.line or d.line)
+                return e
             if isinstance(e, Setting):
                 if _find(self.figures, e.path) is None:
                     field = self._subject_field(
@@ -1716,6 +1779,15 @@ class _Checker:
                 and e.measure is not None
                 and e.measure not in self.measures
             ):
+                # Three namespaces, one spelling, and the order is the rule:
+                # a measure wins, then a declared *field*, then a figure.
+                # Field before figure so that declaring a figure can never
+                # silently change what an existing total computes -- the same
+                # argument the measure precedence above rests on.
+                if _find(self.figures, e.measure) is not None and not self._declares_field(
+                    e.measure
+                ):
+                    return FigureTotal(figure=e.measure, set=e.set, line=e.line)
                 kind, _, field = e.measure.partition(".")
                 if kind in self._kinds and field:
                     return self._field_total(d, e, kind, field)
@@ -2077,6 +2149,69 @@ class _Checker:
         if isinstance(e, FieldTotal):
             self._require_set(d.name, e.set, sets, e.line)
             self._field_matches_set(d.name, e, sets, e.line)
+            return "number"
+
+        if isinstance(e, FigureTotal):
+            self._require_set(d.name, e.set, sets, e.line)
+            grain = self._grain_of(d, combines)
+            source = _find(self.figures, e.figure)
+            assert source is not None  # bound in `_resolve_figure_reads`
+            spaces = self._spaces_in(sets[e.set], sets) if e.set in sets else set()
+            if spaces and source.scope not in spaces:
+                raise CheckError(
+                    f"figure {d.name} totals {e.figure}, which is one value per "
+                    f"{source.scope}, over \"{e.set}\", which holds "
+                    f"{' and '.join(sorted(spaces))} ids. Every lookup would miss and the "
+                    "figure would answer nought for everybody with nothing thrown.",
+                    e.line,
+                )
+            if source.grain is not None and grain != source.grain:
+                # Two sequences that are not the same sequence. The total reads
+                # each member at *this* bucket, so a source cut into months
+                # against a total cut into days shares no bucket key at all --
+                # every lookup misses and the answer is a confident nought.
+                raise CheckError(
+                    f"figure {d.name} totals {e.figure} at {grain or 'no'} grain, and "
+                    f"{e.figure} is keyed by {source.grain}. A total reads each record at "
+                    "the same bucket it is answering for, and two grains share no bucket "
+                    "key.",
+                    e.line,
+                )
+            if source.grain is not None and grain is None:
+                raise CheckError(
+                    f"figure {d.name} totals {e.figure}, which is time-keyed, but is not "
+                    f"itself `bucketed`. Write `figure {d.name} bucketed:`.",
+                    e.line,
+                )
+            return "number"
+
+        if isinstance(e, Spread):
+            self._require_set(d.name, e.set, sets, e.line)
+            grain = self._grain_of(d, combines)
+            source = _find(self.figures, e.figure)
+            if source is None:
+                raise CheckError(
+                    f"figure {d.name} spreads \"{e.figure}\", which is not a figure "
+                    "declared before it. `spread` divides a subject's own computed value "
+                    "across the buckets it occupies -- a measure is a number per record, "
+                    "and there is nothing about a record to divide.",
+                    e.line,
+                )
+            if grain is None:
+                raise CheckError(
+                    f"figure {d.name} spreads {e.figure} and is not `bucketed`. Without a "
+                    "sequence there are no buckets to divide across, and the natural "
+                    f"misreading -- divide by one -- is a figure that silently equals "
+                    f"{e.figure}.",
+                    e.line,
+                )
+            if source.grain is not None:
+                raise CheckError(
+                    f"figure {d.name} spreads {e.figure}, which is already time-keyed. A "
+                    "spread shares one value out across a sequence; a value that is "
+                    "already one-per-bucket has been shared out by whatever produced it.",
+                    e.line,
+                )
             return "number"
 
         if isinstance(e, Extreme):
@@ -3370,6 +3505,20 @@ class _Checker:
                 "IS a record: name the field in `field:` and it is bound for the row.",
                 e.line,
             )
+        if isinstance(e, (FigureTotal, Spread)):
+            # Both aggregate across a *bucket*, and a row has none: a
+            # projection answers one row per record, at the instant it is
+            # asked, over no sequence at all. Refused by name rather than left
+            # to `assert_never`, because the natural misreading -- that this
+            # totals the page -- is a plausible number over a population
+            # nobody chose.
+            word = "totals" if isinstance(e, FigureTotal) else "spreads"
+            raise CheckError(
+                f"{noun} {owner} {word} {e.figure} across \"{e.set}\". That is an "
+                "aggregate over a bucket's members, and a row is one record with no "
+                "sequence behind it. Those are figures.",
+                e.line,
+            )
         assert_never(e)
 
     def _condition(self, c: Condition, bound: dict[str, str], owner: str, noun: str) -> None:
@@ -3656,6 +3805,14 @@ def _calc_hash(e: CalcExpr) -> object:
         return {"op": "setting", "path": e.path}
     if isinstance(e, FieldTotal):
         return {"op": "total", "kind": e.kind, "field": e.field, "set": e.set}
+    if isinstance(e, FigureTotal):
+        # Distinct from `sum(<measure> over <set>)` of the same spelling: one
+        # adds a column somebody typed and the other a number a definition
+        # worked out, and a hash that could not tell them apart would let a
+        # figure become the other under a version claiming nothing moved.
+        return {"op": "figure_total", "figure": e.figure, "set": e.set}
+    if isinstance(e, Spread):
+        return {"op": "spread", "figure": e.figure, "set": e.set}
     if isinstance(e, SubjectField):
         # Which record and which field: two figures reading two fields of one
         # record are two definitions, and a hash that could not tell them

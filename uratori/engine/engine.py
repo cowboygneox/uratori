@@ -1011,6 +1011,18 @@ class Engine:
                 loaded[(name, None)] = await store.members(tenant, name, "")
         bucket_cache.update(loaded)
 
+        # How many buckets of each grouping hold a given member -- the divisor
+        # a `spread` needs. Counted off the table just loaded rather than asked
+        # of the store, so it costs nothing: the buckets are in hand because
+        # every figure over a bucketed grouping needs them anyway.
+        span_counts: dict[tuple[str, str], int] = {}
+        for (index_name, held_bucket), held_members in loaded.items():
+            if held_bucket is None:
+                continue
+            for held_member in held_members:
+                counted = (index_name, held_member)
+                span_counts[counted] = span_counts.get(counted, 0) + 1
+
         records: dict[str, dict[str, Mapping[str, Any]]] = {}
         for measure_name in plan.measures:
             measure = library.measures[measure_name]
@@ -1080,6 +1092,9 @@ class Engine:
                 return None
             return measure_of(measure, record, None)
 
+        def read_spans(index: str, member: str) -> int:
+            return span_counts.get((index, member), 0)
+
         def read_parts(figure: str, subject: str) -> Parts:
             held = parts.get(figure, {}).get(subject, [])
             return Parts(
@@ -1114,6 +1129,7 @@ class Engine:
             fields=read_field,
             instants=read_when,
             subject_fields=read_subject_field,
+            spans=read_spans,
         )
 
     def _indexes_over(self, kind: str) -> list[CompiledIndex]:

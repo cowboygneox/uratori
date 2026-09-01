@@ -1562,6 +1562,11 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         # threshold comes off the record's owner, moving that owner moves the
         # line for every record under it.
         aged = isinstance(index.spec, ByAge)
+        # A clipped span carries the same caveat for the same reason: its
+        # buckets are the ones a stretch still has left, which is a question
+        # about the calendar rather than about the record, so the filing shown
+        # is the one the last pass drew.
+        clipped = _spec_clipped(index.spec)
         owner = (
             index.spec.through.kind
             if isinstance(index.spec, ByAge) and index.spec.through is not None
@@ -1578,7 +1583,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             buckets=[MembershipBucket(**b) for b in buckets],
             buckets_total=buckets_total,
             buckets_more=more,
-            note=_membership_note(aged=aged, owner=owner),
+            note=_membership_note(aged=aged, clipped=clipped, owner=owner),
         )
 
     @ui.get(
@@ -2452,7 +2457,21 @@ def _grouping_edge(library: Library, name: str) -> Dependency:
     )
 
 
-def _membership_note(*, aged: bool, owner: str | None) -> str | None:
+def _spec_clipped(spec: IndexBy) -> bool:
+    """Whether this grouping drops the buckets that have gone.
+
+    Read off the spec rather than declared, the same way the engine decides
+    whether to refresh it -- one source for "does this move with the clock",
+    so the page cannot say one thing while the pass does another.
+    """
+    if isinstance(spec, ByField):
+        return spec.part.ahead_only
+    if isinstance(spec, ByComposite):
+        return any(part.ahead_only for part in spec.parts)
+    return False
+
+
+def _membership_note(*, aged: bool, clipped: bool = False, owner: str | None) -> str | None:
     """The caveat a filing carries, or None where there is none.
 
     A bucket table can describe a world that has moved -- an age filter is
@@ -2463,6 +2482,8 @@ def _membership_note(*, aged: bool, owner: str | None) -> str | None:
     reasons: list[str] = []
     if aged:
         reasons.append("is decided against the clock")
+    if clipped:
+        reasons.append("drops the buckets that have already gone")
     if owner is not None:
         reasons.append(f"takes its threshold from each record's {owner}")
     if not reasons:

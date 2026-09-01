@@ -568,6 +568,28 @@ figure ad_campaign.weekly_spend bucketed:
     calculate:
         spread(ad_campaign.budget over weeks)
 
+# Deliberately unanswerable: a total over an empty set, divided by a count of
+# nothing. Here because every other figure in this world floors at nought --
+# `sum` counts a record it cannot read as nothing -- so an absent value has to
+# be constructed to have one at all, and `spread` must not turn it into a
+# number.
+figure ad_campaign.unknowable:
+    display "{ad_campaign} unknowable"
+    unit count
+    depends:
+        mine = ad_campaign.own:{ad_campaign}
+        nobody = ad_campaign.own:{ad_campaign} - ad_campaign.own:{ad_campaign}
+    calculate:
+        sum(ad_campaign.money over mine) / count(nobody)
+
+# Spreading a value nobody can compute.
+figure ad_campaign.weekly_unknown bucketed:
+    display "{ad_campaign} unknown spend that week"
+    depends:
+        weeks = ad_campaign.my_weeks:{ad_campaign}
+    calculate:
+        spread(ad_campaign.unknowable over weeks)
+
 # What the whole account spends in each week.
 figure ad_account.weekly_spend bucketed:
     display "{ad_account} spend that week"
@@ -651,17 +673,10 @@ async def test_a_spread_of_an_absent_value_is_absent_not_nought() -> None:
     spends an unknown amount each week, and a nought would read as a campaign
     that costs nothing -- which is a number a reader would act on."""
     _e, store, library = await spread_board(
-        {
-            "c1": {
-                "ref": "c1",
-                "account_id": "a1",
-                "starts_at": AUG_3,
-                "ends_at": SEP_6,
-            }
-        },
+        {"c1": {**campaign("a1", AUG_3, SEP_6), "ref": "c1", "budget_cents": 1000}},
         at_ms=1_785_758_400_000.0,
     )
-    found = await rows(store, library, "ad_campaign.weekly_spend")
+    found = await rows(store, library, "ad_campaign.weekly_unknown")
     assert set(found) == {
         "c1@2026-W32",
         "c1@2026-W33",
@@ -669,7 +684,13 @@ async def test_a_spread_of_an_absent_value_is_absent_not_nought() -> None:
         "c1@2026-W35",
         "c1@2026-W36",
     }
-    assert all(v is None for v in found.values()), f"an unknown budget became a number: {found}"
+    assert all(v is None for v in found.values()), f"an unknown value became a number: {found}"
+    # The control: the same campaign's *knowable* spend is a number in the same
+    # buckets, so this is not a test that everything is absent.
+    assert all(
+        v is not None
+        for v in (await rows(store, library, "ad_campaign.weekly_spend")).values()
+    )
 
 
 # ------------------------------------------------------------- adding them --
@@ -756,3 +777,26 @@ figure ad_campaign.flat:
         spread(ad_campaign.budget over weeks)
 ''')
     assert "bucketed" in str(caught.value)
+
+
+# ----------------------------------------------------------- on the page --
+
+
+def test_a_clipped_span_tells_a_reader_its_filing_is_from_the_last_pass() -> None:
+    """The caveat an age filter already carries, for the same reason: a
+    grouping whose membership moves with the calendar shows the filing the last
+    pass drew, and a reader looking at it deserves to be told rather than left
+    to wonder why a week they expected is missing.
+
+    Asserted against the *unclipped* group in the same library, so a note wired
+    to fire on every grouping would fail here.
+    """
+    from uratori.server.ui import _membership_note, _spec_clipped
+
+    library = compile_world()
+    assert _spec_clipped(library.indexes["ad_campaign.weeks_left"].spec) is True
+    assert _spec_clipped(library.indexes["ad_campaign.booked_weeks"].spec) is False
+
+    note = _membership_note(aged=False, clipped=True, owner=None)
+    assert note is not None and "already gone" in note
+    assert _membership_note(aged=False, clipped=False, owner=None) is None
