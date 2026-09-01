@@ -1098,7 +1098,17 @@ def _library_out(library: Library) -> LibraryOut:
                     ),
                     None,
                 ),
-                fields=[part.field for part in parts],
+                # Both ends of a span, not just the near one. A host reading
+                # the declaration alone is being told which fields moving
+                # would refile this grouping's records, and a span's far end
+                # decides its last bucket exactly as the near end decides its
+                # first -- listed singly, changing a due date looked like a
+                # change nothing was filed against.
+                fields=[
+                    field
+                    for part in parts
+                    for field in ((part.field, part.until) if part.until else (part.field,))
+                ],
                 # Every record this grouping rests on besides the one it
                 # buckets: the identity hop, the calendar it cuts on, and an
                 # age filter's owner join. All three used to be dials, which

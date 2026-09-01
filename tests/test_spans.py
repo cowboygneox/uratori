@@ -1218,3 +1218,22 @@ figure ad_campaign.weekly_units bucketed:
         "c1@2026-W35",
         "c1@2026-W36",
     }, "a derived row outlived the bucket its source was retired from"
+
+
+def test_both_ends_of_a_span_are_named_where_a_host_reads_its_dependencies() -> None:
+    """The declaration payload tells a host which fields moving would refile a
+    grouping's records. A span's far end decides its last bucket exactly as the
+    near end decides its first, so listing only the near one described a
+    grouping that changing a due date would not affect -- which is the opposite
+    of true.
+    """
+    from uratori.lang.check import _index_fields
+
+    library = compile_world()
+    parts = _index_fields(library.indexes["ad_campaign.weeks_left"].spec)
+    named = [
+        field
+        for part in parts
+        for field in ((part.field, part.until) if part.until else (part.field,))
+    ]
+    assert named == ["account_id", "starts_at", "ends_at"]
