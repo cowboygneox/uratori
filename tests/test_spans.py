@@ -530,3 +530,229 @@ async def test_crossing_the_period_boundary_drops_the_week_that_went() -> None:
         "a1@2026-W35",
         "a1@2026-W36",
     }, "the week that went is still being counted"
+
+
+# --------------------------------------------------------------- dividing --
+#
+# A span puts a record in several buckets; on its own that means the record's
+# quantity counts *in full* in every one of them. For a count of what is running
+# that is right -- a campaign really is running in all five weeks. For a
+# quantity it is five times the truth, and the two need different words.
+#
+# `spread` is the one that divides: a subject's value, shared evenly across the
+# buckets it occupies. Evenly rather than by overlap, so the ends of a span are
+# rounded up rather than apportioned -- a bounded error at the two edge buckets,
+# in the direction that never hides a peak, against a model whose whole premise
+# is already that nobody knows which day the work lands on.
+
+SPREAD = '''
+# What this campaign has left to spend.
+figure ad_campaign.budget:
+    display "{ad_campaign} budget"
+    depends:
+        mine = ad_campaign.own:{ad_campaign}
+    calculate:
+        sum(ad_campaign.money over mine)
+
+# The campaign's own weeks, keyed by the campaign rather than the account.
+group ad_campaign.my_weeks from (ref, starts_at until ends_at by week excluding weeks gone in "UTC")
+
+# The campaign itself, so its budget has a set to be summed over.
+group ad_campaign.own from ref
+
+# What this campaign spends in each week it has left.
+figure ad_campaign.weekly_spend bucketed:
+    display "{ad_campaign} spend that week"
+    depends:
+        weeks = ad_campaign.my_weeks:{ad_campaign}
+    calculate:
+        spread(ad_campaign.budget over weeks)
+
+# What the whole account spends in each week.
+figure ad_account.weekly_spend bucketed:
+    display "{ad_account} spend that week"
+    depends:
+        live = ad_campaign.weeks_left:{ad_account}
+    calculate:
+        sum(ad_campaign.weekly_spend over live)
+'''
+
+MEASURE = '''
+measure ad_campaign.money = budget_cents in count
+'''
+
+
+async def spread_board(campaigns: dict[str, dict[str, object]], *, at_ms: float):
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(MEASURE + SPREAD)
+    engine = Uratori(schema=WORLD, library=library, store=store, facts=facts)
+    facts.put("t1", "ad_account", "a1", {"name": "A1", "timezone": "UTC"})
+    for key, body in campaigns.items():
+        facts.put("t1", "ad_campaign", key, body)
+    await engine.run("t1", full=True, at_ms=at_ms)
+    return engine, store, library
+
+
+async def test_a_spread_value_is_shared_across_the_buckets_it_spans() -> None:
+    """The division. 1000 across five weeks is 200 a week -- and a plain read
+    of a multi-bucket membership would put the whole 1000 in each of them,
+    reporting five times the money as though it were a fact."""
+    _e, store, library = await spread_board(
+        {"c1": {**campaign("a1", AUG_3, SEP_6), "ref": "c1", "budget_cents": 1000}},
+        at_ms=1_785_758_400_000.0,  # 2026-08-02, before the span begins
+    )
+    found = await rows(store, library, "ad_campaign.weekly_spend")
+    assert found == {
+        "c1@2026-W32": 200.0,
+        "c1@2026-W33": 200.0,
+        "c1@2026-W34": 200.0,
+        "c1@2026-W35": 200.0,
+        "c1@2026-W36": 200.0,
+    }
+
+
+async def test_a_spread_over_one_bucket_is_the_whole_value() -> None:
+    """The degenerate case that a divisor read off the wrong thing gets wrong:
+    one bucket means no division at all, not a division by the number of
+    records or by nought."""
+    _e, store, library = await spread_board(
+        {
+            "c1": {
+                **campaign("a1", "2026-08-04T09:00:00Z", "2026-08-06T09:00:00Z"),
+                "ref": "c1",
+                "budget_cents": 900,
+            }
+        },
+        at_ms=1_785_758_400_000.0,
+    )
+    assert await rows(store, library, "ad_campaign.weekly_spend") == {"c1@2026-W32": 900.0}
+
+
+async def test_a_spread_divides_by_the_weeks_left_not_the_weeks_booked() -> None:
+    """The clip and the division are one question, and this is why they have
+    to be: at a pass inside W34 the campaign has three weeks left, so its
+    remaining money is spread over three. Dividing by the five it was booked
+    over would report a plan as comfortably affordable right up to the day it
+    is not."""
+    _e, store, library = await spread_board(
+        {"c1": {**campaign("a1", AUG_3, SEP_6), "ref": "c1", "budget_cents": 900}},
+        at_ms=MID_AUGUST,
+    )
+    assert await rows(store, library, "ad_campaign.weekly_spend") == {
+        "c1@2026-W34": 300.0,
+        "c1@2026-W35": 300.0,
+        "c1@2026-W36": 300.0,
+    }
+
+
+async def test_a_spread_of_an_absent_value_is_absent_not_nought() -> None:
+    """An absence is never a zero. A campaign whose budget nobody has recorded
+    spends an unknown amount each week, and a nought would read as a campaign
+    that costs nothing -- which is a number a reader would act on."""
+    _e, store, library = await spread_board(
+        {
+            "c1": {
+                "ref": "c1",
+                "account_id": "a1",
+                "starts_at": AUG_3,
+                "ends_at": SEP_6,
+            }
+        },
+        at_ms=1_785_758_400_000.0,
+    )
+    found = await rows(store, library, "ad_campaign.weekly_spend")
+    assert set(found) == {
+        "c1@2026-W32",
+        "c1@2026-W33",
+        "c1@2026-W34",
+        "c1@2026-W35",
+        "c1@2026-W36",
+    }
+    assert all(v is None for v in found.values()), f"an unknown budget became a number: {found}"
+
+
+# ------------------------------------------------------------- adding them --
+
+
+async def test_a_figure_can_be_totalled_across_the_records_in_a_bucket() -> None:
+    """The second step, and the one `sum` could not do: the thing being added
+    is a *computed* figure per campaign, not a field on a record. Two campaigns
+    overlapping in W34 and W35 stack there and stand alone elsewhere."""
+    _e, store, library = await spread_board(
+        {
+            "c1": {**campaign("a1", AUG_3, SEP_6), "ref": "c1", "budget_cents": 1000},
+            "c2": {
+                **campaign("a1", "2026-08-17T09:00:00Z", "2026-08-28T09:00:00Z"),
+                "ref": "c2",
+                "budget_cents": 400,
+            },
+        },
+        at_ms=1_785_758_400_000.0,
+    )
+    assert await rows(store, library, "ad_account.weekly_spend") == {
+        "a1@2026-W32": 200.0,
+        "a1@2026-W33": 200.0,
+        "a1@2026-W34": 400.0,
+        "a1@2026-W35": 400.0,
+        "a1@2026-W36": 200.0,
+    }
+
+
+async def test_the_total_reads_each_record_in_its_own_bucket() -> None:
+    """The mistake this is the control for: reading the source figure at the
+    *subject's* key rather than at the coordinate would give every week the
+    same number -- whichever value the campaign happened to store first -- and
+    the chart would be flat while looking computed.
+    """
+    _e, store, library = await spread_board(
+        {
+            "c1": {**campaign("a1", AUG_3, "2026-08-14T09:00:00Z"), "ref": "c1", "budget_cents": 200},
+            "c2": {
+                **campaign("a1", "2026-08-17T09:00:00Z", "2026-09-04T09:00:00Z"),
+                "ref": "c2",
+                "budget_cents": 900,
+            },
+        },
+        at_ms=1_785_758_400_000.0,
+    )
+    found = await rows(store, library, "ad_account.weekly_spend")
+    # c1: 200 over W32-W33 -> 100 each. c2: 900 over W34-W36 -> 300 each.
+    assert found == {
+        "a1@2026-W32": 100.0,
+        "a1@2026-W33": 100.0,
+        "a1@2026-W34": 300.0,
+        "a1@2026-W35": 300.0,
+        "a1@2026-W36": 300.0,
+    }
+
+
+def test_spreading_something_that_is_not_a_figure_is_refused() -> None:
+    with pytest.raises(CheckError) as caught:
+        compile_world(MEASURE + SPREAD + '''
+# Nonsense: a measure is a field on a record, not a subject's value.
+figure ad_campaign.wrong bucketed:
+    display "wrong"
+    depends:
+        weeks = ad_campaign.my_weeks:{ad_campaign}
+    calculate:
+        spread(ad_campaign.money over weeks)
+''')
+    assert "ad_campaign.money" in str(caught.value)
+
+
+def test_spreading_inside_an_unbucketed_figure_is_refused() -> None:
+    """Without a sequence there are no buckets to spread across, and the
+    natural misreading -- divide by one -- is a figure that silently equals its
+    source."""
+    with pytest.raises(CheckError) as caught:
+        compile_world(MEASURE + SPREAD + '''
+# No `bucketed`, so there is no sequence to divide across.
+figure ad_campaign.flat:
+    display "flat"
+    depends:
+        weeks = ad_campaign.my_weeks:{ad_campaign}
+    calculate:
+        spread(ad_campaign.budget over weeks)
+''')
+    assert "bucketed" in str(caught.value)

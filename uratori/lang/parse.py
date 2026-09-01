@@ -81,6 +81,7 @@ from .ast import (
     SortDecl,
     Statistic,
     StatisticFn,
+    Spread,
     Sum,
     SummariseDecl,
     Text,
@@ -1263,7 +1264,7 @@ class _Parser:
         name = self._next().value
 
         if name in (
-            "count", "list", "sum", "max", "min", "latest", "earliest",
+            "count", "list", "sum", "spread", "max", "min", "latest", "earliest",
             "mean", "median", "worst",
         ) and self._at_op("("):
             return self._call(name, line)
@@ -1365,6 +1366,16 @@ class _Parser:
             target = self._name("a set defined in depends")
             self._punct(")")
             return ListOf(measure=first, set=target, line=line)
+
+        if name == "spread":
+            # `spread(<figure> over <set>)`. Only ever a figure -- there is
+            # nothing to divide about a field on a record, which is a number
+            # per record rather than a number per subject -- so unlike `sum`
+            # this needs no resolution step and says so here.
+            self._keyword("over")
+            target = self._name("a set defined in depends")
+            self._punct(")")
+            return Spread(figure=first, set=target, line=line)
 
         # sum
         if self._at_word("over"):

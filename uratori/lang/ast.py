@@ -1011,6 +1011,65 @@ class FieldTotal:
 
 
 @dataclass(frozen=True)
+class FigureTotal:
+    """`sum(ad_campaign.weekly_spend over live)` -- another figure's values,
+    added up across the records in this bucket.
+
+    `sum(<measure> over <set>)` adds a *field somebody typed*. This adds a
+    number some other definition worked out, which is what a span needs and
+    a measure cannot give: what a campaign has left to spend is its budget
+    less what it has spent, and there is no column holding that.
+
+    Written with the same word, and decided by the checker rather than the
+    parser, exactly as `latest` over a measure and `latest` over a declared
+    field are: both spellings are dotted names, only the library knows which
+    namespace one lands in, and a reader should not have to remember which
+    noun takes which verb.
+
+    **Read at the coordinate, never at the subject.** In bucket `a1@2026-W34`
+    the members are campaigns, and what is wanted from each is *its* value in
+    W34 -- so the lookup is `<member>@<tail>`, not `<member>`. Reading the bare
+    subject would take whichever of a campaign's weeks was stored first and
+    give every week the same number: a chart that is flat while looking
+    computed.
+    """
+
+    figure: str
+    set: str
+    line: int = 0
+
+
+@dataclass(frozen=True)
+class Spread:
+    """`spread(ad_campaign.budget over weeks)` -- a subject's value, divided
+    evenly across the buckets it occupies.
+
+    The counterpart a span makes necessary. Membership in five weeks means a
+    record's quantity counts *in full* in all five, which is right for a count
+    of what is running and five times the truth for an amount of money. `sum`
+    and `spread` are the two readings of one membership, and they need
+    different words because neither is wrong in general.
+
+    **Evenly**, not by overlap. A span that begins on a Wednesday takes a whole
+    week's share of that week, so the error is bounded to the two edge buckets
+    and runs *high* -- the safe direction for a chart whose job is spotting a
+    peak. Apportioning by overlap would be more precise about something the
+    model does not know anyway: nothing here says which day of a week the work
+    lands on, and a weighted answer would dress that guess as arithmetic.
+
+    The divisor is how many buckets the subject occupies in the named group
+    **as it stands now**, which is what makes this compose with a clipped span:
+    a campaign half way through divides what is left over the weeks it has
+    left, not over the weeks it was booked for. Dividing by the booked total
+    would report a plan as affordable right up to the day it is not.
+    """
+
+    figure: str
+    set: str
+    line: int = 0
+
+
+@dataclass(frozen=True)
 class FieldPick:
     """`latest(setting_change.value over sets)` -- the value the most recent
     record in the set carries.
@@ -1120,7 +1179,7 @@ class Coord:
 CalcExpr: TypeAlias = (
     Count | ListOf | Sum | Part | Number | Text | Setting | FigureRef | SubjectField | Ladder
     | Arith | Pick | DaysBetween | Extreme | FieldPick | FieldTotal | Coord
-    | BucketStat
+    | BucketStat | FigureTotal | Spread
 )
 
 
