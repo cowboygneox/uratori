@@ -665,6 +665,71 @@ MEASURE = '''
 measure ad_campaign.money = budget_cents in count
 '''
 
+EFFORT = '''
+# The same world in a unit that renders, so a lost unit is visible rather than
+# merely wrong in a field nobody reads. An effort prints as "40.0h"; a count
+# prints the seconds.
+measure ad_campaign.work = budget_cents in effort
+
+# What this campaign has left to spend, in working time.
+figure ad_campaign.effort:
+    display "{ad_campaign} effort"
+    depends:
+        mine = ad_campaign.own:{ad_campaign}
+    calculate:
+        sum(ad_campaign.work over mine)
+
+# That effort, shared across the weeks the campaign has left.
+figure ad_campaign.weekly_effort bucketed:
+    display "{ad_campaign} effort that week"
+    depends:
+        weeks = ad_campaign.my_weeks:{ad_campaign}
+    calculate:
+        spread(ad_campaign.effort over weeks)
+
+# Every campaign's share for the week, added up for the account.
+figure ad_account.weekly_effort bucketed:
+    display "{ad_account} effort that week"
+    depends:
+        live = ad_campaign.weeks_left:{ad_account}
+    calculate:
+        sum(ad_campaign.weekly_effort over live)
+'''
+
+
+def test_dividing_a_quantity_and_adding_it_back_up_keeps_the_quantity_it_was_in():
+    """A unit is derived wherever it can be, and both of these can be.
+
+    Sharing an effort across five weeks leaves five efforts, and adding efforts
+    gives an effort -- neither construct changes what the number *is*. Left
+    underived they took `count`, which is not a field nobody reads: `count` is
+    what makes the engine print an effort as its raw seconds, so every figure
+    built on a span rendered "144000" where it meant "40.0h". A definition
+    cannot paper over it either, because a derived unit is refused as a
+    redundant declaration -- so the miss is unfixable from outside this file.
+    """
+    library = compile_world(MEASURE + SPREAD + EFFORT)
+    by_name = {f.name: f for f in library.figures}
+
+    assert by_name["ad_campaign.effort"].unit == "effort", "the control: the source"
+    assert by_name["ad_campaign.weekly_effort"].unit == "effort", (
+        "a spread share of an effort is an effort"
+    )
+    assert by_name["ad_account.weekly_effort"].unit == "effort", (
+        "a total of efforts is an effort"
+    )
+
+
+def test_a_spread_count_stays_a_count():
+    """The other side, so the fix is an inheritance rather than a blanket
+    promotion: nothing here has an effort to inherit, and inventing one would
+    render a number of campaigns in hours."""
+    library = compile_world(MEASURE + SPREAD)
+    by_name = {f.name: f for f in library.figures}
+
+    assert by_name["ad_campaign.weekly_spend"].unit == "count"
+    assert by_name["ad_account.weekly_spend"].unit == "count"
+
 
 async def spread_board(campaigns: dict[str, dict[str, object]], *, at_ms: float):
     facts = MemoryFactStore()

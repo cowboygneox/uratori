@@ -2399,6 +2399,24 @@ class _Checker:
                 source: FigurePlan | None = _find(self.figures, combines[binding][0])
                 if source is not None:
                     return source.unit
+        if isinstance(d.calculate, (Spread, FigureTotal)):
+            # Both name their source figure outright rather than through a
+            # binding, so the inheritance is a lookup rather than a search.
+            # Neither construct changes what the number *is*: sharing an
+            # effort across five weeks leaves five efforts, and adding efforts
+            # gives an effort. Underived they took `count`, and `count` is
+            # what makes the engine print an effort as its raw seconds -- so
+            # every figure built on a span rendered "144000" where it meant
+            # "40.0h". Unfixable from a definition, too, because a derived
+            # unit is refused above as a redundant declaration.
+            #
+            # The source's own unit, whatever it is, rather than a promotion
+            # to effort: a spread count of campaigns is still a count, and
+            # inventing a quantity would render it in hours.
+            source = _find(self.figures, d.calculate.figure)
+            if source is not None:
+                return source.unit
+
         if isinstance(d.calculate, (Sum, Part)):
             # A rollup or a bare read inherits from **the binding it reads**,
             # not from whichever binding happens to carry an inheritable unit.
