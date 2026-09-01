@@ -364,6 +364,19 @@ class _Checker:
         self._claim(d.name, word, d.line)
         self._fact_kind(d.kind, f"{word} {d.name} is over", d.line)
 
+        zoned = [p for p in _index_fields(d.spec) if p.zone is not None]
+        if len(zoned) > 1:
+            # Everything downstream reads the first: `zone_ref` takes the
+            # first zoned part it finds, so a reading would count back through
+            # labels the second part's buckets were never cut on. Refused
+            # rather than resolved, because a window over a sequence cut two
+            # ways is a span of no particular calendar.
+            raise CheckError(
+                f"{word} {d.name} names one calendar per part and there is one "
+                "sequence, so it may name one calendar. Every part after the first "
+                "reads it and nothing says so.",
+                d.line,
+            )
         for part in _index_fields(d.spec):
             if part.through is not None:
                 self._fact_kind(

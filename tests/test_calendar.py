@@ -430,3 +430,49 @@ def test_a_written_calendar_is_part_of_the_version() -> None:
         "moving the calendar changed which day every record is filed under and "
         "the version did not move with it"
     )
+
+
+async def test_the_empty_row_is_cut_on_the_calendar_the_board_agrees_on() -> None:
+    """The empty subject is what somebody with nothing looks like, and it has
+    no record to read a calendar off. Cut in UTC while every real row was cut
+    in Auckland, its bounds disagree with every row beside it -- under a
+    heading naming the calendar it did not use."""
+    facts = MemoryFactStore()
+    library = compile_source(LEAGUE, WORLD)
+    engine = Uratori(
+        schema=WORLD, library=library, store=MemoryEngineStore(), facts=facts
+    )
+    facts.put("t1", "shop_courier", "c1", {"name": "Aki", "timezone": ""})
+    facts.put(
+        "t1",
+        "shop_order",
+        "o1",
+        {"ref": "O-1", "courier_id": "c1", "delivered_at": ACROSS_MIDNIGHT},
+    )
+    await engine.run("t1", full=True)
+
+    served = await engine.answer("t1", "shop_courier.recent", trailing=[7], at="2026-06-26")
+    assert isinstance(served, Result)
+    assert served.empty is not None and served.empty.windows
+    [real] = [s for s in served.subjects if s.id == "c1"]
+    assert real.windows is not None
+    assert served.empty.windows[0].zone == real.windows[0].zone == "Pacific/Auckland"
+    assert served.empty.windows[0].frm == real.windows[0].frm, (
+        "the empty row's bounds were cut somewhere no real row was"
+    )
+
+
+def test_a_group_may_name_one_calendar() -> None:
+    """Two time parts, two calendars, and everything downstream reads the
+    first: `zone_ref` takes the first zoned part it finds, so a reading would
+    count back through labels the second part's buckets were never cut on.
+    Only a group nobody's figure fans out by can have two time parts at all,
+    which is exactly why it would go unnoticed."""
+    with pytest.raises(CheckError) as caught:
+        compile_world(
+            '''
+# Orders by two clocks at once.
+group shop_order.two_clocks from (courier_id, delivered_at by day in shop_courier.timezone, delivered_at by month in "Pacific/Auckland")
+'''
+        )
+    assert "one calendar" in caught.value.message

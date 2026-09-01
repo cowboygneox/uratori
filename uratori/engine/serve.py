@@ -903,16 +903,19 @@ async def serve_reading(
                 )
             )
 
-    # The empty subject is what somebody with nothing looks like, and it has
-    # no calendar of its own -- there is no record to read one off. Its
-    # windows are cut in UTC and labelled as such, which is the honest answer
-    # rather than borrowing whichever subject sorted first.
+    # The empty subject is what somebody with nothing looks like. It has no
+    # record of its own, so there is no calendar to read off one -- but where
+    # the board *has* one answer, that is its answer too: cut in UTC while
+    # every real row was cut in Kiritimati, its bounds would disagree with
+    # every row beside it under a heading naming the calendar it did not use.
+    # Where subjects disagree there is no such answer, and UTC labelled as
+    # UTC is honest rather than borrowing whichever subject sorted first.
     empty = Subject(
         id="",
         name="",
         windows=[
-            _window(plan, sample_over([], labels), spec, labels, rule, None)
-            for spec, labels in spans_in(None)
+            _window(plan, sample_over([], labels), spec, labels, rule, shared)
+            for spec, labels in spans_in(shared)
         ],
     )
 
