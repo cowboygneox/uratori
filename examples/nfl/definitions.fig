@@ -131,6 +131,7 @@ fact nfl_player:
     url as text
     position as text
     team as text
+    timezone as text
 
 # One player's line in one game, from the league's weekly stats.
 fact nfl_stat_line:
@@ -226,9 +227,6 @@ filter nfl_team_game.regular where game_type == "REG" label "regular season"
 # what "recent form" means.
 filter nfl_team_game.recent where kickoff younger than 45 days label "recently played"
 
-measure nfl_team_game.points_for = points_for in count
-measure nfl_team_game.points_against = points_against in count
-
 # A duration is the wall-clock gap between two moments on the record: how
 # long since this team last took the field. Thursday games make it short.
 measure nfl_team_game.rest = kickoff - previous_kickoff
@@ -285,6 +283,7 @@ figure nfl_team.ties:
 # Points this franchise has scored across every regular season loaded.
 figure nfl_team.points_scored:
     display "{nfl_team} scored {value} points"
+    unit count
 
     depends:
         mine = nfl_team_game.by_team:{nfl_team} & nfl_team_game.regular
@@ -295,6 +294,7 @@ figure nfl_team.points_scored:
 # Points scored against this franchise across every regular season loaded.
 figure nfl_team.points_allowed:
     display "{nfl_team} allowed {value} points"
+    unit count
 
     depends:
         mine = nfl_team_game.by_team:{nfl_team} & nfl_team_game.regular
@@ -371,6 +371,7 @@ figure nfl_team.last_played:
 # windowed reading can range over, a quarter of a century deep.
 figure nfl_team.points_by_day bucketed:
     display "{nfl_team} points that day"
+    unit count
 
     depends:
         played = nfl_team_game.team_by_day:{nfl_team}
@@ -462,6 +463,7 @@ figure nfl_team_season.wins:
 # Points scored across that regular season.
 figure nfl_team_season.points:
     display "{nfl_team_season} scored {value}"
+    unit count
 
     depends:
         mine = nfl_team_game.by_team_season:{nfl_team_season} & nfl_team_game.regular
@@ -472,6 +474,7 @@ figure nfl_team_season.points:
 # Points allowed across that regular season.
 figure nfl_team_season.allowed:
     display "{nfl_team_season} allowed {value}"
+    unit count
 
     depends:
         mine = nfl_team_game.by_team_season:{nfl_team_season} & nfl_team_game.regular
@@ -512,7 +515,7 @@ figure nfl_team_season.rate:
 # ------------------------------------------------------------ the players --
 
 group nfl_stat_line.by_player from player_id
-group nfl_stat_line.player_by_day from (player_id, kickoff by day in nfl_team.timezone)
+group nfl_stat_line.player_by_day from (player_id, kickoff by day in nfl_player.timezone)
 
 # The same lines at month and quarter grain: the day/month/quarter trio,
 # each its own declaration bucketing the records directly -- a month bucket
@@ -683,7 +686,6 @@ filter nfl_play.conversions where third_down_converted == true label "converted"
 filter nfl_play.judged where third_down_converted is set label "judged"
 
 measure nfl_play.yards = yards_gained in count
-measure nfl_play.points = points in count
 
 # Regular-season snaps this franchise's offence has run since 1999 -- the
 # count that shows the scale: every one of these cites a real play, and a
@@ -741,6 +743,7 @@ figure nfl_team.third_down_rate:
 # a reading show when, on the clock, a team actually scores.
 figure nfl_team.scoring_clock bucketed:
     display "{nfl_team} points in that quarter-hour"
+    unit count
 
     depends:
         slots = nfl_play.scoring_slots:{nfl_team}
@@ -754,6 +757,7 @@ figure nfl_team.scoring_clock bucketed:
 # questions, not one figure re-sliced on the way out.
 figure nfl_team.scoring_by_hour bucketed:
     display "{nfl_team} points in that hour"
+    unit count
 
     depends:
         hours = nfl_play.scoring_hours:{nfl_team}
@@ -820,6 +824,7 @@ figure nfl_game_slot.sides:
 # Points scored by teams playing their Nth game of a season, era-wide.
 figure nfl_game_slot.points:
     display "{nfl_game_slot}: {value} points"
+    unit count
 
     depends:
         mine = nfl_team_game.by_slot:{nfl_game_slot} & nfl_team_game.regular

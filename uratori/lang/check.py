@@ -286,7 +286,7 @@ class _Checker:
             self._name_fields = dict(self._schema.name_fields)
 
     def _record_field(
-        self, kind: str, path: str, what: str, line: int
+        self, kind: str, path: str, what: str, line: int, *, named: bool = False
     ) -> tuple[CompiledFactField, bool] | None:
         """The declared field a path lands on, and whether it crossed a list.
 
@@ -295,7 +295,13 @@ class _Checker:
         stand-in there. In a fact-taught world a path that resolves to nothing
         is a build failure here, because at run time it is a silently empty
         bucket or a column of dashes, for everybody, for ever.
+
+        `named` says the caller's `what` already ends with the dotted name.
+        Without it the message doubles -- `reads shop_courier.stale_days reads
+        "stale_days"` -- which reads as two different names, in the one
+        sentence an author has to find their typo in.
         """
+        reads = "" if named else f' reads "{path}"'
         fact = self.facts.get(kind)
         if fact is None:
             return None
@@ -308,7 +314,7 @@ class _Checker:
             if found is None:
                 level = kind if i == 0 else f'{kind}.{".".join(segments[:i])}'
                 raise CheckError(
-                    f'{what} reads "{path}", and "{segment}" is not a field of {level}. '
+                    f'{what}{reads}, and "{segment}" is not a field of {level}. '
                     f'Declared there: {", ".join(sorted(at)) or "nothing"}.',
                     line,
                 )
@@ -317,7 +323,7 @@ class _Checker:
         assert found is not None
         if found.type is None:
             raise CheckError(
-                f'{what} reads "{path}", which is a nested record rather than a value. '
+                f"{what}{reads}, which is a nested record rather than a value. "
                 f'Its fields are: {", ".join(sorted(at))}.',
                 line,
             )
@@ -375,6 +381,7 @@ class _Checker:
                 f"{word} {d.name} reads its age threshold from "
                 f"{d.spec.through.kind}.{d.spec.read}",
                 d.line,
+                named=True,
             )
             self._record_field(
                 d.kind,
@@ -411,6 +418,7 @@ class _Checker:
             zone.field,
             f"{word} {d.name} reads its calendar from {zone.kind}.{zone.field}",
             d.line,
+            named=True,
         )
         parts = _index_fields(d.spec)
         subject = parts[0] if parts and parts[0] is not part else None
@@ -516,6 +524,25 @@ class _Checker:
     def _measure(self, d: DurationMeasure | FieldMeasure | MomentMeasure) -> None:
         self._claim(d.name, "measure", d.line)
         self._fact_kind(d.kind, f"measure {d.name} is over", d.line)
+        # The mirror image of the figure rule below: `sum(<kind>.<name> over
+        # set)` and `latest(<kind>.<name> over set)` read a measure where one
+        # exists and the record's own field otherwise. A measure winning was
+        # documented as the safe order, on the argument that declaring one
+        # could never silently change an existing figure -- which is exactly
+        # backwards. Declaring `measure shop_order.weight` is what changes an
+        # already-written `sum(shop_order.weight over mine)` from the field
+        # to the measure, with no edit to the figure and no way to see it in
+        # its text. Refused where the collision is made.
+        leaf = d.name.split(".", 1)[1] if "." in d.name else d.name
+        fact = self.facts.get(d.kind)
+        if fact is not None and any(f.name == leaf for f in fact.fields):
+            raise CheckError(
+                f"measure {d.name} takes a name that {d.kind} already has as a field. "
+                "Both are read as `<kind>.<name>` over a set, so declaring this would "
+                "change what an existing figure computes without changing its text. "
+                "Rename the measure.",
+                d.line,
+            )
         self._measure_fields_exist(d)
 
         if isinstance(d, DurationMeasure):
@@ -1176,6 +1203,24 @@ class _Checker:
                 f"through {first.through.kind}.",
                 d.line,
             )
+        # The calendar is read off the subject's own record, and the group
+        # cannot always tell whose: `courier_id` says nothing about which kind
+        # its values key into, so a group written with a plain key field
+        # accepted any kind at all. The figure is where the two meet, because
+        # naming the scope is what says which kind those keys belong to.
+        # Unchecked, every key is looked up in the wrong table, every lookup
+        # misses, and the figure serves nothing -- which reads as a board that
+        # has collected nothing rather than as a wrong declaration.
+        zoned = next((p.zone for p in parts if p.zone is not None), None)
+        if zoned is not None and zoned.kind != scope:
+            raise CheckError(
+                f"figure {d.name} is fanned out by {scope}, but {name} reads its calendar "
+                f"from {zoned.kind}.{zoned.field}. The calendar is a fact about the subject, "
+                f"so it has to be a field on {scope}'s own record -- read off {zoned.kind}, "
+                "every subject key would be looked up in the wrong table and no record would "
+                "land in any bucket.",
+                d.line,
+            )
         if first.truncate is not None or first.select is not None:
             raise CheckError(
                 f"{name} buckets its first part by {first.truncate or first.select}, so it "
@@ -1333,7 +1378,9 @@ class _Checker:
                 f"scoped to {scope}, or through a group.",
                 line,
             )
-        found = self._record_field(kind, field, f"{owner} reads {name}", line)
+        found = self._record_field(
+            kind, field, f"{owner} reads {name}", line, named=True
+        )
         if found is not None and found[0].type not in ("number", None):
             raise CheckError(
                 f'{owner} reads "{name}", which is declared as {found[0].type}. A '
@@ -1475,10 +1522,7 @@ class _Checker:
             ):
                 kind, _, field = e.measure.partition(".")
                 if kind in self._kinds and field:
-                    self._record_field(
-                        kind, field, f"figure {d.name} totals {kind}.{field}", e.line
-                    )
-                    return FieldTotal(kind=kind, field=field, set=e.set, line=e.line)
+                    return self._field_total(d, e, kind, field)
             if isinstance(e, Ladder):
                 return replace(
                     e,
@@ -1501,6 +1545,42 @@ class _Checker:
 
         return walk(d.calculate)
 
+    def _field_total(
+        self, d: FigureDecl, e: Sum, kind: str, field: str
+    ) -> FieldTotal:
+        """One resolved `sum(<kind>.<field> over <set>)`.
+
+        `latest` refuses a word and a path crossing a list; `sum` was given
+        the same shortcut and neither guard. Both failures are quiet at run
+        time because `read_number` answers None for each of them and a total
+        skips what it cannot read: a word field totals 0.0 for every subject,
+        and a crossing path totals only the records that happened to hold
+        exactly one element -- a real-looking number over a population
+        nobody chose, whose evidence cites only the contributors and so
+        reads as consistent.
+        """
+        found = self._record_field(
+            kind, field, f"figure {d.name} totals {kind}.{field}", e.line, named=True
+        )
+        if found is not None and found[0].type not in ("number", None):
+            raise CheckError(
+                f"figure {d.name} totals {kind}.{field}, which is declared as "
+                f"{found[0].type}. A total is arithmetic over numbers; a word contributes "
+                "nothing to it, so the answer would be a confident nought rather than a "
+                "refusal.",
+                e.line,
+            )
+        if found is not None and found[1]:
+            raise CheckError(
+                f"figure {d.name} totals {kind}.{field}, whose path crosses a list, so one "
+                "record holds several of them. A record holding two would contribute "
+                "nothing while a record holding one contributed normally, which is a total "
+                "over the records that happened to hold exactly one. Declare a measure that "
+                "says which element is meant, or total a field the record holds once.",
+                e.line,
+            )
+        return FieldTotal(kind=kind, field=field, set=e.set, line=e.line)
+
     def _field_pick(
         self,
         d: FigureDecl,
@@ -1513,7 +1593,11 @@ class _Checker:
         """One resolved field read, with every way it could be silently wrong
         refused by name."""
         found = self._record_field(
-            kind, field, f"figure {d.name} takes the {e.which} of {kind}.{field}", e.line
+            kind,
+            field,
+            f"figure {d.name} takes the {e.which} of {kind}.{field}",
+            e.line,
+            named=True,
         )
         if found is not None and found[0].type not in ("number", None):
             raise CheckError(
@@ -1888,16 +1972,20 @@ class _Checker:
         way to tell which was meant.
         """
         # A declared-field read joins arithmetic on the "nothing can derive
-        # it" side. A count is a count and a sum of an effort measure is an
-        # effort because the construct says what the number is; a field read
-        # says only that a record carries a number. The fact layer is
+        # it" side -- all three shapes of it, including the bare
+        # `<kind>.<field>` this release added, which was left off and so
+        # silently took `count`. A count is a count and a sum of an effort
+        # measure is an effort because the construct says what the number is;
+        # a field read says only that a record carries a number. The fact layer is
         # structural on purpose -- `value as number` claims a shape, never a
         # meaning -- so there is nothing riding on it to inherit, and the
         # same integer would print as "144000" or as "5d" with no way to
         # tell which was meant. That is the rule in its sharpened form:
         # declare only what cannot be derived, and a redundant declaration
         # is still refused above.
-        arithmetic = isinstance(d.calculate, (Arith, Pick, FieldPick, FieldTotal))
+        arithmetic = isinstance(
+            d.calculate, (Arith, Pick, FieldPick, FieldTotal, SubjectField)
+        )
         if d.unit is not None and not arithmetic:
             raise CheckError(
                 f'figure {d.name} declares "unit {d.unit}", and its calculation already says '

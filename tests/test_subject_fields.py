@@ -47,6 +47,8 @@ fact shop_order:
     courier_id as text
     status as text
     weight as number
+    many parcels:
+        grams as number
 
 group shop_order.carried_by from courier_id
 filter shop_order.open where status != "delivered"
@@ -214,10 +216,9 @@ figure shop_courier.crossed:
         mine = shop_order.carried_by:{shop_courier} & shop_order.open
 
     calculate:
-        shop_order.ref - count(mine)
+        shop_order.weight - count(mine)
 ''',
-        "shop_order",
-        "shop_courier",
+        "is not what this value is about",
     )
 
 
@@ -354,6 +355,79 @@ def test_a_summed_field_must_belong_to_the_sets_kind() -> None:
         TOTALLED.replace("shop_order.weight", "shop_courier.max_orders"),
         "shop_courier",
     )
+
+
+def test_a_summed_field_must_be_a_number() -> None:
+    """`sum` was given the same shortcut `latest` had and none of its guards.
+    A text field reaches `read_number`, which answers None for every record,
+    and the total of nothing at all is 0.0 -- a confident nought about a
+    column of words, on every subject, for ever."""
+    refuses(
+        TOTALLED.replace("shop_order.weight", "shop_order.status"),
+        "status",
+        "text",
+    )
+
+
+def test_a_summed_field_may_not_cross_a_list() -> None:
+    """The failure is worse here than under `latest`, because it is quiet
+    rather than total: a record holding two parcels contributes nothing while
+    a record holding one contributes normally, so the total is a real-looking
+    number computed over the subset of records that happened to hold exactly
+    one. The evidence cites only those, and reads as consistent."""
+    refuses(
+        TOTALLED.replace("shop_order.weight", "shop_order.parcels.grams"),
+        "parcels.grams",
+        "list",
+    )
+
+
+def test_a_measure_may_not_take_a_name_a_field_of_its_kind_already_has() -> None:
+    """A measure wins where both could match, so declaring one silently
+    changes what an already-written `sum(kind.field over set)` computes --
+    the exact thing the resolution order was documented as preventing. The
+    figure rule refuses the mirror-image collision; this is the same rule
+    from the measure's side."""
+    refuses(
+        '''
+# The surcharge, under a name an order's own field already has.
+measure shop_order.weight = shop_order.status in count
+''',
+        "shop_order.weight",
+        "already has as a field",
+    )
+
+
+def test_a_bare_subject_field_names_the_unit_it_cannot_derive() -> None:
+    """Every other field read is on the must-declare list because a record
+    says a number is there and nothing about what it measures. Reading one
+    bare was left off, so a budget in seconds is silently a count and prints
+    as 144000."""
+    refuses(
+        '''
+# The budget on the courier's own record, read straight off it.
+figure shop_courier.budget:
+    display "{shop_courier} budget"
+
+    depends:
+        mine = shop_order.carried_by:{shop_courier} & shop_order.open
+
+    calculate:
+        shop_courier.max_orders
+''',
+        "unit",
+    )
+
+
+def test_a_field_read_names_the_field_once() -> None:
+    """The refusal is what a definition's author reads to find their typo, so
+    a doubled clause in the middle of it is a real cost: `reads
+    shop_courier.max_order reads "max_order"` reads as two different names."""
+    message = refuses(
+        TOTALLED.replace("shop_order.weight", "shop_order.nope"),
+        "nope",
+    )
+    assert message.count("reads") <= 1, message
 
 
 def test_latest_still_needs_a_sequence_because_it_needs_an_ordering() -> None:

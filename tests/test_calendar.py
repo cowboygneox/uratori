@@ -211,6 +211,38 @@ group shop_order.hopped from (courier_id through shop_courier.name, delivered_at
     assert "subject" in caught.value.message
 
 
+def test_the_calendar_must_be_the_subjects_kind_without_a_hop_too() -> None:
+    """The hop was the only shape checked, and it is the rarer one. With a
+    plain key field -- which is how nearly every group is written -- any kind
+    at all was accepted, its records keyed by ids belonging to somebody else,
+    and every lookup missed. The shipped NFL example did exactly this and its
+    figure had been serving nothing.
+
+    The group alone cannot always tell: `courier_id` says nothing about which
+    kind its values key into. The figure does, because it names the scope the
+    group fans out by, so that is where the two are compared.
+    """
+    with pytest.raises(CheckError) as caught:
+        compile_world(
+            '''
+# Orders by courier, cut on somebody else's calendar.
+group shop_order.by_wrong_day from (courier_id, delivered_at by day in shop_order.ref)
+
+# Deliveries a day, against a calendar no courier carries.
+figure shop_courier.wrong bucketed:
+    display "x"
+
+    depends:
+        done = shop_order.by_wrong_day:{shop_courier}
+
+    calculate:
+        count(done)
+'''
+        )
+    assert "shop_courier" in caught.value.message
+    assert "shop_order.ref" in caught.value.message
+
+
 def test_the_calendar_is_part_of_the_groups_spec() -> None:
     """Two groups cutting the same instant on two calendars file it under
     different labels, so they are different specs -- and a figure over one
