@@ -767,6 +767,26 @@ async def _paced(at: float = AT):
     return engine, store, library, facts
 
 
+async def test_a_pass_serves_against_its_own_clock_not_the_wall_clock() -> None:
+    """`at_ms` is the embedding host's clock and it reached the bucketing and
+    not the serving, so a pass filed its buckets against the clock it was
+    handed and then materialised a carried figure forward to *today*.
+
+    Two costs. A host replaying history writes rows for months its own clock
+    says have not happened, and they persist -- no later pass removes a bucket
+    the anchors still justify. And the three tests below could only be read as
+    passing on the days the wall clock happened to agree with the fixture,
+    which is how this went unnoticed: it broke overnight, at a UTC month
+    boundary, with nothing in the diff.
+    """
+    _, store, library, _facts = await _paced(at=AT)
+    figure = library.figure("site.target_month")
+    filed = {r.subject for r in await store.values("t1", figure.name, figure.version)}
+    assert max(filed) == "s1@2026-08", (
+        f"the pass ran at 2026-08-24 and filled past its own clock: {sorted(filed)}"
+    )
+
+
 async def test_a_read_after_the_pass_fills_the_buckets_time_has_added() -> None:
     """A pass extends to the bucket it ran in, so between passes the newest
     bucket has no row.
@@ -1255,6 +1275,7 @@ async def test_a_read_anchored_in_the_future_writes_no_future_buckets() -> None:
         library.reading("site.target_pace"),
         [3],
         at_day="2031-06-15",
+        at_ms=AT,
         facts=facts,
     )
     after = {r.subject for r in await store.values("t1", figure.name, figure.version)}

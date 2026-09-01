@@ -726,7 +726,7 @@ class _Checker:
             assert source is not None  # resolved above, or by `_combines`
             depth = max(depth, source.depth + 1)
 
-        band, band_reads = self._check_band(d, unit, kind, scope, grain)
+        band, band_reads, band_fields = self._check_band(d, unit, kind, scope, grain)
 
         plan = FigurePlan(
             name=d.name,
@@ -745,6 +745,7 @@ class _Checker:
             scope_index=scope_index,
             band=band,
             band_reads=band_reads,
+            band_fields=band_fields,
             grain=grain,
             carried=d.carried,
             ordered_by=_ordered_by_of(d.calculate),
@@ -755,7 +756,7 @@ class _Checker:
 
     def _check_band(
         self, d: FigureDecl, unit: FigureUnit, kind: str, scope: str, grain: str | None
-    ) -> tuple[Ladder | None, tuple[str, ...]]:
+    ) -> tuple[Ladder | None, tuple[str, ...], tuple[str, ...]]:
         """The rules that keep a band a band, and the facts it may name.
 
         A band used to be a figure of its own -- a `level`-unit figure combining
@@ -775,7 +776,7 @@ class _Checker:
         resolved, and the names it reads.
         """
         if d.band is None:
-            return (None, ())
+            return (None, (), ())
         band = d.band
         if not isinstance(band, Ladder):  # pragma: no cover - the parser refuses it first
             raise CheckError(f"figure {d.name}'s band is not a ladder.", d.line)
@@ -940,7 +941,14 @@ class _Checker:
 
         resolved = resolve(band)
         assert isinstance(resolved, Ladder)
-        return (resolved, tuple(sorted(reads)))
+        fields = tuple(
+            sorted(
+                f"{n.kind}.{n.field}"
+                for n in _walk(resolved)
+                if isinstance(n, SubjectField)
+            )
+        )
+        return (resolved, tuple(sorted(reads)), fields)
 
     def _named_sets(self, d: FigureDecl) -> dict[str, SetExpr]:
         out: dict[str, SetExpr] = {}
@@ -2448,6 +2456,21 @@ class _Checker:
                 raise CheckError(
                     f"reading {d.name}'s band compares against {name}, which stores a word. "
                     "There is no order between words, so the comparison has no answer.",
+                    line,
+                )
+            # The figure path has always refused this and the reading path
+            # never did. It matters more here, not less: the retired `band low
+            # against <dial> in minutes` clause was removed on the argument
+            # that "a figure carries its own unit and the checker compares the
+            # two, so the mistake is unwritable" -- which was true of figures
+            # and false of readings. A count of deliveries judged against a
+            # duration in seconds clears every rung, for ever.
+            if source is not None and found.unit != source.unit:
+                raise CheckError(
+                    f"reading {d.name} answers a {source.unit} and its band compares "
+                    f"against {name}, which answers a {found.unit}. Both are numbers by "
+                    "the time the ladder sees them, so the comparison would run and be "
+                    "wrong by whatever the two units differ by.",
                     line,
                 )
             if source is None:

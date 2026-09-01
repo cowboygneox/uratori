@@ -92,6 +92,7 @@ from .read import (
     series_of,
     statistic_of,
     statistics_of,
+    threshold_of,
     unmet_of,
 )
 
@@ -215,8 +216,12 @@ async def band_thresholds(
 
     # A threshold read straight off the subject's record: one fetch of the
     # scope kind, keyed by the subject the row is about. A bucketed row is
-    # `c1@2026-07`, and the record is the courier's, so the lookup drops the
-    # coordinate -- a courier has one allowance, not one per month.
+    # `c1@2026-07`, and the record is the courier's, so the entry is written
+    # under the record's own key and the lookup drops the coordinate -- a
+    # courier has one allowance, not one per month. Keying it by the
+    # coordinate instead is what the code used to do, and every lookup missed:
+    # a sequenced figure banded this way rendered no word at all, on every
+    # row, for ever.
     fields = _subject_fields_in(plan.band)
     if fields and facts is not None:
         held = {row.key: row.value for row in await facts.of_kind(tenant, plan.scope)}
@@ -226,6 +231,24 @@ async def band_thresholds(
                 if value is not None:
                     out.setdefault(subject, {})[f"{kind}.{field}"] = value
     return out
+
+
+def thresholds_for(
+    thresholds: Mapping[str, Mapping[str, Value]], subject: str
+) -> dict[str, Value]:
+    """The thresholds that judge one stored row.
+
+    Two keyings meet here and both are right: a goal *figure* is joined at the
+    row's own coordinate, because a monthly goal has one value per month, and
+    a *record's* field is joined at the bare subject, because a courier has
+    one allowance however many months they have worked. Merged rather than
+    chosen between, so a ladder may name both.
+    """
+    at_subject = thresholds.get(subject_of(subject), {})
+    at_row = thresholds.get(subject, {})
+    if not at_subject:
+        return dict(at_row)
+    return {**at_subject, **at_row}
 
 
 def _subject_fields_in(e: Any) -> set[tuple[str, str]]:
@@ -312,7 +335,7 @@ async def serve_figure(
                     # beside it and the goal figures it names, resolved at this
                     # row's own coordinate.
                     level=_level_word(
-                        band_of(plan.band, stored.value, thresholds.get(stored.subject, {}))
+                        band_of(plan.band, stored.value, thresholds_for(thresholds, stored.subject))
                     ),
                     dimension=tail,
                 )
@@ -739,8 +762,13 @@ async def serve_reading(
     # justify. Months that have not happened would hold confident values for
     # ever, on the strength of one query string. `at_ms` is not clamped: it
     # is the embedding host's own clock rather than a request parameter, and
-    # it is what makes "two months pass with no sync" testable at all.
-    fill_at = min(at, now_ms()) if at_day is not None else at
+    # it is what makes "two months pass with no sync" testable at all -- and
+    # for the same reason it is what the clamp is *against* where both are
+    # given. Clamping a request parameter to the wall clock while the host
+    # said its now was somewhere else fills forward to a date the host does
+    # not believe in, which is the same fabrication one line up.
+    host_now = at_ms if at_ms is not None else now_ms()
+    fill_at = min(at, host_now) if at_day is not None else at
     rule = source.grain or "day"
     for spec in specs:
         refusal = refuse_reach(spec, rule)
@@ -835,8 +863,9 @@ async def serve_reading(
                 inside = [(d, v) for d, v in held if d in covered]
                 sample = sample_over(inside, labels)  # type: ignore[arg-type]
                 against = {
-                    name: statistic_of(
+                    name: threshold_of(
                         plan.band_on or "mean",
+                        sample,
                         sample_over(
                             [
                                 (d, v)  # type: ignore[misc]  # a goal stores numbers
@@ -1358,7 +1387,7 @@ async def project_rows(
             # projection binding a band costs no extra query and cannot be
             # stale against a threshold the way a stored one was.
             values.setdefault(stored.subject, {})[(figure_name, band)] = (
-                band_of(source.band, stored.value, against.get(stored.subject, {}))
+                band_of(source.band, stored.value, thresholds_for(against, stored.subject))
                 if band
                 else stored.value
             )

@@ -149,6 +149,17 @@ class FigurePlan:
     """
 
     band_reads: tuple[str, ...] = ()
+    band_fields: tuple[str, ...] = ()
+    """`<kind>.<field>` names the band reads off the subject's own record.
+
+    Separate from `band_reads` because the move that invalidates them is a
+    different one: a goal figure moving shows up as a change on that figure,
+    where an allowance moving is a write to a fact kind and moves no figure
+    at all. Without this the record-shaped threshold -- the one that replaced
+    the dial for the common case -- had no serving edge, so a limit could
+    drop from five to one and every connected board kept saying "ok".
+    """
+
     grain: str | None = None
     """The bucket rule of the scope index's tail part, when it has one -- a
     stored grain (`minute` through `quarter`) or a selective rule's canonical

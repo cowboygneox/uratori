@@ -74,6 +74,33 @@ def statistic_of(fn: StatisticFn, sample: Sample) -> float | None:
     return None
 
 
+def threshold_of(
+    fn: StatisticFn, judged: Sample, goal: Sample
+) -> float | None:
+    """The goal a window's statistic is compared against, or None.
+
+    `statistic_of` is right for a reading's own value and wrong for the
+    threshold judging it, in the one place they differ: a sum of nothing is
+    nought, and nought is the number every total in the world clears. A
+    courier nobody has ever set a goal for would read "met", which is the
+    bottom-rung-by-default failure a band exists to avoid, arriving through
+    the threshold rather than through the value.
+
+    The same argument covers partial cover. Two months of deliveries judged
+    against one month of goal is wrong by roughly the length of the window,
+    and it is wrong in the comfortable direction. So the goal has to be known
+    for every bucket the value was counted over; short of that the comparison
+    is not knowable, and the window says so.
+    """
+    if not goal.values:
+        return None
+    known = {label for label, value in goal.points if value is not None}
+    wanted = {label for label, value in judged.points if value is not None}
+    if not wanted <= known:
+        return None
+    return statistic_of(fn, goal)
+
+
 def statistics_of(plan: ReadingPlan, sample: Sample) -> dict[str, float | None]:
     """Only the statistics the definition asked for.
 

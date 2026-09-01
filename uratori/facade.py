@@ -277,6 +277,8 @@ class Uratori:
                 refreshed=refreshed,
                 projections=projections,
                 trailing=trailing,
+                at_ms=at_ms,
+                wrote=frozenset(written or ()) | frozenset(deleted or ()),
             )
         else:
             results = ()
@@ -639,6 +641,8 @@ class Uratori:
         projections: set[str] | None = None,
         trailing: Sequence[int | str | WindowSpec] = DEFAULT_TRAILING,
         at: str | None = None,
+        at_ms: float | None = None,
+        wrote: frozenset[str] = frozenset(),
     ) -> tuple[Result | BundleResult, ...]:
         lib = self._library
         out: list[Result | BundleResult] = []
@@ -664,6 +668,12 @@ class Uratori:
                 # the band dials' serve stamps were introduced to close, now
                 # that the threshold is a fact rather than a dial.
                 and not (set(plan.band_reads) & touched)
+                # The same edge for the record-shaped threshold, which needs
+                # its own arm because it moves nothing a change stream carries:
+                # writing a courier's allowance changes no figure's value, so
+                # `touched` is empty and the band that judges by it would keep
+                # the old word on every connected board.
+                and not (plan.band_fields and plan.scope in wrote)
             ):
                 continue
             out.append(
@@ -690,6 +700,7 @@ class Uratori:
                     reading,
                     list(trailing),
                     at_day=at,
+                    at_ms=at_ms,
                     facts=self._facts,
                 )
             )

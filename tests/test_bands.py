@@ -36,10 +36,11 @@ BANDS = Schema(
 )
 
 WORLD = '''
-# Somebody who carries orders.
+# Somebody who carries orders, and the allowance written on their record.
 fact shop_courier:
     name name
     name as text
+    max_orders as number
 
 # One order, from pickup to doorstep.
 fact shop_order:
@@ -152,6 +153,42 @@ figure shop_courier.carrying:
         otherwise "ok"
 '''
 
+# The same shape as BANDED_MONTH, but the threshold is read straight off the
+# courier's record rather than computed. This is the shortcut the release was
+# about, on the sequenced figure it was never tried on.
+BANDED_MONTH_FIELD = '''
+# Deliveries that month against the allowance on the courier's record.
+figure shop_courier.drops_vs_allowance bucketed:
+    display "{shop_courier} against allowance"
+
+    depends:
+        done = shop_order.dropped_by_month:{shop_courier}
+
+    calculate:
+        count(done)
+
+    band:
+        when value > shop_courier.max_orders then "over"
+        otherwise "ok"
+'''
+
+# The unbucketed version, for the invalidation edge.
+BANDED_FIELD = '''
+# Orders in hand against the allowance on the courier's record.
+figure shop_courier.holding:
+    display "{value} in hand"
+
+    depends:
+        mine = shop_order.carried_by:{shop_courier} & shop_order.open
+
+    calculate:
+        count(mine)
+
+    band:
+        when value > shop_courier.max_orders then "over"
+        otherwise "ok"
+'''
+
 AT = 1_787_572_800_000.0  # 2026-08-24T12:00Z -- "now" for these tests
 
 # Two orders delivered in June, four in July; the goal is 3 from February and
@@ -172,13 +209,15 @@ GOALS = [
 ]
 
 
-async def _board(extra: str, *, goals=GOALS, hand: float | None = None):
+async def _board(
+    extra: str, *, goals=GOALS, hand: float | None = None, allowance: float = 3.0
+):
     facts = MemoryFactStore()
     store = MemoryEngineStore()
     library = compile_world(extra)
     engine = Uratori(schema=BANDS, library=library, store=store, facts=facts)
 
-    facts.put("t1", "shop_courier", "c1", {"name": "Aki"})
+    facts.put("t1", "shop_courier", "c1", {"name": "Aki", "max_orders": allowance})
     for key, when in DROPS:
         facts.put(
             "t1",
@@ -299,10 +338,15 @@ async def test_moving_the_goal_re_bands_without_touching_the_stored_number() -> 
         {"courier_id": "c1", "setting": "drops", "value": 9.0,
          "set_at": "2026-06-01T09:00:00Z"},
     )
-    await engine.run("t1", written={"goal_change": ["g3"]}, at_ms=AT)
+    report = await engine.run("t1", written={"goal_change": ["g3"]}, at_ms=AT)
 
     after = await store.value("t1", plan.name, plan.version, "c1@2026-06")
     assert after.value == before.value, "the metric was recomputed by a goal move"
+    assert "shop_courier.drops_vs_goal" not in report.outcome.rebuilt, (
+        "the goal move rebuilt the metric. Equal values cannot show this -- a "
+        "recompute lands on the same number -- so the pass has to say it did not "
+        "run, or the cheap path is only cheap by accident"
+    )
     assert (await _words(engine, "shop_courier.drops_vs_goal")).get("c1@2026-06") == "under", (
         "the raised goal did not re-band the month"
     )
@@ -330,6 +374,46 @@ async def test_a_goal_move_re_serves_the_banded_figure() -> None:
 
     assert "shop_courier.carrying" in _served(report.results), (
         "the limit moved and the figure banded against it was not re-served"
+    )
+
+
+async def test_a_sequenced_figure_bands_against_a_field_on_the_subjects_record() -> None:
+    """A courier has one allowance, not one per month, so the record is
+    fetched once and joined by the subject the row is *about* -- a row keyed
+    `c1@2026-07` is about `c1`.
+
+    Keyed by the coordinate instead, every lookup missed and every row on
+    every sequenced figure banded this way read no word at all. The shortcut
+    worked only on the unbucketed figure it was demonstrated on.
+    """
+    engine, _store, _library, _facts = await _board(BANDED_MONTH_FIELD, allowance=3.0)
+    words = await _words(engine, "shop_courier.drops_vs_allowance")
+    assert words.get("c1@2026-06") == "ok", (
+        f"June's two drops read {words.get('c1@2026-06')!r} against an allowance of 3"
+    )
+    assert words.get("c1@2026-07") == "over", (
+        f"July's four drops read {words.get('c1@2026-07')!r} against an allowance of 3"
+    )
+
+
+async def test_moving_a_field_threshold_re_serves_the_figure_banded_by_it() -> None:
+    """The same screen-keeps-lying case as the goal-figure move, on the
+    threshold shape that replaced the dial for the common case.
+
+    Nothing about the orders changed, so the stored number does not move and
+    the change stream is silent. The pass has to notice that a *band* source
+    moved -- and a band source is a record here, not a figure, which is the
+    edge the figure-shaped version of this rule did not cover.
+    """
+    engine, _store, _library, facts = await _board(BANDED_FIELD, allowance=5.0)
+    assert (await _words(engine, "shop_courier.holding")).get("c1") == "ok"
+
+    facts.put("t1", "shop_courier", "c1", {"name": "Aki", "max_orders": 1.0})
+    report = await engine.run("t1", written={"shop_courier": ["c1"]}, at_ms=AT)
+
+    assert "shop_courier.holding" in _served(report.results), (
+        "the allowance on the record moved and the figure banded against it was "
+        "not re-served, so every connected board keeps the old word"
     )
 
 
@@ -508,13 +592,117 @@ async def test_a_reading_band_reads_the_goal_over_the_same_window_and_statistic(
     this rule exists to refuse.
     """
     engine, _store, _library, _facts = await _board(BANDED_READING)
-    served = await engine.answer("t1", "shop_courier.drops", trailing=["2-3"])
+    served = await engine.answer("t1", "shop_courier.drops", trailing=["3-4"])
     assert isinstance(served, Result)
     [subject] = [s for s in served.subjects if s.id == "c1"]
     assert subject.windows is not None
     [window] = subject.windows
+    # Pinned, because the span this reads was wrong and the assertion below
+    # could not tell: over July and August it totals 4 against 10 and reads
+    # "under" for reasons the docstring does not describe.
+    assert (window.frm, window.to) == ("2026-06", "2026-07"), (
+        f"the window was not June and July: {window.frm}..{window.to}"
+    )
+    assert window.total == 6.0, f"the window did not total the two months: {window}"
     assert window.level == "under", (
         f"the window read {window.level!r} totalling 6 drops against 7 of goal"
+    )
+
+
+async def test_a_reading_band_totals_the_goal_over_the_window_and_no_further() -> None:
+    """The control for the test above, which the fixture could not provide:
+    with every goal inside the window, summing the goal over *every* stored
+    bucket and summing it over the window's give the same answer, so the rule
+    it names is unasserted.
+
+    Here the window is June alone -- two drops against June's goal of 2, which
+    it meets exactly. The goal was set in February and carried forward, so
+    seven monthly goal buckets exist totalling 20; summed over all of them
+    instead of over the window, two drops read 'under'. One month of value
+    against seven months of goal, wrong by the length of the sequence.
+    """
+    engine, _store, _library, _facts = await _board(BANDED_READING)
+    served = await engine.answer("t1", "shop_courier.drops", trailing=["4-4"])
+    assert isinstance(served, Result)
+    [subject] = [s for s in served.subjects if s.id == "c1"]
+    assert subject.windows is not None
+    [window] = subject.windows
+    assert window.frm == "2026-06" and window.to == "2026-06", (
+        f"the window was not June alone: {window.frm}..{window.to}"
+    )
+    assert window.total == 2.0, f"the window did not total June's drops: {window}"
+    assert window.level == "met", (
+        f"June read {window.level!r}: two drops meet June's goal of 2 exactly. "
+        "Reading 'under' means the goal was totalled over months the window "
+        "never covered"
+    )
+
+
+async def test_a_subject_with_no_goal_at_all_gets_no_word() -> None:
+    """The absence rule, on the reading path. `sum` of no buckets is 0.0 --
+    right for the reading's own value, and catastrophic for the threshold it
+    is judged against, because the bottom rung of a band is reliably the
+    comfortable one. A courier nobody has ever set a goal for is not meeting
+    it."""
+    engine, _store, _library, facts = await _board(BANDED_READING)
+    facts.put("t1", "shop_courier", "c2", {"name": "Bo", "max_orders": 3.0})
+    for key, when in DROPS:
+        facts.put(
+            "t1",
+            "shop_order",
+            f"{key}-c2",
+            {"ref": key.upper(), "courier_id": "c2", "status": "delivered",
+             "delivered_at": when},
+        )
+    await engine.run("t1", full=True, at_ms=AT)
+
+    served = await engine.answer("t1", "shop_courier.drops", trailing=["2-3"])
+    assert isinstance(served, Result)
+    words = {
+        s.id: (s.windows[0].level if s.windows else None) for s in served.subjects
+    }
+    assert words.get("c1") == "under", f"the courier with a goal lost their word: {words}"
+    assert words.get("c2") == "unknown", (
+        f"a courier nobody set a goal for read {words.get('c2')!r}. An absent goal "
+        "summed to nought, and every total in the world clears nought"
+    )
+
+
+def test_a_reading_band_reference_must_share_the_unit() -> None:
+    """The figure path refuses this and the reading path never did, so a count
+    of deliveries could be judged against a share -- or, before the threshold
+    unit clause was retired on the argument that the figure carries its own,
+    against a duration in seconds, which bands every window comfortable for
+    ever."""
+    refuses(
+        '''
+# What share of the month's goal was delivered.
+figure shop_courier.goal_share bucketed:
+    display "{shop_courier} share"
+    unit share
+
+    depends:
+        done = shop_order.dropped_by_month:{shop_courier}
+
+    calculate:
+        count(done) / shop_courier.goal_month:{bucket}
+
+# A count of deliveries judged against a share.
+reading shop_courier.crossed(range):
+    display "{shop_courier} deliveries"
+
+    band on sum:
+        when value < shop_courier.goal_share then "under"
+        otherwise "met"
+
+    depends:
+        months = shop_courier.drops_month in range
+
+    calculate:
+        sum(months)
+''',
+        "share",
+        "count",
     )
 
 
