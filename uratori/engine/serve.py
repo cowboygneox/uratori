@@ -90,7 +90,6 @@ from .read import (
     level_of,
     sample_over,
     series_of,
-    statistic_of,
     statistics_of,
     threshold_of,
     unmet_of,

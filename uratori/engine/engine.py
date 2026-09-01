@@ -551,11 +551,11 @@ class Engine:
                     # Hoisted out of the key loop: the same index scan for
                     # every written record turned a roster sync into one full
                     # pass over the bucket keys per subject.
-                    wanted = set(keys)
+                    subjects_written = set(keys)
                     for bucket in await self._store.bucket_keys(
                         tenant, plan.scope_index
                     ):
-                        if subject_of(bucket) in wanted:
+                        if subject_of(bucket) in subjects_written:
                             touch(bucket, plan.name)
                     continue
                 for key in keys:
