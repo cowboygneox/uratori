@@ -52,6 +52,7 @@ fact shop_order:
     depot_id as text
     status as text
     placed_at as moment
+    grace_days as number
 
 # Where an order is dispatched from, and how long one of its orders may sit
 # before it counts as stale. Each depot draws its own line.
@@ -582,4 +583,73 @@ async def test_moving_an_owners_threshold_refiles_the_records_under_it() -> None
 
     assert await store.members("t1", "shop_order.stale", "") == {"o1"}, (
         "the depot tightened its line and the orders under it were never refiled"
+    )
+
+
+# ------------------------------- a line the record itself carries --------
+
+
+async def test_an_age_filter_reads_a_threshold_off_the_record_itself() -> None:
+    """The third shape, and the one the other two positions already had. A
+    band reads `shop_courier.max_orders` bare; a calendar reads
+    `shop_courier.timezone` bare; an age filter had to write a *self-join* --
+    `older than grace_days from ref through shop_order.ref` -- pairing a
+    record with itself to reach a column it is already holding.
+
+    That is the ceremony the whole release was about deleting, still standing
+    one construct along."""
+    from datetime import UTC, datetime, timedelta
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(
+        "\nfilter shop_order.overdue where placed_at older than grace_days\n"
+    )
+    engine = Uratori(schema=DIALLED, library=library, store=store, facts=facts)
+    placed = (datetime.now(tz=UTC) - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for key, grace in (("o1", 1.0), ("o2", 30.0)):
+        facts.put(
+            "t1",
+            "shop_order",
+            key,
+            {"ref": key, "courier_id": "c1", "depot_id": "d1", "status": "riding",
+             "placed_at": placed, "grace_days": grace},
+        )
+    await engine.run("t1", full=True)
+
+    held = sorted(await store.members("t1", "shop_order.overdue", ""))
+    assert held == ["o1"], (
+        f"each order carries its own grace period and the filter held {held}"
+    )
+
+
+async def test_a_record_with_no_line_on_it_is_in_no_filter() -> None:
+    """The same absence rule as everywhere else: a record nobody has drawn a
+    line for is not a record whose line is nought."""
+    from datetime import UTC, datetime, timedelta
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(
+        "\nfilter shop_order.overdue where placed_at older than grace_days\n"
+    )
+    engine = Uratori(schema=DIALLED, library=library, store=store, facts=facts)
+    placed = (datetime.now(tz=UTC) - timedelta(days=500)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    facts.put(
+        "t1",
+        "shop_order",
+        "o1",
+        {"ref": "o1", "courier_id": "c1", "depot_id": "d1", "status": "riding",
+         "placed_at": placed},
+    )
+    await engine.run("t1", full=True)
+
+    assert await store.members("t1", "shop_order.overdue", "") == frozenset()
+
+
+def test_a_line_on_the_record_must_be_a_number() -> None:
+    refuses(
+        "\nfilter shop_order.overdue where placed_at older than status\n",
+        "status",
+        "text",
     )

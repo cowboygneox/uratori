@@ -317,7 +317,13 @@ class ByAge:
     threshold nobody has stated, and guessing one would file records under a
     staleness rule nobody wrote.
 
-    `days` is the other arm: a number in the definition, for a threshold that
+    `older than grace_days` is the third arm and the shortest: the line on the
+    record's own column. The other two positions a threshold appears in read a
+    bare field off the subject already, and this one demanded a self-join --
+    `from ref through shop_order.ref`, pairing a record with itself -- to
+    reach a number it was already holding.
+
+    `days` is the last arm: a number in the definition, for a threshold that
     does not vary. It is not the dial by another name -- a reader can see it,
     and moving it forks the version.
     """
@@ -328,15 +334,18 @@ class ByAge:
     """A literal threshold, in days."""
 
     read: str | None = None
-    """The field to read the threshold off, on the joined record."""
+    """The field to read the threshold off: on the joined record where
+    `through` is set, and on this record itself where it is not."""
 
     local: str | None = None
     """The field on *this* record naming its owner -- `repo_id`."""
 
     through: Through | None = None
     """Which record to read it off: the owner's kind, and the path its key is
-    matched on. Exactly one of `days` and (`read`, `local`, `through`) is
-    set."""
+    matched on. Absent where the line is on the record's own column.
+
+    Exactly one of `days` and `read` is set; `local` and `through` are set
+    together or not at all."""
 
 
 @dataclass(frozen=True)

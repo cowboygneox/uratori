@@ -371,6 +371,27 @@ class _Checker:
                 )
             if part.zone is not None:
                 self._check_zone(d, part, word)
+        if isinstance(d.spec, ByAge) and d.spec.through is None and d.spec.read:
+            found = self._record_field(
+                d.kind,
+                d.spec.read,
+                f"{word} {d.name} reads its age threshold off {d.kind}.{d.spec.read}",
+                d.line,
+                named=True,
+            )
+            if found is not None and found[0].type not in ("number", None):
+                raise CheckError(
+                    f"{word} {d.name} draws its line at {d.kind}.{d.spec.read}, which "
+                    f"is declared as {found[0].type}. A number of days is a number.",
+                    d.line,
+                )
+            if found is not None and found[1]:
+                raise CheckError(
+                    f"{word} {d.name} draws its line at {d.kind}.{d.spec.read}, whose "
+                    "path crosses a list -- one record with several lines, and no "
+                    "answer to which is meant.",
+                    d.line,
+                )
         if isinstance(d.spec, ByAge) and d.spec.through is not None:
             self._fact_kind(
                 d.spec.through.kind,

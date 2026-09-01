@@ -37,6 +37,7 @@ fact data_connection:
 fact code_change:
     name title
     title as text
+    grace_days as number
     author_id as text
     author_account_id as text
     repo_id as text

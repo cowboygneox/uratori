@@ -733,6 +733,14 @@ class _Parser:
                     "here where a reader can see it.",
                     line,
                 )
+            if not self._at_word("from"):
+                # `older than grace_days` -- the line the record itself
+                # carries. The other two positions a threshold appears in read
+                # a bare field off the subject already; this one demanded a
+                # self-join (`from ref through shop_order.ref`) to reach a
+                # column the record was holding, which is the ceremony the
+                # rest of this was about deleting.
+                return ByAge(field=field, direction=direction, read=read)
             self._keyword("from")
             local = self._name("the field on this record that names its owner")
             self._keyword("through")

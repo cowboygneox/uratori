@@ -407,16 +407,25 @@ in days; the unit is fixed precisely so the unsafe version cannot be written.
 A record whose moment cannot be read is in **no** age bucket -- an absent
 timestamp is not evidence of age.
 
-Where the line is not the same for every record, it is read off the record's
-**owner**:
+Where the line is not the same for every record, it comes off a record --
+either the one being filtered, or its **owner**:
 
 ```
-filter code_change.idle where updated_at older than stale_days from repo_id through code_repo.id
+filter code_change.stale where updated_at older than grace_days
+filter code_change.idle  where updated_at older than stale_days from repo_id through code_repo.id
 ```
 
--- the same join a projection field writes, one construct along. Each
-repository declares its own staleness, and the threshold is a fact like every
-other number.
+The first reads a column the record is already holding. The second is the
+same join a projection field writes, one construct along: each repository
+declares its own staleness, and the threshold is a fact like every other
+number.
+
+The bare form exists because the join was the only one, and reaching a
+column on the record itself meant writing a *self-join* -- `older than
+grace_days from ref through code_change.ref`, pairing a record with itself.
+The other two positions a threshold appears in read a bare field off the
+subject already; this one demanded ceremony to reach a number that was
+already there.
 
 This is the position a dial was hardest to remove from, and it is worth saying
 why the answer is a join rather than a figure. Everywhere else a threshold
@@ -425,6 +434,10 @@ over records *before* anything buckets them by person or site, so there is
 nothing to look a goal up by -- and a figure that could feed a filter would be
 a cycle, since the filter decides the population the figure is computed over.
 What a record does have is its owner.
+
+**A record with no line on it is in no filter**, and neither is one holding
+two -- the same rule the bare field read has everywhere else. A record nobody
+has drawn a line for is not a record whose line is nought.
 
 **A join that matches no record is not in the filter.** Never a default and
 never the whole population: an owner nobody has collected yet is a threshold

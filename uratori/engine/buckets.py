@@ -633,7 +633,20 @@ def _age_threshold(
     """
     if spec.days is not None:
         return spec.days
-    if owners is None or spec.through is None or spec.local is None or spec.read is None:
+    if spec.read is None:
+        return None
+    if spec.through is None:
+        # The line on the record's own column. Same rule as the join below:
+        # a record holding no number, or two, has no line -- and a record
+        # with no line is not a record whose line is nought.
+        held = read_path(record, spec.read)
+        if len(held) != 1:
+            return None
+        try:
+            return float(held[0])
+        except (TypeError, ValueError):
+            return None
+    if owners is None or spec.local is None:
         return None
     keys = read_path(record, spec.local)
     if len(keys) != 1:
