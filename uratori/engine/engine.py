@@ -20,6 +20,7 @@ from ..lang.plan import CompiledIndex, FigurePlan, Library
 from ..lang.source import declaration_source
 from ..schema import Schema
 from ..store import EngineStore, FactSource
+from ..windows import usable_zone
 from .buckets import (
     SEPARATOR,
     OwnerReader,
@@ -30,7 +31,6 @@ from .buckets import (
     read_number,
     read_path,
     subject_of,
-    usable_zone,
 )
 from .carry import CarryReachExceeded, materialise
 from .change import Change, Outcome
@@ -261,6 +261,7 @@ class Engine:
                 for key in await self._store.bucket_keys(tenant, plan.scope_index)
             }
             alive = {row.key for row in await self._facts.of_kind(tenant, plan.scope)}
+            zone = zone_ref(lib, plan)
             try:
                 rows = await materialise(
                     self._store,
@@ -268,7 +269,8 @@ class Engine:
                     tenant,
                     bases & alive,
                     at_ms=now,
-                    zones=await subject_zones(self._facts, tenant, zone_ref(lib, plan)),
+                    zones=await subject_zones(self._facts, tenant, zone),
+                    written=zone.named if zone is not None else None,
                     trigger="pass",
                 )
             except CarryReachExceeded as refused:  # pragma: no cover - belt
@@ -1124,7 +1126,9 @@ async def subject_zones(
     two answers to "whose calendar" would be a window walking a sequence that
     does not exist.
     """
-    if zone is None:
+    if zone is None or zone.kind is None or zone.field is None:
+        # None at all, or one written in the definition: there is no record to
+        # read and every subject shares it, so there is no map to build.
         return {}
     out: dict[str, str] = {}
     for row in await facts.of_kind(tenant, zone.kind):

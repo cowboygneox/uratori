@@ -215,7 +215,11 @@ class Uratori:
             # refiles every one of that subject's buckets while the records
             # themselves sit still -- the same blindness the identity hop has,
             # and it needs the same escalation.
-            + [part.zone.kind for part in parts if part.zone is not None]
+            + [
+                part.zone.kind
+                for part in parts
+                if part.zone is not None and part.zone.kind is not None
+            ]
             + [
                 spec.through.kind
                 for spec in specs

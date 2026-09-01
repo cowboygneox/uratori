@@ -747,7 +747,17 @@ async def serve_reading(
     # The calendars actually in play. One, and the response can speak in it;
     # several, and the only honest top-level answer is UTC with each window
     # carrying its subject's own.
-    in_play: list[str | None] = list(sorted(set(zones.values()))) or [None]
+    #
+    # A calendar written in the definition is one for everybody by
+    # construction, and `subject_zones` builds no map for it -- there is no
+    # record to read. Taken from the spec instead, so a board that shares a
+    # calendar still says which, and every window is cut in it rather than
+    # in UTC.
+    written = zone.named if zone is not None else None
+    if written is not None:
+        in_play: list[str | None] = [written]
+    else:
+        in_play = list(sorted(set(zones.values()))) or [None]
     shared = in_play[0] if len(in_play) == 1 else None
     if at_day is not None:
         at = end_of_day_ms(at_day, shared)
@@ -825,7 +835,8 @@ async def serve_reading(
                     for key in await store.bucket_keys(tenant, source.scope_index or "")
                 },
                     at_ms=fill_at,
-                    zones=zones,
+                    zones=zones if written is None else {},
+                    written=written,
                     trigger="read",
                 )
             except CarryReachExceeded as refused:
@@ -856,7 +867,11 @@ async def serve_reading(
 
         for base, held in sorted(by_subject.items()):
             served: list[Window] = []
-            where = zones.get(base) if zones else None
+            # A calendar written in the definition applies to every subject,
+            # so it is the window's too -- taken here as well as at the top,
+            # or the heading would say Auckland while the bounds were cut in
+            # UTC.
+            where = written or (zones.get(base) if zones else None)
             for spec, labels in spans_in(where):
                 covered = set(labels)
                 inside = [(d, v) for d, v in held if d in covered]

@@ -330,3 +330,103 @@ def test_the_calendar_is_part_of_the_groups_spec() -> None:
     ).figure("shop_courier.drops")
     assert one is not None and other is not None
     assert one.version != other.version
+
+
+# --------------------------------------------- one calendar, written down --
+#
+# A board where everybody shares a calendar is the common case, and reaching
+# it through a field meant copying one value onto every record of a roster
+# kind. The showcase did exactly that -- thirty-two franchises each carrying
+# `"America/New_York"`, with a comment saying the league keeps one clock -- so
+# a team missing it fell into no bucket and a typo on one of them was a
+# one-record way to lose a figure.
+#
+# The argument for keeping a literal threshold applies to a calendar word for
+# word: a value written in the definition is not a control outside it. The
+# reader can see it, and moving it forks the version.
+
+LEAGUE = SOURCE.replace(
+    "delivered_at by day in shop_courier.timezone",
+    'delivered_at by day in "Pacific/Auckland"',
+)
+
+
+async def test_a_calendar_may_be_written_in_the_definition() -> None:
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_source(LEAGUE, WORLD)
+    engine = Uratori(schema=WORLD, library=library, store=store, facts=facts)
+    # No `timezone` on either record, and it is not needed.
+    facts.put("t1", "shop_courier", "c1", {"name": "Aki", "timezone": ""})
+    facts.put("t1", "shop_courier", "c2", {"name": "Bo", "timezone": ""})
+    for key, courier in (("o1", "c1"), ("o2", "c2")):
+        facts.put(
+            "t1",
+            "shop_order",
+            key,
+            {"ref": key.upper(), "courier_id": courier, "delivered_at": ACROSS_MIDNIGHT},
+        )
+    await engine.run("t1", full=True)
+
+    rows = await _rows(store, library)
+    assert rows == {"c1@2026-06-26": 1.0, "c2@2026-06-26": 1.0}, (
+        f"14:00Z on the 25th is already the 26th in Auckland, for everybody: {rows}"
+    )
+
+
+async def test_a_written_calendar_is_the_answer_a_window_reports() -> None:
+    """One calendar for the board, so the response says it once rather than
+    each row carrying the same word."""
+    facts = MemoryFactStore()
+    library = compile_source(LEAGUE, WORLD)
+    engine = Uratori(
+        schema=WORLD, library=library, store=MemoryEngineStore(), facts=facts
+    )
+    facts.put("t1", "shop_courier", "c1", {"name": "Aki", "timezone": ""})
+    facts.put(
+        "t1",
+        "shop_order",
+        "o1",
+        {"ref": "O-1", "courier_id": "c1", "delivered_at": ACROSS_MIDNIGHT},
+    )
+    await engine.run("t1", full=True)
+
+    served = await engine.answer("t1", "shop_courier.recent", trailing=[7], at="2026-06-26")
+    assert isinstance(served, Result)
+    assert served.zone == "Pacific/Auckland", (
+        f"the board's one calendar was not reported at the top: {served.zone}"
+    )
+    [subject] = [s for s in served.subjects if s.id == "c1"]
+    assert subject.windows is not None
+    assert subject.windows[0].zone == "Pacific/Auckland", (
+        "the heading said Auckland and the window's own bounds were cut "
+        f"somewhere else: {subject.windows[0].zone}"
+    )
+    assert subject.windows[0].to == "2026-06-26"
+
+
+def test_a_written_calendar_must_name_a_real_one() -> None:
+    """Written in the definition, so it is refused at compile time rather than
+    treated as absent -- unlike a record's, where an unusable value is a fact
+    about one subject and the board goes on."""
+    with pytest.raises(CheckError) as caught:
+        compile_source(
+            SOURCE.replace(
+                "delivered_at by day in shop_courier.timezone",
+                'delivered_at by day in "PST"',
+            ),
+            WORLD,
+        )
+    assert "PST" in caught.value.message
+
+
+def test_a_written_calendar_is_part_of_the_version() -> None:
+    one = compile_source(LEAGUE, WORLD).figure("shop_courier.drops")
+    other = compile_source(
+        LEAGUE.replace('"Pacific/Auckland"', '"Europe/London"'), WORLD
+    ).figure("shop_courier.drops")
+    assert one is not None and other is not None
+    assert one.version != other.version, (
+        "moving the calendar changed which day every record is filed under and "
+        "the version did not move with it"
+    )

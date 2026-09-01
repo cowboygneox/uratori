@@ -285,6 +285,7 @@ async def materialise(
     *,
     at_ms: float,
     zones: Mapping[str, str],
+    written: str | None = None,
     trigger: str,
     cap: int = MAX_CARRY_BUCKETS,
 ) -> list[tuple[str, Value, Value]]:
@@ -361,7 +362,10 @@ async def materialise(
         # only a calendar answers -- so the one that cut the anchors has to be
         # the one that fills between them, or the fill lands on days the
         # subject's own rows never used.
-        zone = zones.get(base)
+        # One calendar for every subject, written in the definition, beats
+        # the per-subject map -- which is empty in that case, because there
+        # is no record to read one off.
+        zone = written or zones.get(base)
 
         def labels_back(n: int, _at: float = at_ms, _zone: str | None = zone) -> list[str]:
             from ..windows import WindowSpec

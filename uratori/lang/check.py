@@ -23,6 +23,7 @@ from ..schema import Schema
 from ..windows import (
     WindowSpec,
     refuse_reach,
+    usable_zone,
     window_token,
 )
 from .ast import (
@@ -413,6 +414,20 @@ class _Checker:
         """
         zone = part.zone
         assert zone is not None
+        if zone.named is not None:
+            # Written in the definition, so it is checked here rather than
+            # treated as absent at run time: an unusable word on a record is a
+            # fact about one subject, and an unusable word in the source is a
+            # figure that answers nothing for anybody.
+            if usable_zone(zone.named) is None:
+                raise CheckError(
+                    f'{word} {d.name} cuts its buckets in "{zone.named}", which is not '
+                    "a calendar anybody keeps. Write an IANA name -- `Asia/Tokyo`, "
+                    "`America/New_York` -- or read one off the subject's record.",
+                    d.line,
+                )
+            return
+        assert zone.kind is not None and zone.field is not None
         self._fact_kind(zone.kind, f"{word} {d.name} reads its calendar from", d.line)
         self._record_field(
             zone.kind,
@@ -1272,7 +1287,10 @@ class _Checker:
         # Unchecked, every key is looked up in the wrong table, every lookup
         # misses, and the figure serves nothing -- which reads as a board that
         # has collected nothing rather than as a wrong declaration.
-        zoned = next((p.zone for p in parts if p.zone is not None), None)
+        zoned = next(
+            (p.zone for p in parts if p.zone is not None and p.zone.kind is not None),
+            None,
+        )
         if zoned is not None and zoned.kind != scope:
             raise CheckError(
                 f"figure {d.name} is fanned out by {scope}, but {name} reads its calendar "
@@ -3679,11 +3697,17 @@ def _field_hash(part: IndexField) -> object:
         # a selective rule is new vocabulary, and every spec written before
         # it existed must keep its version.
         "select": part.select,
-        # The calendar's record and field. A group cut on one subject's
-        # calendar and one cut on another's file the same instant under
-        # different labels, so the two are different specs.
+        # The calendar: the record and field carrying it, or the one written
+        # in the definition. A group cut on one calendar and one cut on
+        # another file the same instant under different labels, so the two
+        # are different specs -- and `named` is absent-unless-declared, so
+        # every spec written before a literal was possible keeps its version.
         "zone": (
-            {"kind": part.zone.kind, "field": part.zone.field}
+            {
+                "kind": part.zone.kind,
+                "field": part.zone.field,
+                "named": part.zone.named,
+            }
             if part.zone is not None
             else None
         ),

@@ -131,7 +131,6 @@ fact nfl_player:
     url as text
     position as text
     team as text
-    timezone as text
 
 # One player's line in one game, from the league's weekly stats.
 fact nfl_stat_line:
@@ -512,7 +511,10 @@ figure nfl_team_season.rate:
 # ------------------------------------------------------------ the players --
 
 group nfl_stat_line.by_player from player_id
-group nfl_stat_line.player_by_day from (player_id, kickoff by day in nfl_player.timezone)
+# A player's day is cut on the league's clock, written here rather than
+# copied onto every player: it is one value for everybody, and a reader can
+# see it without opening a record.
+group nfl_stat_line.player_by_day from (player_id, kickoff by day in "America/New_York")
 
 # The same lines at month and quarter grain: the day/month/quarter trio,
 # each its own declaration bucketing the records directly -- a month bucket

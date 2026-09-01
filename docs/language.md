@@ -454,17 +454,36 @@ dimension. Because `@` joins the halves, a key value containing `@` is refused
 outright rather than encoded -- a subject that decomposes into the wrong pair
 is silent, and a refusal is not.
 
-`by day` truncates an instant to a calendar day. `in team_person.timezone`
-names *whose* calendar: a **field on the subject's record**, read for the
-subject a bucket belongs to. A bare `by day` means UTC, and that is a choice a
-definition makes rather than a default it falls into -- two figures on one
-card, one cut by UTC days and one by somebody's own, would be two rows headed
-"30" measuring two different months.
+`by day` truncates an instant to a calendar day. `in ...` names *whose*
+calendar, and it takes either shape a threshold does:
+
+- **`in team_person.timezone`** -- a field on the subject's record, read for
+  the subject a bucket belongs to. This is the one to reach for whenever
+  subjects genuinely differ, and everything below is about it.
+- **`in "Asia/Tokyo"`** -- one calendar for every subject, written where a
+  reader can see it. The argument is the one that keeps a literal threshold
+  legal: a value in the definition is not a control outside it, because the
+  reader can see it and moving it forks the version. It is refused at compile
+  time if it is not a real zone -- unlike a record's, where an unusable value
+  is a fact about one subject and the board goes on without them.
+
+A bare `by day` means UTC, and that is a choice a definition makes rather than
+a default it falls into -- two figures on one card, one cut by UTC days and
+one by somebody's own, would be two rows headed "30" measuring two different
+months.
 
 It used to be a tenant dial, and a dial meant one calendar for a whole board:
 a courier in Tokyo and one in London had their days cut on somebody else's
 midnight, and the number under "yesterday" was about a period neither of them
-worked.
+worked. The written form is not that dial coming back. A dial varied
+invisibly, from a form, with nothing on the card to cite; this is in the
+source, in the version, and in the trace.
+
+For a board that shares one calendar the field form was a real cost, and the
+showcase paid it: thirty-two franchises each carrying `"America/New_York"`,
+with a comment saying the league keeps one clock -- so a team missing the
+value fell into no bucket, and a typo on one record was a one-record way to
+empty a figure.
 
 **Subject-scoped rather than record-scoped**, and that is the load-bearing
 choice. Read off the record being bucketed, a subject's sequence could mix
@@ -483,7 +502,11 @@ Three things follow, and the first is the price:
 - **A subject with no calendar recorded is in no bucket.** Never UTC as a
   fallback: a subject nobody has said a calendar for has no calendar, and
   defaulting one files their history under days they never worked, with
-  nothing on the board to say so.
+  nothing on the board to say so. A value that is not a usable zone name
+  counts as none -- `"PST"`, a typo, an empty template. As a dial this was one
+  value with one write door to validate at; as a field it is uncontrolled
+  provider data on every roster record, and `timezone as text` accepts
+  anything.
 - **Moving a subject's calendar refiles their whole history**, and the
   records themselves do not move -- so the change stream over them says
   nothing. The kind carrying a calendar is treated exactly as a kind a group

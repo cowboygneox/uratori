@@ -11,13 +11,11 @@ from calendar import monthrange
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
-from functools import lru_cache
 from typing import Any, assert_never
-from zoneinfo import ZoneInfo
 
 from ..lang.ast import ByAge, ByComposite, ByField, ByPredicate, ByPresence, IndexField
 from ..lang.plan import CompiledIndex, CompiledMeasure
-from ..windows import WindowSpec
+from ..windows import WindowSpec, _zone
 
 SEPARATOR = "@"
 """What joins the parts of a composite key.
@@ -174,39 +172,6 @@ def parse_instant(text: str) -> float | None:
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=UTC)
     return moment.timestamp() * 1000.0
-
-
-@lru_cache(maxsize=4096)
-def _zone(name: str) -> ZoneInfo:
-    return ZoneInfo(name)
-
-
-@lru_cache(maxsize=4096)
-def usable_zone(name: str) -> str | None:
-    """The name back if it names a real calendar, else None.
-
-    A calendar used to be a dial: one value per board, with one write door to
-    validate it at. It is a field on a roster record now, which means it is
-    uncontrolled provider data on every subject and `timezone as text` accepts
-    anything -- `"PST"`, an empty template, a typo.
-
-    Unusable is treated as *absent*, which is the answer the design already
-    has for a subject whose calendar it does not know: they are in no bucket,
-    never UTC's. The alternative was what the code did, which was to let
-    `ZoneInfo` raise out of the bucketing and abort the entire tenant's pass
-    -- every figure for everybody, on the strength of one bad string on one
-    record.
-
-    Cached because it is asked once per record per pass, and the answer for a
-    given string never changes.
-    """
-    if not name:
-        return None
-    try:
-        _zone(name)
-    except Exception:
-        return None
-    return name
 
 
 def day_in(epoch_ms: float, zone: str | None) -> str:
@@ -708,7 +673,12 @@ def _keys_for(
 
     if part.truncate is not None or part.select is not None:
         zone_name: str | None = None
-        if part.zone is not None:
+        if part.zone is not None and part.zone.named is not None:
+            # One calendar for the board, written in the definition. No lookup
+            # and no subject to miss on, which is the whole point of it.
+            zone_name = part.zone.named
+        elif part.zone is not None:
+            assert part.zone.field is not None
             if subject is not None:
                 # The subject's own calendar. Absent means the subject has no
                 # calendar recorded, and a record cannot be filed under a day

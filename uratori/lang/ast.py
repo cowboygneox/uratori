@@ -164,8 +164,24 @@ class Zone:
     and defaulting one files their history under days they never worked.
     """
 
-    kind: str
-    field: str
+    kind: str | None
+    field: str | None
+    named: str | None = None
+    """One calendar for every subject, written in the definition.
+
+    Set instead of `kind`/`field`, never beside them. A board where everybody
+    shares a calendar is the common case, and reaching it through a field
+    meant copying one word onto every record of a roster kind -- where a
+    subject missing it falls into no bucket, and a typo on one record is a
+    one-record way to lose a figure. The reasoning is the one that keeps a
+    literal threshold legal: a value written in the definition is not a
+    control outside it, because the reader can see it and moving it forks the
+    version.
+
+    Refused at compile time if it is not a real zone, unlike a record's --
+    there, an unusable value is a fact about one subject and the board goes
+    on without them.
+    """
 
 
 @dataclass(frozen=True)

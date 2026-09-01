@@ -355,12 +355,6 @@ def player_facts(
             "position": row["position"],
             "team": row["team"],
             "url": row.get("headshot_url", ""),
-            # A player's days are cut on their own record's calendar, because
-            # the calendar is read off the subject and a player is the subject
-            # here. Reading it off the team looked right and matched nothing:
-            # the group's keys are player ids, so every lookup in the team
-            # table missed and the figure served nothing at all.
-            "timezone": "America/New_York",
         }
         line: Record = {
             "name": f"{row['player_display_name']}, week {row['week']} of {season}",

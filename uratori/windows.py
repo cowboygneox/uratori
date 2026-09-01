@@ -32,6 +32,8 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 MAX_BUCKETS = 3660
 """How many buckets one span may cover -- ten years of daily buckets.
@@ -357,3 +359,36 @@ __all__ = [
     "span_text",
     "window_token",
 ]
+
+
+@lru_cache(maxsize=4096)
+def _zone(name: str) -> ZoneInfo:
+    return ZoneInfo(name)
+
+
+@lru_cache(maxsize=4096)
+def usable_zone(name: str) -> str | None:
+    """The name back if it names a real calendar, else None.
+
+    A calendar used to be a dial: one value per board, with one write door to
+    validate it at. It is a field on a roster record now, which means it is
+    uncontrolled provider data on every subject and `timezone as text` accepts
+    anything -- `"PST"`, an empty template, a typo.
+
+    Unusable is treated as *absent*, which is the answer the design already
+    has for a subject whose calendar it does not know: they are in no bucket,
+    never UTC's. The alternative was what the code did, which was to let
+    `ZoneInfo` raise out of the bucketing and abort the entire tenant's pass
+    -- every figure for everybody, on the strength of one bad string on one
+    record.
+
+    Cached because it is asked once per record per pass, and the answer for a
+    given string never changes.
+    """
+    if not name:
+        return None
+    try:
+        _zone(name)
+    except Exception:
+        return None
+    return name

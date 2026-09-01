@@ -605,18 +605,31 @@ class _Parser:
             truncate, select = self._bucket_rule()
             if self._at_word("in"):
                 self._next()
-                named = self._name(
-                    "the record and field carrying the calendar, e.g. team_person.timezone"
-                )
-                kind, _, field = named.partition(".")
-                if not field:
-                    raise self._error(
-                        f'"{named}" needs a kind and a field -- `team_person.timezone`. '
-                        "A calendar is a fact about the subject now, not a tenant dial: "
-                        "one dial cut every board's days on somebody else's midnight.",
-                        line,
+                if self._peek().kind == "string":
+                    # `by day in "Asia/Tokyo"` -- one calendar for the board,
+                    # written where a reader can see it. The argument is the
+                    # one that keeps a literal threshold legal: a value in the
+                    # definition is not a control outside it, and moving it
+                    # forks the version. Reaching this through a field meant
+                    # copying one word onto every record of a roster kind,
+                    # where a subject missing it falls into no bucket.
+                    zone = Zone(kind=None, field=None, named=self._next().value)
+                else:
+                    named = self._name(
+                        "the record and field carrying the calendar (e.g. "
+                        'team_person.timezone), or one written out ("Asia/Tokyo")'
                     )
-                zone = Zone(kind=kind, field=field)
+                    kind, _, field = named.partition(".")
+                    if not field:
+                        raise self._error(
+                            f'"{named}" needs a kind and a field -- '
+                            "`team_person.timezone` -- or quotes, if every subject "
+                            'shares one calendar: `in "Asia/Tokyo"`. What it may not '
+                            "be is a tenant dial: one dial cut every board's days on "
+                            "somebody else's midnight.",
+                            line,
+                        )
+                    zone = Zone(kind=kind, field=field)
 
         return IndexField(field=path, through=through, truncate=truncate, select=select, zone=zone)
 
