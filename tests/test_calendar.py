@@ -145,8 +145,10 @@ async def test_moving_a_subjects_calendar_refiles_their_history() -> None:
     assert "c1@2026-06-26" in rows, (
         f"the courier moved calendars and their history stayed where it was: {rows}"
     )
-    assert rows.get("c1@2026-06-25") in (None, 0.0), (
-        f"the old day survived the move, so the same delivery is filed twice: {rows}"
+    assert "c1@2026-06-25" not in rows, (
+        "the old day survived the move, so the same delivery is filed twice. "
+        "A nought is not acceptable here either: a day with nothing in it is "
+        f"absent, never a measured none-of-it. {rows}"
     )
 
 

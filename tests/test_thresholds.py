@@ -323,6 +323,30 @@ summarise shop_order.book over shop_order.rows:
     )
 
 
+def test_a_summarys_total_may_not_name_a_dial_either() -> None:
+    """`count ... where` and `total ... where` are two gates over the same
+    population and the walk that collects a summary's dotted names has to
+    cover both. It covered one, so the other could have gone on reading a
+    control nothing on the tile could cite."""
+    refuses(
+        '''
+# One row per order.
+projection shop_order.rows2:
+    field:
+        ref = ref as text
+
+    value:
+        weight in count = 1
+
+# The weight of the book.
+summarise shop_order.book2 over shop_order.rows2:
+    total heavy in count = weight where weight >= limits.busy
+''',
+        "limits.busy",
+        "tenant dial",
+    )
+
+
 # ---------------------------------------------------- literals stay legal --
 
 
@@ -449,4 +473,113 @@ async def test_an_order_whose_owner_is_unknown_is_in_no_filter() -> None:
     assert await store.members("t1", "shop_order.stale", "") == frozenset(), (
         "an order five hundred days old was filed as stale against a threshold "
         "nobody has stated"
+    )
+
+
+async def _aged_board(depots, orders):
+    """One board over the age filter, so the ambiguity cases below differ only
+    in the records that make them ambiguous."""
+    from datetime import UTC, datetime, timedelta
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(AGED)
+    engine = Uratori(schema=DIALLED, library=library, store=store, facts=facts)
+    for key, body in depots.items():
+        facts.put("t1", "shop_depot", key, body)
+    placed = (datetime.now(tz=UTC) - timedelta(days=500)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for key, depot in orders.items():
+        facts.put(
+            "t1",
+            "shop_order",
+            key,
+            {"ref": key, "courier_id": "c1", "depot_id": depot, "status": "riding",
+             "placed_at": placed},
+        )
+    await engine.run("t1", full=True)
+    return store
+
+
+async def test_a_record_naming_two_owners_is_in_no_filter() -> None:
+    """A record holds one `depot_id`, so two of them is data nobody meant --
+    and picking either is a five-hundred-day-old order filed against a line
+    somebody else's depot drew. There is no answer, so there is no filing."""
+    store = await _aged_board(
+        {"d1": {"name": "North", "id": "d1", "stale_days": 1}},
+        {"o1": ["d1", "d1"]},
+    )
+    assert await store.members("t1", "shop_order.stale", "") == frozenset(), (
+        "an order naming two owners was filed against one of their lines"
+    )
+
+
+async def test_two_owners_answering_to_one_key_leave_the_record_unfiled() -> None:
+    """The join is by a declared field, not by record key, so two depots can
+    carry the same `id`. Which one's rule applies has no answer."""
+    store = await _aged_board(
+        {
+            "d1": {"name": "North", "id": "shared", "stale_days": 1},
+            "d2": {"name": "South", "id": "shared", "stale_days": 900},
+        },
+        {"o1": "shared"},
+    )
+    assert await store.members("t1", "shop_order.stale", "") == frozenset(), (
+        "two depots claim the same id and the filter picked one of their lines"
+    )
+
+
+async def test_an_owner_holding_two_thresholds_states_no_threshold() -> None:
+    """`stale_days` holding a list is one depot with two lines. First-wins
+    would be a stable answer about the wrong number."""
+    store = await _aged_board(
+        {"d1": {"name": "North", "id": "d1", "stale_days": [1, 900]}},
+        {"o1": "d1"},
+    )
+    assert await store.members("t1", "shop_order.stale", "") == frozenset(), (
+        "a depot with two staleness rules had one of them applied"
+    )
+
+
+async def test_an_owner_whose_threshold_is_not_a_number_states_none() -> None:
+    """A provider writing `"soon"` into the column is not a line at zero
+    days, which is where a `float()` that swallowed its own failure would
+    put every record in the depot."""
+    store = await _aged_board(
+        {"d1": {"name": "North", "id": "d1", "stale_days": "soon"}},
+        {"o1": "d1"},
+    )
+    assert await store.members("t1", "shop_order.stale", "") == frozenset(), (
+        "a depot whose staleness rule is a word had its orders filed anyway"
+    )
+
+
+async def test_moving_an_owners_threshold_refiles_the_records_under_it() -> None:
+    """The invalidation this construct turns on, and the one the identity hop
+    already had. Nothing about the *orders* moved, so the change stream over
+    them says nothing -- but a depot is a kind the filter reads through, and
+    a write to one of those escalates the pass to a full one. Without it the
+    board keeps yesterday's filing for ever and nothing anywhere says so."""
+    from datetime import UTC, datetime, timedelta
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(AGED)
+    engine = Uratori(schema=DIALLED, library=library, store=store, facts=facts)
+    facts.put("t1", "shop_depot", "d1", {"name": "North", "id": "d1", "stale_days": 30})
+    placed = (datetime.now(tz=UTC) - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    facts.put(
+        "t1",
+        "shop_order",
+        "o1",
+        {"ref": "o1", "courier_id": "c1", "depot_id": "d1", "status": "riding",
+         "placed_at": placed},
+    )
+    await engine.run("t1", full=True)
+    assert await store.members("t1", "shop_order.stale", "") == frozenset()
+
+    facts.put("t1", "shop_depot", "d1", {"name": "North", "id": "d1", "stale_days": 1})
+    await engine.run("t1", written={"shop_depot": ["d1"]})
+
+    assert await store.members("t1", "shop_order.stale", "") == {"o1"}, (
+        "the depot tightened its line and the orders under it were never refiled"
     )

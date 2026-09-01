@@ -140,17 +140,62 @@ async def test_a_band_compares_against_a_field_on_the_subjects_record() -> None:
 
 
 async def test_the_threshold_costs_no_declarations() -> None:
-    """The point of the change, pinned as a fact about the source: the whole
-    world above is a group, a filter and the figure itself. A `measure`, a
-    self-pairing `group` and a second `figure` were the price of this before.
+    """The point of the change, measured against the shape it replaced.
+
+    Before, a limit on a courier's record could only reach a band through a
+    `measure` renaming the field, a `group` pairing the record with itself,
+    and a second `figure` summing a set of one. That is what is compiled here
+    -- the long road, still legal and still correct -- and the assertion is
+    that it answers exactly what the short one does.
+
+    Pinning `lib.measures == []` on the short road, as this used to, restated
+    the source the test itself had written: the compiler synthesises none of
+    those, so a world with no measures in its text has none in its library
+    however the feature behaves.
     """
-    lib = compile_world()
-    assert [m for m in lib.measures] == [], "the threshold needed a measure"
-    assert sorted(lib.indexes) == ["shop_order.carried_by", "shop_order.open"], (
-        f"the threshold needed a grouping of its own: {sorted(lib.indexes)}"
+    scaffolding = '''
+group shop_courier.themselves from name
+
+measure shop_courier.cleared_for = max_orders in count
+
+# The limit on this courier's record, the long way round.
+figure shop_courier.allowance:
+    display "{shop_courier} may hold {value}"
+
+    depends:
+        me = shop_courier.themselves:{shop_courier}
+
+    calculate:
+        sum(shop_courier.cleared_for over me)
+'''
+    # Spliced in above the figure, because a band names a figure declared
+    # before it -- which is itself part of what the long road costs.
+    at = SOURCE.index("# Orders in hand right now")
+    long_road = compile_source(
+        (SOURCE[:at] + scaffolding + "\n" + SOURCE[at:]).replace(
+            "value > shop_courier.max_orders", "value > shop_courier.allowance"
+        ),
+        WORLD,
     )
-    assert [f.name for f in lib.figures] == ["shop_courier.carrying"], (
-        "the threshold needed a figure of its own"
+    assert len(long_road.figures) == 2 and len(long_road.measures) == 1
+
+    facts = MemoryFactStore()
+    engine = Uratori(
+        schema=WORLD, library=long_road, store=MemoryEngineStore(), facts=facts
+    )
+    facts.put("t1", "shop_courier", "c1", {"name": "c1", "max_orders": 1.0})
+    for n in range(2):
+        facts.put(
+            "t1",
+            "shop_order",
+            f"o{n}",
+            {"ref": f"A-{n}", "courier_id": "c1", "status": "riding"},
+        )
+    await engine.run("t1", full=True)
+    [row] = (await _one(engine, "shop_courier.carrying")).subjects
+    assert row.level == "over", (
+        f"the three-declaration road answers {row.level!r} where the "
+        "no-declaration road answers 'over'"
     )
 
 

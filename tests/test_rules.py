@@ -284,17 +284,38 @@ def test_max_propagates_an_absence_rather_than_letting_the_known_side_win() -> N
         BASE
         + """
 # d
+figure team_person.opened:
+    display "x"
+    depends:
+        mine = work_issue.assigned_to:{team_person}
+    calculate:
+        count(mine)
+
+# d
 figure team_person.bigger:
     display "x"
     unit count
     calculate:
-        max(team_person.count, team_person.count)
+        max(team_person.count, team_person.opened)
 """
     ).figure("team_person.bigger")
     assert plan is not None
-    # `a` resolves, `b` does not.
-    readers = _readers(parts={("team_person.count", "p1"): Parts((4.0,), ("p1",))})
-    assert evaluate(plan, "p1", readers).value == 4.0
+    # **Two different reads, deliberately.** Written as `max(x, x)` the mixed
+    # case is unconstructible -- both operands resolve together or neither
+    # does -- so letting the known side win was a change nothing could see.
+    both = _readers(
+        parts={
+            ("team_person.count", "p1"): Parts((4.0,), ("p1",)),
+            ("team_person.opened", "p1"): Parts((9.0,), ("p1",)),
+        }
+    )
+    assert evaluate(plan, "p1", both).value == 9.0, "the control: both known"
+
+    one = _readers(parts={("team_person.count", "p1"): Parts((4.0,), ("p1",))})
+    assert evaluate(plan, "p1", one).value is None, (
+        "one side was never computed and the other won, so the figure reports "
+        "a commitment too small and every share divided by it reads high"
+    )
     assert evaluate(plan, "nobody", _readers()).value is None
 
 

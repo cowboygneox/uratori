@@ -284,12 +284,18 @@ async def test_tenants_are_listed_with_their_fact_counts(pg_dsn: str) -> None:
         )
         # A third tenant used to be reachable here by storing settings and
         # never feeding it -- exactly the misconfiguration an investigator
-        # comes looking for. There are no settings, so the two ways in are
-        # facts and runs.
+        # comes looking for. There are no settings, and the comment claiming
+        # "the two ways in are facts and runs" went on to test only one of
+        # them. A tenant that has run and holds nothing is the same finding
+        # wearing different clothes.
+        run = await http.post("/tenants/t3/runs", json={})
+        assert run.status_code == 200, run.text
+
         tenants = (await http.get("/ui/api/tenants")).json()["tenants"]
         assert {(t["tenant"], t["facts"]) for t in tenants} == {
             ("t1", 2),
             ("t2", 1),
+            ("t3", 0),
         }
 
 
@@ -703,7 +709,7 @@ async def test_the_ui_serves_its_page_with_the_frame_ancestors_it_was_given(
 # do this -- it holds two groupings and two figures, and a payload whose
 # contract is "every declaration of every kind" needs a corpus that has them.
 FULL_SOURCE = """
-group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day)
+group code_change.merged_by_day from (author_account_id through team_person.accounts.account_id, merged_at by day in team_person.timezone)
 group code_review_request.asked_of from reviewer_account_id through team_person.accounts.account_id
 filter code_review_request.pending where pending == true
 filter code_change.stale where updated_at older than 3 days
@@ -735,6 +741,20 @@ reading team_person.queue():
     calculate:
         count(w)
 
+# Issues by person and day, cut on that person's own calendar and reached
+# by a plain key -- so the calendar is the *only* edge to the record that
+# decides the labels. With a `through` hop the two edges land on the same
+# kind and the zone one proves nothing.
+group work_issue.done_by_day from (assignee_account_id, completed_at by day in team_person.timezone)
+
+# Issues finished that day.
+figure team_person.done_that_day bucketed:
+    display "{team_person} finished that day"
+    depends:
+        done = work_issue.done_by_day:{team_person}
+    calculate:
+        count(done)
+
 # One row per issue.
 projection work_issue.card:
     field:
@@ -760,12 +780,14 @@ async def test_every_declaration_kind_travels_with_its_own_edges(pg_dsn: str) ->
         kinds = {d["name"]: d["kind"] for d in world["declarations"]}
         assert kinds == {
             "code_change.merged_by_day": "group",
+            "work_issue.done_by_day": "group",
             "code_review_request.asked_of": "group",
             "code_review_request.pending": "filter",
             "code_change.stale": "filter",
             "code_change.open_seconds": "measure",
             "code_review_request.waiting_seconds": "measure",
             "team_person.time_to_merge": "figure",
+            "team_person.done_that_day": "figure",
             "team_person.lead_time": "reading",
             "team_person.queue": "reading",
             "work_issue.card": "projection",
@@ -786,6 +808,13 @@ async def test_every_declaration_kind_travels_with_its_own_edges(pg_dsn: str) ->
         # own kind's records; one reading a threshold off an owner would
         # carry that owner's kind as an edge.
         assert rests("code_change.stale") == {("fact", "code_change")}
+        # A group fanned out by a plain key: the calendar is the only thing
+        # naming the other kind, so this is where the zone edge does work the
+        # identity hop is not already doing.
+        assert rests("work_issue.done_by_day") == {
+            ("fact", "work_issue"),
+            ("fact", "team_person"),
+        }
         # A measure rests on the records it measures, and nothing else.
         assert rests("code_change.open_seconds") == {("fact", "code_change")}
         assert by_name["code_change.open_seconds"]["version"] is None
@@ -867,10 +896,15 @@ async def test_moved_by_is_the_closure_to_leaves(pg_dsn: str) -> None:
             )
 
 
-async def test_moved_by_carries_settings_found_deep_in_the_chain(pg_dsn: str) -> None:
-    """A reading windowing a figure over a zone-bucketed group is moved by the
-    zone dial three hops down. The closure must surface it, or 'nothing else
-    can move this number' becomes false exactly where it is hardest to see."""
+async def test_moved_by_reaches_the_calendar_three_hops_down(pg_dsn: str) -> None:
+    """A reading windows a figure over a group whose buckets are cut on a
+    calendar read off the subject's record. That record can move the reading's
+    every number, three hops down, and the closure has to surface it -- or
+    "nothing else can move this" is false exactly where it is hardest to see.
+
+    The group in this fixture had lost its `in <kind>.<field>` clause, so what
+    the assertion below actually reached was the identity hop, which is
+    covered twice elsewhere. It is a zoned group again."""
     from .world import WORLD
 
     async with serve(pg_dsn) as http:
@@ -887,8 +921,22 @@ async def test_moved_by_carries_settings_found_deep_in_the_chain(pg_dsn: str) ->
             "the calendar lives on a record the group under the figure under "
             "the reading resolves to, and the closure must reach it"
         )
-        assert ("fact", "code_change") in lead_time
-        assert ("fact", "team_person") in lead_time
+        assert ("fact", "code_change") in lead_time, (
+            "the records the figure is actually over"
+        )
+
+        # The calendar as the *only* route to the record. `done_by_day` fans
+        # out by a plain key, so nothing else on this figure's chain mentions
+        # team_person -- and moving somebody's timezone refiles their whole
+        # history.
+        done = {
+            (d["type"], d["name"])
+            for d in by_name["team_person.done_that_day"]["moved_by"]
+        }
+        assert ("fact", "team_person") in done, (
+            "the calendar is the only edge from this figure to the record "
+            "that decides its labels, and the closure did not carry it"
+        )
 
 
 # ----------------------------------------------------------- membership --
@@ -1574,13 +1622,17 @@ async def test_an_effort_renders_in_hours_and_needs_no_dial(
         page = (await http.get("/ui/api/tenants/t1/measured/shop_order.spent")).json()
         assert page["records"][0]["display"] == "8.0h", "28,800s of working time"
 
-        await http.put(
+        # And there is nowhere left to move it from. This used to PUT a dial
+        # and re-read the page, on a route deleted with the dials -- so the
+        # call was an unasserted 404 and the second assertion re-checked the
+        # value the first had. The 404 is the fact worth pinning.
+        refused = await http.put(
             "/tenants/t1/settings",
             json={"document": {"tenant": {"hoursPerDay": 4}}},
         )
-        moved = (await http.get("/ui/api/tenants/t1/measured/shop_order.spent")).json()
-        assert moved["records"][0]["display"] == "8.0h", (
-            "a dial nothing reads changed the rendered text"
+        assert refused.status_code == 404, (
+            "the settings route is back; an effort's rendered text can move "
+            f"from a form again ({refused.status_code})"
         )
 
 

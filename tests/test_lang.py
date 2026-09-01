@@ -218,7 +218,9 @@ def test_a_groups_checker_messages_speak_the_group_word() -> None:
     group word through the zone refusal."""
     refuses(
         "\ngroup code_change.by_bad_day from (authorAccountId, mergedAt by day in flow.leadTimeDays)\n",
-        "not a fact kind",
+        # The word, not just the complaint: `_decl_word` reporting a group as a
+        # filter breaks nothing structural, so only the fragment can catch it.
+        "group code_change.by_bad_day",
     )
 
 
@@ -2720,7 +2722,10 @@ figure team_person.merge_total:
     calculate:
         team_person.merge_rate
 """,
-        "one value per",
+        # Fourteen messages in the checker contain "one value per", three of
+        # which could plausibly fire on this construct. The name and the word
+        # `bare` together pin which one.
+        "team_person.merge_rate\" bare",
     )
 
 

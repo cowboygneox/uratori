@@ -81,10 +81,7 @@ projection team_person.watch:
     read:
         w = team_person.wip_level
 
-# Weighted issues, and the working time each carries. The effort is the one
-# thing here a dial still touches -- the renderer divides by the working day
-# on the way to the text -- now that a threshold is written where a reader
-# can see it rather than read from a settings page.
+# Weighted issues, and the working time each carries.
 projection work_issue.weighted:
     field:
         key = title as text

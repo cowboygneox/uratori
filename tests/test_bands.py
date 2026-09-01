@@ -761,3 +761,130 @@ reading shop_courier.unbanded(range):
 ''',
         "mean",
     )
+
+
+# ------------------------------------- a projection's `band of` column --
+
+
+async def _card(engine: Uratori):
+    served = await engine.answer("t1", "shop_courier.card")
+    assert isinstance(served, Result), "the projection answered nothing"
+    return [s.row for s in served.subjects if s.row is not None]
+
+
+BANDED_CARD = '''
+# One row per courier: what they are holding, and the word beside it.
+projection shop_courier.card:
+    field:
+        who = name as text
+
+    read:
+        held = shop_courier.holding
+        held_band = band of shop_courier.holding
+'''
+
+
+async def test_a_projections_band_column_reads_the_figures_own_thresholds() -> None:
+    """`band of F` is the figure's own word, so it is derived from the same
+    value against the same thresholds -- and where those thresholds are facts,
+    the projection has to resolve them too.
+
+    Every `band of` in the suite banded against a literal, so the whole
+    threshold-resolution path on this route was dead code as far as any test
+    was concerned: replacing it with an empty map broke nothing.
+    """
+    engine, _store, _library, facts = await _board(
+        BANDED_FIELD + BANDED_CARD, allowance=5.0
+    )
+    facts.put(
+        "t1",
+        "shop_order",
+        "open1",
+        {"ref": "OPEN-1", "courier_id": "c1", "status": "riding",
+         "delivered_at": "2026-08-01T10:00:00Z"},
+    )
+    await engine.run("t1", full=True, at_ms=AT)
+
+    [row] = await _card(engine)
+    assert row.values["held"] == 1.0
+    assert row.values["held_band"] == "ok", (
+        f"one order in hand against an allowance of five read {row.values['held_band']!r}"
+    )
+
+    facts.put("t1", "shop_courier", "c1", {"name": "Aki", "max_orders": 0.0})
+    await engine.run("t1", written={"shop_courier": ["c1"]}, at_ms=AT)
+
+    [row] = await _card(engine)
+    assert row.values["held"] == 1.0, "the figure's own value must not have moved"
+    assert row.values["held_band"] == "over", (
+        "the allowance dropped to nought and the column beside the unchanged "
+        f"number kept saying {row.values['held_band']!r}"
+    )
+
+
+def test_a_band_reference_must_share_the_scope() -> None:
+    """Different scopes are different id spaces, so the join is not a near
+    miss -- `c1` against `o1` never meets, and every row bands unknown, which
+    reads as missing data rather than as a wrong definition."""
+    refuses(
+        '''
+# What each order weighs, so there is a figure over the wrong kind.
+figure shop_order.weight:
+    display "{shop_order} weight"
+
+    depends:
+        mine = shop_order.carried_by:{shop_order}
+
+    calculate:
+        count(mine)
+
+# Deliveries judged against a figure about orders.
+figure shop_courier.crossed:
+    display "x"
+
+    depends:
+        mine = shop_order.carried_by:{shop_courier}
+
+    calculate:
+        count(mine)
+
+    band:
+        when value > shop_order.weight then "over"
+        otherwise "ok"
+''',
+        "shop_order.weight",
+        "shop_order",
+    )
+
+
+def test_a_band_reference_must_share_the_dimension() -> None:
+    """A figure split across a dimension is keyed `c1@gitlab`, and an
+    unsplit one `c1`. The two never meet either."""
+    refuses(
+        '''
+# Deliveries split by status.
+figure shop_courier.by_status across shop_order:
+    display "x"
+
+    depends:
+        mine = shop_order.carried_by:{shop_courier}
+
+    calculate:
+        count(mine)
+
+# An unsplit count judged against a split one.
+figure shop_courier.mixed:
+    display "x"
+
+    depends:
+        mine = shop_order.carried_by:{shop_courier}
+
+    calculate:
+        count(mine)
+
+    band:
+        when value > shop_courier.by_status then "over"
+        otherwise "ok"
+''',
+        "shop_courier.by_status",
+    )

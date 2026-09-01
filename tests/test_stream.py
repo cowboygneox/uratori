@@ -548,8 +548,18 @@ def test_a_goal_move_pushes_the_watched_recolour_through_figure_and_tile(pg_dsn:
             )
             assert saved.status_code == 200, saved.text
 
-            heard = {socket.receive_json()["result"]["name"] for _ in range(2)}
+            pushed = [socket.receive_json()["result"] for _ in range(2)]
+            heard = {r["name"] for r in pushed}
             assert heard == {"shop_courier.carrying", "shop_courier.card"}
+            # **The word, not just the frame.** Asserting only the names lets
+            # the stale word through, which is the exact failure a re-serve
+            # exists to prevent: the frame arrives, the client repaints, and
+            # it repaints the same "ok".
+            carrying = next(r for r in pushed if r["name"] == "shop_courier.carrying")
+            assert [s["level"] for s in carrying["subjects"]] == ["over"], (
+                "the limit dropped to one against two orders in hand, and the "
+                "re-served frame still carried the old word"
+            )
             socket.send_json({"type": "ping"})
             assert socket.receive_json()["type"] == "pong"
 
