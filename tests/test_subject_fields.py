@@ -47,6 +47,7 @@ fact shop_order:
     courier_id as text
     status as text
     weight as number
+    delivered_at as moment
     many parcels:
         grams as number
 
@@ -200,6 +201,68 @@ async def test_a_record_with_no_value_there_withholds_the_word() -> None:
 
 
 # ------------------------------------------------------------ what is refused --
+
+
+SEQUENCED_ROOM = '''
+# Orders by courier and day.
+group shop_order.dropped_by_day from (courier_id, delivered_at by day)
+
+# How much room this courier had left that day.
+figure shop_courier.room_that_day bucketed:
+    display "{shop_courier} had room for {value} more"
+    unit count
+
+    depends:
+        done = shop_order.dropped_by_day:{shop_courier}
+
+    calculate:
+        shop_courier.max_orders - count(done)
+'''
+
+
+async def test_a_write_to_the_record_recomputes_the_buckets_and_invents_none() -> None:
+    """The subject's own record is not a *member* of the grouping that fans
+    the figure out, so a write to it has to reach the figure by subject rather
+    than by bucket. On a sequenced figure that subject is a coordinate --
+    `c1@2026-06-25` -- and the bare key is not a row it has.
+
+    Touched anyway, the bare key was evaluated, found no bucket, and stored
+    the arithmetic over an empty set: a row saying the courier had room for
+    nine more on no day at all, pushed on the change stream, served with no
+    dimension, and surviving every later warm pass.
+    """
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(SEQUENCED_ROOM)
+    engine = Uratori(
+        schema=WORLD, library=library, store=store, facts=facts
+    )
+    facts.put("t1", "shop_courier", "c1", {"name": "Aki", "max_orders": 5.0})
+    facts.put(
+        "t1",
+        "shop_order",
+        "o1",
+        {"ref": "A-1", "courier_id": "c1", "status": "riding",
+         "delivered_at": "2026-06-25T10:00:00Z"},
+    )
+    await engine.run("t1", full=True)
+    plan = library.figure("shop_courier.room_that_day")
+
+    async def rows() -> dict[str, object]:
+        return {r.subject: r.value for r in await store.values("t1", plan.name, plan.version)}
+
+    assert await rows() == {"c1@2026-06-25": 4.0}
+
+    facts.put("t1", "shop_courier", "c1", {"name": "Aki", "max_orders": 9.0})
+    report = await engine.run("t1", written={"shop_courier": ["c1"]})
+
+    assert await rows() == {"c1@2026-06-25": 8.0}, (
+        f"the allowance moved and the day did not follow it, or a row was "
+        f"invented for no day: {await rows()}"
+    )
+    assert [c.subject for c in report.outcome.changes] == ["c1@2026-06-25"], (
+        f"a change was reported about a subject with no bucket: {report.outcome.changes}"
+    )
 
 
 def test_a_field_of_another_kind_is_not_the_subjects() -> None:

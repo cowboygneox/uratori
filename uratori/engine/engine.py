@@ -30,6 +30,7 @@ from .buckets import (
     read_number,
     read_path,
     subject_of,
+    usable_zone,
 )
 from .carry import CarryReachExceeded, materialise
 from .change import Change, Outcome
@@ -383,7 +384,9 @@ class Engine:
             for row in await self._facts.of_kind(tenant, kind):
                 held = read_path(row.value, field)
                 if len(held) == 1:
-                    out[row.key] = str(held[0])
+                    named = usable_zone(str(held[0]))
+                    if named is not None:
+                        out[row.key] = named
             return out
 
         async def build_bodies(kind: str, path: str) -> dict[str, list[Mapping[str, Any]]]:
@@ -533,14 +536,27 @@ class Engine:
                     # would be missed entirely. This is the shape a threshold
                     # read off the subject's record has: raise a courier's
                     # allowance and nothing about their orders moves.
-                    for key in keys:
-                        touch(key, plan.name)
-                        if plan.grain is not None or plan.across is not None:
-                            for bucket in await self._store.bucket_keys(
-                                tenant, plan.scope_index
-                            ):
-                                if subject_of(bucket) == key:
-                                    touch(bucket, plan.name)
+                    #
+                    # Sequenced or dimensioned, the subjects are *coordinates*
+                    # and the bare key is not one of this figure's rows.
+                    # Touched anyway it was evaluated, found no bucket, and
+                    # the arithmetic over an empty set was stored: a row
+                    # claiming the courier had room for nine more on no day at
+                    # all, reported as a movement and served with no dimension.
+                    # So it is one branch or the other, never both.
+                    if plan.grain is None and plan.across is None:
+                        for key in keys:
+                            touch(key, plan.name)
+                        continue
+                    # Hoisted out of the key loop: the same index scan for
+                    # every written record turned a roster sync into one full
+                    # pass over the bucket keys per subject.
+                    wanted = set(keys)
+                    for bucket in await self._store.bucket_keys(
+                        tenant, plan.scope_index
+                    ):
+                        if subject_of(bucket) in wanted:
+                            touch(bucket, plan.name)
                     continue
                 for key in keys:
                     for bucket in await self._store.buckets_holding(
@@ -626,8 +642,21 @@ class Engine:
             # the quadratic shape that turned a season-sized bulk load into
             # tens of minutes -- tests/test_pass_cost.py holds the line.
             readers = await self._readers(tenant, plan)
+            # **Which buckets the grouping still has**, fetched once per
+            # figure alongside the readers rather than once per subject, for
+            # the same reason. A sparse sequenced figure has a row exactly
+            # where its group has a bucket, so a subject recomputed here that
+            # is no longer one is a bucket that emptied -- and the row has to
+            # go rather than be recomputed to a nought. The population is what
+            # says so; the number the population produced cannot, because
+            # `count()` of nothing and a genuinely-nought bucket are the same
+            # `0.0`. Carried figures are exempt: their rows exist precisely
+            # where no record does.
+            live: set[str] | None = None
+            if plan.grain is not None and not plan.carried and plan.scope_index is not None:
+                live = set(await self._store.bucket_keys(tenant, plan.scope_index))
             for subject in sorted(subjects):
-                change = await self._recompute_one(tenant, plan, subject, readers)
+                change = await self._recompute_one(tenant, plan, subject, readers, live)
                 if change is None:
                     continue
                 changes.append(change)
@@ -653,14 +682,32 @@ class Engine:
         return changes
 
     async def _recompute_one(
-        self, tenant: str, plan: FigurePlan, subject: str, readers: Readers
+        self,
+        tenant: str,
+        plan: FigurePlan,
+        subject: str,
+        readers: Readers,
+        live: set[str] | None = None,
     ) -> Change | None:
         result = evaluate(plan, subject, readers)
         held = await self._store.value(tenant, plan.name, plan.version, subject)
 
         label = await self._label(tenant, plan, subject)
 
-        if plan.grain is not None and isinstance(result.value, list) and not result.value:
+        # **The bucket left the grouping.** Distinct from "no member could be
+        # measured", which is a real bucket answering an honest absence: here
+        # there is nothing in the bucket at all. Only an empty *list* used to
+        # be caught, so `count()` of nothing stored the scalar `0.0` and a day
+        # that lost its last record kept a row holding a measured nought --
+        # stored, versioned and current, so every reader believed it. A window
+        # counted the day as covered, dragging its mean down and overstating
+        # its own coverage, and the change stream pushed 1 -> 0 to every
+        # screen. The sweep that catches this runs on a full pass, and a
+        # corrected timestamp arrives as an ordinary write.
+        emptied = live is not None and subject not in live
+        if plan.grain is not None and (
+            emptied or (isinstance(result.value, list) and not result.value)
+        ):
             # A bucket every member was gated off is a bucket nothing happened
             # in, and a time-keyed figure's subjects are the buckets something
             # happened in -- so the subject is absent, not an empty list.
@@ -1083,7 +1130,9 @@ async def subject_zones(
     for row in await facts.of_kind(tenant, zone.kind):
         held = read_path(row.value, zone.field)
         if len(held) == 1:
-            out[row.key] = str(held[0])
+            named = usable_zone(str(held[0]))
+            if named is not None:
+                out[row.key] = named
     return out
 
 

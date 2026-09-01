@@ -150,6 +150,42 @@ async def test_moving_a_subjects_calendar_refiles_their_history() -> None:
     )
 
 
+async def test_a_corrected_timestamp_leaves_no_measured_nought_behind() -> None:
+    """The headline case for a moved bucket, on the warm path a host actually
+    uses. An order's `delivered_at` is corrected from the 25th to the 27th, so
+    the 25th has nothing in it any more.
+
+    The row for the 25th was recomputed rather than removed, and `count()` of
+    nothing is the scalar `0.0` -- so the day held a *measured nought*. Only
+    an empty list was treated as an emptied bucket, and a count never produces
+    one. The sweep that would have caught it runs on a full pass, and a
+    corrected timestamp arrives as an ordinary write.
+
+    Every reader believes the row: the figure is stored, versioned and
+    current. A window counts the day as covered, which drags the mean down and
+    overstates how much of the range was measured, and the change stream
+    pushes 1 -> 0 to every screen.
+    """
+    engine, store, library, facts = await _board(
+        {"c1": "Europe/London"},
+        {"o1": {"ref": "O-1", "courier_id": "c1", "delivered_at": ACROSS_MIDNIGHT}},
+    )
+    assert await _rows(store, library) == {"c1@2026-06-25": 1.0}
+
+    facts.put(
+        "t1",
+        "shop_order",
+        "o1",
+        {"ref": "O-1", "courier_id": "c1", "delivered_at": "2026-06-27T14:00:00Z"},
+    )
+    await engine.run("t1", written={"shop_order": ["o1"]})
+
+    rows = await _rows(store, library)
+    assert rows == {"c1@2026-06-27": 1.0}, (
+        f"the day the order left is still reporting a number: {rows}"
+    )
+
+
 async def test_a_window_covers_each_subjects_own_dates() -> None:
     """The consequence a board has to live with: "the last seven days" is a
     different seven dates for each subject, so each window reports its own
@@ -173,6 +209,45 @@ async def test_a_window_covers_each_subjects_own_dates() -> None:
         "each window must say whose calendar it was cut on, or a reader "
         "comparing two rows cannot tell they cover different dates"
     )
+
+
+async def test_a_courier_whose_calendar_is_not_a_calendar_is_in_no_bucket() -> None:
+    """`"PST"` is not a zone name, and neither is a typo, an empty template or
+    whatever a provider put in that column. As a dial this was one value with
+    one write door to validate at; as a fact it is uncontrolled data on every
+    record of a roster kind, and `timezone as text` accepts anything.
+
+    Unguarded, the lookup raised out of the bucketing and took the *whole
+    tenant's pass* with it -- every figure for everybody, on the strength of
+    one bad string on one record. The design already has the right answer for
+    a subject whose calendar it does not know: they are in no bucket. An
+    unusable value is not knowing it.
+    """
+    _engine, store, library, _facts = await _board(
+        {"c1": "Europe/London", "c2": "PST"},
+        {
+            "o1": {"ref": "O-1", "courier_id": "c1", "delivered_at": ACROSS_MIDNIGHT},
+            "o2": {"ref": "O-2", "courier_id": "c2", "delivered_at": ACROSS_MIDNIGHT},
+        },
+    )
+    rows = await _rows(store, library)
+    assert rows == {"c1@2026-06-25": 1.0}, (
+        f"one unusable zone string took the whole board's pass with it: {rows}"
+    )
+
+
+async def test_an_unusable_calendar_on_a_courier_with_nothing_still_serves() -> None:
+    """The same value reaches the serving path by a different route: the
+    windows to resolve are drawn from every distinct zone in the tenant,
+    whether or not any stored row was cut on one. So a courier with a typo and
+    no orders at all made the reading endpoint raise for *everybody*."""
+    engine, _store, _library, _facts = await _board(
+        {"c1": "Europe/London", "c2": "Not/AZone"},
+        {"o1": {"ref": "O-1", "courier_id": "c1", "delivered_at": ACROSS_MIDNIGHT}},
+    )
+    served = await engine.answer("t1", "shop_courier.recent", trailing=[7], at="2026-06-26")
+    assert isinstance(served, Result)
+    assert [s.id for s in served.subjects] == ["c1"]
 
 
 # ----------------------------------------------------------- what is refused --
