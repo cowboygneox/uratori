@@ -625,14 +625,6 @@ class _Checker:
                 d.line,
             )
 
-        if d.sets and d.combines:
-            raise CheckError(
-                f"figure {d.name} has both a depends and a combine block. Reading record "
-                "sets and another figure would be two populations arriving at one calculation "
-                "with no rule for how they relate -- adding a count of records to a total of "
-                "stored values produces a number no definition makes a claim about.",
-                d.line,
-            )
         if d.across is not None:
             self._fact_kind(d.across, f"figure {d.name} is split across", d.line)
             if d.across == scope:
@@ -645,6 +637,22 @@ class _Checker:
 
         set_names = self._named_sets(d)
         combines = self._combines(d)
+        # `sum(<figure>)` is the rollup, written where every other operation
+        # is written. Desugared into the same binding the retired `combine`
+        # block produced, so the plan, the evaluator and the pass see one
+        # shape and only the surface changed.
+        d, combines = self._resolve_rollups(d, combines, set_names)
+        if d.sets and combines:
+            raise CheckError(
+                f"figure {d.name} names a population in `depends` and rolls up another "
+                "figure's parts in the same calculation. Those are two populations "
+                "arriving at one number with no rule for how they relate -- adding a "
+                "count of records to a total of stored values produces a number no "
+                "definition makes a claim about. Reading one figure's *value* beside a "
+                "population is fine and expected: that is a number, not a second "
+                "population.",
+                d.line,
+            )
         # Resolved before the scope check, because a figure that reads another
         # figure and names no group takes its subjects the way a rollup does --
         # and until the dotted names are resolved, nothing knows it reads one.
@@ -1096,64 +1104,111 @@ class _Checker:
         else:
             assert_never(expr)
 
-    def _combines(self, d: FigureDecl) -> dict[str, tuple[str, str | None]]:
-        out: dict[str, tuple[str, str | None]] = {}
-        seen_over = 0
-        for c in d.combines:
-            if c.name in out:
-                raise CheckError(
-                    f'figure {d.name} binds "{c.name}" twice in its combine block.', c.line
-                )
-            source = _find(self.figures, c.figure)
-            if source is None:
-                raise CheckError(
-                    f'there is no figure called "{c.figure}". Declared so far: '
-                    f"{', '.join(f.name for f in self.figures) or 'none'}.",
-                    c.line,
-                )
-            # No self-reference check here, deliberately: `_find` only searches
-            # figures declared *before* this one, so a figure can never resolve
-            # to itself and the branch would be unreachable. The name simply
-            # does not resolve, and "there is no figure called X" is the honest
-            # message -- an unreachable refusal is worse than none, because it
-            # reads as a guard somebody is relying on.
-            if c.over is None:
-                # `combine` is the rollup block now, and nothing else. Reading
-                # one figure's value was its other job, and a calculation can
-                # name a figure outright -- so the binding was an alias for a
-                # name, declared above the only line that used it.
-                raise CheckError(
-                    f"figure {d.name} binds {c.figure} in a combine block, and combine "
-                    "adds up the parts of a figure split across a dimension "
-                    f"(`{c.name} = {c.figure} over <kind>`). To read one figure's value, "
-                    f"name it in the calculation: `{c.figure}` where `{c.name}` is now.",
-                    c.line,
-                )
-            if c.over is not None:
-                seen_over += 1
+    def _resolve_rollups(
+        self,
+        d: FigureDecl,
+        combines: dict[str, tuple[str, str | None]],
+        set_names: dict[str, SetExpr],
+    ) -> tuple[FigureDecl, dict[str, tuple[str, str | None]]]:
+        """`sum(<figure>)` -- add up the parts of a figure split across a
+        dimension, so that a total and its parts cannot disagree.
+
+        This was a block: four lines and a name for one operation whose only
+        legal consumer was the `sum` on the line below it. `over <kind>`
+        restated what the source already declares, and the binding was an
+        alias for a value used once, immediately. Neither said anything the
+        calculation could not.
+
+        The binding it desugars to is the figure's own name, so the shape the
+        plan carries is unchanged and nothing downstream learns a new one.
+        """
+        out = dict(combines)
+
+        def walk(e: CalcExpr) -> CalcExpr:
+            if (
+                isinstance(e, Sum)
+                and e.measure is None
+                and "." in e.set
+                and e.set not in set_names
+            ):
+                source = _find(self.figures, e.set)
+                if source is None:
+                    raise CheckError(
+                        f'figure {d.name} adds up "{e.set}", which is not a figure '
+                        "declared before it. Declared so far: "
+                        f"{', '.join(f.name for f in self.figures) or 'none'}.",
+                        e.line,
+                    )
                 if source.across is None:
                     raise CheckError(
-                        f"figure {d.name} adds up {c.figure} over {c.over}, but {c.figure} is "
-                        "not split across anything. A rollup of an undimensioned figure totals "
-                        "a single value and looks right for ever, which is why this is refused "
-                        "rather than allowed to mean the same as a bare read.",
-                        c.line,
+                        f"figure {d.name} adds up {e.set}, which is not split across "
+                        "anything. A rollup of an undimensioned figure totals a single "
+                        "value and looks right for ever, which is why this is refused "
+                        f"rather than allowed to mean the same as reading {e.set} "
+                        "outright.",
+                        e.line,
                     )
-                if source.across != c.over:
-                    raise CheckError(
-                        f"figure {d.name} adds up {c.figure} over {c.over}, but {c.figure} is "
-                        f"split across {source.across}.",
-                        c.line,
-                    )
-                if seen_over > 1:
+                if any(
+                    name != e.set and held[1] is not None for name, held in out.items()
+                ):
                     raise CheckError(
                         f"figure {d.name} rolls up more than one dimensioned figure. A "
-                        "rollup's members are addresses carrying no figure name, so two would "
-                        "be indistinguishable once stored.",
-                        c.line,
+                        "rollup's members are addresses carrying no figure name, so two "
+                        "would be indistinguishable once stored.",
+                        e.line,
                     )
-            out[c.name] = (c.figure, c.over)
-        return out
+                out[e.set] = (e.set, source.across)
+                return replace(e, set=e.set, measure=None)
+            if isinstance(e, Ladder):
+                return replace(
+                    e,
+                    rungs=tuple(
+                        replace(
+                            r,
+                            left=walk(r.left),
+                            then=walk(r.then),
+                            right=walk(r.right) if r.right is not None else None,
+                        )
+                        for r in e.rungs
+                    ),
+                    otherwise=walk(e.otherwise),
+                )
+            if isinstance(e, (Arith, Pick)):
+                return replace(e, left=walk(e.left), right=walk(e.right))
+            return e
+
+        return replace(d, calculate=walk(d.calculate)), out
+
+    def _combines(self, d: FigureDecl) -> dict[str, tuple[str, str | None]]:
+        """The retired `combine:` block, refused with the line it becomes.
+
+        It was four lines and a name for one operation whose only legal
+        consumer was the `sum` immediately below it -- and neither half of it
+        said anything the calculation could not. `over <kind>` restated what
+        the source declares, and the binding was an alias for a value used
+        once. A rollup is written where every other operation is written.
+
+        Refused rather than kept working, because two spellings of one thing
+        is what this language is arranged against, and the version hash would
+        fork between them for no semantic reason.
+        """
+        for c in d.combines:
+            if c.over is None:
+                raise CheckError(
+                    f"figure {d.name} binds {c.figure} in a combine block. To read one "
+                    f"figure's value, name it in the calculation: `{c.figure}` where "
+                    f"`{c.name}` is now.",
+                    c.line,
+                )
+            raise CheckError(
+                f"figure {d.name} has a combine block, and there is no such block any "
+                f"more. A rollup is an expression: write `sum({c.figure})` in "
+                "`calculate:` where `sum(" + c.name + ")` is now, and delete the block. "
+                f"`over {c.over}` went with it -- {c.figure} declares what it is split "
+                "across, and saying it twice is a second place for the two to disagree.",
+                c.line,
+            )
+        return {}
 
     def _scope_index(
         self,

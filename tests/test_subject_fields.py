@@ -48,10 +48,17 @@ fact shop_order:
     status as text
     weight as number
     delivered_at as moment
+    depot_id as text
     many parcels:
         grams as number
 
+# Where an order is dispatched from.
+fact shop_depot:
+    name name
+    name as text
+
 group shop_order.carried_by from courier_id
+group shop_order.by_depot from (courier_id, depot_id)
 filter shop_order.open where status != "delivered"
 
 # Orders in hand right now, against this courier's own limit.
@@ -551,26 +558,104 @@ def test_latest_still_needs_a_sequence_because_it_needs_an_ordering() -> None:
 # --------------------------------------------- combine, shrunk to its one job --
 
 
-def test_a_plain_combine_is_refused_with_the_calculation_it_becomes() -> None:
-    """`combine` had two jobs and only one of them was its own. Binding a
-    figure's value was an alias for a name, declared above the single line
-    that used it; a calculation names the figure. What is left is the rollup,
-    which is a genuinely different operation."""
-    refuses(
-        '''
-# The same count, via a binding.
-figure shop_courier.aliased:
-    display "x"
-    unit count
+ACROSS = '''
+# Orders in hand, split by the depot they came from.
+figure shop_courier.by_depot across shop_depot:
+    display "{shop_courier} from {shop_depot}"
 
-    combine:
-        held = shop_courier.carrying
+    depends:
+        mine = shop_order.by_depot:{shop_courier}
 
     calculate:
-        held - 1
+        count(mine)
+'''
+
+
+async def test_a_rollup_is_one_line_in_the_calculation() -> None:
+    """`combine` cost four lines and a name for one operation, and its only
+    legal consumer was the `sum` on the line below it. Nothing about the block
+    said anything the calculation could not: the source declares what it is
+    split across, so `over <kind>` restated it, and the binding was a name for
+    a value used once, immediately.
+
+    So the rollup is where every other operation is. What it must keep is the
+    property the block existed for: a total and its parts cannot disagree,
+    because there is one count and this adds it up.
+    """
+    facts = MemoryFactStore()
+    library = compile_world(
+        ACROSS
+        + '''
+# Orders in hand, every status together.
+figure shop_courier.holding:
+    display "{shop_courier} in hand"
+
+    calculate:
+        sum(shop_courier.by_depot)
+'''
+    )
+    engine = Uratori(
+        schema=WORLD, library=library, store=MemoryEngineStore(), facts=facts
+    )
+    facts.put("t1", "shop_courier", "c1", {"name": "Aki", "max_orders": 5.0})
+    for key in ("d1", "d2"):
+        facts.put("t1", "shop_depot", key, {"name": key.upper()})
+    for n, depot in enumerate(("d1", "d1", "d2")):
+        facts.put(
+            "t1",
+            "shop_order",
+            f"o{n}",
+            {"ref": f"A-{n}", "courier_id": "c1", "status": "riding",
+             "depot_id": depot},
+        )
+    await engine.run("t1", full=True)
+
+    parts = {s.id: s.value for s in (await _one(engine, "shop_courier.by_depot")).subjects}
+    [total] = (await _one(engine, "shop_courier.holding")).subjects
+    assert sum(v for v in parts.values() if v is not None) == total.value, (
+        f"the total and its parts disagree: {parts} against {total.value}"
+    )
+    assert total.value == 3.0
+
+
+def test_a_rollup_of_a_figure_with_no_dimension_is_refused() -> None:
+    """The mistake the block's `over <kind>` was there to catch, caught by the
+    source's own declaration instead: totalling one value is a total that
+    looks right for ever."""
+    refuses(
+        '''
+# The count, totalled.
+figure shop_courier.doubled:
+    display "x"
+
+    calculate:
+        sum(shop_courier.carrying)
 ''',
-        "combine adds up the parts",
-        "name it in the calculation",
+        "shop_courier.carrying",
+        "across",
+    )
+
+
+def test_the_combine_block_is_refused_with_the_line_it_becomes() -> None:
+    """A block that survived as a wrapper around one expression. Refused with
+    the rewrite rather than left working, because two spellings of one
+    operation is the thing this language is arranged against -- and the
+    version hash would fork between them for no semantic reason."""
+    refuses(
+        ACROSS
+        + '''
+# Orders in hand, every depot together.
+figure shop_courier.holding:
+    display "{shop_courier} in hand"
+
+    combine:
+        parts = shop_courier.by_depot over shop_depot
+
+    calculate:
+        sum(parts)
+''',
+        "combine block",
+        "sum(shop_courier.by_depot)",
     )
 
 

@@ -652,8 +652,8 @@ kind of subject it is one-value-per. It requires an explanation (the `#` lines
 above it -- the definition a reader is shown), a `display` template (the
 sentence a movement is reported under) and a `calculate` block. A figure over
 records also declares `depends`; one built only on other figures needs no
-group at all, and takes its subjects from what it reads. `unit`, `band` and
-`combine` are optional.
+group at all, and takes its subjects from what it reads. `unit` and `band`
+are optional.
 
 The `display` template is prose, written by convention with the scope kind,
 the `across` kind for a split figure, and `{value}` as placeholders --
@@ -735,7 +735,7 @@ size, a measure over a set, a bound figure, another figure, a literal.
   not take a name one of its scope's fields already has -- one spelling
   answering two things is what this language exists to refuse, and it is
   refused where the collision is made rather than where it is read. A bare
-  name reads a binding from `depends` or `combine`.
+  name reads a binding from `depends`.
 
   **`shop_courier.max_orders`** -- the field -- is the short road, and the one
   most thresholds want: a number somebody typed onto a record. It costs no
@@ -753,7 +753,7 @@ size, a measure over a set, a bound figure, another figure, a literal.
 
   Either way a calculation can now reach a number it did not compute itself,
   which the two blocks did not cover between them: `depends` gives a
-  population and cannot reach a value, `combine` totals parts and cannot
+  population and cannot reach a value, and a rollup totals parts and cannot
   count records. "How much room is left before this courier's limit" was
   unwritable.
 
@@ -815,13 +815,26 @@ A figure built on another figure inherits its unit from **the binding it
 actually reads**, not from whichever binding happens to carry an inheritable
 one.
 
-### `combine` -- adding up a split figure's parts
+### `sum(<figure>)` -- adding up a split figure's parts
 
 ```
 # Open changes, all sources together.
 figure team_person.open_mrs:
     display "{team_person} open changes"
 
+    calculate:
+        sum(team_person.open_mrs_by_source)
+```
+
+A rollup totals the parts of a figure split `across` a dimension, so that **a
+total and its parts cannot disagree**: there is one count, and this adds it
+up. Agreement by construction is worth more than two independent counts held
+together by a test.
+
+This was a block, and the block was four lines and a name for one operation
+whose only legal consumer was the `sum` immediately below it:
+
+```
     combine:
         sources = team_person.open_mrs_by_source over data_connection
 
@@ -829,22 +842,17 @@ figure team_person.open_mrs:
         sum(sources)
 ```
 
-`combine` totals the parts of a figure split `across` a dimension, so that **a
-total and its parts cannot disagree**: there is one count, and this adds it
-up. Agreement by construction is worth more than two independent counts held
-together by a test.
+Neither half said anything the calculation could not. `over <kind>` restated
+what the source already declares -- and a second place to write it is a first
+place for the two to disagree. The binding was an alias for a value used once,
+immediately. So a rollup is written where every other operation is written,
+and the block is refused with the line it becomes.
 
-`over <kind>` is not optional. It was, and the version without it bound one
-figure's value to a name -- an alias, declared above the single line that used
-it, for something a calculation can now say directly. What is left is the
-rollup, which is a genuinely different operation: many values in, one out.
-
-Both mistakes around it fail quietly, so both are refused by name. A bare read
-of a dimensioned figure would take whichever part sorts first; a rollup of an
-undimensioned one would total a single value and look right for ever. The
-checker also holds `over` against the source's own `across`, so a source later
-split across something else fails the build here rather than quietly changing
-what this is a total of.
+Both mistakes around it still fail quietly, so both are still refused by name.
+A bare read of a dimensioned figure would take whichever part sorts first; a
+rollup of an undimensioned one would total a single value and look right for
+ever. And a figure may roll up one source: a rollup's members are addresses
+carrying no figure name, so two would be indistinguishable once stored.
 
 The rules around it:
 
@@ -963,7 +971,7 @@ The rules that keep it a band rather than a second calculation hiding in the
 same block:
 
 - The only *binding* in scope is **`value`** -- this figure's own answer.
-  Reading a set or a `combine` source here would be a second calculation
+  Reading a set or a rollup's source here would be a second calculation
   sharing the first one's name and version.
 - A threshold figure must **share this figure's scope, dimension and
   grain**, and answer in the **same unit**. The join is subject-key equality:
@@ -1245,8 +1253,8 @@ check. The declared boundary is what turns the statistic into a claim.
 
 Outside a bucketed figure it is refused -- the population would be everything
 ever collected, so the number drifts with the data's age and nobody can say
-what it is a median *of*. Over a combined figure it is refused as the mean of
-means it would be.
+what it is a median *of*. Over a rollup it is refused as the mean of means it
+would be.
 
 ### Reading it back
 
@@ -1977,7 +1985,7 @@ its own version and provenance exactly as it would served alone.
 **A bundle defines no calculation.** Members are names plus arguments,
 nothing else -- no `depends`, no `calculate`, no unit, no band, no
 cross-member arithmetic of any kind. A number derived from two members is a
-`combine` figure's job; a trend inside one window is the reading's own
+rollup figure's job; a trend inside one window is the reading's own
 `delta`. Serving a bundle *triggers* evaluation of its
 members, and every rule that makes a number trustworthy stays in the member's
 own definition and hash.
@@ -2207,11 +2215,13 @@ The ones most worth recognising, in the checker's own words:
 - *"...names no group addressed by `{scope}`, so it has no subjects"* /
   *"...is fanned out by more than one group"* -- exactly one group fans a
   figure out.
-- *"...has both a depends and a combine block"* -- a population of records
-  and a total of another figure's parts, with no rule for how they relate.
-- *"...binds X in a combine block, and combine adds up the parts of a figure
-  split across a dimension"* -- to read one figure's value, name it in the
-  calculation.
+- *"...names a population in `depends` and rolls up another figure's parts
+  in the same calculation"* -- two populations with no rule for how they
+  relate.
+- *"...has a combine block, and there is no such block any more"* -- with the
+  one line it becomes.
+- *"...adds up X, which is not split across anything"* -- a rollup of an
+  undimensioned figure totals a single value and looks right for ever.
 - *"...takes a name that <kind> already has as a field"* -- both are read as
   `<kind>.<name>`, so one spelling would answer two things.
 - *"...lists M, which is measured to now"* / *"...measures days from ... to

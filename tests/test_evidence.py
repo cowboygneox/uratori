@@ -66,10 +66,8 @@ figure team_person.open_mrs_by_source across data_connection:
 # The total across sources, as the sum of its parts.
 figure team_person.open_mrs:
     display "{team_person} open"
-    combine:
-        sources = team_person.open_mrs_by_source over data_connection
     calculate:
-        sum(sources)
+        sum(team_person.open_mrs_by_source)
 
 # Rework on what this person carries, added up.
 figure team_person.rework_effort:

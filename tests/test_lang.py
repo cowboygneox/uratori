@@ -340,22 +340,28 @@ figure team_person.bad:
 
 
 def test_a_figure_may_not_have_both_depends_and_a_rollup() -> None:
-    """`combine` is the rollup block and nothing else now, so this is the rule
-    in the only form left to break: a population of records beside a total of
-    another figure's parts, with no rule for how they relate. Reading one
-    figure's *value* beside a population is fine and expected -- that is a
-    number, not a second population, and it is named in the calculation."""
+    """A population of records beside a total of another figure's parts, with
+    no rule for how they relate. Reading one figure's *value* beside a
+    population is fine and expected -- that is a number, not a second
+    population."""
     refuses(
         """
 # d
+figure team_person.pairs across data_connection:
+    display "{team_person} in {data_connection}"
+    depends:
+        p = code_change.authored_in:{team_person} & code_change.open
+    calculate:
+        count(p)
+
+# d
 figure team_person.mixed:
     display "x"
+    unit count
     depends:
         m = work_issue.assigned_to:{team_person}
-    combine:
-        w = team_person.open_mrs_by_source over data_connection
     calculate:
-        count(m)
+        count(m) + sum(team_person.pairs)
 """,
         "two populations",
     )
@@ -467,10 +473,8 @@ def test_a_rollup_of_an_undimensioned_figure_totals_one_value_and_looks_right() 
 # d
 figure team_person.total:
     display "x"
-    combine:
-        s = team_person.wip over data_connection
     calculate:
-        sum(s)
+        sum(team_person.wip)
 """,
         "not split across anything",
     )
@@ -492,10 +496,8 @@ figure team_person.pairs across data_connection:
 # d
 figure team_person.total:
     display "x"
-    combine:
-        s = team_person.pairs over data_connection
     calculate:
-        sum(s)
+        sum(team_person.pairs)
 """
     )
     parts = lib.figure("team_person.pairs")
@@ -1768,10 +1770,8 @@ figure team_person.pairs across data_connection:
 # d
 figure team_person.total:
     display "x"
-    combine:
-        s = team_person.pairs over data_connection
     calculate:
-        sum(s)
+        sum(team_person.pairs)
 """
     a = compile_ok(body.replace("OPENSTATE", "open")).figure("team_person.total")
     b = compile_ok(body.replace("OPENSTATE", "open - code_change.open")).figure(

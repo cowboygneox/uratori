@@ -86,10 +86,8 @@ figure team_person.open_mrs_by_source across data_connection:
 # Open MRs.
 figure team_person.open_mrs:
     display "{team_person} open MRs"
-    combine:
-        sources = team_person.open_mrs_by_source over data_connection
     calculate:
-        sum(sources)
+        sum(team_person.open_mrs_by_source)
 """
 
 LIB = compile_source(LIB_SOURCE)

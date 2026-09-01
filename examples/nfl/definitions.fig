@@ -251,11 +251,8 @@ figure nfl_team.wins_by_season across nfl_season:
 figure nfl_team.wins:
     display "{nfl_team} era wins"
 
-    combine:
-        seasons = nfl_team.wins_by_season over nfl_season
-
     calculate:
-        sum(seasons)
+        sum(nfl_team.wins_by_season)
 
 # How many regular-season games this franchise has finished since 1999.
 # The postseason lives on the scoreboard and the bracket, not in the
@@ -584,11 +581,8 @@ figure nfl_player.tds_versus across nfl_team:
 figure nfl_player.touchdowns:
     display "{nfl_player} career touchdowns"
 
-    combine:
-        parts = nfl_player.tds_versus over nfl_team
-
     calculate:
-        sum(parts)
+        sum(nfl_player.tds_versus)
 
 # The same touchdowns split by season instead: the shape of a career, one
 # value per (player, year) pair.

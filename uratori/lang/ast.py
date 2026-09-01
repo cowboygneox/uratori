@@ -612,7 +612,8 @@ class Sum:
 
 @dataclass(frozen=True)
 class Part:
-    """`total` -- a figure bound in `combine` with no `over`, read as one value.
+    """A name the definition bound above -- a set in `depends`, or `value`
+    inside a band.
 
     The scalar counterpart of `sum`. Where that adds a subject's parts up, this
     reads the one value the source holds for this subject, so a figure can be
@@ -1036,8 +1037,7 @@ class Coord:
     so the two shapes are visually distinct by construction and a reader never
     has to look up which kind of thing a name is.
 
-    `name` is a `combine` binding in a figure's `calculate`, and a figure
-    name in a `band:` rung, because those are the two places a second
+    `name` is a figure name in a `band:` rung, which is where a second
     sequenced value can appear at all.
     """
 
@@ -1167,9 +1167,15 @@ class FigureDecl:
     unit: DeclaredUnit | None = None
     sets: tuple[NamedSet, ...] = ()
     combines: tuple[Combine, ...] = ()
-    """A figure has `depends` or `combine`, never both. Reading indexes *and*
-    another figure would be two populations arriving at one calculation with no
-    rule for how they relate."""
+    """The retired `combine:` block, parsed only so the checker can refuse it
+    with the line it becomes.
+
+    It was four lines and a name for one operation whose only legal consumer
+    was the `sum` immediately below it. `sum(<figure>)` in `calculate:` is the
+    rollup now; a figure still has `depends` or a rollup and never both,
+    because reading indexes *and* another figure's parts would be two
+    populations arriving at one calculation with no rule for how they
+    relate."""
 
     band: Ladder | None = None
     """The second thing this figure answers: which band its number falls in.
