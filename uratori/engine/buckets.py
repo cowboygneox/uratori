@@ -212,12 +212,7 @@ def label_in(epoch_ms: float, zone: str | None, grain: str) -> str:
         # zone is applied once, to find the day, and the rest is calendar
         # arithmetic -- so a month figure and a day figure over one event
         # can never disagree about which month the event's day was in.
-        local_day = date.fromisoformat(day_in(epoch_ms, zone))
-        if grain == "week":
-            return _week_label(local_day)
-        if grain == "month":
-            return _month_label(local_day.year, local_day.month)
-        return _quarter_label(local_day.year, local_day.month)
+        return label_of_day(date.fromisoformat(day_in(epoch_ms, zone)), grain)
     moment = datetime.fromtimestamp(epoch_ms / 1000.0, tz=UTC)
     if zone is not None:
         moment = moment.astimezone(_zone(zone))
@@ -397,6 +392,82 @@ def _week_label(day: date) -> str:
     return f"{iso.year:04d}-W{iso.week:02d}"
 
 
+def label_of_day(local_day: date, grain: str) -> str:
+    """Which bucket a *local calendar day* belongs to, at a grain.
+
+    The half of `label_in` that happens after the zone has been applied,
+    lifted out so a span can enumerate labels by walking days without
+    round-tripping each one back through an epoch and a timezone database.
+    Called by `label_in` itself, so the two cannot disagree about what a
+    given day's week is.
+    """
+    if grain == "day":
+        return local_day.isoformat()
+    if grain == "week":
+        return _week_label(local_day)
+    if grain == "month":
+        return _month_label(local_day.year, local_day.month)
+    return _quarter_label(local_day.year, local_day.month)
+
+
+def _next_period(local_day: date, grain: str) -> date:
+    """The first day of the next bucket after the one `local_day` is in.
+
+    Stepping by period rather than by day, so enumerating a two-year span at
+    week grain walks 104 times instead of 730. Landing on the *first* day of
+    the next bucket (rather than adding a period to an arbitrary day) is what
+    makes the walk exact at month ends: 31 January plus a month is a question
+    with no good answer, and 1 February is not.
+    """
+    if grain == "day":
+        return local_day + timedelta(days=1)
+    if grain == "week":
+        # ISO weeks start on Monday. `weekday()` is 0 for Monday, so this
+        # lands on the next Monday from any day of the week.
+        return local_day + timedelta(days=7 - local_day.weekday())
+    step = 1 if grain == "month" else 3
+    month = local_day.month - 1 + step
+    if grain == "quarter":
+        # Snap to the quarter's own boundary first, or a span starting in
+        # February would walk February, May, August -- periods that are three
+        # months apart and not quarters.
+        month = ((local_day.month - 1) // 3 + 1) * 3
+    year = local_day.year + month // 12
+    return date(year, month % 12 + 1, 1)
+
+
+def labels_between(
+    start_ms: float, end_ms: float, zone: str | None, grain: str
+) -> list[str]:
+    """Every bucket label the stretch from `start_ms` to `end_ms` touches.
+
+    **Both ends inclusive.** A campaign that starts and finishes inside one
+    week is in that week rather than in none -- the half-open reading loses the
+    shortest spans entirely, which is the arithmetic mistake worth naming here
+    because it looks so much like the right one.
+
+    Backwards ends produce nothing rather than being reversed: a far end before
+    a near end is somebody's typo, and quietly swapping them reports a run
+    across a stretch nobody booked.
+
+    Both ends are truncated in the same calendar, which is the other thing that
+    has to be true and is invisible when a fixture is UTC-only: an instant is
+    the Sunday of one week in London and the Monday of the next in Auckland, so
+    a span with one end cut in the subject's zone and the other in UTC is
+    right for exactly one of them.
+    """
+    first = date.fromisoformat(day_in(start_ms, zone))
+    last = date.fromisoformat(day_in(end_ms, zone))
+    if last < first:
+        return []
+    out: list[str] = []
+    cursor = first
+    while cursor <= last:
+        out.append(label_of_day(cursor, grain))
+        cursor = _next_period(cursor, grain)
+    return out
+
+
 def resolve_span(at_ms: float, zone: str | None, spec: WindowSpec, rule: str) -> list[str]:
     """A span of positions resolved to the concrete bucket labels it covers,
     oldest first, counted back from the anchor in the tenant's calendar.
@@ -560,7 +631,7 @@ def buckets_of(
         return [""] if inside else []
 
     if isinstance(spec, ByField):
-        return _keys_for(spec.part, record, resolve, None, zones)
+        return _keys_for(spec.part, record, resolve, None, zones, now_ms)
 
     if isinstance(spec, ByComposite):
         # **Not a plain cross product any more.** A time part's calendar is a
@@ -578,7 +649,7 @@ def buckets_of(
             grown: list[list[str]] = []
             for prefix in combos:
                 keys = _keys_for(
-                    part, record, resolve, prefix[0] if prefix else None, zones
+                    part, record, resolve, prefix[0] if prefix else None, zones, now_ms
                 )
                 grown.extend([*prefix, key] for key in keys)
             if not grown:
@@ -671,6 +742,7 @@ def _keys_for(
     resolve: ThroughResolver,
     subject: str | None,
     zones: Mapping[str, str] | None,
+    now_ms: float,
 ) -> list[str]:
     raw = read_path(record, part.field)
     if not raw:
@@ -706,6 +778,37 @@ def _keys_for(
                 zone_name = str(held[0]) if len(held) == 1 else None
             if zone_name is None:
                 return []
+        if part.until is not None:
+            # A span: every bucket between two instants, rather than the one
+            # bucket an instant fell in.
+            #
+            # `raw` may hold several near ends if the path crossed a list; the
+            # far end may not (the checker refuses it), so the span is read
+            # from the earliest near end to the one far end. Either end
+            # missing is no membership at all -- never a half-open span
+            # running to now or to for ever, because a booking with no end is
+            # one nobody has scheduled.
+            far_values = read_path(record, part.until)
+            far = parse_instant(far_values[0]) if len(far_values) == 1 else None
+            nears = [m for m in (parse_instant(v) for v in raw) if m is not None]
+            if far is None or not nears:
+                return []
+            labels = labels_between(min(nears), far, zone_name, part.truncate or "day")
+            if part.ahead_only:
+                # Drop the buckets whose period has already gone, in the same
+                # calendar the labels were cut in. Comparing labels rather than
+                # instants is what makes that exact: the pass instant's own
+                # label is the period in progress, and a label sorts against
+                # its siblings, so ">= this one" is "this period or later"
+                # without any boundary arithmetic to get wrong.
+                #
+                # The period in progress is **kept**. Dropping it would make
+                # the near future -- the only part anybody can still act on --
+                # the one part missing from the answer.
+                current = label_in(now_ms, zone_name, part.truncate or "day")
+                labels = [label for label in labels if label >= current]
+            return labels
+
         out: list[str] = []
         for value in raw:
             moment = parse_instant(value)

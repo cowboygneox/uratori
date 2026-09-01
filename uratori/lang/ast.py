@@ -234,6 +234,53 @@ class IndexField:
     default it falls into.
     """
 
+    until: str | None = None
+    """`starts_at until ends_at by week` -- the far end of a **span**.
+
+    Every other bucket rule asks which bucket one instant fell in. That is the
+    right question about an event and the wrong one about a commitment: a
+    campaign booked from August to October did not *happen* in August, it
+    occupies eleven weeks, and a chart of what is running each week needs it in
+    all eleven. With `until` set the record is a member of every bucket the two
+    ends cross, both ends inclusive -- a campaign that starts and finishes
+    inside one week is in that week rather than in none.
+
+    A property of the *part* rather than a spec of its own, which is what keeps
+    it small: a composite crosses its parts already, so
+    `(account_id, starts_at until ends_at by week)` fans an account's weeks with
+    no new machinery, and `ByField`/`ByComposite` are untouched.
+
+    Both ends must be moments and both must be present -- a span missing an end
+    is in no bucket rather than running to now or to for ever, because a booking
+    with no end is one nobody has scheduled and inventing one files it under
+    weeks no one committed to. Backwards ends are somebody's typo and produce no
+    membership; silently reversing them would report a run across a stretch
+    nobody booked.
+
+    Mutually exclusive with `select`, and requires `truncate`: without a grain
+    there is nothing to enumerate between the ends. Hashed as its own key, so
+    every spec written before spans existed keeps its version.
+    """
+
+    ahead_only: bool = False
+    """`excluding weeks gone` -- drop buckets whose period has already passed.
+
+    What turns a span from a fact about a booking into a claim about the
+    future: a campaign half way through occupies the weeks it has *left*, not
+    the weeks it was planned over. The near end is inclusive, so the period in
+    progress is kept -- dropping it would make the one part of the chart
+    anybody can still act on the one part missing.
+
+    This makes membership move with the clock, which is not new: `ByAge` does
+    it, and pays the same price. A record crosses this line on a knowable day,
+    the crossing is noticed at the next pass, and the pass's own instant is what
+    every bucket in that pass answers to. Fenced to day grain and coarser for
+    the reason `carried forward` is: a pass is the only clock membership has.
+
+    The comparison is made in the *subject's* calendar, like the labels
+    themselves, so an account whose week has not turned yet keeps the week an
+    account in another calendar has already left behind."""
+
 
 @dataclass(frozen=True)
 class ByField:

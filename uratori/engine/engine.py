@@ -104,7 +104,7 @@ class Engine:
         # removed ones.
         built = await self._store.index_stamps(tenant)
         wanted = {
-            name: _index_stamp(idx) for name, idx in lib.indexes.items()
+            name: _index_stamp(idx, now) for name, idx in lib.indexes.items()
         }
         if not built:
             # The one-time upgrade window: no per-index stamps yet, but a
@@ -221,6 +221,32 @@ class Engine:
                         )
                     )
                     rebuilt = tuple(sorted(healed))
+                    changes.extend(
+                        await self._remove_departed(tenant, only=healed)
+                    )
+                # **A rebuild retires buckets as well as filling them**, and
+                # only the removal half needs saying here: the backfill above
+                # writes every coordinate the grouping now has, and a
+                # coordinate it no longer has is not in that set, so nothing
+                # above can reach the row left behind. It keeps its number,
+                # its version and its currency, and every reader believes it.
+                #
+                # Cheap to have missed: until a grouping's buckets could
+                # *depart*, this could not happen on the warm path. A merge
+                # stays in its day for ever, and a record moving between
+                # buckets went through `_apply`, which diffs the old set
+                # against the new. A wholesale rebuild is diffless, and a
+                # clipped span retires a bucket every period by design -- so
+                # without this the first column of a forward chart is last
+                # week's, permanently.
+                #
+                # Scoped to the figures the rebuild reached, and run only when
+                # there are any: this walks a figure's scope kind, and a
+                # grouping nothing reads has no rows to retire. Unscoped it
+                # turned a one-grouping rebuild into a scan per figure in the
+                # library -- fixed work no change could reach, which
+                # `test_a_change_that_reaches_nothing_serves_nothing` exists to
+                # catch and did.
             if deleted:
                 # A departed *subject* is not a moved bucket, and the warm path
                 # is driven by bucket movement -- so without this a person
@@ -454,7 +480,7 @@ class Engine:
             # mid-way leaves exactly the unbuilt ones stale, and the next
             # pass pays exactly the remaining debt.
             await self._store.set_index_stamp(
-                tenant, index.name, _index_stamp(index)
+                tenant, index.name, _index_stamp(index, now_ms)
             )
 
     # -------------------------------------------------------- incremental --
@@ -855,7 +881,7 @@ class Engine:
     # --------------------------------------------------------------- departed --
 
     async def _remove_departed(
-        self, tenant: str
+        self, tenant: str, only: set[str] | None = None
     ) -> list[Change]:
         """Delete values whose subject no longer exists, **and report each one**.
 
@@ -863,9 +889,17 @@ class Engine:
         departed subject vanished with no trace in the change stream -- which is
         precisely why the socket could not be fed from it, and why a
         re-read-everything step existed instead.
+
+        `only` narrows it to named figures, for the warm path's use after a
+        grouping was rebuilt: the sweep costs a scan of each figure's scope
+        kind, and a rebuild of one grouping can only orphan rows in the figures
+        that read it. Unnarrowed there, a one-grouping rebuild paid a scan per
+        figure in the library -- fixed work the change could not reach.
         """
         changes: list[Change] = []
         for plan in self._library.figures:
+            if only is not None and plan.name not in only:
+                continue
             alive = {row.key for row in await self._facts.of_kind(tenant, plan.scope)}
             dimension = (
                 {row.key for row in await self._facts.of_kind(tenant, plan.across)}
@@ -1209,21 +1243,67 @@ def _index_version(index: CompiledIndex) -> str:
     return version_of(_index_hash(index))
 
 
-def _index_stamp(index: CompiledIndex) -> Any:
+def _clipped(index: CompiledIndex) -> bool:
+    """Whether this grouping's membership moves with the clock.
+
+    True for a span written `excluding <grain>s gone`, and for nothing else.
+    An unclipped span is a fact about two dates on a record -- it moves when
+    the record moves, which the change stream already notices. Derived from
+    the spec rather than declared, so it cannot disagree with what the rule
+    actually does: a keyword saying "refresh me" could be written on a
+    grouping that needs no refresh, or left off one that does, and the second
+    of those is silent.
+    """
+    from ..lang.ast import ByComposite, ByField
+
+    spec = index.spec
+    if isinstance(spec, ByField):
+        return spec.part.ahead_only
+    if isinstance(spec, ByComposite):
+        return any(part.ahead_only for part in spec.parts)
+    return False
+
+
+def _index_stamp(index: CompiledIndex, now_ms: float) -> Any:
     """What a grouping's buckets are built under.
 
     A figure pointer's two-part discipline, applied to membership: the spec
-    version, and a fingerprint of what else could move the buckets. The
-    second part is empty now -- an age threshold is a number in the
-    definition or a field on the record's owner, and a calendar is a field on
-    the subject's record, so both move with *records*, which the change
-    stream and the through-kind escalation already notice. It stays in the
-    shape because it is a stored column, and a constant is cheaper than a
-    migration for a word.
+    version, and a fingerprint of what else could move the buckets. For almost
+    every grouping the second part is empty -- an age threshold is a number in
+    the definition or a field on the record's owner, and a calendar is a field
+    on the subject's record, so both move with *records*, which the change
+    stream and the through-kind escalation already notice.
+
+    A **clipped span** is the exception, and the reason this argument exists.
+    Its membership moves with the calendar and nothing writes a fact when
+    Monday arrives, so without the day in here it would be rebuilt only by a
+    full pass and a board would keep last week's chart until one happened. With
+    it, the grouping reads as stale on the first pass of a new day, the existing
+    per-index rebuild picks up exactly that grouping, and the cascade recomputes
+    what reads it. The cron this feature needs is the pass that already runs.
+
+    **The day rather than the instant**, and the cost decides it: a wholesale
+    rebuild is diffless -- `replace_index` cannot say whose buckets moved -- so
+    every figure over a rebuilt grouping recomputes outright. Stamping the
+    instant would rebuild and recompute on every pass for ever. Stamping the
+    hour would do it twenty-four times a day to move a bar a week wide.
+
+    **UTC rather than the subject's calendar**, which is the honest compromise
+    here: a span's labels are cut in each subject's own zone, so there is no one
+    calendar whose midnight this could use. The stamp decides only *when* the
+    rebuild happens; the rebuild itself passes its instant down and every
+    subject's clip is computed in their own zone. So a board ahead of UTC keeps
+    a period it has left for up to a day -- bounded, and against a chart whose
+    narrowest column is a day it is the smallest unit that does not pay a
+    recompute for nothing.
     """
     from ..store import Pointer
+    from .buckets import day_in
 
-    return Pointer(version=_index_version(index), settings_fingerprint="")
+    return Pointer(
+        version=_index_version(index),
+        settings_fingerprint=day_in(now_ms, None) if _clipped(index) else "",
+    )
 
 
 def _versions_if_legacy_current(legacy: str | None, library: Library) -> dict[str, str] | None:

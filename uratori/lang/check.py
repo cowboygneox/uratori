@@ -384,6 +384,8 @@ class _Checker:
                 )
             if part.zone is not None:
                 self._check_zone(d, part, word)
+            if part.until is not None:
+                self._check_span(d, part, word)
         if isinstance(d.spec, ByAge) and d.spec.through is None and d.spec.read:
             found = self._record_field(
                 d.kind,
@@ -494,6 +496,63 @@ class _Checker:
                 d.line,
             )
 
+    _SPANNABLE: tuple[str, ...] = ("day", "week", "month", "quarter")
+    """The grains a span may be written at.
+
+    Everything a pass can honour, and nothing finer. A span's membership moves
+    with the clock -- the near end is clipped at the pass instant when
+    `excluding ... gone` is written -- and the pass is the only clock membership
+    has, so a rule owing new buckets every minute would get one per sync and its
+    newest bucket would read as an absence for as long as the gap. The same
+    fence `carried forward` is behind, arrived at from the same argument.
+
+    Sub-day grains are also where a span stops being a useful question: nobody
+    books a campaign to the quarter-hour, and the enumeration between two ends
+    a year apart at minute grain is half a million buckets for one record.
+    """
+
+    def _check_span(self, d: IndexDecl, part: IndexField, word: str) -> None:
+        """The shape rules for `<from> until <to> by <grain>`.
+
+        Structural only -- whether the two ends are moments is checked against
+        the declared world in `_index_fields_exist`, beside the near end's own
+        rule, so the pair cannot drift apart.
+        """
+        what = f"{word} {d.name}"
+        if part.truncate is None:
+            raise CheckError(
+                f"{what} spans {part.field} until {part.until} and gives no grain. "
+                "There is nothing to enumerate between two instants without one -- "
+                "write `by week`, `by day`, or another grain, and the record joins "
+                "every bucket the two ends cross.",
+                d.line,
+            )
+        if part.select is not None:
+            raise CheckError(
+                f"{what} spans {part.field} until {part.until} by "
+                f"{part.select}. A selective rule picks one day a month and is "
+                "deliberately partial; a span enumerates a stretch. The two say "
+                "opposite things about what membership means.",
+                d.line,
+            )
+        if part.truncate not in self._SPANNABLE:
+            raise CheckError(
+                f"{what} spans {part.field} until {part.until} by {part.truncate}, "
+                "and a pass cannot honour that. Membership across a span moves with "
+                "the clock, and a pass is the only clock it has -- so a rule owing new "
+                f"buckets every {part.truncate} gets one per sync. Span at day grain "
+                "or coarser.",
+                d.line,
+            )
+        if part.through is not None:
+            raise CheckError(
+                f"{what} spans {part.field} until {part.until} and resolves through "
+                f"{part.through.kind}. A `through` maps one value onto the ids that own "
+                "it, which is a question about a subject; a span is a question about a "
+                "stretch of calendar. Put the two in separate parts.",
+                d.line,
+            )
+
     def _index_fields_exist(self, d: IndexDecl, word: str) -> None:
         """Every field a group or filter reads, against the declared world.
 
@@ -518,6 +577,30 @@ class _Checker:
                     "it needs a moment.",
                     d.line,
                 )
+            if part.until is not None:
+                # The far end of a span, held to every rule the near end is.
+                # Checked here rather than beside the grain rules below so the
+                # two ends are validated by one piece of code: a far end that
+                # was allowed to be a word, or to cross a list, would produce a
+                # group that silently holds nothing.
+                far = self._record_field(d.kind, part.until, what, d.line)
+                assert far is not None
+                far_node, far_crossed = far
+                if far_node.type != "moment":
+                    raise CheckError(
+                        f"{what} spans {part.field} until {part.until}, and {part.until} "
+                        f"is a {far_node.type}. A span runs between two instants -- with "
+                        "a far end that is not one there are no buckets between them, "
+                        "and the group holds nothing at all.",
+                        d.line,
+                    )
+                if far_crossed:
+                    raise CheckError(
+                        f"{what} spans {part.field} until {part.until}, which crosses a "
+                        "list -- several instants per record, and a span has one far "
+                        "end.",
+                        d.line,
+                    )
         spec = d.spec
         if isinstance(spec, ByAge):
             found = self._record_field(d.kind, spec.field, what, d.line)
@@ -3731,6 +3814,12 @@ def _field_hash(part: IndexField) -> object:
         # a selective rule is new vocabulary, and every spec written before
         # it existed must keep its version.
         "select": part.select,
+        # The far end of a span, and whether the passed buckets are dropped.
+        # Both absent-unless-declared for the same reason: they are the newest
+        # vocabulary here, and a spec written before spans existed must hash
+        # to what it hashed to yesterday or every figure over it repoints.
+        "until": part.until,
+        "ahead_only": part.ahead_only or None,
         # The calendar: the record and field carrying it, or the one written
         # in the definition. A group cut on one calendar and one cut on
         # another file the same instant under different labels, so the two

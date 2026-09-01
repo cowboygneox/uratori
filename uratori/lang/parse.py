@@ -600,9 +600,42 @@ class _Parser:
                 )
             through = Through(kind=kind, path=rest)
 
+        until: str | None = None
+        ahead_only = False
+        if self._at_word("until"):
+            # `starts_at until ends_at by week` -- a span rather than an
+            # instant. Read before `by`, because the grain applies to the pair.
+            self._next()
+            until = self._name("the field holding the far end of the span")
+
         if self._at_word("by"):
             self._next()
             truncate, select = self._bucket_rule()
+            if self._at_word("excluding"):
+                # `excluding weeks gone`. The plural is written out and checked
+                # against the grain rather than accepted as noise: it is the
+                # only part of the clause a reader can use to tell what is being
+                # dropped, and "excluding days gone" on a week rule would read
+                # as a finer promise than the rule can keep.
+                self._next()
+                if until is None:
+                    raise self._error(
+                        '"excluding ... gone" drops buckets that have already passed, '
+                        "which only means something for a span. Write it after "
+                        "`<from> until <to> by <grain>`.",
+                        line,
+                    )
+                plural = self._name("the grain being dropped, e.g. `weeks`")
+                if truncate is None or plural != f"{truncate}s":
+                    wanted = f"{truncate}s" if truncate is not None else "<grain>s"
+                    raise self._error(
+                        f'"excluding {plural} gone" does not match this rule\'s grain. '
+                        f"Write `excluding {wanted} gone`, so the clause says what is "
+                        "actually being dropped.",
+                        line,
+                    )
+                self._keyword("gone")
+                ahead_only = True
             if self._at_word("in"):
                 self._next()
                 if self._peek().kind == "string":
@@ -631,7 +664,15 @@ class _Parser:
                         )
                     zone = Zone(kind=kind, field=field)
 
-        return IndexField(field=path, through=through, truncate=truncate, select=select, zone=zone)
+        return IndexField(
+            field=path,
+            through=through,
+            truncate=truncate,
+            select=select,
+            zone=zone,
+            until=until,
+            ahead_only=ahead_only,
+        )
 
     _GRAINS: tuple[str, ...] = ("minute", "hour", "day", "week", "month", "quarter")
     _ORDINALS: tuple[str, ...] = ("first", "second", "third", "fourth", "fifth")
