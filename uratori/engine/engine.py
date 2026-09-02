@@ -31,6 +31,7 @@ from .buckets import (
     read_number,
     read_path,
     subject_of,
+    tail_of,
 )
 from .carry import CarryReachExceeded, materialise
 from .change import Change, Outcome
@@ -654,6 +655,9 @@ class Engine:
         changes: list[Change] = []
         by_depth = sorted(self._library.figures, key=lambda p: p.depth)
         pending: dict[str, set[str]] = {k: set(v) for k, v in touched.items()}
+        # One bucket listing per grouping for the whole pass, read lazily and
+        # only by the readers that need one. See `_reader_keys`.
+        held_buckets: dict[str, list[str]] = {}
 
         for plan in by_depth:
             subjects: set[str] = set()
@@ -705,9 +709,75 @@ class Engine:
                 for other in self._library.figures:
                     if plan.name not in other.reads:
                         continue
-                    reader_subject = subject if other.grain is not None else subject_of(subject)
-                    pending.setdefault(reader_subject, set()).add(other.name)
+                    for reader_subject in await self._reader_keys(
+                        tenant, other, plan, subject, held_buckets
+                    ):
+                        pending.setdefault(reader_subject, set()).add(other.name)
         return changes
+
+    async def _reader_keys(
+        self,
+        tenant: str,
+        reader: FigurePlan,
+        writer: FigurePlan,
+        subject: str,
+        held: dict[str, list[str]],
+    ) -> list[str]:
+        """Which of a reader's own subjects a writer's moved subject makes stale.
+
+        **In the reader's subject space, never the writer's**, and the four
+        shapes are genuinely different questions rather than one with cases.
+
+        - A **roster-keyed reader** holds one value per subject, so a moved
+          coordinate makes the total for its base stale.
+        - A **sequenced reader of a sequenced writer in the same scope** holds
+          one value per coordinate and the coordinate passes straight through.
+          Handing it the base instead asks for a subject it does not have, and
+          `evaluate` finds every coordinate row under that base and aborts
+          rather than pick one, taking the pass with it.
+        - A **sequenced reader of an unsequenced writer** is what `spread`
+          introduced, and it has no coordinate to pass through: the writer has
+          one value per campaign and the reader one per campaign-week, so the
+          coordinates have to be read off the reader's own grouping. Marking
+          the bare key instead named a row that does not exist, and every week
+          went on holding the number it was built with until the next full
+          reconcile -- a stale value, which is worse than a missing one on a
+          board claiming a figure moves when its records do.
+        - A **sequenced reader in another scope** is what a total over a set
+          introduced, and it is cross-scope by construction: the account's
+          figure reads its campaigns'. `c1@2026-W33` is not a subject the
+          account has, so what carries across is the *coordinate* -- every one
+          of the reader's own buckets at that tail. Which member moved is not
+          narrowed here deliberately: a total re-reads its whole set anyway,
+          so the only thing a narrower answer would buy is a second place for
+          set membership to be decided.
+        """
+        if reader.grain is None:
+            return [subject_of(subject)]
+        if writer.grain is not None and reader.scope == writer.scope:
+            return [subject]
+        if reader.scope_index is None:
+            # Nothing to enumerate buckets from. A sequenced figure with no
+            # grouping takes its subjects from its sources, and the source
+            # that just moved is this writer -- so the bare pass-through is
+            # the honest answer and `_scopes_of` fills the rest on a full run.
+            return [subject]
+
+        # Once per index for the whole pass, not once per moved subject. The
+        # loop this feeds is the quadratic shape the comment above it names --
+        # a season-sized bulk load moves tens of thousands of subjects, and a
+        # bucket listing per subject per reader is the exact cost
+        # `test_pass_cost.py` exists to hold down. Nothing this reads moves
+        # mid-pass: groupings are rebuilt before any recompute begins.
+        keys = held.get(reader.scope_index)
+        if keys is None:
+            keys = await self._store.bucket_keys(tenant, reader.scope_index)
+            held[reader.scope_index] = keys
+        if writer.grain is None:
+            base = subject_of(subject)
+            return [key for key in keys if subject_of(key) == base]
+        tail = tail_of(subject)
+        return [key for key in keys if tail_of(key) == tail]
 
     async def _recompute_one(
         self,

@@ -1302,3 +1302,71 @@ def test_both_ends_of_a_span_are_named_where_a_host_reads_its_dependencies() -> 
         for field in ((part.field, part.until) if part.until else (part.field,))
     ]
     assert named == ["account_id", "starts_at", "ends_at"]
+
+
+# ------------------------------------------------- the warm path, downstream --
+
+
+async def test_a_warm_pass_carries_a_changed_value_into_the_buckets_it_spreads_over() -> None:
+    """A budget that doubles must double every week it is spread across, on the
+    ordinary pass rather than at the next full reconcile.
+
+    This is the shape a `spread` introduced and nothing else in the language
+    has: a **bucketed reader of an unbucketed writer**. The pass marks a
+    figure's readers stale in the reader's own subject space, and the two
+    shapes it knew were a roster-keyed reader of a coordinate (take the base)
+    and a sequenced reader of a sequenced writer (the coordinate passes
+    through). Here the writer has one value per campaign and the reader has
+    one per campaign-week, so the coordinate has to be *invented* from the
+    index -- and marking the bare campaign key instead left every week holding
+    the number it was built with.
+
+    A stale value is worse than a missing one on a board whose whole claim is
+    that a figure moves when the records behind it do. Nothing was wrong on
+    screen: the weeks simply went on saying what they said yesterday, and a
+    full reconcile quietly corrected them hours later.
+    """
+    engine, store, library = await spread_board(
+        {"c1": {**campaign("a1", AUG_3, SEP_6, 1000), "ref": "c1"}}, at_ms=EARLY_AUGUST
+    )
+    before = await rows(store, library, "ad_campaign.weekly_spend")
+    assert set(before.values()) == {200.0}, "the fixture: 1000 over five weeks"
+
+    engine._facts.put(
+        "t1", "ad_campaign", "c1", {**campaign("a1", AUG_3, SEP_6, 2000), "ref": "c1"}
+    )
+    await engine.run("t1", written={"ad_campaign": ["c1"]}, at_ms=EARLY_AUGUST)
+
+    assert set((await rows(store, library, "ad_campaign.weekly_spend")).values()) == {400.0}, (
+        "the spread kept its old share after the value it divides doubled"
+    )
+
+
+async def test_a_warm_pass_carries_a_spread_into_the_total_above_it() -> None:
+    """And on into the account, which is the second broken edge.
+
+    A total over a set is **cross-scope by construction** -- the account's
+    figure reads its campaigns' -- so the writer's coordinate (`c1@2026-W33`)
+    is not a subject the reader has. Passed through unchanged it named a row
+    that does not exist, so the account's own week was never recomputed and
+    the two answers disagreed: the campaign's weeks said 400 while the
+    account's still totalled 200.
+
+    Asserted separately from the campaign's own weeks above because the two
+    are different edges and a fix for one is not a fix for the other -- the
+    first cut of this repair corrected the campaign and left the account
+    stale, which is the reading a screen actually shows.
+    """
+    engine, store, library = await spread_board(
+        {"c1": {**campaign("a1", AUG_3, SEP_6, 1000), "ref": "c1"}}, at_ms=EARLY_AUGUST
+    )
+    assert set((await rows(store, library, "ad_account.weekly_spend")).values()) == {200.0}
+
+    engine._facts.put(
+        "t1", "ad_campaign", "c1", {**campaign("a1", AUG_3, SEP_6, 2000), "ref": "c1"}
+    )
+    await engine.run("t1", written={"ad_campaign": ["c1"]}, at_ms=EARLY_AUGUST)
+
+    assert set((await rows(store, library, "ad_account.weekly_spend")).values()) == {400.0}, (
+        "the account's weekly total ignored a campaign share that doubled"
+    )
