@@ -1337,9 +1337,15 @@ async def test_a_warm_pass_carries_a_changed_value_into_the_buckets_it_spreads_o
     )
     await engine.run("t1", written={"ad_campaign": ["c1"]}, at_ms=EARLY_AUGUST)
 
-    assert set((await rows(store, library, "ad_campaign.weekly_spend")).values()) == {400.0}, (
-        "the spread kept its old share after the value it divides doubled"
-    )
+    # The whole dict, not the set of its values: a pass that dropped or
+    # renamed a bucket while doubling the rest would satisfy a set.
+    assert await rows(store, library, "ad_campaign.weekly_spend") == {
+        "c1@2026-W32": 400.0,
+        "c1@2026-W33": 400.0,
+        "c1@2026-W34": 400.0,
+        "c1@2026-W35": 400.0,
+        "c1@2026-W36": 400.0,
+    }, "the spread kept its old share after the value it divides doubled"
 
 
 async def test_a_warm_pass_carries_a_spread_into_the_total_above_it() -> None:
@@ -1367,6 +1373,61 @@ async def test_a_warm_pass_carries_a_spread_into_the_total_above_it() -> None:
     )
     await engine.run("t1", written={"ad_campaign": ["c1"]}, at_ms=EARLY_AUGUST)
 
-    assert set((await rows(store, library, "ad_account.weekly_spend")).values()) == {400.0}, (
-        "the account's weekly total ignored a campaign share that doubled"
+    assert await rows(store, library, "ad_account.weekly_spend") == {
+        "a1@2026-W32": 400.0,
+        "a1@2026-W33": 400.0,
+        "a1@2026-W34": 400.0,
+        "a1@2026-W35": 400.0,
+        "a1@2026-W36": 400.0,
+    }, "the account's weekly total ignored a campaign share that doubled"
+
+
+async def test_a_pass_lists_a_groupings_buckets_once_however_many_subjects_moved() -> None:
+    """The cost of deciding *which* buckets a moved value made stale.
+
+    Working out that a `spread`'s weeks are stale means knowing which weeks
+    its grouping holds, and the obvious place to ask is inside the loop over
+    moved subjects -- which is the quadratic shape `tests/test_pass_cost.py`
+    exists to keep out, one store method along. That file cannot see this one:
+    it spies `all_buckets` rather than `bucket_keys`, and its library has
+    neither a spread nor a cross-scope total, so the branch that reads buckets
+    is never reached there at all.
+
+    Growth rather than a magic number, like its neighbour: four times the
+    campaigns moving must ask the store for the same listings. And the pass
+    has to have done something, or the equality holds vacuously.
+    """
+    counted: list[str] = []
+
+    class CountingStore(MemoryEngineStore):
+        async def bucket_keys(self, tenant: str, index: str):  # type: ignore[override]
+            counted.append(index)
+            return await super().bucket_keys(tenant, index)
+
+    async def listings_for(campaigns: int) -> tuple[int, int]:
+        facts = MemoryFactStore()
+        store = CountingStore()
+        library = compile_world(MEASURE + SPREAD)
+        engine = Uratori(schema=WORLD, library=library, store=store, facts=facts)
+        facts.put("t1", "ad_account", "a1", {"name": "A1", "timezone": "UTC"})
+        keys = [f"c{n}" for n in range(campaigns)]
+        for key in keys:
+            facts.put("t1", "ad_campaign", key, {**campaign("a1", AUG_3, SEP_6, 1000), "ref": key})
+        await engine.run("t1", full=True, at_ms=EARLY_AUGUST)
+
+        for key in keys:
+            facts.put("t1", "ad_campaign", key, {**campaign("a1", AUG_3, SEP_6, 2000), "ref": key})
+        counted.clear()
+        outcome = await engine.execute("t1", written={"ad_campaign": keys}, at_ms=EARLY_AUGUST)
+        return len(counted), len(outcome.changes)
+
+    few, few_changes = await listings_for(2)
+    many, many_changes = await listings_for(8)
+
+    assert few_changes and many_changes, "a pass that recomputed nothing proves nothing"
+    assert many_changes > few_changes, "the larger board must actually have moved more"
+    assert few == many, (
+        f"the bucket listing grew with the roster: {few} for two campaigns, {many} for "
+        "eight. Asked per moved subject rather than once per grouping, this is the "
+        "quadratic shape a season-sized load turns into tens of minutes."
     )
