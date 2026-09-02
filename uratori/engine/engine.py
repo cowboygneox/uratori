@@ -280,6 +280,10 @@ class Engine:
         # own value is still stale would spread the stale number forward.
         carried: list[str] = []
         downstream: dict[str, set[str]] = {}
+        # The same per-pass bucket index `_recompute` keeps, for the same
+        # reason: a carry can land many buckets, and each asks which of a
+        # reader's own rows they make stale.
+        carried_buckets: dict[str, tuple[dict[str, list[str]], dict[str, list[str]]]] = {}
         for plan in lib.figures:
             if not plan.carried or plan.scope_index is None:
                 continue
@@ -331,9 +335,23 @@ class Engine:
                 # the *next* pass. That is the worst shape a bug can have:
                 # right in every test that runs twice, and wrong on every
                 # first build.
+                #
+                # **Seeded in the reader's own subject space**, through the
+                # same resolution the ordinary recompute uses. Seeded with the
+                # carried figure's own coordinate it was right for a reader
+                # sequenced in the same scope and wrong for the other two
+                # shapes: a roster-keyed reader was handed a coordinate it has
+                # no row for, and a cross-scope total was handed `s1@2026-02`
+                # for a figure whose rows are `r1@2026-02`. Both then healed at
+                # the next full reconcile -- which is this comment's own "wrong
+                # on every first build" in the one place it was still true.
                 for other in lib.figures:
-                    if plan.name in other.reads:
-                        downstream.setdefault(subject, set()).add(other.name)
+                    if plan.name not in other.reads:
+                        continue
+                    for key in await self._reader_keys(
+                        tenant, other, plan, subject, carried_buckets
+                    ):
+                        downstream.setdefault(key, set()).add(other.name)
 
         if downstream:
             # Depth order is `_recompute`'s own, so a total is never computed
@@ -657,7 +675,7 @@ class Engine:
         pending: dict[str, set[str]] = {k: set(v) for k, v in touched.items()}
         # One bucket listing per grouping for the whole pass, read lazily and
         # only by the readers that need one. See `_reader_keys`.
-        held_buckets: dict[str, list[str]] = {}
+        held_buckets: dict[str, tuple[dict[str, list[str]], dict[str, list[str]]]] = {}
 
         for plan in by_depth:
             subjects: set[str] = set()
@@ -721,7 +739,7 @@ class Engine:
         reader: FigurePlan,
         writer: FigurePlan,
         subject: str,
-        held: dict[str, list[str]],
+        held: dict[str, tuple[dict[str, list[str]], dict[str, list[str]]]],
     ) -> list[str]:
         """Which of a reader's own subjects a writer's moved subject makes stale.
 
@@ -763,21 +781,30 @@ class Engine:
             # the honest answer and `_scopes_of` fills the rest on a full run.
             return [subject]
 
-        # Once per index for the whole pass, not once per moved subject. The
-        # loop this feeds is the quadratic shape the comment above it names --
-        # a season-sized bulk load moves tens of thousands of subjects, and a
-        # bucket listing per subject per reader is the exact cost
-        # `test_pass_cost.py` exists to hold down. Nothing this reads moves
-        # mid-pass: groupings are rebuilt before any recompute begins.
-        keys = held.get(reader.scope_index)
-        if keys is None:
-            keys = await self._store.bucket_keys(tenant, reader.scope_index)
-            held[reader.scope_index] = keys
+        # Once per index for the whole pass, and **indexed rather than
+        # scanned**. The loop this feeds is the quadratic shape the comment
+        # above it names: fetching the list per moved subject was one round
+        # trip each, and walking it per moved subject was 5N comparisons each
+        # -- 5N total, which is a fifth of a million on a four-hundred-subject
+        # delta and a hundred million on a season-sized one. Grouped up front
+        # both lookups are a dict hit. Nothing this reads moves mid-pass:
+        # groupings are rebuilt before any recompute begins.
+        grouped = held.get(reader.scope_index)
+        if grouped is None:
+            by_base: dict[str, list[str]] = {}
+            by_tail: dict[str, list[str]] = {}
+            for key in await self._store.bucket_keys(tenant, reader.scope_index):
+                by_base.setdefault(subject_of(key), []).append(key)
+                its_tail = tail_of(key)
+                if its_tail is not None:
+                    by_tail.setdefault(its_tail, []).append(key)
+            grouped = (by_base, by_tail)
+            held[reader.scope_index] = grouped
+        by_base, by_tail = grouped
         if writer.grain is None:
-            base = subject_of(subject)
-            return [key for key in keys if subject_of(key) == base]
+            return by_base.get(subject_of(subject), [])
         tail = tail_of(subject)
-        return [key for key in keys if tail_of(key) == tail]
+        return [] if tail is None else by_tail.get(tail, [])
 
     async def _recompute_one(
         self,

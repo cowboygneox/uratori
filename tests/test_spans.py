@@ -1431,3 +1431,95 @@ async def test_a_pass_lists_a_groupings_buckets_once_however_many_subjects_moved
         "eight. Asked per moved subject rather than once per grouping, this is the "
         "quadratic shape a season-sized load turns into tens of minutes."
     )
+
+
+CARRY = '''
+# One change to what a campaign is told to spend, at one moment. Sparse by
+# nature: a week nobody touched it has no record at all, which is what gives
+# the carry something to do.
+fact spend_change:
+    name ref
+    ref as text
+    campaign_id as text
+    amount as number
+    set_at as moment
+
+group spend_change.by_week from (campaign_id, set_at by week in "UTC")
+
+# What the campaign was last told to spend, held across the weeks nobody
+# changed it.
+figure ad_campaign.held_spend bucketed:
+    display "{ad_campaign} held spend that week"
+    unit count
+    depends:
+        sets = spend_change.by_week:{ad_campaign}
+    calculate:
+        latest(spend_change.amount over sets) carried forward
+
+# The account's total of those held weeks -- a cross-scope reader of a
+# carried figure, which is the pairing the last stale bug lived in.
+figure ad_account.held_spend bucketed:
+    display "{ad_account} held spend that week"
+    depends:
+        live = ad_campaign.weeks_left:{ad_account}
+    calculate:
+        sum(ad_campaign.held_spend over live)
+'''
+
+
+async def test_a_carried_bucket_makes_its_cross_scope_total_stale_too() -> None:
+    """The carry lands buckets of its own, and whoever totals them has to hear.
+
+    A carry runs after the ordinary recomputes -- it reads the anchor values
+    those just wrote -- and then seeds the readers of what it wrote. It seeded
+    them with **its own** coordinate, which is right for a reader sequenced in
+    the same scope and names a row that does not exist for a total in another:
+    the account's rows are `a1@2026-W34` and the seed said `c1@2026-W34`. So
+    the account went on totalling a share its own source had already replaced,
+    and healed at the next full reconcile -- the shape the comment above that
+    loop calls the worst a bug can have.
+
+    The **carried** week is the whole point of the fixture, and getting there
+    takes some care. The stream is sparse -- one change, in W32 -- so W33 and
+    W34 exist only because the carry wrote them, and W34 is the week the
+    account is still asking about (the span drops the two that have gone).
+    Moving the *anchor* is what then re-materialises W34 without any ordinary
+    recompute touching it. An earlier version of this test spread a value
+    across every week instead, which gives every bucket an anchor, carries
+    nothing, and passes against the bug.
+    """
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_world(MEASURE + SPREAD + CARRY)
+    engine = Uratori(schema=WORLD, library=library, store=store, facts=facts)
+    facts.put("t1", "ad_account", "a1", {"name": "A1", "timezone": "UTC"})
+    facts.put("t1", "ad_campaign", "c1", {**campaign("a1", AUG_3, SEP_6, 0), "ref": "c1"})
+    facts.put(
+        "t1",
+        "spend_change",
+        "s1",
+        {"ref": "s1", "campaign_id": "c1", "amount": 1000, "set_at": AUG_3},
+    )
+    await engine.run("t1", full=True, at_ms=MID_AUGUST)
+
+    # W34 is the week in progress: carried on the campaign, and the first week
+    # the account still holds now the earlier two have gone.
+    assert (await rows(store, library, "ad_campaign.held_spend"))["c1@2026-W34"] == 1000.0
+    assert (await rows(store, library, "ad_account.held_spend"))["a1@2026-W34"] == 1000.0
+
+    # Correct the anchor. Nothing is written in W34 at all -- only the carry
+    # reaches it, which is exactly the propagation under test.
+    facts.put(
+        "t1",
+        "spend_change",
+        "s1",
+        {"ref": "s1", "campaign_id": "c1", "amount": 2000, "set_at": AUG_3},
+    )
+    await engine.run("t1", written={"spend_change": ["s1"]}, at_ms=MID_AUGUST)
+
+    assert (await rows(store, library, "ad_campaign.held_spend"))["c1@2026-W34"] == 2000.0, (
+        "the control: the carried week itself did not follow its anchor"
+    )
+    assert (await rows(store, library, "ad_account.held_spend"))["a1@2026-W34"] == 2000.0, (
+        "the account went on totalling a carried week its own source had replaced"
+    )
