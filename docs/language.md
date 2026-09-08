@@ -574,14 +574,26 @@ part anybody can still act on, the one part missing. The plural must match the
 grain, because it is the only part of the clause a reader can use to tell what
 is being dropped.
 
-This is the second place membership moves with the clock (an
-[age filter](#filter) is the first), and it costs the same thing: **the filing
-is as fresh as the last pass.** The engine notices for itself -- a clipped
-span's stored buckets carry the day they were built on, so the grouping
-rebuilds on the first pass of a new day and everything over it recomputes
-through the ordinary cascade. The cron a forward chart needs is the pass that
-already runs. Fenced to day grain and coarser, for the reason
-`carried forward` is: a pass is the only clock membership has.
+Adding `carrying overdue weeks` puts a span *entirely in the past* into the
+current period's bucket. This is the **isolate**, not the fold: on its own it
+yields only overdue spans, at the current period, which is deliberate -- it
+lets a consumer draw the carried-over work as its own distinguishable quantity.
+A span still running yields nothing under this clause alone, and a span entirely
+in the future also yields nothing. Written **beside** `excluding weeks gone`
+it becomes the fold: the weeks a span has left, or the current week if it has
+none left. For a roadmap of committed work, an epic past its due date with work
+still unfinished is not free and not gone -- it is the most overdue thing on the
+board, and without this clause it drops silently off a "what does each week cost"
+chart. The plural must match the grain, exactly as `excluding ... gone` does.
+
+Both clauses make membership move with the clock (an [age filter](#filter) is
+the third place), and they cost the same thing: **the filing is as fresh as the
+last pass.** The engine notices for itself -- a clipped span's stored buckets
+carry the day they were built on, so the grouping rebuilds on the first pass of
+a new day and everything over it recomputes through the ordinary cascade. The
+cron a forward chart needs is the pass that already runs. Fenced to day grain
+and coarser, for the reason `carried forward` is: a pass is the only clock
+membership has.
 
 A label is the *local* instant reduced to the grain, in the calendar the
 definition names: the zone is applied once, to find the local time, and a

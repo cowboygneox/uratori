@@ -1029,7 +1029,7 @@ def test_the_editor_knows_every_word_a_figure_header_can_carry() -> None:
         | set(_parse._Parser._GRAINS)
         | set(_parse._Parser._ORDINALS)
         | set(_parse._Parser._WEEKDAYS)
-        | {"bucketed", "carried", "forward", "until", "excluding", "gone", "of"}
+        | {"bucketed", "carried", "forward", "until", "excluding", "gone", "carrying", "overdue", "of"}
     )
     for word in sorted(words):
         assert f"'{word}'" in source, (

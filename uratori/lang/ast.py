@@ -281,6 +281,32 @@ class IndexField:
     themselves, so an account whose week has not turned yet keeps the week an
     account in another calendar has already left behind."""
 
+    overdue_to_current: bool = False
+    """`carrying overdue weeks` -- if every bucket has gone, the record is a
+    member of the current period's bucket.
+
+    Means: "If this span is entirely in the past, put it in the current period."
+    This is the isolate, not the fold. On its own it yields only overdue spans,
+    at the current period, which is deliberate -- it lets a consumer draw the
+    carried-over work as its own distinguishable quantity. Written beside
+    `ahead_only` it becomes the fold: the weeks left, or the current week if
+    none left.
+
+    The name was chosen to avoid collision with `carried forward` (on-change
+    data with anchors), and to read correctly beside `excluding weeks gone`.
+    "Carrying" suggests the forward movement to the current period, and
+    "overdue" names what is being carried.
+
+    Fenced to day grain and coarser for the same reason `ahead_only` is: a pass
+    is the only clock membership has. The comparison is made in the subject's
+    calendar, like the labels and like `ahead_only`. Requires `until` (it is
+    meaningless without a span), requires a grain, and the grain's plural is
+    validated exactly as `ahead_only`'s is.
+
+    Backwards ends (far end before near end) must produce no membership, exactly
+    as now. Either end missing must produce no membership. Mutually exclusive
+    with `select`."""
+
 
 @dataclass(frozen=True)
 class ByField:

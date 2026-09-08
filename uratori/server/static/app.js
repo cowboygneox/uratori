@@ -1816,8 +1816,8 @@ const FIG_WORDS = new Set([
   'detail', 'action', 'severity', 'info', 'attention', 'true', 'false',
   'mean', 'median', 'worst', 'sum', 'spread', 'series', 'delta', 'list', 'latest', 'earliest',
   'max', 'min',
-  // A span's own words, and the clip that makes it a question about the future.
-  'until', 'excluding', 'gone',
+  // A span's own words, the clip, and the overdue carry.
+  'until', 'excluding', 'gone', 'carrying', 'overdue',
   ...FIG_UNITS, ...FIG_FACT_TYPES, ...FIG_FIELD_TYPES,
   // Every grain, singular and plural, and the selective rule's vocabulary.
   // The coarse three were missing before spans arrived: `by week` rendered

@@ -559,6 +559,15 @@ class _Checker:
                 "stretch of calendar. Put the two in separate parts.",
                 d.line,
             )
+        if part.overdue_to_current and part.truncate not in self._SPANNABLE:
+            raise CheckError(
+                f"{what} carries overdue {part.truncate}s, and a pass cannot honour "
+                "that. The carried bucket is the current period, which moves with the "
+                "clock, and a pass is the only clock membership has -- so a rule owing "
+                f"a new current bucket every {part.truncate} gets one per sync. Use day "
+                "grain or coarser.",
+                d.line,
+            )
 
     def _index_fields_exist(self, d: IndexDecl, word: str) -> None:
         """Every field a group or filter reads, against the declared world.
@@ -4030,6 +4039,10 @@ def _field_hash(part: IndexField) -> object:
         # to what it hashed to yesterday or every figure over it repoints.
         "until": part.until,
         "ahead_only": part.ahead_only or None,
+        # Whether overdue spans are carried to the current period. Absent-unless-
+        # declared like `ahead_only`: every spec written before this clause
+        # existed must keep its version.
+        "overdue_to_current": part.overdue_to_current or None,
         # The calendar: the record and field carrying it, or the one written
         # in the definition. A group cut on one calendar and one cut on
         # another file the same instant under different labels, so the two

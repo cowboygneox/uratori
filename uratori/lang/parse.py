@@ -622,6 +622,7 @@ class _Parser:
             self._next()
             until = self._name("the field holding the far end of the span")
 
+        overdue_to_current = False
         if self._at_word("by"):
             self._next()
             truncate, select = self._bucket_rule()
@@ -650,6 +651,29 @@ class _Parser:
                     )
                 self._keyword("gone")
                 ahead_only = True
+            if self._at_word("carrying"):
+                # `carrying overdue weeks`. The new clause that captures fully-past
+                # spans in the current period. The plural is validated the same way
+                # `excluding ... gone` is.
+                self._next()
+                self._keyword("overdue")
+                if until is None:
+                    raise self._error(
+                        '"carrying overdue ..." puts fully-past spans in the current '
+                        "period, which only means something for a span. Write it after "
+                        "`<from> until <to> by <grain>`.",
+                        line,
+                    )
+                plural = self._name("the grain being carried, e.g. `weeks`")
+                if truncate is None or plural != f"{truncate}s":
+                    wanted = f"{truncate}s" if truncate is not None else "<grain>s"
+                    raise self._error(
+                        f'"carrying overdue {plural}" does not match this rule\'s grain. '
+                        f"Write `carrying overdue {wanted}`, so the clause says what is "
+                        "actually being carried.",
+                        line,
+                    )
+                overdue_to_current = True
             if self._at_word("in"):
                 self._next()
                 if self._peek().kind == "string":
@@ -686,6 +710,7 @@ class _Parser:
             zone=zone,
             until=until,
             ahead_only=ahead_only,
+            overdue_to_current=overdue_to_current,
         )
 
     _GRAINS: tuple[str, ...] = ("minute", "hour", "day", "week", "month", "quarter")

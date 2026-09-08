@@ -815,6 +815,13 @@ def _keys_for(
             if far is None or not nears:
                 return []
             labels = labels_between(min(nears), far, zone_name, part.truncate or "day")
+            # Save the original span result before any filtering. This
+            # distinguishes "backwards span returned []" from "all buckets
+            # filtered out returned []" -- the two reasons a list can be empty
+            # must not be conflated. A backwards span must never be carried to
+            # the current period, even under the fold.
+            original_labels = labels
+            current = label_in(now_ms, zone_name, part.truncate or "day")
             if part.ahead_only:
                 # Drop the buckets whose period has already gone, in the same
                 # calendar the labels were cut in. Comparing labels rather than
@@ -826,8 +833,34 @@ def _keys_for(
                 # The period in progress is **kept**. Dropping it would make
                 # the near future -- the only part anybody can still act on --
                 # the one part missing from the answer.
-                current = label_in(now_ms, zone_name, part.truncate or "day")
                 labels = [label for label in labels if label >= current]
+            if part.overdue_to_current:
+                # `carrying overdue weeks`: if every bucket has gone, the record
+                # is a member of the current period's bucket (exactly one bucket).
+                # This is the isolate, not the fold -- on its own it yields only
+                # overdue spans. Written beside `ahead_only` it becomes the fold:
+                # the weeks left, or the current week if none left.
+                #
+                # The comparison is made in the subject's calendar, like the
+                # labels and like `ahead_only`. Three cases:
+                # 1. With `ahead_only`: if the span was well-formed AND after
+                #    filtering all buckets have gone, carry to current (the fold).
+                # 2. Without `ahead_only` and all labels < current: replace
+                #    with [current] (the isolate, overdue case).
+                # 3. Without `ahead_only` and some labels >= current: clear
+                #    labels (the isolate, not-overdue case -- yield nothing).
+                if part.ahead_only:
+                    # The fold: only carry if the span was well-formed (produced
+                    # buckets before filtering) AND all buckets have gone. A
+                    # backwards span produces original_labels=[], so it stays [].
+                    if original_labels and not labels:
+                        labels = [current]
+                else:
+                    # The isolate: only yield overdue spans at current.
+                    if labels and all(label < current for label in labels):
+                        labels = [current]
+                    else:
+                        labels = []
             return labels
 
         out: list[str] = []

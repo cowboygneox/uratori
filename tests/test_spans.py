@@ -83,6 +83,12 @@ group ad_campaign.booked_weeks from (account_id, starts_at until ends_at by week
 # Every week a campaign still has left to run.
 group ad_campaign.weeks_left from (account_id, starts_at until ends_at by week excluding weeks gone in ad_account.timezone)
 
+# Overdue campaigns: spans entirely in the past, captured at the current week.
+group ad_campaign.overdue_weeks from (account_id, starts_at until ends_at by week carrying overdue weeks in ad_account.timezone)
+
+# Both clauses together: the weeks a campaign has left, or the current week if it has none left.
+group ad_campaign.folded_weeks from (account_id, starts_at until ends_at by week excluding weeks gone carrying overdue weeks in ad_account.timezone)
+
 # How many campaigns this account has running in each week.
 figure ad_account.running bucketed:
     display "{ad_account} campaigns running that week"
@@ -119,6 +125,22 @@ figure ad_account.still_running bucketed:
         live = ad_campaign.weeks_left:{ad_account}
     calculate:
         count(live)
+
+# Overdue campaigns at the current week.
+figure ad_account.overdue bucketed:
+    display "{ad_account} overdue campaigns"
+    depends:
+        late = ad_campaign.overdue_weeks:{ad_account}
+    calculate:
+        count(late)
+
+# The fold: weeks left or current if none left.
+figure ad_account.folded bucketed:
+    display "{ad_account} folded view"
+    depends:
+        all = ad_campaign.folded_weeks:{ad_account}
+    calculate:
+        count(all)
 '''
 
 # Three weeks apart, chosen so every label below is checkable by eye:
@@ -332,6 +354,9 @@ async def test_the_week_in_progress_is_not_gone() -> None:
 
 
 async def test_a_span_entirely_in_the_past_is_in_no_bucket_once_clipped() -> None:
+    """The existing behaviour: `excluding weeks gone` alone drops a fully-past
+    span entirely. This test must stay green -- the new clause is opt-in and
+    changes nothing about this one."""
     _e, store, library, _f = await board(
         {"a1": "UTC"},
         {"c1": campaign("a1", "2026-07-06T09:00:00Z", "2026-07-24T09:00:00Z")},
@@ -381,6 +406,151 @@ async def test_the_clip_is_cut_by_the_subjects_calendar_too() -> None:
     found = await rows(store, library, "ad_account.still_running")
     assert "a1@2026-W33" in found, f"London's current week was dropped early: {found}"
     assert "a2@2026-W33" not in found, f"Auckland kept a week it has left: {found}"
+
+
+# ---------------------------------------------------------- carrying overdue --
+
+
+async def test_carrying_overdue_puts_a_fully_past_span_in_the_current_period() -> None:
+    """The new clause alone: a span entirely in the past yields exactly the
+    current period's bucket. This is the isolate -- the overdue work on its own,
+    distinguishable from what still has time."""
+    _e, store, library, _f = await board(
+        {"a1": "UTC"},
+        {"c1": campaign("a1", "2026-07-06T09:00:00Z", "2026-07-24T09:00:00Z")},
+        at_ms=MID_AUGUST,
+    )
+    assert await rows(store, library, "ad_account.overdue") == {"a1@2026-W34": 1.0}
+
+
+async def test_carrying_overdue_yields_nothing_for_a_span_still_running() -> None:
+    """The isolate property: a span that has weeks left yields NOTHING under the
+    new clause alone. This is the mistake most likely to be made -- letting it
+    yield the current week when it already has weeks would double-count running
+    work."""
+    _e, store, library, _f = await board(
+        {"a1": "UTC"},
+        {"c1": campaign("a1", AUG_3, SEP_6)},
+        at_ms=MID_AUGUST,
+    )
+    assert await rows(store, library, "ad_account.overdue") == {}
+
+
+async def test_carrying_overdue_yields_nothing_for_a_future_span() -> None:
+    """A span entirely in the future is not overdue, so the new clause alone
+    yields nothing for it."""
+    _e, store, library, _f = await board(
+        {"a1": "UTC"},
+        {"c1": campaign("a1", "2026-10-05T09:00:00Z", "2026-10-16T09:00:00Z")},
+        at_ms=MID_AUGUST,
+    )
+    assert await rows(store, library, "ad_account.overdue") == {}
+
+
+async def test_both_clauses_together_fold_the_two_cases() -> None:
+    """The primary use: `excluding weeks gone carrying overdue weeks` gives the
+    weeks left OR the current week if none left. Three spans in one group: one
+    running, one overdue, one future."""
+    _e, store, library, _f = await board(
+        {"a1": "UTC"},
+        {
+            "c1": campaign("a1", AUG_3, SEP_6),  # running: W34-W36
+            "c2": campaign("a1", "2026-07-06T09:00:00Z", "2026-07-24T09:00:00Z"),  # overdue
+            "c3": campaign("a1", "2026-10-05T09:00:00Z", "2026-10-16T09:00:00Z"),  # future
+        },
+        at_ms=MID_AUGUST,
+    )
+    assert await rows(store, library, "ad_account.folded") == {
+        "a1@2026-W34": 2.0,  # c1 running + c2 overdue
+        "a1@2026-W35": 1.0,  # c1 running
+        "a1@2026-W36": 1.0,  # c1 running
+        "a1@2026-W41": 1.0,  # c3 future
+        "a1@2026-W42": 1.0,  # c3 future
+    }
+
+
+async def test_the_period_in_progress_is_not_overdue() -> None:
+    """A span whose far end is inside the current period is NOT overdue -- it
+    still has this period left. Boundary test: under the new clause alone it
+    yields nothing, not the current week."""
+    _e, store, library, _f = await board(
+        {"a1": "UTC"},
+        {"c1": campaign("a1", "2026-08-10T09:00:00Z", "2026-08-19T09:00:00Z")},
+        at_ms=MID_AUGUST,
+    )
+    assert await rows(store, library, "ad_account.overdue") == {}
+    # But the folded view shows it in W34 because it still has that week left:
+    assert await rows(store, library, "ad_account.folded") == {"a1@2026-W34": 1.0}
+
+
+async def test_carrying_overdue_honours_missing_ends() -> None:
+    """Missing near end, missing far end, and backwards ends each yield nothing
+    under the new clause, exactly as they do for the base span rule. Test against
+    BOTH the isolate group and the fold group, because a typo that lands on the
+    current period in the fold is phantom effort in this week's staffing bar."""
+    _e, store, library, _f = await board(
+        {"a1": "UTC"},
+        {
+            "c1": {"ref": "C", "account_id": "a1", "starts_at": AUG_3, "budget_cents": 0},
+            "c2": {"ref": "C", "account_id": "a1", "ends_at": SEP_6, "budget_cents": 0},
+            "c3": campaign("a1", SEP_6, AUG_3),  # backwards
+        },
+        at_ms=MID_AUGUST,
+    )
+    assert await rows(store, library, "ad_account.overdue") == {}
+    assert await rows(store, library, "ad_account.folded") == {}, (
+        "a backwards or missing-end span yielded buckets under the fold"
+    )
+
+
+async def test_backwards_span_yields_nothing_from_the_fold() -> None:
+    """A span whose far end is before its near end is a typo, not a booking, and
+    the fold must not carry it to the current period. Without this guard, a
+    mis-dated epic injects phantom effort into this week's staffing bar — a wrong
+    number from a data-entry error, which is the worst kind."""
+    _e, store, library, _f = await board(
+        {"a1": "UTC"},
+        {"c1": campaign("a1", SEP_6, AUG_3)},  # backwards: ends before it starts
+        at_ms=MID_AUGUST,
+    )
+    assert await rows(store, library, "ad_account.folded") == {}, (
+        "a backwards span was carried to the current period under the fold"
+    )
+
+
+async def test_single_bucket_gone_is_still_carried_under_the_fold() -> None:
+    """A span that produces exactly one bucket, and that bucket has gone, should
+    still land on the current period under the fold. This is the case the fix
+    must not break: a well-formed span whose entire run has passed."""
+    _e, store, library, _f = await board(
+        {"a1": "UTC"},
+        # A span that starts and ends inside W33, which has passed by MID_AUGUST (W34):
+        {"c1": campaign("a1", "2026-08-10T09:00:00Z", "2026-08-14T09:00:00Z")},
+        at_ms=MID_AUGUST,
+    )
+    # Under the fold, this should land on W34 (current):
+    assert await rows(store, library, "ad_account.folded") == {"a1@2026-W34": 1.0}, (
+        "a single-bucket-gone span was not carried to current under the fold"
+    )
+
+
+async def test_carrying_overdue_uses_the_subjects_calendar() -> None:
+    """The overdue check is made in the subject's own calendar, like the labels
+    and like `excluding ... gone`. At 2026-08-16T13:00Z it is Sunday of W33 in
+    London but already Monday of W34 in Auckland, so a span ending in W33 is
+    overdue for Auckland but not for London."""
+    sunday = 1_786_885_200_000.0
+    _e, store, library, _f = await board(
+        {"a1": "Europe/London", "a2": "Pacific/Auckland"},
+        {
+            "c1": campaign("a1", "2026-08-03T09:00:00Z", "2026-08-15T09:00:00Z"),
+            "c2": campaign("a2", "2026-08-03T09:00:00Z", "2026-08-15T09:00:00Z"),
+        },
+        at_ms=sunday,
+    )
+    found = await rows(store, library, "ad_account.overdue")
+    assert "a1@2026-W33" not in found, f"London kept a not-yet-overdue span: {found}"
+    assert "a2@2026-W34" in found, f"Auckland's overdue span was missed: {found}"
 
 
 # ------------------------------------------------------------------- grains --
@@ -498,6 +668,65 @@ projection ad_campaign.sheet:
     assert "rather than holding a single bucket" in str(caught.value)
 
 
+def test_carrying_overdue_without_until_is_refused() -> None:
+    """The new clause is meaningless without a span -- it operates on the span's
+    buckets, so without `until` there are no buckets to carry forward."""
+    from uratori.lang.lex import SyntaxError_
+
+    with pytest.raises(SyntaxError_) as caught:
+        compile_world('''
+group ad_campaign.bad from (account_id, starts_at by week carrying overdue weeks in ad_account.timezone)
+''')
+    assert "carrying overdue" in str(caught.value).lower()
+    assert "until" in str(caught.value).lower()
+
+
+def test_carrying_overdue_with_mismatched_plural_is_refused() -> None:
+    """The plural must match the grain, exactly as `excluding ... gone` does.
+    It is the only part of the clause a reader can use to tell what is being
+    carried."""
+    from uratori.lang.lex import SyntaxError_
+
+    with pytest.raises(SyntaxError_) as caught:
+        compile_world('''
+group ad_campaign.bad from (account_id, starts_at until ends_at by week carrying overdue days in ad_account.timezone)
+''')
+    assert "days" in str(caught.value)
+    assert "weeks" in str(caught.value)
+
+
+def test_carrying_overdue_below_day_grain_is_refused() -> None:
+    """Fenced to day grain and coarser, for the same reason `excluding ... gone`
+    is: a pass is the only clock membership has."""
+    with pytest.raises(CheckError) as caught:
+        compile_world('''
+group ad_campaign.by_hour from (account_id, starts_at until ends_at by hour carrying overdue hours in ad_account.timezone)
+''')
+    assert "hour" in str(caught.value)
+
+
+def test_existing_span_spec_version_is_unchanged() -> None:
+    """The new flag is hashed as its own key (absent-unless-declared), so every
+    spec written before this clause existed keeps its version. This test pins
+    that an existing `excluding weeks gone` spec's hash does not move."""
+    from uratori.engine.engine import _index_version
+
+    lib1 = compile_world()
+    # A span with `excluding ... gone` but without the new clause:
+    existing = lib1.indexes.get("ad_campaign.weeks_left")
+    assert existing is not None, "weeks_left group not found"
+    v1 = _index_version(existing)
+    # Recompile and check the version is stable:
+    lib2 = compile_world()
+    recompiled = lib2.indexes.get("ad_campaign.weeks_left")
+    assert recompiled is not None
+    v2 = _index_version(recompiled)
+    assert v1 == v2, (
+        "The version of an existing `excluding weeks gone` span changed. The new "
+        "flag must be absent-unless-declared in _field_hash."
+    )
+
+
 # ------------------------------------------------------------- the refresh --
 #
 # A clipped span's membership moves with the clock, and the clock is not an
@@ -554,10 +783,11 @@ async def test_the_same_day_twice_rebuilds_nothing() -> None:
 
 
 async def test_an_unclipped_span_never_moves_with_the_clock() -> None:
-    """A span with no `excluding ... gone` is a fact about a booking, not a
-    claim about the future: its buckets are decided by two dates on the record
-    and nothing else. It must not be dragged into the daily rebuild, or every
-    board pays for a refresh that cannot change an answer.
+    """A span with no `excluding ... gone` or `carrying overdue ...` is a fact
+    about a booking, not a claim about the future: its buckets are decided by
+    two dates on the record and nothing else. It must not be dragged into the
+    daily rebuild, or every board pays for a refresh that cannot change an
+    answer.
     """
     engine, _s, _l, _f = await board(
         {"a1": "UTC"},
@@ -566,9 +796,16 @@ async def test_an_unclipped_span_never_moves_with_the_clock() -> None:
     )
     outcome = await _pass(engine, MID_AUGUST + 30 * DAY_MS)
     # Exact, not `not in`: a refresh disabled outright would leave this empty
-    # and satisfy the negative on its own, so the clipped group's presence is
+    # and satisfy the negative on its own, so the clipped groups' presence is
     # what proves the pass did the work it was meant to skip for the other.
-    assert outcome.reindexed == ("ad_campaign.any_week", "ad_campaign.weeks_left")
+    # The three clipped groups are: any_week (ahead_only), weeks_left
+    # (ahead_only), folded_weeks (both), and overdue_weeks (overdue_to_current).
+    assert set(outcome.reindexed) == {
+        "ad_campaign.any_week",
+        "ad_campaign.weeks_left",
+        "ad_campaign.folded_weeks",
+        "ad_campaign.overdue_weeks",
+    }
 
 
 async def test_crossing_the_period_boundary_drops_the_week_that_went() -> None:
@@ -592,6 +829,23 @@ async def test_crossing_the_period_boundary_drops_the_week_that_went() -> None:
         "a1@2026-W35",
         "a1@2026-W36",
     }, "the week that went is still being counted"
+
+
+async def test_carrying_overdue_alone_also_moves_with_the_clock() -> None:
+    """The new clause is also clock-moving -- arguably more so, since its whole
+    output is the current bucket. `_clipped()` must return true for it, or the
+    carried bucket will stick on whatever week it was first built in and never
+    advance."""
+    engine, _s, _l, _f = await board(
+        {"a1": "UTC"},
+        {"c1": campaign("a1", "2026-07-06T09:00:00Z", "2026-07-24T09:00:00Z")},
+        at_ms=MID_AUGUST,
+    )
+    outcome = await _pass(engine, MID_AUGUST + DAY_MS)
+    assert "ad_campaign.overdue_weeks" in outcome.reindexed, (
+        "_clipped() did not return true for carrying overdue, so the group was "
+        "not rebuilt on a new day"
+    )
 
 
 # --------------------------------------------------------------- dividing --

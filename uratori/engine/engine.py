@@ -1381,21 +1381,21 @@ def _index_version(index: CompiledIndex) -> str:
 def _clipped(index: CompiledIndex) -> bool:
     """Whether this grouping's membership moves with the clock.
 
-    True for a span written `excluding <grain>s gone`, and for nothing else.
-    An unclipped span is a fact about two dates on a record -- it moves when
-    the record moves, which the change stream already notices. Derived from
-    the spec rather than declared, so it cannot disagree with what the rule
-    actually does: a keyword saying "refresh me" could be written on a
-    grouping that needs no refresh, or left off one that does, and the second
-    of those is silent.
+    True for a span written `excluding <grain>s gone` or
+    `carrying overdue <grain>s`, and for nothing else. An unclipped span is a
+    fact about two dates on a record -- it moves when the record moves, which
+    the change stream already notices. Derived from the spec rather than
+    declared, so it cannot disagree with what the rule actually does: a keyword
+    saying "refresh me" could be written on a grouping that needs no refresh,
+    or left off one that does, and the second of those is silent.
     """
     from ..lang.ast import ByComposite, ByField
 
     spec = index.spec
     if isinstance(spec, ByField):
-        return spec.part.ahead_only
+        return spec.part.ahead_only or spec.part.overdue_to_current
     if isinstance(spec, ByComposite):
-        return any(part.ahead_only for part in spec.parts)
+        return any(part.ahead_only or part.overdue_to_current for part in spec.parts)
     return False
 
 
