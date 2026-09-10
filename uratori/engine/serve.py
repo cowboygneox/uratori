@@ -1195,7 +1195,7 @@ def _flag(rendered: RenderedFlag) -> Any:
 
 
 _UNITS: frozenset[str] = frozenset(
-    {"count", "duration", "effort", "share", "days", "level", "moment"}
+    {"count", "duration", "effort", "share", "days", "amount", "level", "moment"}
 )
 
 

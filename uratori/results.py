@@ -37,7 +37,9 @@ from typing import Annotated, Literal, TypeAlias
 
 from pydantic import BaseModel, Field
 
-Unit: TypeAlias = Literal["count", "duration", "effort", "share", "days", "level", "moment"]
+Unit: TypeAlias = Literal[
+    "count", "duration", "effort", "share", "days", "amount", "level", "moment"
+]
 """What a value *is*, so a renderer never guesses.
 
 `duration` is wall-clock and `effort` is working time. Both render in hours,
@@ -45,6 +47,16 @@ so they part company as the number grows: 144,000 seconds is "1.7d" as a
 duration and "40.0h" as an effort, because forty hours of work is a week and
 nobody means "one and two-thirds days" by it. They are different quantities,
 and the unit travels so a renderer never treats them as one.
+
+`amount` is a quantity where magnitude matters more than precision -- money
+is the motivating case, but tokens, requests and bytes are exactly the same
+shape of number and get the unit for free. It carries no currency symbol, no
+currency code, no unit word at all: a consumer wanting "$" or "req" supplies
+that itself, as a static label its own integration config already knows,
+because what the number *means* is domain knowledge the engine has no
+business holding. What the unit *does* own is the rendering: compact and
+abbreviated ("1.2k", "13M") rather than exact, because a reader comparing
+magnitudes down a column is better served by that than by counting digits.
 
 (Effort used to render against a working-day dial, so 28,800 seconds read "1d".
 Hours say the same thing without a reader having to find out whose working day

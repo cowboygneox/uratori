@@ -362,7 +362,77 @@ def format_value(value: Value, unit: FigureUnit) -> str:
         from datetime import UTC, datetime
 
         return datetime.fromtimestamp(value / 1000.0, tz=UTC).date().isoformat()
+    if unit == "amount":
+        return _format_amount(value)
     return f"{value:g}"
+
+
+_AMOUNT_TIERS: tuple[tuple[float, float, str, int], ...] = (
+    # (match-at-or-above, divide-by, suffix, decimal places). Checked
+    # largest first, so the first threshold a magnitude clears wins.
+    (1_000_000_000.0, 1_000_000_000.0, "B", 0),
+    (1_000_000.0, 1_000_000.0, "M", 0),
+    (1_000.0, 1_000.0, "k", 1),
+    (0.0, 1.0, "", 0),
+)
+
+
+def _format_amount(value: float) -> str:
+    """Compact and abbreviated, never exact -- `155`, `1.2k`, `13M`. No
+    currency symbol and no currency code: the unit is "a quantity where
+    magnitude matters more than precision", and money is only the case that
+    motivated it. A consumer that wants "$" prints it itself, beside a
+    number this function never touches.
+
+    **The rule.** Under 1,000, the plain rounded integer -- no reader needs
+    "$0.155k" instead of "$155". From 1,000 a magnitude divides by the
+    largest of 1e3/1e6/1e9 it clears and takes a suffix, `k`/`M`/`B`; no
+    `T`, because nothing in this engine's domain (spend, tokens, requests,
+    bytes) plausibly reaches a trillion of anything and a tier nobody hits
+    is a tier nobody can review.
+
+    **Decimal places are per tier, not a fixed "one significant decimal".**
+    `k` keeps one (`1.2k`, `10.1k`): at that scale a first-decimal digit is
+    itself hundreds of whatever is being counted, which is exactly the
+    resolution a reader comparing rows needs. `M` and `B` keep none
+    (`13M`, not `13.4M`): a tenth of a million is noise at that scale, and a
+    column of eight-figure numbers wearing a decimal reads as false
+    precision rather than as care. A trailing ".0" is trimmed either way --
+    `2000.0` reads `2k`, not `2.0k` -- because a zero decimal at the one
+    tier that has one says nothing a bare integer would not.
+
+    **Boundaries round up, never leak.** `999.5` and `1000.0` both read
+    `1k`: rounding a magnitude can carry it across a tier line (`999.95k`
+    rounds to `1000k`, which is `1M`), so a carry re-scales into the next
+    tier up rather than printing a four-digit number with a suffix that no
+    longer matches its own rule. Signed, so a fall reads as one (`-30.2k`);
+    zero and anything rounding to it reads as a bare `0`.
+
+    **The raw value still travels beside this string, and that is the point
+    of the split.** `Window.series`/`Window.delta`/a figure's stored
+    `value` stay exact floats forever -- only this rendered text is
+    compact. A screen whose parts and totals must reconcile checks that
+    against the untouched numbers; the abbreviation is safe to show
+    precisely because nothing computes from it. `1.2k + 3.4k` visibly does
+    not make `4.7k` and never has to: it is never added, only read.
+    """
+    sign = "-" if value < 0 else ""
+    magnitude = abs(value)
+    for i, (match, divisor, suffix, decimals) in enumerate(_AMOUNT_TIERS):
+        if magnitude < match:
+            continue
+        scaled = magnitude / divisor
+        rounded = round(scaled, decimals)
+        if rounded >= 1000 and i > 0:
+            # Carried into the tier above (e.g. 999,950,000 -> "1000M"):
+            # re-scale against that tier instead of printing the overflow.
+            _, divisor, suffix, decimals = _AMOUNT_TIERS[i - 1]
+            rounded = round(magnitude / divisor, decimals)
+        text = f"{rounded:.{decimals}f}"
+        if decimals and text.endswith(".0"):
+            text = text[:-2]
+        return f"{sign}{text}{suffix}"
+    return f"{sign}{round(magnitude)}"  # unreachable: the last tier matches everything
 
 
 def _duration(seconds: float) -> str:

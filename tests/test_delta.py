@@ -494,6 +494,88 @@ async def test_the_delta_cells_are_served_rendered_and_signed() -> None:
     assert len(window.delta_display) == len(window.delta)
 
 
+AMOUNT_DAILY = compile_source(
+    BASE
+    + """
+measure work_issue.cost = costCents in amount
+
+# Spend, day by day.
+figure team_person.spend bucketed:
+    display "{team_person} spend"
+    depends:
+        done = work_issue.delivered_by_day:{team_person}
+    calculate:
+        sum(work_issue.cost over done)
+
+# How spend moved, day to day.
+reading team_person.spend_trend(range):
+    display "{team_person} spend trend"
+    depends:
+        s = team_person.spend in range
+    calculate:
+        sum(s)
+        series(s)
+        delta(s)
+"""
+)
+
+
+async def _seeded_amount() -> tuple[SpyStore, float]:
+    store = SpyStore()
+    figure = AMOUNT_DAILY.figure("team_person.spend")
+    assert figure is not None
+    tenant = "t1"
+    await store.set_pointer(
+        tenant,
+        figure.name,
+        Pointer(version=figure.version, settings_fingerprint=""),
+    )
+    await store.set_buckets(tenant, "work_issue.delivered_by_day", "c1", ["p1@2026-03-10"])
+    for day, value in (
+        ("2026-03-01", [100.0]),  # well before the window -- must never be read
+        ("2026-03-08", [1547.4899999999998]),  # the window's oldest day
+        ("2026-03-09", [31439.658209]),  # large enough to abbreviate to a "k"
+        ("2026-03-10", [1234.5]),  # a fall from the day before
+    ):
+        await store.save(
+            tenant, figure.name, figure.version, f"p1@{day}", value, (), "P One"
+        )
+    return store, 1_773_172_800_000.0  # 2026-03-10T20:00Z, midday in Los Angeles
+
+
+async def test_an_amount_reading_renders_sum_series_and_delta_compactly() -> None:
+    """The motivating case end to end: a spend figure served through a
+    windowed reading must not fall through to a count's `%g` on any of its
+    statistics -- `sum` and each `delta` cell, including a negative one,
+    render compact and abbreviated. The raw `series` points stay exact
+    floats: only the rendered text is compact, which is what lets a screen's
+    parts-and-totals reconciliation check against the untouched numbers
+    rather than against `1.2k + 3.4k`."""
+    store, at = await _seeded_amount()
+    reading = AMOUNT_DAILY.reading("team_person.spend_trend")
+    assert reading is not None
+    result = await serve_reading(store, AMOUNT_DAILY, "t1", reading, [3], at_ms=at)
+    window = result.subjects[0].windows[0]
+
+    assert window.series == [1547.4899999999998, 31439.658209, 1234.5], (
+        "the raw points are untouched -- rendering happens once, in display"
+    )
+    assert window.total == pytest.approx(1547.4899999999998 + 31439.658209 + 1234.5)
+    assert window.display["total"] == "34.2k", (
+        "the sum abbreviates the same as any other amount, one decimal at "
+        "the k tier"
+    )
+
+    assert window.delta is not None
+    assert window.delta[1] == pytest.approx(31439.658209 - 1547.4899999999998)
+    assert window.delta[2] == pytest.approx(1234.5 - 31439.658209)
+    assert window.delta_display == [
+        None,
+        "29.9k",
+        "-30.2k",
+    ], "a fall renders signed and abbreviated, with no currency mark"
+
+
 def test_a_negative_duration_renders_in_the_same_unit_as_a_positive_one() -> None:
     """`delta` is the first statistic that can be negative, and it found the
     unit ladder testing `seconds < 60` -- which every negative satisfies."""
@@ -516,6 +598,37 @@ def test_a_negative_duration_renders_in_the_same_unit_as_a_positive_one() -> Non
     # to divide by -- so the sign is the whole of what this arm has to get
     # right.
     assert format_value(-864000.0, "effort") == "-240.0h"
+
+
+def test_an_amount_renders_compactly_and_abbreviated() -> None:
+    """Before `amount`, a consumer of a quantity like money had to declare
+    `unit count`, whose renderer is the fallback `%g` -- six significant
+    figures, so `1547.4899999999998` printed `1547.49` (cents kept) and
+    `31439.658209` printed `31439.7` (cents gone, and it looks like a typo)
+    in the same column. `amount` renders both the same way: compact and
+    abbreviated, with no currency symbol and no currency code, since a
+    currency belongs to whoever is billing, not to arithmetic.
+
+    Below 1,000: the plain rounded integer. From 1,000: `k`/`M`/`B`, one
+    decimal at `k` (a first-decimal digit there is hundreds of whatever is
+    being counted) and none at `M`/`B` (a tenth of a million is noise), a
+    trailing ".0" trimmed either way, and a rounding carry across a tier
+    line (`999.95k` -> `1000k`) re-scaled into the tier above rather than
+    printed as an overflow."""
+    from uratori.engine.project import format_value
+
+    assert format_value(155.0, "amount") == "155", "under 1,000: the plain integer"
+    assert format_value(1234.5, "amount") == "1.2k"
+    assert format_value(10149.0, "amount") == "10.1k"
+    assert format_value(13412000.0, "amount") == "13M", "no decimal at the M tier"
+    assert format_value(0.42, "amount") == "0"
+    assert format_value(-30205.16, "amount") == "-30.2k", "signed, and abbreviated"
+    assert format_value(1000.0, "amount") == "1k", "an exact boundary, trimmed to k"
+    assert format_value(999.5, "amount") == "1k", "rounds up into the k tier"
+    assert format_value(2000.0, "amount") == "2k", "a trailing .0 is never shown"
+    assert format_value(999_950_000.0, "amount") == "1B", (
+        "a rounding carry escalates a tier rather than printing 1000M"
+    )
 
 
 def test_a_delta_over_a_sub_day_figure_is_refused_rather_than_served_empty() -> None:

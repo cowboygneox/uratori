@@ -628,6 +628,145 @@ figure team_person.counted:
     )
 
 
+def test_an_amount_measure_declares_its_unit_and_a_sum_over_it_infers_amount() -> None:
+    """A field measure must say what its number is -- `in amount` alongside
+    `in effort` and `in count` -- and a sum over it must come out as an
+    amount rather than falling back to count, the same way a sum over an
+    effort measure comes out as effort. Without the inference a spend figure
+    would render through the `%g` fallback and disagree by row with its own
+    units. `amount` is deliberately not called `money`: the engine holds a
+    general "magnitude over precision" quantity, and a currency belongs to
+    whoever is billing, not to the engine."""
+    lib = compile_ok(
+        """
+measure work_issue.cost = costCents in amount
+
+# d
+figure team_person.spend:
+    display "x"
+    depends:
+        m = work_issue.assigned_to:{team_person}
+    calculate:
+        sum(work_issue.cost over m)
+"""
+    )
+    plan = lib.figure("team_person.spend")
+    assert plan is not None
+    assert plan.unit == "amount"
+
+
+def test_an_unknown_measure_unit_names_amount_as_a_valid_choice() -> None:
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(BASE + "\nmeasure work_issue.cost = costCents in dollars\n")
+    assert '"dollars" is not a measure unit' in caught.value.message
+    assert '"amount" for a quantity like money, tokens or bytes' in caught.value.message
+
+
+def test_an_unknown_unit_lists_amount_among_the_valid_ones() -> None:
+    with pytest.raises(SyntaxError_) as caught:
+        compile_source(
+            BASE
+            + """
+# d
+figure team_person.ratio:
+    display "x"
+    unit dollars
+    calculate:
+        team_person.wip / team_person.wip
+"""
+        )
+    assert "amount" in caught.value.message
+    assert '"dollars" is not a unit' in caught.value.message
+
+
+def test_unit_amount_is_accepted_wherever_a_declared_unit_is() -> None:
+    """The control for the two refusals above: `unit amount` compiles on
+    arithmetic exactly as `unit share` does."""
+    lib = compile_ok(
+        """
+# d
+figure team_person.balance:
+    display "x"
+    unit amount
+    calculate:
+        team_person.wip - team_person.wip
+"""
+    )
+    plan = lib.figure("team_person.balance")
+    assert plan is not None
+    assert plan.unit == "amount"
+
+
+def test_an_amount_figure_may_be_read_over_a_range_and_answers_amount() -> None:
+    """The whole reason the unit exists: a board's spend is a day-bucketed
+    amount figure summed over a trailing window, and the reading path has to
+    carry `amount` through rather than refusing it the way it refuses effort
+    (which would be banded as elapsed time -- an amount has no tenant dial
+    in the way, so there is nothing here for the reading path to get
+    wrong)."""
+    lib = compile_ok(
+        """
+measure work_issue.cost = costCents in amount
+
+# d
+figure team_person.spend_by_day bucketed:
+    display "x"
+    depends:
+        m = work_issue.delivered_by_day:{team_person}
+    calculate:
+        sum(work_issue.cost over m)
+
+# d
+reading team_person.spend(range):
+    display "x"
+    depends:
+        m = team_person.spend_by_day in range
+    calculate:
+        sum(m)
+        series(m)
+        delta(m)
+"""
+    )
+    reading = lib.reading("team_person.spend")
+    assert reading is not None
+    assert reading.unit == "amount"
+
+
+def test_an_amount_readings_band_takes_a_plain_number() -> None:
+    """An amount has no scale words the way a duration does -- `3 days`
+    names a span in something other than seconds, but there is only one way
+    to write an amount. So an amount band's threshold is a bare number,
+    resolved exactly like a share's or a count's rather than going through
+    the seconds conversion `_scaled` applies to duration and effort."""
+    lib = compile_ok(
+        """
+measure work_issue.cost = costCents in amount
+
+# d
+figure team_person.spend_by_day bucketed:
+    display "x"
+    depends:
+        m = work_issue.delivered_by_day:{team_person}
+    calculate:
+        sum(work_issue.cost over m)
+
+# d
+reading team_person.spend(range):
+    display "x"
+    band on sum:
+        when value > 10000 then "high"
+        otherwise "ok"
+    depends:
+        m = team_person.spend_by_day in range
+    calculate:
+        sum(m)
+"""
+    )
+    reading = lib.reading("team_person.spend")
+    assert reading is not None
+    assert reading.band is not None
+
+
 def test_a_ladder_must_return_a_word_not_a_number() -> None:
     """A numeric ladder would carry an absence out under a numeric unit, where
     nothing downstream can hold it."""

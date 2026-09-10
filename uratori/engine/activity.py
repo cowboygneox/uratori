@@ -97,7 +97,7 @@ def weight_of(change: Change, unit: FigureUnit) -> float:
         return delta * 100.0
     if unit == "moment":
         return delta / 86_400_000.0
-    return delta  # count, days: already on the order of things that happened
+    return delta  # count, days, amount: already on the order of things that happened
 
 
 def render_change(

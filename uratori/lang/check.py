@@ -63,6 +63,7 @@ from .ast import (
     IndexField,
     Ladder,
     ListOf,
+    MeasureUnit,
     MomentMeasure,
     Number,
     Part,
@@ -2373,7 +2374,7 @@ class _Checker:
                 f"figure {d.name} produces a number nothing can name. The same two operands "
                 "divided give a share and subtracted give the quantity they were both in, "
                 'and 0.6 renders as "60%" or as "0.6" with no way to tell which was meant. '
-                "Add `unit <share|days|effort|count|duration>`.",
+                "Add `unit <share|days|effort|count|duration|amount>`.",
                 d.line,
             )
         if d.unit is not None:
@@ -2394,10 +2395,10 @@ class _Checker:
             m = self.measures[d.calculate.measure]
             if m.shape == "duration":
                 return "duration"
-            return "effort" if m.unit == "effort" else "count"
+            return _measure_figure_unit(m.unit)
         if isinstance(d.calculate, Sum) and d.calculate.measure is not None:
             m = self.measures[d.calculate.measure]
-            return "effort" if m.unit == "effort" else "count"
+            return _measure_figure_unit(m.unit)
         if isinstance(d.calculate, Coord):
             # A passthrough is the source's own number at a coordinate, so it
             # is in the source's own unit. Derived like `Part`'s, and for the
@@ -2438,7 +2439,7 @@ class _Checker:
                 source = _find(self.figures, held[0])
                 if source is not None:
                     inherited: FigureUnit = source.unit
-                    if inherited in ("effort", "share", "days", "duration"):
+                    if inherited in ("effort", "share", "days", "duration", "amount"):
                         return inherited
         return "count"
 
@@ -2739,7 +2740,7 @@ class _Checker:
 
     def _reading_unit(
         self, source: FigureUnit, d: ReadingDecl
-    ) -> Literal["count", "duration", "effort"]:
+    ) -> Literal["count", "duration", "amount"]:
         if source == "effort":
             raise CheckError(
                 f"{d.name} reads a figure measured in effort -- seconds of working time, "
@@ -2748,6 +2749,14 @@ class _Checker:
                 "wall-clock and printed as raw seconds.",
                 d.line,
             )
+        # Amount is not folded into the `duration` branch below: `sum`, `mean`,
+        # `median`, `worst` and every per-bucket `series`/`delta` cell render
+        # through `format_value`, which already has an amount branch of its
+        # own -- compact and abbreviated, no `%g` fallback and no seconds
+        # arithmetic to get wrong. Unlike effort there is no tenant dial in
+        # the way, so there is nothing here to get wrong the way effort would.
+        if source == "amount":
+            return "amount"
         return "count" if source == "count" else "duration"
 
     def _band(
@@ -3624,6 +3633,20 @@ class _Checker:
 
 
 # ------------------------------------------------------------- helpers --
+
+
+def _measure_figure_unit(unit: MeasureUnit | None) -> FigureUnit:
+    """What a figure built on a field measure's own quantity is.
+
+    A duration measure has its own branch above and never reaches here; this
+    is only the three field-measure units, each a figure unit of the same
+    name -- a sum of an amount measure is an amount, not a count wearing one.
+    """
+    if unit == "effort":
+        return "effort"
+    if unit == "amount":
+        return "amount"
+    return "count"
 
 
 def _unique_fields(owner: str, fields: tuple[FactField, ...], line: int) -> None:

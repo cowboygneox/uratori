@@ -683,16 +683,27 @@ construction, so it needs no unit.
 
 **A field measure** reads whatever number the record carries, and must say
 what that number *is*: `in effort` for seconds of working time, `in count`
-for a tally. Required rather than defaulted, because the same integer means
-different things -- a default of `count` prints an estimate as `144000`, a
-default of `effort` prints a tally of five reopens as `0.0h`, and neither
-throws. Note that **`effort` is not a synonym for `duration`**: a duration is
-wall-clock and effort is working time. Both render in hours, so they agree at
-eight and part company above a day -- 144,000 seconds is `1.7d` as a duration
-and `40.0h` as an effort, because a working week is forty hours and nobody
-means "one and two-thirds days" by it. One number cannot be both. A field holding several numbers, or a numeric *string*, reads as
-nothing -- first-wins would answer with whichever value the provider happened
-to order first.
+for a tally, `in amount` for a quantity like money, tokens or bytes.
+Required rather than defaulted, because the same integer means different
+things -- a default of `count` prints an estimate as `144000`, a default of
+`effort` prints a tally of five reopens as `0.0h`, and neither throws. Note
+that **`effort` is not a synonym for `duration`**: a duration is wall-clock
+and effort is working time. Both render in hours, so they agree at eight and
+part company above a day -- 144,000 seconds is `1.7d` as a duration and
+`40.0h` as an effort, because a working week is forty hours and nobody means
+"one and two-thirds days" by it. One number cannot be both. A field holding
+several numbers, or a numeric *string*, reads as nothing -- first-wins would
+answer with whichever value the provider happened to order first.
+
+**`amount`** is a quantity where magnitude matters more than precision --
+money is the motivating case, but tokens, requests and bytes are exactly the
+same shape of number. It renders compact and abbreviated rather than exact:
+`155` stays `155`, `1234.5` prints `1.2k`, `13412000.0` prints `13M`. It
+carries no currency symbol, no currency code, no unit word at all -- what
+the number *means* is domain knowledge the engine has no business holding,
+so a consumer wanting "$" or "req" supplies that itself, as a static label.
+`sum` over an amount measure answers an amount, the same way a sum over an
+effort measure answers effort.
 
 **A moment** (`moment <field>`) names a single instant. It is its own kind of
 measure, not a field measure with a third unit, because an instant is not a
@@ -905,7 +916,7 @@ meant. So arithmetic (and `max`/`min`) **must** declare a unit --
     unit share
 ```
 
--- from `share`, `days`, `effort`, `count`, `duration`, and everything else
+-- from `share`, `days`, `effort`, `count`, `duration`, `amount`, and everything else
 must **not**: a second place to write it is a first place for the two to
 disagree. `level` and `moment` cannot be written at all; each comes from
 exactly one construct and is always derived.
@@ -1511,11 +1522,18 @@ figures agree by construction about which bucket an order is in, because
 every label is derived from the same zoned day.
 
 The source figure must share the reading's scope, be time-keyed, and store a
-number -- an effort figure is refused (the reading path renders count or
-duration, so an effort would be banded as wall-clock and printed as raw
-seconds), as are a word and a moment. And **a reading may only read a
-figure**, never another reading: composing them is how a team number becomes
-a mean of means, weighting each person equally instead of each record.
+number -- an effort figure is refused (the reading path renders count,
+duration or amount, so an effort would be banded as wall-clock and printed as
+raw seconds), as are a word and a moment. An amount figure is not refused: a
+board's trailing spend is exactly `sum`/`series`/`delta` over a day-bucketed
+amount figure, and every one of those renders through the same compact,
+abbreviated formatting the figure path uses, with no tenant dial in the way
+an effort has one. `band on sum` over an amount reading takes a plain
+number as its threshold -- an amount has no scale words the way a duration
+does (`3 days`), so there is nothing to convert. And **a
+reading may only read a figure**, never another reading: composing them is
+how a team number becomes a mean of means, weighting each person equally
+instead of each record.
 
 ### Live: over records, right now
 

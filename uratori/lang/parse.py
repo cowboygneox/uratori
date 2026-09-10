@@ -95,7 +95,9 @@ from .ast import (
 from .lex import SyntaxError_, Token, lex, prose_above
 
 _FACT_TYPES: frozenset[str] = frozenset({"text", "number", "flag", "moment"})
-_DECLARED_UNITS: frozenset[str] = frozenset({"share", "days", "effort", "count", "duration"})
+_DECLARED_UNITS: frozenset[str] = frozenset(
+    {"share", "days", "effort", "count", "duration", "amount"}
+)
 
 _TIME_SCALES: tuple[str, ...] = ("seconds", "minutes", "hours", "days", "weeks")
 """The scales a number about a span of time may be written in.
@@ -105,7 +107,7 @@ declared once, resolved to exactly 3,600 seconds, and was therefore a synonym
 for `hours` -- with a docstring claiming a working day mattered and nothing
 that made it. A scale here is a plain multiple of a second and says so."""
 _DERIVED_UNITS: frozenset[str] = frozenset({"level", "moment"})
-_MEASURE_UNITS: frozenset[str] = frozenset({"effort", "count"})
+_MEASURE_UNITS: frozenset[str] = frozenset({"effort", "count", "amount"})
 _FIELD_TYPES: frozenset[str] = frozenset({"text", "date", "number", "flag"})
 _STATISTICS: frozenset[str] = frozenset(
     {"mean", "median", "worst", "sum", "count", "series", "delta"}
@@ -899,16 +901,19 @@ class _Parser:
             )
 
         self._keyword("in")
-        unit = self._name('a unit: "effort" or "count"')
+        unit = self._name('a unit: "effort", "count" or "amount"')
         if unit not in _MEASURE_UNITS:
             raise self._error(
                 f'"{unit}" is not a measure unit. A field measure reads whatever the record '
                 'carries, so it has to say what the number is: "effort" for seconds of '
-                'working time, "count" for a tally.',
+                'working time, "count" for a tally, "amount" for a quantity like money, '
+                "tokens or bytes.",
                 line,
             )
         self._end_of_line()
-        measure_unit: MeasureUnit = "effort" if unit == "effort" else "count"
+        measure_unit: MeasureUnit = (
+            "effort" if unit == "effort" else ("amount" if unit == "amount" else "count")
+        )
         return FieldMeasure(name=name, kind=kind, field=first, unit=measure_unit, line=line)
 
     # ------------------------------------------------------------ figure --
@@ -1067,6 +1072,8 @@ class _Parser:
             return "count"
         if word == "duration":
             return "duration"
+        if word == "amount":
+            return "amount"
         raise self._error(
             f'"{word}" is not a unit. Those are: {", ".join(sorted(_DECLARED_UNITS))}.'
         )

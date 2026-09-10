@@ -524,7 +524,7 @@ figure subscribes to and would therefore be a declaration that lies.
 
 # -------------------------------------------------------------- measure --
 
-MeasureUnit: TypeAlias = Literal["effort", "count"]
+MeasureUnit: TypeAlias = Literal["effort", "count", "amount"]
 """What a *field* measure's number is, because nothing else can tell.
 
 A duration measure needs no unit: it is the seconds between two moments by
@@ -641,7 +641,7 @@ that is not a value, and every comparison against it would then need a rule.
 
 ArithOperator: TypeAlias = Literal["+", "-", "*", "/"]
 
-DeclaredUnit: TypeAlias = Literal["share", "days", "effort", "count", "duration"]
+DeclaredUnit: TypeAlias = Literal["share", "days", "effort", "count", "duration", "amount"]
 """What an arithmetic value *is*, because nothing else can tell.
 
 `delivered / committed` is mute. It could be a share, and `breakdown -
