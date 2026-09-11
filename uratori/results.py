@@ -183,6 +183,10 @@ class Window(BaseModel):
     worst: float | None = None
     total: float | None = None
     count: float | None = None
+    per_bucket: float | None = None
+    """The total spread across `buckets_requested`, where `mean` divides by
+    `buckets_covered`. Both are on this window, so the division a reader would
+    have to trust is one they can check against the two fields beside it."""
     series: list[float | None] | None = None
     """Per-point values, when the definition asked for them. The one statistic
     that is not a scalar; it exists so a sparkline is a definition's answer

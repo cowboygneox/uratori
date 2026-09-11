@@ -806,6 +806,7 @@ UNRENDERED: dict[str, str] = {
     "Window.worst": "rendered through the display map, never the raw scalar",
     "Window.total": "rendered through the display map, never the raw scalar",
     "Window.count": "rendered through the display map, never the raw scalar",
+    "Window.per_bucket": "rendered through the display map, never the raw scalar",
     "Row.values": "positional only -- the page renders display",
     "Row.units": "display strings arrive rendered; units exist for clients that draw",
     "Flag.name": "the stable id; the page shows label and detail",

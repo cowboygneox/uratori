@@ -1579,10 +1579,56 @@ group addressed by `:{scope}`, and the measure may not be a field measure.
 ### Statistics
 
 A closed vocabulary, not an expression grammar: `mean`, `median`, `worst`,
-`sum`, `count`, `series`, `delta`. Each is a claim about a distribution that a
-reader has to be able to check against the evidence, and an arbitrary formula
-is not checkable by anybody not already reading the code. Each line of
-`calculate` is one statistic over one bound set.
+`sum`, `count`, `per_bucket`, `series`, `delta`. Each is a claim about a
+distribution that a reader has to be able to check against the evidence, and an
+arbitrary formula is not checkable by anybody not already reading the code. Each
+line of `calculate` is one statistic over one bound set.
+
+- **`per_bucket` divides by the window; `mean` divides by the evidence.**
+  This is the distinction to get right before reaching for either, because
+  both are honest, they are usually different numbers, and neither is a
+  default.
+
+  A bucket with nothing in it is never written, so a figure's sequence is
+  sparse by nature: a week somebody worked three days of holds three
+  buckets. `mean` averages those three -- "on a day they were at it".
+  `per_bucket` spreads the total across all seven the span asked for -- "per
+  day of the week". At three of seven covered they differ by more than a
+  factor of two, and only the definition can say which question was meant.
+
+  The divisor is `buckets_requested`, which the window already reports beside
+  `buckets_covered`, so the division a reader would otherwise have to take on
+  trust is one they can check against the very response that carried it.
+
+  It is the one distribution statistic **allowed over a `count` figure**, and
+  for the reason the others are refused: the objection to `mean` over daily
+  counts is that it is a mean per bucket wearing a per-record label, and this
+  one says per bucket in its name. Over an **empty window** it answers
+  nothing rather than nought -- it follows `mean` there and not `sum`,
+  because a rate with no evidence under it is a claim nobody can make, and
+  `0.0` is the worst way to make it: real, bandable, and indistinguishable
+  from a measured nought. It is refused over a **live** reading, which has no
+  window of buckets to spread anything across.
+
+  ```
+  reading team_person.throughput(range):
+      display "{team_person} per bucket"
+      depends:
+          shipped = team_person.volume in range
+      calculate:
+          per_bucket(shipped)
+  ```
+
+  The display says "per bucket" and not "per day" deliberately: the grain is
+  whatever `team_person.volume`'s own group declared, and a reading that
+  hardcodes a grain its source does not have is the wrong-label mistake this
+  statistic exists to avoid. Name the grain where the figure fixes it.
+
+  It may not sit beside a `sum` over the same set, for a sharper version of
+  the reason the distributions may not: `per_bucket`'s numerator *is* that
+  sum, so the two are one quantity under two names, and the third number a
+  reader gets by dividing them is the length of the window. Two readings, if
+  both are wanted.
 
 - **`sum` is why a count figure can be read at all.** The distribution
   statistics are refused over stored counts, because a mean of them is a

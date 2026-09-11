@@ -69,6 +69,27 @@ def statistic_of(fn: StatisticFn, sample: Sample) -> float | None:
         return float(sum(values))
     if fn == "count":
         return float(len(values))
+    if fn == "per_bucket":
+        # **The divisor is the window, not the evidence.** `mean` divides by
+        # the buckets that held a value; this divides by the buckets the span
+        # asked for, so a week somebody worked three days of answers "per day
+        # of the week" rather than "on a day they were at it". Both are
+        # honest and they are different numbers, which is why the reading has
+        # to name the one it means.
+        #
+        # Empty answers nothing rather than nought, following `mean` and not
+        # `sum`. A sum of nothing is nought because a queue that took no
+        # tickets took no tickets; a *rate* over a window holding no evidence
+        # is a claim nobody can make, and 0.0 is the worst possible way to
+        # say it -- real, bandable, and indistinguishable from a measured
+        # nought.
+        #
+        # `buckets_requested` is nought only where the calendar runs out (an
+        # anchor in year one, a span reaching past it). Unknown, rather than
+        # an exception thrown from inside a statistic.
+        if not values or not sample.buckets_requested:
+            return None
+        return float(sum(values)) / sample.buckets_requested
     # `series` and `delta` are one cell per bucket rather than a statistic;
     # the checker refuses a band on either, and no caller asks for one here.
     return None

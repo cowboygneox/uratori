@@ -1405,7 +1405,7 @@ class LiveSource:
 
 
 StatisticFn: TypeAlias = Literal[
-    "mean", "median", "worst", "sum", "count", "series", "delta"
+    "mean", "median", "worst", "sum", "count", "series", "delta", "per_bucket"
 ]
 """A closed vocabulary, not an expression grammar.
 
@@ -1421,6 +1421,23 @@ a mean per *day* wearing a label that says per record.
 `count` is live-only: a windowed reading already reports the sample, so a count
 beside it would be one quantity under two names -- and the two would not even
 agree, because for a count source the sample is days that contributed.
+
+`per_bucket` is the total spread across **every bucket the window asked for**,
+where `mean` averages only the buckets that hold a value. On a sparse figure --
+which is most of them, since a bucket with nothing in it is never written --
+those are different questions with different answers: over a week somebody
+worked three days of, `mean` says "on a day they were at it" and `per_bucket`
+says "per day of the week". Both are honest, neither is a default, so the
+reading has to name the one it means. The divisor is `buckets_requested`, the
+number the window already reports beside `buckets_covered`, so a reader can
+check the division against the response that carried it.
+
+It is the one distribution statistic allowed over a `count` figure, and for
+the reason the others are refused: the objection to `mean` over daily counts
+is that it is a mean per *day* wearing a label that says per record, and this
+one says per bucket in its name. It answers nothing rather than nought over an
+empty window -- a rate with no evidence under it is a claim nobody can make,
+which is `mean`'s rule and not `sum`'s.
 
 `series` returns the per-bucket values rather than a statistic over them, and
 `delta` the change into each bucket. They are the two that are not scalars, and

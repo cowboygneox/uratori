@@ -525,6 +525,22 @@ reading team_person.pace(range):
         m = team_person.per_day in range
     calculate:
         mean(m)
+
+# d
+reading team_person.daily_volume(range):
+    display "x"
+    depends:
+        m = team_person.volume in range
+    calculate:
+        per_bucket(m)
+
+# d
+reading team_person.daily_lead(range):
+    display "x"
+    depends:
+        m = team_person.per_day in range
+    calculate:
+        per_bucket(m)
 """
 )
 
@@ -573,6 +589,65 @@ def test_a_sum_of_nothing_is_nought_and_a_mean_of_nothing_is_unknown() -> None:
 
     assert statistics_of(speed, empty)["mean"] is None
     assert statistics_of(shipped, empty)["total"] == 0.0
+
+
+def test_per_bucket_divides_by_the_window_and_mean_divides_by_what_it_found() -> None:
+    """The difference between the two is the whole reason `per_bucket` exists.
+
+    A week in which somebody worked three days and rested four holds three
+    buckets, because a bucket with nothing in it is never written -- that is
+    the sparse shape every day-grained figure here keeps. `mean` answers "on a
+    day they were at it", dividing by the three it found. `per_bucket` answers
+    "per day of the week", dividing by the seven the window asked for.
+
+    Both are honest and they are different numbers, which is why the reading
+    has to say which one it means. Reported side by side here so a change that
+    quietly made one behave like the other cannot pass: at 3 of 7 covered they
+    differ by more than a factor of two.
+    """
+    three_of_seven = Sample(
+        values=(30.0, 60.0, 30.0),
+        points=(),
+        buckets_covered=3,
+        buckets_requested=7,
+    )
+
+    per_day = READINGS.reading("team_person.daily_volume")
+    on_a_working_day = READINGS.reading("team_person.pace")
+    assert per_day is not None and on_a_working_day is not None
+
+    assert statistics_of(per_day, three_of_seven)["per_bucket"] == pytest.approx(120.0 / 7)
+    assert statistics_of(on_a_working_day, three_of_seven)["mean"] == pytest.approx(40.0)
+
+
+def test_per_bucket_over_an_empty_window_is_unknown_rather_than_nought() -> None:
+    """The nought this refuses is the confident kind. Dividing a sum of
+    nothing by seven days gives 0.0 -- a real, bandable, plausible number
+    saying "spends nothing daily" for somebody the collector has never heard
+    from. `sum` may answer nought because a queue that took no tickets took no
+    tickets; a rate over a window with no evidence in it is a claim nobody can
+    make, so this follows `mean` and not `sum`."""
+    empty = Sample(values=(), points=(), buckets_covered=0, buckets_requested=7)
+
+    plan = READINGS.reading("team_person.daily_volume")
+    assert plan is not None
+
+    assert statistics_of(plan, empty)["per_bucket"] is None
+
+
+def test_per_bucket_of_a_window_that_resolved_to_no_bucket_is_unknown() -> None:
+    """`buckets_requested` is nought only where the calendar runs out -- an
+    anchor in year one, a span reaching past it. The divisor is then nothing
+    to divide by, and the answer is unknown rather than an exception raised
+    from inside a statistic."""
+    off_the_calendar = Sample(
+        values=(5.0,), points=(), buckets_covered=0, buckets_requested=0
+    )
+
+    plan = READINGS.reading("team_person.daily_volume")
+    assert plan is not None
+
+    assert statistics_of(plan, off_the_calendar)["per_bucket"] is None
 
 
 def test_a_requirement_names_what_fell_short_rather_than_only_that_it_did() -> None:
@@ -887,6 +962,14 @@ reading team_person.monthly_shipped(range):
     calculate:
         sum(m)
         series(m)
+
+# d
+reading team_person.monthly_rate(range):
+    display "x"
+    depends:
+        m = team_person.monthly_volume in range
+    calculate:
+        per_bucket(m)
 
 # d
 reading team_person.monthly_pace(range):
@@ -1391,6 +1474,34 @@ async def test_a_month_window_pools_the_months_own_buckets() -> None:
     assert window.series == [None, None, None, None, 3.0, 2.0]
     assert window.buckets_requested == 6 and window.buckets_covered == 2
     assert window.buckets is None, "a contiguous rule needs no bucket list; the edges say it"
+
+
+async def test_per_bucket_reaches_the_wire_rendered_and_divided_by_the_span() -> None:
+    """End to end, because the unit tests above stop at the statistic.
+
+    Two days of work inside a six-day span: the rate is the total over six,
+    not over the two that hold a value, and the window carries both counts so
+    a reader can check the division that produced the number against the
+    response it arrived in. The rendered form travels beside it -- formatting
+    is a calculation and belongs on this side of the wire, the rule every
+    other statistic here already keeps.
+    """
+    figure = GRAINED.figure("team_person.monthly_volume")
+    reading = GRAINED.reading("team_person.monthly_rate")
+    assert figure is not None and reading is not None
+    store = await _figure_store(
+        figure,
+        "work_issue.by_month",
+        (("p1@2026-08", 2.0), ("p1@2026-07", 4.0)),
+    )
+
+    result = await serve_reading(store, GRAINED, "t1", reading, [6], at_day="2026-08-15")
+
+    assert isinstance(result.state, Ok)
+    [window] = result.subjects[0].windows
+    assert window.buckets_requested == 6 and window.buckets_covered == 2
+    assert window.per_bucket == pytest.approx(1.0), "6 over six months, not over two"
+    assert window.display["per_bucket"] == "1"
 
 
 async def test_each_serves_one_window_per_bucket_with_every_rule_per_window() -> None:

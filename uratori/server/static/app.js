@@ -1814,7 +1814,8 @@ const FIG_WORDS = new Set([
   'when', 'then', 'otherwise', 'now', 'days', 'moment', 'ascending', 'descending',
   'bucketed', 'carried', 'forward',
   'detail', 'action', 'severity', 'info', 'attention', 'true', 'false',
-  'mean', 'median', 'worst', 'sum', 'spread', 'series', 'delta', 'list', 'latest', 'earliest',
+  'mean', 'median', 'worst', 'sum', 'spread', 'series', 'delta', 'per_bucket',
+  'list', 'latest', 'earliest',
   'max', 'min',
   // A span's own words, the clip, and the overdue carry.
   'until', 'excluding', 'gone', 'carrying', 'overdue',

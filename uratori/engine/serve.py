@@ -1063,6 +1063,7 @@ def _window(
         worst=stats.get("worst"),
         total=stats.get("total"),
         count=stats.get("count"),
+        per_bucket=stats.get("per_bucket"),
         series=points,
         delta=changes,
         delta_display=(

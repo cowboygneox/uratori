@@ -2521,7 +2521,9 @@ class _Checker:
         unit = self._reading_unit(source.unit, d)
         band, band_on, band_reads = self._band(d, scope, source)
         requires = d.requires
-        if not requires and any(s.fn in ("mean", "median", "worst") for s in d.calculate):
+        if not requires and any(
+            s.fn in ("mean", "median", "worst", "per_bucket") for s in d.calculate
+        ):
             # The unwritten minimum sample is one value, injected here so it is
             # hashed like a written one -- a floor applied at read time would
             # let two engines render the same version differently. One rather
@@ -2531,6 +2533,13 @@ class _Checker:
             # gets no default (a sum of nothing is nought and nought must
             # render), and neither does a live reading (an empty queue is a
             # real count of nought pending, not a shortfall).
+            #
+            # `per_bucket` is in the set with the distributions rather than
+            # with `sum`, though it is a total underneath. Its divisor is the
+            # window rather than the evidence, so an empty window would give
+            # it a real, bandable 0.0 -- "spends nothing daily" for somebody
+            # nobody has collected a thing from, which is the confident nought
+            # this whole clause exists to keep off the board.
             requires = (Requirement(count=1, set=d.sets[0].name, line=d.line),)
         self.readings.append(
             _versioned_reading(
@@ -2671,7 +2680,23 @@ class _Checker:
                     f"the figure under {d.name} stores a count, so {stat.fn}({stat.set}) is a "
                     f"{stat.fn} per *{grain}* wearing a label that says per record -- a "
                     "plausible number of roughly the right magnitude, which is the worst "
-                    "kind of wrong. Only sum is allowed over a count.",
+                    f"kind of wrong. Over a count, sum is allowed, and per_bucket({stat.set}) "
+                    f"is the per-{grain} rate stated in its own name -- which is the whole "
+                    "objection to the others.",
+                    stat.line,
+                )
+            if stat.fn == "per_bucket" and live:
+                # A live reading measures records against the clock and has no
+                # window behind it, so there is no bucket count to divide by --
+                # `buckets_requested` is nought and the answer would be a
+                # permanent dash with no reason attached. Refused where the
+                # author can see it rather than served as an absence they would
+                # have to work backwards from.
+                raise CheckError(
+                    f"reading {d.name} is live, so per_bucket({stat.set}) has no window to "
+                    "spread its total across -- a rate per bucket needs a span of buckets, "
+                    "and a live reading counts what is true now. Read the stored figure "
+                    "over a range instead.",
                     stat.line,
                 )
             if stat.fn == "delta":
@@ -2726,7 +2751,15 @@ class _Checker:
                         stat.line,
                     )
             seen.add(stat.fn)
-        if "sum" in seen and seen & {"mean", "median", "worst"}:
+        if "sum" in seen and seen & {"mean", "median", "worst", "per_bucket"}:
+            # `per_bucket` is in this set for a sharper reason than the
+            # distributions are. Its numerator *is* the sum -- the same total,
+            # divided by a number the window already reports -- so a reading
+            # declaring both puts the same quantity on the wire twice under
+            # two names, and their ratio is a third that reads like a finding
+            # and is really just the length of the window. A reader who wants
+            # both writes two readings, which is what makes each one say what
+            # it means.
             raise CheckError(
                 f"reading {d.name} calculates both a sum and a distribution. Two numbers a "
                 "reader can divide produce a third that no definition claims.",

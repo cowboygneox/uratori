@@ -1014,6 +1014,57 @@ reading team_person.shipped(range):
     assert lib.reading("team_person.shipped") is not None
 
 
+def test_per_bucket_over_daily_counts_is_allowed_where_a_mean_is_not() -> None:
+    """The other control on the same refusal, and the reason `per_bucket`
+    earns an exemption the distributions do not.
+
+    The objection to `mean` over daily counts is not arithmetic, it is
+    labelling: the number is per *day* and the word says per record. This one
+    says per bucket in its name, so the label cannot lie -- and "merges per
+    day over the last thirty" is the question a reader most often had in mind
+    when they reached for `mean` and were refused.
+    """
+    lib = compile_ok(
+        """
+# d
+figure team_person.merges bucketed:
+    display "x"
+    depends:
+        m = code_change.merged_by_day:{team_person}
+    calculate:
+        count(m)
+
+# d
+reading team_person.daily_merges(range):
+    display "x"
+    depends:
+        m = team_person.merges in range
+    calculate:
+        per_bucket(m)
+"""
+    )
+    assert lib.reading("team_person.daily_merges") is not None
+
+
+def test_per_bucket_on_a_live_reading_has_no_window_to_divide_by() -> None:
+    """A live reading counts what is true now and stores nothing, so there is
+    no span of buckets to spread a total across. Served rather than refused,
+    it would answer a permanent dash whose reason lived in a divisor nobody
+    can see; the author is told at compile time instead."""
+    refuses(
+        """
+# d
+reading team_person.owed():
+    display "x"
+    depends:
+        m = code_review_request.waiting_seconds over (code_review_request.asked_of:{team_person} & code_review_request.pending)
+    calculate:
+        per_bucket(m)
+""",
+        "has no window to spread its total across",
+    )
+
+
 def test_a_sum_may_not_sit_beside_a_distribution() -> None:
     """Two numbers a reader can divide produce a third that no definition
     claims."""
@@ -1027,6 +1078,27 @@ reading team_person.both(range):
     calculate:
         sum(m)
         mean(m)
+""",
+        "a third that no definition claims",
+    )
+
+
+def test_a_sum_may_not_sit_beside_a_per_bucket_of_that_same_sum() -> None:
+    """The sharper case of the rule above, and the one easiest to talk
+    yourself into: `per_bucket`'s numerator *is* the sum, so a reading
+    declaring both puts one quantity on the wire under two names and their
+    ratio is the length of the window -- a third number that reads like a
+    finding. Two readings, if a screen genuinely wants both."""
+    refuses(
+        """
+# d
+reading team_person.both_rates(range):
+    display "x"
+    depends:
+        m = team_person.time_to_merge in range
+    calculate:
+        sum(m)
+        per_bucket(m)
 """,
         "a third that no definition claims",
     )
