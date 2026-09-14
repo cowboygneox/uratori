@@ -1104,6 +1104,163 @@ reading team_person.both_rates(range):
     )
 
 
+# ----------------------------------------------------------- percentile --
+
+
+def test_percentile_parses_a_rank_and_a_set_as_words() -> None:
+    lib = compile_ok(
+        """
+# d
+reading team_person.p90(range):
+    display "x"
+    depends:
+        m = team_person.time_to_merge in range
+    calculate:
+        percentile 90 of m
+"""
+    )
+    plan = lib.reading("team_person.p90")
+    assert plan is not None
+    assert [(s.fn, s.set, s.rank) for s in plan.calculate] == [("percentile", "m", 90)]
+
+
+def test_percentile_refuses_call_syntax() -> None:
+    with pytest.raises(SyntaxError_) as caught:
+        compile_ok(
+            """
+# d
+reading team_person.p90(range):
+    display "x"
+    depends:
+        m = team_person.time_to_merge in range
+    calculate:
+        percentile(m)
+"""
+        )
+    assert "not a call" in caught.value.message
+
+
+@pytest.mark.parametrize("rank", ["0", "100", "2.5"])
+def test_percentile_refuses_a_rank_outside_1_to_99(rank: str) -> None:
+    with pytest.raises(SyntaxError_) as caught:
+        compile_ok(
+            f"""
+# d
+reading team_person.p90(range):
+    display "x"
+    depends:
+        m = team_person.time_to_merge in range
+    calculate:
+        percentile {rank} of m
+"""
+        )
+    assert "not a percentile rank" in caught.value.message
+
+
+def test_a_reading_may_declare_at_most_one_percentile() -> None:
+    refuses(
+        """
+# d
+reading team_person.both_ranks(range):
+    display "x"
+    depends:
+        m = team_person.time_to_merge in range
+    calculate:
+        percentile 50 of m
+        percentile 90 of m
+""",
+        "declares two percentiles",
+    )
+
+
+def test_percentile_over_daily_counts_is_refused_like_mean() -> None:
+    """The same worded reason `mean` gets: a percentile of daily counts is a
+    percentile per *day* wearing a label that says per record."""
+    refuses(
+        """
+# d
+figure team_person.merges bucketed:
+    display "x"
+    depends:
+        m = code_change.merged_by_day:{team_person}
+    calculate:
+        count(m)
+
+# d
+reading team_person.p90_merges(range):
+    display "x"
+    depends:
+        m = team_person.merges in range
+    calculate:
+        percentile 90 of m
+""",
+        "per record",
+    )
+
+
+def test_a_sum_may_not_sit_beside_a_percentile_of_that_same_sum() -> None:
+    refuses(
+        """
+# d
+reading team_person.both_shapes(range):
+    display "x"
+    depends:
+        m = team_person.time_to_merge in range
+    calculate:
+        sum(m)
+        percentile 90 of m
+""",
+        "a third that no definition claims",
+    )
+
+
+def test_two_readings_differing_only_in_rank_get_different_versions() -> None:
+    """The rank is part of what the statistic means, not an argument a
+    version can ignore -- two readings differing only in rank must not share
+    one, or two different definitions would cite identically."""
+
+    def ranked(rank: int):
+        return compile_ok(
+            f"""
+# d
+reading team_person.p(range):
+    display "x"
+    depends:
+        m = team_person.time_to_merge in range
+    calculate:
+        percentile {rank} of m
+"""
+        ).reading("team_person.p")
+
+    p50, p90 = ranked(50), ranked(90)
+    assert p50 is not None and p90 is not None
+    assert p50.version != p90.version
+
+
+def test_a_band_on_percentile_carries_the_same_rank_to_the_plan() -> None:
+    """`band_on_rank` is how the served window and the goal figure's
+    reduction find the rank without re-scanning `calculate` -- it must equal
+    the rank the matching `calculate` line declared."""
+    lib = compile_ok(
+        """
+# d
+reading team_person.p90_banded(range):
+    display "x"
+    band on percentile:
+        when value > 21 days then "over"
+        otherwise "ok"
+    depends:
+        m = team_person.time_to_merge in range
+    calculate:
+        percentile 90 of m
+"""
+    )
+    plan = lib.reading("team_person.p90_banded")
+    assert plan is not None
+    assert plan.band_on == "percentile"
+    assert plan.band_on_rank == 90
+
+
 # -------------------------------------------------------- minimum sample --
 
 

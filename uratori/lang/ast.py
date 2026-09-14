@@ -1405,14 +1405,28 @@ class LiveSource:
 
 
 StatisticFn: TypeAlias = Literal[
-    "mean", "median", "worst", "sum", "count", "series", "delta", "per_bucket"
+    "mean", "median", "worst", "sum", "count", "series", "delta", "per_bucket",
+    "percentile",
 ]
 """A closed vocabulary, not an expression grammar.
 
 Each is a claim about a distribution that a reader has to be able to check
 against the evidence, and an arbitrary formula is not checkable by anybody who
-is not already reading the code. `percentile` is the obvious next one and is
-deliberately absent until something asks for it.
+is not already reading the code.
+
+`percentile` carries a rank the others do not, so it is written as words --
+`percentile 90 of <set>`, not `percentile(<set>)` -- the way `at least 3
+values in <set>` is words rather than a call. It answers the nearest-rank
+value: the sorted sample's value at position `ceil(rank/100 * n)`, one-indexed
+and clamped to the sample -- never an interpolation between two of them. A
+reader who wants to point at the evidence behind a p90 needs a value that is
+*in* the evidence; the interpolated variants answer a number no record holds,
+which is a claim the same shape as an arbitrary formula would make. It is
+placed with the other distributions everywhere that matters: refused over a
+`count` figure for the same reason `mean` is, refused beside `sum`, and
+banded like `median`. At most one may be declared per reading, the same rule
+`series` and `delta` keep, because the response carries one `percentile`
+field and a second declaration would silently be the one the serve path kept.
 
 `sum` is the odd one and is why a `count` figure can be read at all. The
 distribution statistics are refused over daily counts, because a mean of them is
@@ -1460,6 +1474,12 @@ a question nothing has asked.
 class Statistic:
     fn: StatisticFn
     set: str
+    rank: int | None = None
+    """The rank a `percentile` statistic names, 1 to 99; `None` for every
+    other statistic. It is part of what the statistic *means* rather than an
+    argument to a function, so it is hashed into the reading's version like
+    the statistic and the set are -- two readings differing only in rank are
+    two different definitions and must not share a version."""
     line: int = 0
     """A series' points are one per bucket of the source figure's own
     sequence -- the grain its group declared -- so there is nothing here to

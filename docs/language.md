@@ -1582,10 +1582,41 @@ group addressed by `:{scope}`, and the measure may not be a field measure.
 ### Statistics
 
 A closed vocabulary, not an expression grammar: `mean`, `median`, `worst`,
-`sum`, `count`, `per_bucket`, `series`, `delta`. Each is a claim about a
-distribution that a reader has to be able to check against the evidence, and an
-arbitrary formula is not checkable by anybody not already reading the code. Each
-line of `calculate` is one statistic over one bound set.
+`sum`, `count`, `per_bucket`, `percentile`, `series`, `delta`. Each is a claim
+about a distribution that a reader has to be able to check against the
+evidence, and an arbitrary formula is not checkable by anybody not already
+reading the code. Each line of `calculate` is one statistic over one bound
+set.
+
+- **`percentile` names a rank, so it reads as words.** `percentile 90 of
+  <set>` -- the rank first, then `of`, then the set -- not
+  `percentile(<set>)`. Every other statistic is a plain claim about the whole
+  distribution; this one is a family of claims indexed by a number, the same
+  reason `at least 3 values in <set>` is a requirement written as words
+  rather than a call. The rank is a whole number from 1 to 99: 100 is what
+  `worst` already names, and 0 is the minimum nothing has asked for.
+
+  ```
+  reading room.turnoverP90(range):
+      display "{room} p90 turnover"
+      depends:
+          durations = room.turnover in range
+      calculate:
+          percentile 90 of durations
+  ```
+
+  The value is the **nearest-rank** value, never an interpolation: the
+  sample's values, sorted, at position `ceil(rank/100 * n)` counting from
+  one. A reader auditing a p90 can point at the one record it came from --
+  the interpolated variants some libraries default to answer a number no
+  record holds, which is a claim of the same shape a formula language would
+  make, and this vocabulary exists to refuse. Over an **empty window** it
+  answers nothing rather than nought, following `median`. It is placed with
+  the other distributions everywhere that matters: refused over a `count`
+  figure for the reason `mean` is, refused beside a `sum` over the same set,
+  and bandable like `median` is. One reading declares at most one
+  `percentile`, the same rule `series` and `delta` keep, because the
+  response carries one `percentile` field.
 
 - **`per_bucket` divides by the window; `mean` divides by the evidence.**
   This is the distinction to get right before reaching for either, because
@@ -2502,7 +2533,9 @@ The ones most worth recognising, in the checker's own words:
 
 Each of these was considered and refused, and the refusals are as much a part
 of the language as the grammar. A construct with no definition using it is a
-construct nobody has checked.
+construct nobody has checked. `percentile` used to be listed here, on the
+grounds that nothing had asked for it; the Orion dashboard's p90 turnover tile
+asked, and it joined the statistics above.
 
 | Not here | Why |
 |---|---|
@@ -2511,7 +2544,6 @@ construct nobody has checked.
 | `hour` truncation | the same argument pointed downward: a range over quarter-hours produces it, so it is a series grouping at read time |
 | numeric minute counts other than 15 | a truncation is a product decision about grain; nothing has asked for them (the one-minute grain is spelled `by minute`) |
 | a minute-resolution series | over a sparse figure the point *is* the record -- the raw collection the payload exists to withhold |
-| `percentile` | nothing has asked for it |
 | aggregation in a projection | those are figures, and this engine claims one way to compute a number |
 | a general `max(<measure> over <set>)` | `latest` / `earliest` are the narrow case a definition wanted |
 | arbitrary text | a figure that could return any string would be a template engine with a version hash |

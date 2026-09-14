@@ -35,7 +35,9 @@ from uratori.engine.read import (
     level_of,
     sample_over,
     series_of,
+    statistic_of,
     statistics_of,
+    threshold_of,
     unmet_of,
 )
 from uratori.engine.serve import serve_reading
@@ -541,6 +543,14 @@ reading team_person.daily_lead(range):
         m = team_person.per_day in range
     calculate:
         per_bucket(m)
+
+# d
+reading team_person.p90_lead(range):
+    display "x"
+    depends:
+        m = team_person.per_day in range
+    calculate:
+        percentile 90 of m
 """
 )
 
@@ -648,6 +658,60 @@ def test_per_bucket_of_a_window_that_resolved_to_no_bucket_is_unknown() -> None:
     assert plan is not None
 
     assert statistics_of(plan, off_the_calendar)["per_bucket"] is None
+
+
+def test_percentile_is_the_nearest_rank_value_never_an_interpolation() -> None:
+    """A reader auditing a p90 has to be able to point at the one record it
+    came from, so the answer is a value that occurred rather than one
+    interpolated between two of the sample's values -- ten values 1..10 at
+    rank 90 lands on the ninth, not on 9.1 or any other number the linear
+    variants would invent."""
+    ten = Sample(
+        values=tuple(float(v) for v in range(1, 11)),
+        points=(),
+        buckets_covered=10,
+        buckets_requested=10,
+    )
+    plan = READINGS.reading("team_person.p90_lead")
+    assert plan is not None
+    assert statistics_of(plan, ten)["percentile"] == 9.0
+
+
+def test_percentile_of_a_single_value_is_that_value() -> None:
+    """The rank cannot fall outside a sample of one -- every rank from 1 to 99
+    names the same, only, value."""
+    one = Sample(values=(42.0,), points=(), buckets_covered=1, buckets_requested=1)
+    plan = READINGS.reading("team_person.p90_lead")
+    assert plan is not None
+    assert statistics_of(plan, one)["percentile"] == 42.0
+
+
+def test_percentile_over_an_empty_window_is_unknown_rather_than_nought() -> None:
+    """Following `median`, not `sum`: a percentile of no values is a claim
+    nobody can make."""
+    empty = Sample(values=(), points=(), buckets_covered=0, buckets_requested=7)
+    plan = READINGS.reading("team_person.p90_lead")
+    assert plan is not None
+    assert statistics_of(plan, empty)["percentile"] is None
+
+
+def test_a_percentile_band_reduces_its_goal_through_the_same_rank() -> None:
+    """`threshold_of` is the one implementation both the reading's own value
+    and its goal are reduced through, so a bare `on percentile` and its
+    threshold cannot disagree about which rank is meant. Reducing the same
+    ten-value sample at rank 50 and rank 90 must answer the two different
+    nearest-rank values a stray `mean`-shaped reduction would collapse to
+    one number."""
+    ten = Sample(
+        values=tuple(float(v) for v in range(1, 11)),
+        points=tuple((str(v), float(v)) for v in range(1, 11)),
+        buckets_covered=10,
+        buckets_requested=10,
+    )
+    judged = Sample(values=(1.0,), points=(("1", 1.0),), buckets_covered=1, buckets_requested=1)
+    assert threshold_of("percentile", judged, ten, rank=50) == 5.0
+    assert threshold_of("percentile", judged, ten, rank=90) == 9.0
+    assert statistic_of("percentile", ten, rank=50) == 5.0
 
 
 def test_a_requirement_names_what_fell_short_rather_than_only_that_it_did() -> None:

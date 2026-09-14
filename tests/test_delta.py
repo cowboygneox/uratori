@@ -607,6 +607,14 @@ reading team_person.effort_rate(range):
     calculate:
         per_bucket(d)
 
+# Delivered estimate, the p90 day of the window.
+reading team_person.effort_p90(range):
+    display "{team_person} p90"
+    depends:
+        d = team_person.effort_delivered in range
+    calculate:
+        percentile 90 of d
+
 # Delivered estimate, banded against a team's own pace.
 reading team_person.effort_banded(range):
     display "{team_person} velocity"
@@ -728,6 +736,23 @@ async def test_an_effort_readings_per_bucket_rate_reads_as_hours_per_day() -> No
     assert window.buckets_requested == 3
     assert window.per_bucket == pytest.approx((3600.0 + 7200.0 + 3600.0) / 3)
     assert window.display["per_bucket"] == "1.3h"
+
+
+async def test_an_effort_readings_percentile_reads_as_hours_and_carries_its_rank() -> None:
+    """The served window carries both the nearest-rank value, rendered
+    through the same effort formatting every other statistic uses, and the
+    declared rank beside it -- so a client can label "p90" without holding
+    the definition. Three days of 1h, 2h, 1h at rank 90 lands on the largest,
+    2h, by nearest-rank: `ceil(0.9 * 3) - 1 == 2`, the last index."""
+    store, at = await _seeded_effort()
+    reading = EFFORT_DAILY.reading("team_person.effort_p90")
+    assert reading is not None
+    result = await serve_reading(store, EFFORT_DAILY, "t1", reading, [3], at_ms=at)
+    window = result.subjects[0].windows[0]
+
+    assert window.percentile == pytest.approx(7200.0)
+    assert window.percentile_rank == 90
+    assert window.display["percentile"] == "2.0h"
 
 
 async def test_an_effort_readings_band_scales_its_days_literal_to_working_hours() -> None:

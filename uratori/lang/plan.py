@@ -209,6 +209,12 @@ class ReadingPlan:
     how a figure named in the ladder is reduced over the window: same buckets,
     same statistic."""
 
+    band_on_rank: int | None = None
+    """The rank `band_on` names, when it names `percentile` -- the value from
+    the matching `calculate` line, carried here so the served window and the
+    goal figure's reduction can find it without re-scanning `calculate`.
+    `None` for every other statistic."""
+
     band_reads: tuple[str, ...] = ()
     """The figures the ladder compares against, in name order."""
 

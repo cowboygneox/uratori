@@ -110,7 +110,10 @@ _DERIVED_UNITS: frozenset[str] = frozenset({"level", "moment"})
 _MEASURE_UNITS: frozenset[str] = frozenset({"effort", "count", "amount"})
 _FIELD_TYPES: frozenset[str] = frozenset({"text", "date", "number", "flag"})
 _STATISTICS: frozenset[str] = frozenset(
-    {"mean", "median", "worst", "sum", "count", "series", "delta", "per_bucket"}
+    {
+        "mean", "median", "worst", "sum", "count", "series", "delta", "per_bucket",
+        "percentile",
+    }
 )
 _COMPARISONS: frozenset[str] = frozenset({">=", ">", "<=", "<", "==", "!="})
 
@@ -1614,6 +1617,40 @@ class _Parser:
                     "The vocabulary is closed on purpose: each one is a claim about a "
                     "distribution that a reader has to be able to check."
                 )
+            if fn == "percentile":
+                # A percentile carries a rank the other statistics do not, so
+                # it reads as words -- `percentile 90 of <set>` -- the way `at
+                # least 3 values in <set>` is words rather than a call. Named
+                # here rather than left to fail as "expected a number", because
+                # the call-syntax spelling is the mistake an author reaching
+                # for the other statistics' shape will actually make.
+                if self._at_op("("):
+                    raise self._error(
+                        "percentile is not a call: write \"percentile 90 of <set>\", not "
+                        '"percentile(<set>)". The rank comes before the set, as words, '
+                        "because it is part of what the statistic means rather than an "
+                        "argument to a function."
+                    )
+                if not self._is("number"):
+                    raise self._error(
+                        'a percentile names its rank before "of": "percentile 90 of '
+                        '<set>".'
+                    )
+                tok = self._next()
+                raw = float(tok.value)
+                if not raw.is_integer() or not (1 <= int(raw) <= 99):
+                    raise self._error(
+                        f'"{tok.value}" is not a percentile rank. A rank is a whole '
+                        "number from 1 to 99 -- 100 is what `worst` already names, and 0 "
+                        "is the minimum no reading has asked for."
+                    )
+                rank = int(raw)
+                self._keyword("of")
+                target = self._name("a set defined in depends")
+                out.append(Statistic(fn="percentile", set=target, rank=rank, line=line))  # type: ignore[arg-type]
+                self._end_of_line()
+                self._skip_newlines()
+                continue
             self._punct("(")
             target = self._name("a set defined in depends")
             self._punct(")")

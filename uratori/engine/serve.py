@@ -888,6 +888,7 @@ async def serve_reading(
                             ],
                             labels,
                         ),
+                        plan.band_on_rank,
                     )
                     for name, per_subject in goals.items()
                 }
@@ -1064,6 +1065,13 @@ def _window(
         total=stats.get("total"),
         count=stats.get("count"),
         per_bucket=stats.get("per_bucket"),
+        percentile=stats.get("percentile"),
+        # The declared rank travels beside the value so a client can label
+        # "p90" without holding the definition -- the same reasoning that
+        # puts `buckets_requested` beside `per_bucket`'s divisor.
+        percentile_rank=next(
+            (s.rank for s in plan.calculate if s.fn == "percentile"), None
+        ),
         series=points,
         delta=changes,
         delta_display=(

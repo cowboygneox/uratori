@@ -187,6 +187,16 @@ class Window(BaseModel):
     """The total spread across `buckets_requested`, where `mean` divides by
     `buckets_covered`. Both are on this window, so the division a reader would
     have to trust is one they can check against the two fields beside it."""
+    percentile: float | None = None
+    """The nearest-rank value: the sorted sample's value at `percentile_rank`,
+    never an interpolation between two of them, so a reader can point at the
+    one record it came from."""
+    percentile_rank: int | None = None
+    """The rank the definition declared, 1 to 99, carried beside the value so
+    a client can label "p90" without holding the definition. Present whenever
+    the reading declares a `percentile`, even where a shortfall in the sample
+    has withheld the value itself -- the same way `buckets_requested` survives
+    an unmet requirement that withholds every statistic."""
     series: list[float | None] | None = None
     """Per-point values, when the definition asked for them. The one statistic
     that is not a scalar; it exists so a sparkline is a definition's answer

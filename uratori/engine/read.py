@@ -14,6 +14,7 @@ into its version.
 
 from __future__ import annotations
 
+import math
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -44,13 +45,16 @@ class Sample:
     buckets_requested: int
 
 
-def statistic_of(fn: StatisticFn, sample: Sample) -> float | None:
+def statistic_of(fn: StatisticFn, sample: Sample, rank: int | None = None) -> float | None:
     """One statistic over one sample.
 
     Split out from `statistics_of` because a band's threshold figure is
     reduced over the same window by the same statistic, and two
     implementations of "the mean" are two chances for the number and the
-    threshold judging it to be computed differently.
+    threshold judging it to be computed differently. `rank` is that same
+    argument for `percentile`: the one implementation both the reading's own
+    value and its threshold reduce through, so the two cannot disagree about
+    which rank a bare `on percentile` means.
     """
     values = sample.values
     if fn == "mean":
@@ -90,13 +94,30 @@ def statistic_of(fn: StatisticFn, sample: Sample) -> float | None:
         if not values or not sample.buckets_requested:
             return None
         return float(sum(values)) / sample.buckets_requested
+    if fn == "percentile":
+        # Nearest-rank, not an interpolated variant: the answer is always a
+        # value that occurred, so a reader auditing a p90 can point at the
+        # one record it came from. Interpolating between the two values on
+        # either side of the rank would answer a number no record holds --
+        # an invented figure of the same shape the closed vocabulary exists
+        # to keep off the wire.
+        #
+        # Empty answers nothing rather than nought, following `median`: a
+        # percentile of no values is a claim nobody can make.
+        if not values or rank is None:
+            return None
+        ordered = sorted(values)
+        n = len(ordered)
+        index = math.ceil(rank / 100 * n) - 1
+        index = min(max(index, 0), n - 1)
+        return ordered[index]
     # `series` and `delta` are one cell per bucket rather than a statistic;
     # the checker refuses a band on either, and no caller asks for one here.
     return None
 
 
 def threshold_of(
-    fn: StatisticFn, judged: Sample, goal: Sample
+    fn: StatisticFn, judged: Sample, goal: Sample, rank: int | None = None
 ) -> float | None:
     """The goal a window's statistic is compared against, or None.
 
@@ -119,7 +140,7 @@ def threshold_of(
     wanted = {label for label, value in judged.points if value is not None}
     if not wanted <= known:
         return None
-    return statistic_of(fn, goal)
+    return statistic_of(fn, goal, rank)
 
 
 def statistics_of(plan: ReadingPlan, sample: Sample) -> dict[str, float | None]:
@@ -136,7 +157,9 @@ def statistics_of(plan: ReadingPlan, sample: Sample) -> dict[str, float | None]:
         # the definition never asked for, dashed.
         if stat.fn in ("series", "delta"):
             continue
-        out[{"sum": "total"}.get(stat.fn, stat.fn)] = statistic_of(stat.fn, sample)
+        out[{"sum": "total"}.get(stat.fn, stat.fn)] = statistic_of(
+            stat.fn, sample, stat.rank
+        )
     return out
 
 

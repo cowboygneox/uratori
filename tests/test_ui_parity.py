@@ -807,6 +807,12 @@ UNRENDERED: dict[str, str] = {
     "Window.total": "rendered through the display map, never the raw scalar",
     "Window.count": "rendered through the display map, never the raw scalar",
     "Window.per_bucket": "rendered through the display map, never the raw scalar",
+    "Window.percentile": "rendered through the display map, never the raw scalar",
+    "Window.percentile_rank": (
+        "not a value to render -- it labels which percentile the display map's "
+        "value is, for a client without the definition; the page has the "
+        "definition and prints \"percentile\" as its own statistic name"
+    ),
     "Row.values": "positional only -- the page renders display",
     "Row.units": "display strings arrive rendered; units exist for clients that draw",
     "Flag.name": "the stable id; the page shows label and detail",
