@@ -19,8 +19,9 @@ product's end users; a host builds its own screens against the
   which can move this number, and nothing else can;
   **built from**, the declarations it composes, one hop at a time; and
   **used by**, the reverse. Every page then shows its data for the chosen
-  tenant -- a filter its matching records, a group its buckets and their
-  members, a measure each record's rendered measurement -- and drills to the
+  tenant -- a filter its matching records, a group a chosen bucket's members
+  first and its other buckets below, a measure each record's rendered
+  measurement -- and drills to the
   record pages themselves. Every leaf under **moved by** is a fact kind, and
   that is the whole of it: a definition's numbers come from records, so the
   page can name the records and stop. (A leaf used to be able to be a tenant

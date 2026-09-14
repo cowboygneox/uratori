@@ -43,7 +43,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict
 
-from ..engine.buckets import SEPARATOR, measure_of, subject_of
+from ..engine.buckets import SEPARATOR, measure_of, subject_of, tail_of
 from ..engine.project import format_value
 from ..engine.serve import _citing_spaces, _label_of, serve_figure
 from ..engine.serve import availability as figure_availability
@@ -406,6 +406,24 @@ class MembershipBucket(BaseModel):
     bucket: str
     members: int
 
+    subject: str
+    """The key's first part -- an id even where the id is all there is."""
+
+    coordinate: str | None
+    """The key's remainder past the separator, where the grouping is
+    composite (a subject crossed with a day, say). None for a plain group."""
+
+    subject_kind: str | None
+    """Whose record `subject` is an id of, when the grouping's spec or a
+    figure scoped over it says -- see `_bucket_subject_kind`. None leaves
+    `subject` an unexplained id, exactly as honest as the grouping is."""
+
+    label: str | None
+    """`subject`'s name, resolved the way a figure names its own subject --
+    the schema's name field for `subject_kind`, read off the live record.
+    None when the kind is unknown, the record has departed, or the kind has
+    no name field: a raw id beats a fabricated name."""
+
 
 class MembershipOut(BaseModel):
     """Where a group or filter actually filed this tenant's records -- the
@@ -470,6 +488,15 @@ class MemberPageOut(BaseModel):
     records: list[MemberRecordOut]
     more: bool
     total: int
+
+    subject: str
+    coordinate: str | None
+    subject_kind: str | None
+    label: str | None
+    """Same four fields as `MembershipBucket`, for the one bucket this page
+    lists -- served here too because the members page is reachable for a
+    bucket that has fallen off the ledger's current page, where the ledger
+    row that would otherwise carry the name is not on screen."""
 
 
 class MeasuredRecordOut(BaseModel):
@@ -1581,7 +1608,7 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
         buckets_limit: Annotated[int, Query(ge=1, le=1000)] = 50,
     ) -> MembershipOut:
         s = _state(request)
-        _world, library = ready(s)
+        world, library = ready(s)
         index = library.indexes.get(name)
         if index is None:
             raise HTTPException(status_code=404, detail=_not_a_grouping(library, name))
@@ -1642,6 +1669,14 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             if isinstance(index.spec, ByAge) and index.spec.through is not None
             else None
         )
+        named = await _bucket_names(
+            tenant,
+            library,
+            index,
+            taught_schema(world),
+            PostgresFactStore(s.pool),
+            [b["bucket"] for b in buckets],
+        )
         return MembershipOut(
             name=name,
             kind=_grouping_kind(index),
@@ -1650,7 +1685,16 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             state=state,
             members=members,
             population=population,
-            buckets=[MembershipBucket(**b) for b in buckets],
+            buckets=[
+                MembershipBucket(
+                    **b,
+                    subject=named[b["bucket"]][0],
+                    coordinate=named[b["bucket"]][1],
+                    subject_kind=named[b["bucket"]][2],
+                    label=named[b["bucket"]][3],
+                )
+                for b in buckets
+            ],
             buckets_total=buckets_total,
             buckets_more=more,
             note=_membership_note(aged=aged, clipped=clipped, owner=owner),
@@ -1684,6 +1728,10 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             s.pool, tenant, name, bucket, index.id_space, after=after, limit=limit
         )
         name_field = taught_schema(world).name_fields.get(index.id_space)
+        named = await _bucket_names(
+            tenant, library, index, taught_schema(world), PostgresFactStore(s.pool), [bucket]
+        )
+        subject, coordinate, subject_kind, label = named[bucket]
         return MemberPageOut(
             name=name,
             bucket=bucket,
@@ -1697,6 +1745,10 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             ],
             more=more,
             total=total,
+            subject=subject,
+            coordinate=coordinate,
+            subject_kind=subject_kind,
+            label=label,
         )
 
     # ------------------------------------------------------------ measured --
@@ -2538,6 +2590,64 @@ def _grouping_kind(index: CompiledIndex) -> Literal["group", "filter"]:
     """The declaration keyword, recovered from the compiled shape: a group
     fans records out (bucketed), a filter is a single narrowing bucket."""
     return "group" if index.bucketed else "filter"
+
+
+def _bucket_subject_kind(library: Library, index: CompiledIndex) -> str | None:
+    """Whose id a bucket key's subject part names, or nothing.
+
+    A `through` on the grouping's first part says so directly -- the target
+    kind the hop resolves to. A bare field names no kind by itself (`from
+    courier_id` could be anybody's id), so the only other source is a figure
+    that scopes itself over this grouping: `scope shop_courier over
+    courier_id.bucket` states, in the one place it is written, whose ids that
+    index fans out over. Neither exists for the average grouping, and that is
+    the honest answer rather than a guessed one.
+    """
+    from ..lang.check import _index_fields
+
+    parts = _index_fields(index.spec)
+    if parts and parts[0].through is not None:
+        return parts[0].through.kind
+    # Every scope that reads this grouping, not the first: nothing refuses two
+    # figures of different scopes over one bare field, and the first one in
+    # declaration order is a coin toss dressed as a fact. Two answers is no
+    # answer, and the page prints the key.
+    scopes = {plan.scope for plan in library.figures if plan.scope_index == index.name}
+    return scopes.pop() if len(scopes) == 1 else None
+
+
+async def _bucket_names(
+    tenant: str,
+    library: Library,
+    index: CompiledIndex,
+    schema: Schema,
+    facts: PostgresFactStore,
+    keys: Sequence[str],
+) -> dict[str, tuple[str, str | None, str | None, str | None]]:
+    """`(subject, coordinate, subject_kind, label)` for each of `keys`.
+
+    One `facts.some` for every distinct subject on the page, not one per
+    bucket: a composite grouping can print the same subject dozens of times
+    across its coordinates, and the ledger's page size is exactly how many
+    subjects a page can distinctly hold.
+    """
+    # A filter has one bucket and it is nobody's: its key is the empty string,
+    # and looking that up would be a query for a record that cannot exist.
+    subject_kind = _bucket_subject_kind(library, index) if index.bucketed else None
+    name_field = schema.name_fields.get(subject_kind) if subject_kind else None
+    parsed = {key: (subject_of(key), tail_of(key)) for key in keys}
+    names: dict[str, str | None] = {}
+    if name_field is not None and subject_kind is not None:
+        subjects = sorted({subject for subject, _ in parsed.values()})
+        rows = await facts.some(tenant, subject_kind, subjects)
+        by_subject = {row.key: row.value for row in rows}
+        for subject in subjects:
+            value = by_subject.get(subject)
+            names[subject] = _field_at(value, name_field) if value is not None else None
+    return {
+        key: (subject, coordinate, subject_kind, names.get(subject))
+        for key, (subject, coordinate) in parsed.items()
+    }
 
 
 def _grouping_edge(library: Library, name: str) -> Dependency:
