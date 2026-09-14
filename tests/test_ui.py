@@ -3810,3 +3810,549 @@ async def test_a_bundle_on_the_wrong_route_gets_a_forwarding_address(
         assert measured.status_code == 404
         assert "bundle" in measured.json()["detail"], measured.text
         assert "results" in measured.json()["detail"]
+
+
+# --------------------------------------------------------------- working --
+
+WORKING_WORLD_DOCUMENT: dict[str, Any] = {
+    "kinds": ["shop_order", "shop_courier", "shop_zone"],
+    "name_fields": {"shop_courier": "name", "shop_order": "ref", "shop_zone": "name"},
+    "url_fields": {"shop_order": "url"},
+}
+
+WORKING_SOURCE = COURIER_SOURCE + """
+group shop_order.delivered_by_day from (courier_id, delivered_at by day)
+group shop_order.carried_in from (courier_id, zone_id)
+
+measure shop_order.riding_seconds = delivered_at - picked_up_at
+measure shop_order.estimate = estimate_seconds in effort
+
+# Orders in hand, split by zone.
+figure shop_courier.orders_by_zone across shop_zone:
+    display "{shop_courier} orders in {shop_zone}"
+    depends:
+        mine = shop_order.carried_in:{shop_courier} & shop_order.open
+    calculate:
+        count(mine)
+
+# Every zone added up.
+figure shop_courier.orders_total:
+    display "{shop_courier} orders total"
+    calculate:
+        sum(shop_courier.orders_by_zone)
+
+# Effort in the orders currently in hand.
+figure shop_courier.delivered_effort:
+    display "{shop_courier} delivered effort"
+    depends:
+        mine = shop_order.carried_by:{shop_courier} & shop_order.open
+    calculate:
+        sum(shop_order.estimate over mine)
+
+# Effort in everything ever carried, delivered or not.
+figure shop_courier.committed_effort:
+    display "{shop_courier} committed effort"
+    depends:
+        mine = shop_order.carried_by:{shop_courier}
+    calculate:
+        sum(shop_order.estimate over mine)
+
+# What fraction of the committed effort is still in hand.
+figure shop_courier.effort_ratio:
+    display "{shop_courier} effort ratio"
+    unit share
+    calculate:
+        shop_courier.delivered_effort / shop_courier.committed_effort
+
+# A courier's limit, and whether they are over it.
+figure shop_courier.hand_limit:
+    display "{shop_courier} may hold {value}"
+    depends:
+        all = shop_order.carried_by:{shop_courier}
+    calculate:
+        3
+
+# Whether a courier is over their hand limit.
+figure shop_courier.load:
+    display "{shop_courier} has {value} in hand"
+    depends:
+        mine = shop_order.carried_by:{shop_courier} & shop_order.open
+    calculate:
+        count(mine)
+    band:
+        when value >= 5 then "critical"
+        when value >= shop_courier.hand_limit then "over"
+        otherwise "ok"
+
+# Every delivery's ride time, day by day.
+figure shop_courier.ride_times bucketed:
+    display "{shop_courier} rides"
+    depends:
+        done = shop_order.delivered_by_day:{shop_courier}
+    calculate:
+        list(shop_order.riding_seconds over done)
+
+# The typical ride, over a window.
+reading shop_courier.typical_ride(range):
+    display "{value}"
+    depends:
+        rides = shop_courier.ride_times in range
+    calculate:
+        mean(rides)
+"""
+
+
+def _zoned_orders(n: int, courier: str = "c1", zone: str = "z1", estimate: bool = True) -> dict[str, dict[str, Any]]:
+    out = {}
+    for i in range(n):
+        row: dict[str, Any] = {
+            "ref": f"A-{courier}-{i}",
+            "courier_id": courier,
+            "status": "riding",
+            "zone_id": zone,
+        }
+        if estimate:
+            row["estimate_seconds"] = 3600.0
+        out[f"o{courier}{zone}{i}"] = row
+    return out
+
+
+async def _teach_working(http: httpx.AsyncClient) -> None:
+    put = await http.put("/schema", json=WORKING_WORLD_DOCUMENT)
+    assert put.status_code == 200, put.text
+    put = await http.put("/definitions", json={"source": WORKING_SOURCE})
+    assert put.status_code == 200, put.text
+
+
+async def _working(http: httpx.AsyncClient, tenant: str, figure: str, subject: str) -> httpx.Response:
+    return await http.get(
+        f"/ui/api/tenants/{tenant}/working/{figure}", params={"subject": subject}
+    )
+
+
+async def test_a_working_count_shows_the_narrowing_set(pg_dsn: str) -> None:
+    """`carrying` counts a two-operand set: the working must show the first
+    index's own count and what the `&` narrowed it to, with the removed
+    records named."""
+    async with serve(pg_dsn) as http:
+        await _teach_working(http)
+        await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_courier": COURIER,
+                    "shop_order": {
+                        "o1": {"ref": "A-1", "courier_id": "c1", "status": "riding"},
+                        "o2": {"ref": "A-2", "courier_id": "c1", "status": "riding"},
+                        "o3": {"ref": "A-3", "courier_id": "c1", "status": "delivered"},
+                    },
+                }
+            },
+        )
+
+        got = await _working(http, "t1", "shop_courier.carrying", "c1")
+        assert got.status_code == 200, got.text
+        body = got.json()
+        assert body["state"]["ok"] is True
+        assert body["stored"] == "2"
+        root = body["root"]
+        assert root["op"] == "count"
+        assert root["display"] == "2"
+        [set_node] = root["children"]
+        assert set_node["op"] == "set"
+        assert set_node["display"] == "2 records"
+        set_index, set_op = set_node["children"]
+        assert set_index["op"] == "set-index"
+        assert set_index["display"] == "3 records"
+        assert set_op["op"] == "set-op"
+        assert set_op["display"] == "2 remain"
+        removed_keys = {r["key"] for r in set_op["records"]}
+        assert removed_keys == {"o3"}
+        assert set_op["records"][0]["role"] == "removed"
+
+
+async def test_a_sum_measure_splits_the_measured_from_the_blank(pg_dsn: str) -> None:
+    """One order carries no estimate: its record line must say so, the node
+    note must state the split, and the live re-derivation must agree with
+    the stored total."""
+    async with serve(pg_dsn) as http:
+        await _teach_working(http)
+        orders = {
+            "oa": {
+                "ref": "A-a", "courier_id": "c1", "status": "riding",
+                "zone_id": "z1", "estimate_seconds": 3600.0,
+            },
+            "ob": {
+                "ref": "A-b", "courier_id": "c1", "status": "riding", "zone_id": "z1",
+            },
+        }
+        await http.post(
+            "/tenants/t1/facts",
+            json={"writes": {"shop_courier": COURIER, "shop_order": orders}},
+        )
+
+        got = await _working(http, "t1", "shop_courier.delivered_effort", "c1")
+        assert got.status_code == 200, got.text
+        body = got.json()
+        assert body["stored"] == "1.0h"
+        assert body["agrees"] is True
+        root = body["root"]
+        assert root["op"] == "sum-measure"
+        assert root["display"] == "1.0h"
+        assert "1 of 2" in (root["note"] or "")
+        by_key = {r["key"]: r for r in root["records"]}
+        assert by_key["oa"]["role"] == "counted"
+        assert by_key["oa"]["display"] == "1.0h"
+        assert by_key["ob"]["role"] == "nothing"
+        assert "no estimate" in (by_key["ob"]["note"] or "")
+
+
+async def test_an_arithmetic_figure_shows_both_operands_and_the_division_note(pg_dsn: str) -> None:
+    """A ratio of two figures must show each as a `figure` child carrying its
+    own worksheet address, and a courier with nothing committed must show
+    the division-by-nought note rather than a bare dash with no story."""
+    async with serve(pg_dsn) as http:
+        await _teach_working(http)
+        await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_courier": {"c1": {"name": "Aki"}, "c2": {"name": "Zed"}},
+                    "shop_order": {
+                        "o1": {
+                            "ref": "A-1", "courier_id": "c1", "status": "riding",
+                            "zone_id": "z1", "estimate_seconds": 3600.0,
+                        }
+                    },
+                }
+            },
+        )
+
+        got = await _working(http, "t1", "shop_courier.effort_ratio", "c1")
+        assert got.status_code == 200, got.text
+        root = got.json()["root"]
+        assert root["op"] == "arith"
+        left, right = root["children"]
+        assert left["figure"] == "shop_courier.delivered_effort"
+        assert left["figure_subject"] == "c1"
+        assert right["figure"] == "shop_courier.committed_effort"
+
+        blank = await _working(http, "t1", "shop_courier.effort_ratio", "c2")
+        assert blank.status_code == 200, blank.text
+        blank_root = blank.json()["root"]
+        assert blank_root["display"] is None
+        assert "division by nought" in (blank_root["note"] or "")
+
+
+async def test_a_rollup_lists_one_part_per_stored_cell(pg_dsn: str) -> None:
+    """`orders_total` sums a dimensioned figure's stored cells; the working
+    must show one `part` child per zone, each carrying its own worksheet
+    address."""
+    async with serve(pg_dsn) as http:
+        await _teach_working(http)
+        await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_courier": COURIER,
+                    "shop_zone": {"z1": {"name": "North"}, "z2": {"name": "South"}},
+                    "shop_order": {
+                        "o1": {
+                            "ref": "A-1", "courier_id": "c1", "status": "riding", "zone_id": "z1",
+                        },
+                        "o2": {
+                            "ref": "A-2", "courier_id": "c1", "status": "riding", "zone_id": "z2",
+                        },
+                    },
+                }
+            },
+        )
+
+        got = await _working(http, "t1", "shop_courier.orders_total", "c1")
+        assert got.status_code == 200, got.text
+        body = got.json()
+        assert body["stored"] == "2"
+        root = body["root"]
+        assert root["op"] == "rollup"
+        assert {c["figure_subject"] for c in root["children"]} == {"c1@z1", "c1@z2"}
+        assert {c["display"] for c in root["children"]} == {"1"}
+
+
+async def test_a_band_ladder_records_each_rungs_verdict(pg_dsn: str) -> None:
+    """A courier carrying three orders clears the second rung, not the
+    first: the working must show `failed`, `matched`, `not-reached` in
+    that order."""
+    async with serve(pg_dsn) as http:
+        await _teach_working(http)
+        await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_courier": COURIER,
+                    "shop_order": _zoned_orders(3, estimate=False),
+                }
+            },
+        )
+
+        got = await _working(http, "t1", "shop_courier.load", "c1")
+        assert got.status_code == 200, got.text
+        body = got.json()
+        assert body["level"] == "over"
+        band = body["band"]
+        assert band["op"] == "band"
+        assert band["display"] == "over"
+        verdicts = [c["verdict"] for c in band["children"]]
+        assert verdicts == ["failed", "matched", "not-reached"]
+
+
+async def test_a_time_keyed_figure_resolves_its_bucket(pg_dsn: str) -> None:
+    """A bucketed figure's subject carries a coordinate; the working must
+    split it out and resolve the set at that exact bucket."""
+    async with serve(pg_dsn) as http:
+        await _teach_working(http)
+        await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_courier": COURIER,
+                    "shop_order": {
+                        "o1": {
+                            "ref": "A-1", "courier_id": "c1", "status": "delivered",
+                            "picked_up_at": "2026-06-01T08:00:00Z",
+                            "delivered_at": "2026-06-01T09:00:00Z",
+                        }
+                    },
+                }
+            },
+        )
+
+        result = (
+            await http.get("/ui/api/tenants/t1/results/shop_courier.ride_times")
+        ).json()
+        [subject] = result["subjects"]
+        key = subject["id"]
+        assert "@" in key
+
+        got = await _working(http, "t1", "shop_courier.ride_times", key)
+        assert got.status_code == 200, got.text
+        body = got.json()
+        assert body["subject_key"] == "c1"
+        assert body["coordinate"] == key.split("@", 1)[1]
+        root = body["root"]
+        assert root["op"] == "list"
+        assert root["display"] is not None
+
+
+async def test_working_refuses_a_reading_with_a_forwarding_sentence(pg_dsn: str) -> None:
+    """A reading stores nothing, so `working` must forward rather than 404
+    with nothing to go on -- the same contract `evidence` keeps."""
+    async with serve(pg_dsn) as http:
+        await _teach_working(http)
+        refused = await _working(http, "t1", "shop_courier.typical_ride", "c1")
+        assert refused.status_code == 404
+        assert "stores nothing" in refused.json()["detail"]
+
+
+async def test_working_404s_an_unknown_subject_and_200s_a_never_computed_figure(pg_dsn: str) -> None:
+    async with serve(pg_dsn) as http:
+        await _teach_working(http)
+        await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_courier": COURIER,
+                    "shop_order": {
+                        "o1": {"ref": "A-1", "courier_id": "c1", "status": "riding"},
+                    },
+                }
+            },
+        )
+
+        missing = await _working(http, "t1", "shop_courier.carrying", "nobody")
+        assert missing.status_code == 404
+
+        grown = WORKING_SOURCE + """
+# The same count, taught after the pass.
+figure shop_courier.echo:
+    display "{value}"
+    depends:
+        mine = shop_order.carried_by:{shop_courier} & shop_order.open
+    calculate:
+        count(mine)
+"""
+        put = await http.put("/definitions", json={"source": grown})
+        assert put.status_code == 200, put.text
+
+        never = await _working(http, "t1", "shop_courier.echo", "c1")
+        assert never.status_code == 200, never.text
+        body = never.json()
+        assert body["state"]["ok"] is False
+        assert body["root"] is None
+
+
+async def test_working_shows_disagreement_after_a_deferred_correction(pg_dsn: str) -> None:
+    """A fact lands with `defer: true` after the pass that wrote the stored
+    row: the live re-derivation moves and `agrees` must say so.
+
+    The correction moves a measured *field* on a record already counted in
+    -- never membership, which a deferred write leaves stale in the index
+    tables until the next real pass. A measure read goes straight to the
+    fact store on every call, so it is the one thing a deferred write moves
+    that the working can see without a recompute."""
+    async with serve(pg_dsn) as http:
+        await _teach_working(http)
+        await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_courier": COURIER,
+                    "shop_order": {
+                        "o1": {
+                            "ref": "A-1", "courier_id": "c1", "status": "riding",
+                            "estimate_seconds": 3600.0,
+                        },
+                    },
+                }
+            },
+        )
+        before = await _working(http, "t1", "shop_courier.delivered_effort", "c1")
+        assert before.json()["stored"] == "1.0h"
+        assert before.json()["agrees"] is True
+
+        await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "shop_order": {
+                        "o1": {
+                            "ref": "A-1", "courier_id": "c1", "status": "riding",
+                            "estimate_seconds": 7200.0,
+                        },
+                    }
+                },
+                "defer": True,
+            },
+        )
+
+        after = await _working(http, "t1", "shop_courier.delivered_effort", "c1")
+        assert after.status_code == 200, after.text
+        body = after.json()
+        assert body["stored"] == "1.0h", "the deferred write moved no stored row"
+        assert body["live"] == "2.0h"
+        assert body["agrees"] is False
+        assert "re-derived now" in (body["note"] or "")
+
+
+SPREAD_WORLD_DOCUMENT: dict[str, Any] = {"kinds": []}
+
+SPREAD_SOURCE = '''
+# Somebody who buys advertising.
+fact ad_account:
+    name name
+    name as text
+
+# One campaign, booked between two dates, with money attached.
+fact ad_campaign:
+    name ref
+    ref as text
+    account_id as text
+    starts_at as moment
+    ends_at as moment
+    budget_cents as number
+
+measure ad_campaign.money = budget_cents in count
+
+# Every campaign an account runs -- subject and member share nothing: the
+# subject is the account, the members are its campaigns.
+group ad_campaign.owned_by from account_id
+
+# The account's weeks, by which of its campaigns are running in each --
+# subject is the account, but the composite's members are still campaigns.
+group ad_campaign.weeks_left from (account_id, starts_at until ends_at by week in "UTC")
+
+# What this account has budgeted across every campaign it runs.
+figure ad_account.total_budget:
+    display "{ad_account} total budget"
+    depends:
+        mine = ad_campaign.owned_by:{ad_account}
+    calculate:
+        sum(ad_campaign.money over mine)
+
+# That budget, shared across the weeks the account has campaigns running.
+figure ad_account.weekly_budget bucketed:
+    display "{ad_account} budget that week"
+    depends:
+        weeks = ad_campaign.weeks_left:{ad_account}
+    calculate:
+        spread(ad_account.total_budget over weeks)
+'''
+
+
+async def test_a_spread_divisor_is_counted_by_the_bucket_keys_subject_not_membership(
+    pg_dsn: str,
+) -> None:
+    """`ad_campaign.weeks_left` is exactly the shape `Engine._readers`'
+    docstring warns about: keyed `(account_id, <span>)`, so the account is
+    the bucket's subject but never one of its members (only campaigns are).
+    A divisor counted by asking "how many buckets hold this account as a
+    member" finds none and spreads by nought; the pass -- and the working --
+    must count buckets by the bucket key's own subject part instead, which
+    is what the fix in `working.py`'s `Spread` prefetch does."""
+    async with serve(pg_dsn) as http:
+        put = await http.put("/schema", json=SPREAD_WORLD_DOCUMENT)
+        assert put.status_code == 200, put.text
+        put = await http.put("/definitions", json={"source": SPREAD_SOURCE})
+        assert put.status_code == 200, put.text
+
+        await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "ad_account": {"a1": {"name": "Acme"}, "a2": {"name": "Zed"}},
+                    "ad_campaign": {
+                        "c1": {
+                            "ref": "C1", "account_id": "a1",
+                            "starts_at": "2026-08-03T09:00:00Z",
+                            "ends_at": "2026-09-06T17:00:00Z",
+                            "budget_cents": 1000,
+                        },
+                        # A campaign under a different account, so a
+                        # membership-based count of a1's buckets would still
+                        # find nothing even by accident.
+                        "c2": {
+                            "ref": "C2", "account_id": "a2",
+                            "starts_at": "2026-08-03T09:00:00Z",
+                            "ends_at": "2026-08-10T09:00:00Z",
+                            "budget_cents": 500,
+                        },
+                    },
+                }
+            },
+        )
+
+        result = (
+            await http.get("/ui/api/tenants/t1/results/ad_account.weekly_budget")
+        ).json()
+        a1_rows = [s for s in result["subjects"] if s["id"].startswith("a1@")]
+        assert len(a1_rows) > 1, "the fixture must span more than one week"
+        weeks_held = len(a1_rows)
+        subject_key = a1_rows[0]["id"]
+
+        got = await _working(http, "t1", "ad_account.weekly_budget", subject_key)
+        assert got.status_code == 200, got.text
+        body = got.json()
+        assert body["agrees"] is True
+        assert body["stored"] is not None and body["stored"] != "—"
+        root = body["root"]
+        assert root["op"] == "spread"
+        assert root["display"] is not None and root["display"] != "—"
+        part, divisor = root["children"]
+        assert part["figure"] == "ad_account.total_budget"
+        assert part["figure_subject"] == "a1"
+        assert divisor["label"] == "buckets held"
+        assert divisor["display"] == f"{weeks_held} buckets", (
+            "the divisor must be the number of the account's OWN weeks -- "
+            "counted by the bucket key's subject part, not by asking "
+            "whether the account is a member of any bucket (it never is: "
+            "only campaigns are)"
+        )

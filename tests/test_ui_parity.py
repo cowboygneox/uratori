@@ -811,10 +811,19 @@ UNRENDERED: dict[str, str] = {
     "Row.units": "display strings arrive rendered; units exist for clients that draw",
     "Flag.name": "the stable id; the page shows label and detail",
     "Flag.action": "no surface offers actions; the fields shown are label and detail",
-    "Evidence.subject": "the row clicked is the subject; repeating it under itself adds nothing",
-    "Evidence.display": "the value is on the row the panel expands under",
-    "Evidence.version": "the row's result already cites it",
-    "Evidence.source": "the members already name their figure per row",
+    # The evidence route stays (it is also the public API's shape), but the
+    # page no longer draws it: a value's worksheet (WorkingOut/StepOut) shows
+    # the same citation joined to records, plus the arithmetic over them,
+    # which a flat member roster could not -- the working replaces the panel
+    # everywhere the button used to open it.
+    "Evidence.subject": "the worksheet page states subject_name/subject_key instead of echoing the raw key",
+    "Evidence.display": "the worksheet's stored/live plate is what the page shows now",
+    "Evidence.version": "the worksheet's title block states version instead",
+    "Evidence.source": "the worksheet's declaration link names the figure's source instead",
+    "Evidence.parts": (
+        "whether a citation is of records or of parts is now a property of the "
+        "step's op (rollup vs. sum-measure/etc in StepOut), not a flag the page reads"
+    ),
     "CitedPageOut.figure": "the opener already names the figure; the echo is for API readers of the page",
     "TenantOut.facts": "the switcher is an address list; per-kind counts live on the Facts tab it switches",
 }

@@ -412,6 +412,54 @@ input[type="search"]:focus { border-color: var(--accent); }
 }
 .tree .leaf { color: var(--ink-faint); }
 
+/* -------------------------------------------------------- the worksheet --- */
+/* A school-child's "show your work": each step reads as expression … =
+   value, values held in one right-hand column, depth drawn by nested .tree
+   rules (above), the records that contributed nothing kept on the page,
+   quiet rather than dropped. */
+
+.work-step { padding-left: 0; }
+.work-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 1.5rem;
+  align-items: baseline;
+}
+.work-label { font-family: var(--mono); min-width: 0; overflow-wrap: anywhere; }
+.work-display { font-family: var(--mono); text-align: right; white-space: nowrap; }
+.work-note { padding: 0.1rem 0 0.15rem; }
+
+.work-value {
+  font-family: var(--mono);
+  font-size: 1.6rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.work-plate { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; margin: 0.4rem 0; }
+
+.work-verdict { margin-left: 0.6rem; font-size: 0.85em; }
+.verdict-matched { color: var(--accent); box-shadow: inset 2px 0 0 var(--accent); padding-left: 0.4rem; }
+.verdict-unknown { color: var(--warm); }
+.verdict-failed, .verdict-not-reached { color: var(--ink-faint); }
+.work-step.verdict-not-reached > .work-row .work-label { text-decoration: line-through; }
+
+table.work-records { margin: 0.25rem 0 0.4rem; }
+table.work-records .role-nothing { color: var(--ink-faint); font-style: italic; }
+table.work-records .role-removed { color: var(--ink-faint); }
+table.work-records .role-absent { color: var(--warm); }
+table.work-records .role-winner { color: var(--accent); }
+
+.work-nest:empty { display: none; }
+.work-nest .tree { margin-top: 0.3rem; }
+
+/* A label and a value fit side by side well below the page's own one-column
+   break: the pair is what makes a row read as "expression = value", so it
+   folds only where a phone genuinely cannot hold both. */
+@media (max-width: 40rem) {
+  .work-row { grid-template-columns: 1fr; row-gap: 0.1rem; }
+  .work-display { text-align: left; }
+}
+
 /* ------------------------------------------------------------ activity --- */
 
 .run {

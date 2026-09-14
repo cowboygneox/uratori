@@ -181,6 +181,7 @@ async function render() {
   if (route === 'facts') draw(await factsView(segments, params));
   else if (route === 'activity') draw(await activityView(params));
   else if (route === 'edit') draw(await editorView(params));
+  else if (route === 'work') draw(await workView(segments[0], segments[1]));
   else draw(await definitionsView(argument, params));
 }
 
@@ -241,6 +242,13 @@ function roster(selected) {
 }
 
 async function definitionsView(name, params) {
+  // A definition link that names a subject is a link to one value, and a
+  // host deep-linking `#/definitions/<figure>?subject=<id>` from its own
+  // screen means that value's worksheet, not the figure's whole roster.
+  const subject = params.get('subject');
+  if (name && subject && (byName.get(name) || {}).kind === 'figure') {
+    return workView(name, subject);
+  }
   const pane = name ? await declarationPane(name, params) : [libraryPlate()];
   // Pane before roster: a keyboard should reach the content in a few tabs,
   // not after all 75 roster links. The stylesheet places the roster left.
@@ -288,6 +296,10 @@ function defHash(name, extra) {
 
 function recordHash(kind, key) {
   return `#/facts/${encodeURIComponent(kind)}/${encodeURIComponent(key)}`;
+}
+
+function workHash(figure, subject) {
+  return `#/work/${encodeURIComponent(figure)}/${encodeURIComponent(subject)}`;
 }
 
 // One leaf of the impact answer, and there is one kind left: the records.
@@ -780,8 +792,13 @@ function resultBlocks(result) {
       el('tr', {}, el('th', {}, 'subject'), el('th', {}, 'value'),
         result.banded ? el('th', {}, 'band') : null, el('th', {})),
       result.subjects.map((subject) => {
+        // The subject's name opens THIS row's worksheet: a reader who
+        // followed one number wants that number's working, not the figure's
+        // whole population again.
         const row = el('tr', {},
-          el('td', {}, subject.name, ' ', el('span', { class: 'faint mono' }, subject.id),
+          el('td', {},
+            el('a', { href: workHash(result.name, subject.id) }, subject.name), ' ',
+            el('span', { class: 'faint mono' }, subject.id),
             subject.dimension
               ? el('span', { class: 'dim' }, ` × ${subject.dimension}`) : null),
           // The dash, never the raw number: formatting is the server's job,
@@ -789,8 +806,8 @@ function resultBlocks(result) {
           el('td', { class: 'mono' }, subject.display ?? '—'),
           result.banded ? el('td', { class: 'mono dim' }, subject.level) : null,
           el('td', {}, el('button', {
-            onclick: () => evidenceRow(row, result.name, subject.id),
-          }, 'evidence')));
+            onclick: () => showWorkRow(row, result.name, subject.id),
+          }, 'show work')));
         return row;
       })));
   } else if (result.kind === 'reading') {
@@ -935,100 +952,281 @@ function deltaCells(window) {
   }, text == null ? (at === 0 ? 'no predecessor in range' : '—') : text)));
 }
 
-async function evidenceRow(row, figure, subject) {
+// A value's worksheet, inline: fetched once, folded like the old evidence
+// panel, but drawing the working tree instead of a flat roster -- the
+// records that contributed nothing stay on the page, quiet rather than
+// omitted, and an operand that is itself a stored value drills in place.
+async function showWorkRow(row, figure, subject) {
   if (row.nextSibling && row.nextSibling.classList.contains('expansion')) {
     row.nextSibling.remove(); // second click folds it back up
     return;
   }
   const answer = await get(
-    `tenants/${encodeURIComponent(tenant())}/evidence/${encodeURIComponent(figure)}`
+    `tenants/${encodeURIComponent(tenant())}/working/${encodeURIComponent(figure)}`
     + `?subject=${encodeURIComponent(subject)}`);
   const holder = el('td', { colspan: String(row.children.length) });
   const expansion = el('tr', { class: 'expansion' }, holder);
   if (!answer.ok) {
-    holder.append(problem(answer, 'No evidence:'));
+    holder.append(problem(answer, 'Could not show this working:'));
   } else {
-    holder.append(evidencePanel(answer.body));
+    holder.append(workingInline(answer.body));
   }
   row.after(expansion);
 }
 
-function evidencePanel(evidence) {
-  // The part drill fetches evidence for figures no surrounding table has
-  // availability-gated, so the gate lives here: without it a never-computed
-  // or dial-moved part renders "This value cites nothing." -- the confident
-  // claim the state field exists to prevent.
-  if (!evidence.state.ok) return unavailable(evidence.state);
-  // Through el(), not bare append(): append() stringifies a null child
-  // into the visible word "null", el() skips it.
-  return el('div', {}, el('p', { class: 'dim' },
-    evidence.members.length
-      ? [`This value cites ${evidence.members.length} `
-         + (evidence.parts
-             ? (evidence.members.length === 1 ? 'part' : 'parts')
-             : (evidence.members.length === 1 ? 'record' : 'records')),
-         // The definition the numbers travel through, named on the panel:
-         // "these records, measured as this definition says" is what makes
-         // the rows lead to the amount rather than merely sit under it.
-         // "measured as", tense-neutral on purpose: a list row's numbers are
-         // the stored addends, a sum's or an extreme's are read live.
-         evidence.measure
-           ? [', each measured as ', el('a', {
-               class: 'mono', href: `#/definitions/${encodeURIComponent(evidence.measure)}`,
-             }, evidence.measure), ':']
-           : ':']
-      : 'This value cites nothing.'),
-    evidence.note ? el('p', { class: 'faint' }, evidence.note) : null,
-    el('ul', {}, evidence.members.map((member) => {
-      const link = member.url ? safeUrl(member.url) : null;
-      const item = el('li', { class: 'mono' },
-        member.figure
-          ? [el('a', { class: 'faint', href: `#/definitions/${encodeURIComponent(member.figure)}` },
-              member.figure), el('span', { class: 'faint' }, ' · ')]
-          : null,
-        link
-          ? el('a', { href: link, target: '_blank', rel: 'noreferrer' },
-              member.title || member.key)
-          : (member.title || member.key),
-        // The cell a part is for, or twenty-seven season rows of one team
-        // all read as the same frozen label.
-        member.dimension ? el('span', { class: 'dim' }, ` × ${member.dimension}`) : null,
-        member.display ? el('span', { class: 'dim' }, ` — ${member.display}`) : null,
-        member.held ? null : el('span', { class: 'faint' }, ' (no longer held)'),
-        // The citation's last rung: when the members are records of one
-        // kind, each held one links to the record itself, so a value can
-        // be walked to the stored fact without leaving the trace.
-        evidence.kind && member.held
-          ? [' ', el('a', { class: 'trace', href: recordHash(evidence.kind, member.key) },
-              'record →')]
-          : null,
-        // A part is a stored value of its own, so the walk continues: its
-        // citation opens in place, and the trace runs figure by figure down
-        // to the records without leaving the page.
-        member.figure && member.held
-          ? [' ', el('button', { onclick: () => partDrill(item, member) }, 'evidence')]
-          : null);
-      return item;
-    })));
+// The same working, drawn inline under a row rather than as its own page:
+// the sentence, the stored/live line, the tree, the band ladder, and a
+// link on to the full worksheet for whoever wants the declared source too.
+function workingInline(working) {
+  const parts = [el('p', { class: 'dim' }, working.sentence)];
+  parts.push(workValuePlate(working));
+  if (!working.state.ok) { parts.push(unavailable(working.state)); return el('div', {}, parts); }
+  if (!working.root) {
+    parts.push(el('p', { class: 'faint' }, 'Not yet computed for this subject.'));
+    return el('div', {}, parts);
+  }
+  parts.push(workingTree(working.root, { depth: 0 }));
+  if (working.band) {
+    parts.push(el('h3', {}, 'Band'), workingTree(working.band, { depth: 0 }));
+  }
+  parts.push(el('p', {},
+    el('a', { class: 'trace', href: workHash(working.figure, working.subject) }, 'open full worksheet →')));
+  return el('div', {}, parts);
 }
 
-async function partDrill(item, member) {
-  const open = item.querySelector(':scope > .expansion');
-  if (open) { open.remove(); return; } // second click folds it back up
-  // Two fast clicks would both pass the check above before either fetch
-  // lands, stacking two panels the toggle then removes one at a time.
-  if (item.dataset.drilling) return;
-  item.dataset.drilling = '1';
-  try {
-    const answer = await get(
-      `tenants/${encodeURIComponent(tenant())}/evidence/${encodeURIComponent(member.figure)}`
-      + `?subject=${encodeURIComponent(member.key)}`);
-    const nested = el('div', { class: 'expansion' },
-      answer.ok ? evidencePanel(answer.body) : problem(answer, 'No evidence:'));
-    item.append(nested);
-  } finally {
-    delete item.dataset.drilling;
+// The stored value beside the live re-derivation the tree below explains --
+// the citation this value carries, and, when the two disagree, the sentence
+// that says so and why (a record moved since the pass that wrote the row).
+function workValuePlate(working) {
+  return el('div', { class: 'work-plate' },
+    el('span', { class: 'work-value' }, working.stored ?? '—'),
+    el('span', { class: 'dim' }, ' stored · version ',
+      el('span', { class: 'mono' }, working.version)),
+    working.level ? el('span', { class: 'badge' }, working.level) : null,
+    // Both sides stated, always: the stored value is the citation, the
+    // live one is what the tree below explains, and "they agree" is a
+    // finding a verifier came for -- not something to show only when it
+    // fails.
+    working.agrees === false
+      ? el('div', { class: 'notice' }, working.note)
+      : (working.stored != null && working.live == null
+          ? el('div', { class: 'notice' }, 're-derived now: absent. ', working.note)
+          : (working.live != null
+              ? el('span', { class: 'faint' }, 're-derived now ',
+                  el('span', { class: 'mono' }, working.live), ' — agrees')
+              : null)));
+}
+
+// The tree renderer: one <li> per step, a two-column row (label, then the
+// value right-aligned and tabular), the records it read folded or open by
+// the rule the shape earns, and children nested the way the roster's own
+// .tree already draws dependency depth.
+function workingTree(step, opts) {
+  return el('ul', { class: 'tree work' }, workStep(step, opts || { depth: 0 }));
+}
+
+function workLabelLink(step) {
+  // The label goes to the most specific place there is: an operand that is
+  // itself a stored value opens ITS worksheet; a set's index opens the very
+  // bucket; only a measure or a set-less definition falls back to the
+  // declaration page, because nothing more specific exists for it.
+  if (step.figure && step.figure_subject) {
+    return el('a', { class: 'mono', href: workHash(step.figure, step.figure_subject) }, step.label);
   }
+  if (step.definition && step.bucket) {
+    return el('a', { class: 'mono', href: defHash(step.definition, { bucket: step.bucket }) }, step.label);
+  }
+  if (step.definition) {
+    return el('a', { class: 'mono', href: defHash(step.definition) }, step.label);
+  }
+  return el('span', { class: 'mono' }, step.label);
+}
+
+const VERDICT_WORD = { matched: 'matched', failed: 'failed', unknown: 'unknown', 'not-reached': '' };
+
+function workStep(step, opts) {
+  const depth = opts.depth || 0;
+  const nestHolder = el('div', { class: 'work-nest' });
+  const label = [workLabelLink(step)];
+  if (step.figure && step.figure_subject) {
+    // The label itself already opens the worksheet; the trace beside it is
+    // the way to the declaration, for whoever wants the text instead.
+    if (step.definition) {
+      label.push(' ', el('a', { class: 'trace', href: defHash(step.definition) }, 'definition'));
+    }
+    label.push(' ', depth < 6
+      ? workDrillToggle(step, depth, nestHolder)
+      : el('a', { class: 'trace', href: workHash(step.figure, step.figure_subject) }, 'deeper →'));
+  }
+  const verdict = step.verdict
+    ? el('span', { class: `work-verdict verdict-${step.verdict}` }, VERDICT_WORD[step.verdict] ?? step.verdict)
+    : null;
+  const row = el('div', { class: 'work-row' },
+    el('div', { class: 'work-label' }, label, verdict),
+    el('div', { class: 'work-display' }, step.display ?? '—'));
+  const body = [row];
+  if (step.note) body.push(el('div', { class: 'faint work-note' }, step.note));
+  // Children before records: a sum's working reads "which records" (the
+  // set, narrowed step by step) and then "what each contributed" -- the
+  // order a reader checks it in, and the order the definition wrote it.
+  if (step.children && step.children.length) {
+    body.push(el('ul', { class: 'tree work' }, step.children.map((child) => workStep(child, { depth }))));
+  }
+  const records = workRecords(step);
+  if (records) body.push(records);
+  body.push(nestHolder);
+  const classes = [`op-${step.op}`, step.verdict ? `verdict-${step.verdict}` : null].filter(Boolean).join(' ');
+  return el('li', { class: `work-step ${classes}` }, body);
+}
+
+// A drill toggle for an operand that is itself a stored value: fetches that
+// figure's own working and nests its root in place, one figure's worksheet
+// opening inside another's, capped so a cyclic-looking chain of figures
+// cannot recurse forever.
+function workDrillToggle(step, depth, nestHolder) {
+  const btn = el('button', {}, '▸ work');
+  btn.addEventListener('click', async () => {
+    if (nestHolder.childNodes.length) { nestHolder.replaceChildren(); btn.textContent = '▸ work'; return; }
+    if (btn.dataset.drilling) return; // guards the double fast-click, like the old partDrill
+    btn.dataset.drilling = '1';
+    btn.textContent = 'loading…';
+    try {
+      const answer = await get(
+        `tenants/${encodeURIComponent(tenant())}/working/${encodeURIComponent(step.figure)}`
+        + `?subject=${encodeURIComponent(step.figure_subject)}`);
+      if (!answer.ok) {
+        nestHolder.replaceChildren(problem(answer, 'Could not show this working:'));
+      } else if (!answer.body.state.ok) {
+        nestHolder.replaceChildren(unavailable(answer.body.state));
+      } else if (!answer.body.root) {
+        nestHolder.replaceChildren(el('p', { class: 'faint' }, 'Not yet computed for this subject.'));
+      } else {
+        nestHolder.replaceChildren(workingTree(answer.body.root, { depth: depth + 1 }));
+      }
+      btn.textContent = '▾ work';
+    } finally {
+      delete btn.dataset.drilling;
+    }
+  });
+  return btn;
+}
+
+// The record ledger under a node: role decides voice (nothing/removed/absent
+// are stated quietly, never dropped), folded behind a disclosure for the
+// shapes where the records are a roster (set/set-index/set-op/count), open
+// by default where they ARE the arithmetic (sum-measure, list, extreme,
+// stat, field-*).
+const OPEN_RECORD_OPS = new Set(['sum-measure', 'list', 'extreme', 'stat', 'field-total', 'field-pick']);
+
+function workRecords(step) {
+  if (!step.records || !step.records.length) return null;
+  const capLine = step.records_more
+    ? el('tr', {}, el('td', { colspan: '3', class: 'faint' },
+        `showing ${step.records.length} of ${step.records_total}.`,
+        step.note ? ` ${step.note}` : ''))
+    : null;
+  if (OPEN_RECORD_OPS.has(step.op)) {
+    // The arithmetic, open: the records that contributed are the working.
+    // The ones the measure could not read are still listed -- a roster
+    // quietly shorter than the value's citation is the lie this page
+    // exists to end -- but behind one line, so twelve "no estimate" rows
+    // do not bury the three that add up. Grouping by a server-stated role
+    // is layout; nothing here is counted into a value.
+    const took = step.records.filter((record) => record.role !== 'nothing');
+    const none = step.records.filter((record) => record.role === 'nothing');
+    const parts = [];
+    if (took.length) {
+      parts.push(el('table', { class: 'ledger work-records' },
+        took.map((record) => workRecordRow(record, step.record_kind)),
+        none.length ? null : capLine));
+    }
+    if (none.length) {
+      parts.push(el('details', { class: 'work-nothing' },
+        el('summary', {}, `${none.length} contributed nothing`),
+        el('table', { class: 'ledger work-records' },
+          none.map((record) => workRecordRow(record, step.record_kind)), capLine)));
+    }
+    return el('div', {}, parts);
+  }
+  const rows = step.records.map((record) => workRecordRow(record, step.record_kind));
+  if (capLine) rows.push(capLine);
+  const table = el('table', { class: 'ledger work-records' }, rows);
+  // A set-op's records are the ones it removed; say so on the fold, or
+  // "8 records" under "& work_issue.active — 16 remain" reads as the 16.
+  const removed = step.records.every((record) => record.role === 'removed');
+  const n = step.records_total || step.records.length;
+  return el('details', {}, el('summary', {}, removed ? `${n} removed` : `${n} records`), table);
+}
+
+function workRecordRow(record, kind) {
+  // The record's name opens the record's own page here -- the trace stays
+  // inside the UI, where the next question ("what else counted this?") is
+  // answered. The provider's own page is one step further, marked as the
+  // way out.
+  const link = record.url ? safeUrl(record.url) : null;
+  const shown = record.title || record.key;
+  const name = kind && record.held
+    ? el('a', { href: recordHash(kind, record.key) }, shown)
+    : shown;
+  return el('tr', { class: `role-${record.role}` },
+    el('td', {}, name, ' ', el('span', { class: 'faint mono' }, record.key),
+      link
+        ? [' ', el('a', { class: 'trace', href: link, target: '_blank', rel: 'noreferrer' }, 'source ↗')]
+        : null,
+      record.held ? null : el('span', { class: 'faint' }, ' (no longer held)')),
+    el('td', { class: 'mono num' }, record.display ?? '—'),
+    el('td', { class: 'faint' }, record.note || ''));
+}
+
+// The page for one value's worksheet: `#/work/<figure>/<subject>`.
+async function workView(figure, subject) {
+  const answer = await get(
+    `tenants/${encodeURIComponent(tenant())}/working/${encodeURIComponent(figure)}`
+    + `?subject=${encodeURIComponent(subject)}`);
+  if (!answer.ok) return [problem(answer, 'Could not show this working:')];
+  const working = answer.body;
+  const declaration = byName.get(working.figure);
+  const parts = [
+    el('nav', { class: 'crumbs' },
+      el('a', { href: '#/facts' }, 'Facts'), ' / ',
+      el('a', { class: 'mono', href: `#/facts/${encodeURIComponent(working.scope)}` }, working.scope), ' / ',
+      el('a', { class: 'mono', href: recordHash(working.scope, working.subject_key) },
+        working.subject_name || working.subject_key), ' / ',
+      el('a', { class: 'mono', href: defHash(working.figure) }, working.figure),
+      // The cell this value is for: a by-day figure keeps one worksheet per
+      // day, and two of them differ only here.
+      working.coordinate ? el('span', { class: 'mono' }, ` × ${working.coordinate}`) : null),
+    el('div', { class: 'title-block' },
+      el('div', { class: 'tb-head' },
+        el('h1', {}, working.sentence), ' ',
+        el('span', { class: 'badge figure' }, 'figure'),
+        el('span', { class: 'badge' }, working.unit),
+        declaration && declaration.grain ? el('span', { class: 'badge' }, `by ${declaration.grain}`) : null,
+        working.dimension ? el('span', { class: 'badge' }, `× ${working.dimension}`) : null,
+        working.coordinate ? el('span', { class: 'badge' }, working.coordinate) : null),
+      workValuePlate(working),
+      el('div', { class: 'tb-cite' },
+        'version ', el('span', { class: 'mono' }, working.version),
+        ' — the citation this value carries')),
+  ];
+  parts.push(el('h2', {}, 'The working'));
+  if (!working.state.ok) {
+    parts.push(unavailable(working.state));
+  } else if (!working.root) {
+    parts.push(el('p', { class: 'faint' }, 'Not yet computed for this subject.'));
+  } else {
+    parts.push(workingTree(working.root, { depth: 0 }));
+  }
+  if (working.band) {
+    parts.push(el('h2', {}, 'Band'), workingTree(working.band, { depth: 0 }));
+  }
+  if (declaration) {
+    parts.push(
+      el('h2', {}, 'Declared as'),
+      el('pre', {}, declaration.source),
+      el('p', {}, el('a', { class: 'mono', href: defHash(working.figure) }, 'the definition →')));
+  }
+  return parts;
 }
 
 // A self-contained paged browser in an expansion row: the door behind a
@@ -1083,13 +1281,13 @@ async function computedPage(kind, key, figure, banded, after) {
   const served = body.result;
   const rows = served.subjects.map((subject) => {
     const row = el('tr', {},
-      el('td', {}, el('span', { class: 'faint mono' }, subject.id),
+      el('td', {}, el('a', { class: 'mono', href: workHash(served.name, subject.id) }, subject.id),
         subject.dimension ? el('span', { class: 'dim' }, ` × ${subject.dimension}`) : null),
       el('td', { class: 'mono num' }, subject.display ?? '—'),
       banded ? el('td', { class: 'mono dim' }, served.banded ? subject.level : '') : null,
       el('td', {}, el('button', {
-        onclick: () => evidenceRow(row, served.name, subject.id),
-      }, 'evidence')));
+        onclick: () => showWorkRow(row, served.name, subject.id),
+      }, 'show work')));
     return row;
   });
   return {
@@ -1121,7 +1319,8 @@ async function citedPage(kind, key, entry, after) {
     el('td', {}, el('a', { href: recordHash(body.scope, row.subject) }, row.name),
       ' ', el('span', { class: 'faint mono' }, row.subject),
       row.dimension ? el('span', { class: 'dim' }, ` × ${row.dimension}`) : null),
-    el('td', { class: 'mono num' }, row.display ?? '—')));
+    el('td', { class: 'mono num' },
+      el('a', { class: 'mono', href: workHash(entry.figure, row.id) }, row.display ?? '—'))));
   return {
     ok: true,
     summary: `${body.rows.length} of ${body.total} citations — ${body.order}`,
@@ -1304,8 +1503,14 @@ async function recordView(kind, key) {
               'no stored value for this record'));
         }
         const rows = figure.subjects.map((subject, i) => {
+          // The figure name cell now opens THIS subject's worksheet, not
+          // the figure's general definition page -- a smaller trace link
+          // keeps the way to the declaration for whoever wants that instead.
+          const workLink = el('a', { class: 'mono', href: workHash(figure.name, subject.id) },
+            i ? '〃' : figure.name);
           const row = el('tr', {},
-            el('td', {}, i ? el('span', { class: 'faint mono' }, '〃') : cite,
+            el('td', {}, workLink,
+              i === 0 ? [' ', el('a', { class: 'trace', href: defHash(figure.name) }, 'definition')] : null,
               subject.dimension
                 ? el('span', { class: 'dim' }, ` × ${subject.dimension}`) : null),
             el('td', { class: 'mono num' }, subject.display ?? '—'),
@@ -1316,8 +1521,8 @@ async function recordView(kind, key) {
             banded ? el('td', { class: 'mono dim' },
               figure.banded ? subject.level : '—') : null,
             el('td', {}, el('button', {
-              onclick: () => evidenceRow(row, figure.name, subject.id),
-            }, 'evidence')));
+              onclick: () => showWorkRow(row, figure.name, subject.id),
+            }, 'show work')));
           return row;
         });
         // A by-day figure holds dozens of cells per subject; folded, so the
@@ -1425,7 +1630,10 @@ async function recordView(kind, key) {
               ' ', el('span', { class: 'faint mono' }, row.subject),
               row.dimension
                 ? el('span', { class: 'dim' }, ` × ${row.dimension}`) : null),
-            el('td', { class: 'mono num' }, row.display ?? '—')));
+            // The value links to that row's own worksheet: the number
+            // this record was counted into, shown its work.
+            el('td', { class: 'mono num' },
+              el('a', { class: 'mono', href: workHash(entry.figure, row.id) }, row.display ?? '—'))));
           if (entry.more) {
             // The walk's default page size is the sample's cap, so its
             // first page IS the rows above — the browse re-anchors the
@@ -1718,9 +1926,15 @@ async function activityView(params) {
       run.shown.map((change) => el('tr', {
         class: change.kind === 'removed' ? 'move removed' : 'move',
       },
+        // A moved value links to its own worksheet -- the row names the
+        // exact subject, so "why did this move?" is one click, not a hunt
+        // through the figure's whole roster. A removed row's value is gone
+        // with its subject, so it keeps the way to the declaration.
         el('td', {}, el('a', {
           class: 'mono',
-          href: `#/definitions/${encodeURIComponent(change.figure)}`,
+          href: change.kind === 'removed'
+            ? defHash(change.figure)
+            : workHash(change.figure, change.subject_id),
         }, change.figure)),
         el('td', { class: 'dim' }, change.label,
           change.kind === 'removed' ? [' ', el('span', { class: 'badge' }, 'removed')] : null),
