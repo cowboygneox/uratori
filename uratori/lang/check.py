@@ -2519,10 +2519,11 @@ class _Checker:
 
         self._statistics(d, bound, live=False, source=source)
         unit = self._reading_unit(source.unit, d)
-        band, band_on, band_reads = self._band(d, scope, source)
+        band, band_on, band_on_rank, band_reads = self._band(d, scope, source)
         requires = d.requires
         if not requires and any(
-            s.fn in ("mean", "median", "worst", "per_bucket") for s in d.calculate
+            s.fn in ("mean", "median", "worst", "per_bucket", "percentile")
+            for s in d.calculate
         ):
             # The unwritten minimum sample is one value, injected here so it is
             # hashed like a written one -- a floor applied at read time would
@@ -2554,6 +2555,7 @@ class _Checker:
                     requires=requires,
                     band=band,
                     band_on=band_on,
+                    band_on_rank=band_on_rank,
                     band_reads=band_reads,
                     source=source.name,
                 ),
@@ -2625,7 +2627,7 @@ class _Checker:
             )
 
         self._statistics(d, bound, live=True, source=None)
-        band, band_on, band_reads = self._band(d, scope, None)
+        band, band_on, band_on_rank, band_reads = self._band(d, scope, None)
         self.readings.append(
             _versioned_reading(
                 ReadingPlan(
@@ -2639,6 +2641,7 @@ class _Checker:
                     requires=d.requires,
                     band=band,
                     band_on=band_on,
+                    band_on_rank=band_on_rank,
                     band_reads=band_reads,
                     live_measure=measure,
                     live_set=expr,
@@ -2661,6 +2664,7 @@ class _Checker:
         seen: set[str] = set()
         series_declared = 0
         delta_declared = 0
+        percentile_declared = 0
         for stat in d.calculate:
             if stat.set not in bound:
                 raise CheckError(
@@ -2675,9 +2679,14 @@ class _Checker:
                     "buckets that contributed rather than records.",
                     stat.line,
                 )
-            if counts and stat.fn in ("mean", "median", "worst"):
+            if counts and stat.fn in ("mean", "median", "worst", "percentile"):
+                written = (
+                    f"percentile {stat.rank} of {stat.set}"
+                    if stat.fn == "percentile"
+                    else f"{stat.fn}({stat.set})"
+                )
                 raise CheckError(
-                    f"the figure under {d.name} stores a count, so {stat.fn}({stat.set}) is a "
+                    f"the figure under {d.name} stores a count, so {written} is a "
                     f"{stat.fn} per *{grain}* wearing a label that says per record -- a "
                     "plausible number of roughly the right magnitude, which is the worst "
                     f"kind of wrong. Over a count, sum is allowed, and per_bucket({stat.set}) "
@@ -2685,6 +2694,16 @@ class _Checker:
                     "objection to the others.",
                     stat.line,
                 )
+            if stat.fn == "percentile":
+                percentile_declared += 1
+                if percentile_declared > 1:
+                    raise CheckError(
+                        f"reading {d.name} declares two percentiles. A response carries "
+                        "one, so the second would be whichever the serve path kept, "
+                        "silently -- the same rule that keeps a reading to one series and "
+                        "one delta.",
+                        stat.line,
+                    )
             if stat.fn == "per_bucket" and live:
                 # A live reading measures records against the clock and has no
                 # window behind it, so there is no bucket count to divide by --
@@ -2751,7 +2770,7 @@ class _Checker:
                         stat.line,
                     )
             seen.add(stat.fn)
-        if "sum" in seen and seen & {"mean", "median", "worst", "per_bucket"}:
+        if "sum" in seen and seen & {"mean", "median", "worst", "per_bucket", "percentile"}:
             # `per_bucket` is in this set for a sharper reason than the
             # distributions are. Its numerator *is* the sum -- the same total,
             # divided by a number the window already reports -- so a reading
@@ -2800,7 +2819,7 @@ class _Checker:
 
     def _band(
         self, d: ReadingDecl, scope: str, source: FigurePlan | None
-    ) -> tuple[Ladder | None, StatisticFn | None, tuple[str, ...]]:
+    ) -> tuple[Ladder | None, StatisticFn | None, int | None, tuple[str, ...]]:
         """A reading's band: the same ladder a figure writes, judged over one
         of the reading's statistics.
 
@@ -2811,7 +2830,7 @@ class _Checker:
         never meet.
         """
         if d.band is None:
-            return (None, None, ())
+            return (None, None, None, ())
         band = d.band
         # The default is `mean`, so a band with no `on` over a reading that
         # calculates no mean is checked too. Left unchecked it compiled and
@@ -2963,7 +2982,14 @@ class _Checker:
         answered = "count" if wanted == "count" else (source.unit if source else "count")
         resolved = _scaled(resolve(band.ladder), answered, f"reading {d.name}")
         assert isinstance(resolved, Ladder)
-        return (resolved, wanted, tuple(sorted(reads)))
+        # The rank rides along with which statistic is judged: `on
+        # percentile` alone would tell the served window which field to band
+        # but not which rank the goal figure has to be reduced by, and the
+        # rank is only ever declared once, on the matching `calculate` line.
+        rank = next(
+            (s.rank for s in d.calculate if s.fn == wanted and s.rank is not None), None
+        )
+        return (resolved, wanted, rank, tuple(sorted(reads)))
 
     # --------------------------------------------------------- projection --
 
@@ -4257,17 +4283,24 @@ def _versioned_reading(
         "unit": plan.unit,
         # Two elements, exactly the shape a grainless statistic has always
         # hashed as -- `series(...) by <grain>` is retired, and the readings
-        # that never wrote one keep their historic versions.
-        "calculate": [[s.fn, s.set] for s in plan.calculate],
+        # that never wrote one keep their historic versions. A third element
+        # is appended only for a statistic that carries a rank, so a
+        # definition with no `percentile` still hashes the way it always has.
+        "calculate": [
+            [s.fn, s.set] + ([s.rank] if s.rank is not None else [])
+            for s in plan.calculate
+        ],
         "requires": [[r.count, r.set] for r in plan.requires] or None,
         # The ladder and the statistic it judges. `mean` hashes as absent, so
         # a band that names the default explicitly is the same definition as
         # one that leaves it out -- the same absent-unless-declared shape
-        # every other optional key here has.
+        # every other optional key here has. The rank rides beside `on` only
+        # when there is one, for the same reason.
         "band": (
             {
                 "ladder": _calc_hash(plan.band),
                 "on": plan.band_on if plan.band_on not in (None, "mean") else None,
+                **({"rank": plan.band_on_rank} if plan.band_on_rank is not None else {}),
             }
             if plan.band is not None
             else None
