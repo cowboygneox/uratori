@@ -34,14 +34,8 @@ product's end users; a host builds its own screens against the
   A window's date bounds carry **whose calendar** they are in wherever the
   answer has no single one: a calendar is a field on the subject's record,
   so two rows reading the same dates can be two different weeks -- and a
-  figure's rows carry an *evidence* button -- the
-  stored citation, joined back to the records, and made to *lead to the
-  amount*: the panel names the measure the value reads its members through,
-  a sum's or an extreme's rows each show that record as the measure reads it
-  now (live, like a rollup's parts -- a record corrected since the pass
-  visibly disagrees with the stored total, which is true), and a part row
-  opens its own citation in place, so the walk runs figure by figure down to
-  the records without leaving the page. A **bundle**'s page adds the slot
+  figure's rows carry a *show work* button that expands, inline, that
+  subject's worksheet (see below). A **bundle**'s page adds the slot
   table -- each address beside its member and any declared window spans --
   and its current answer is the tile itself: every member rendered under its
   slot name by the same code that kind gets standalone, each with its own
@@ -72,6 +66,25 @@ product's end users; a host builds its own screens against the
   row -- the figure's own order for computed rows, subject order for
   citations, keyset-paged so a boundary neither drops nor doubles a row; an
   unavailable figure answers with its state rather than an empty table.
+- **A value's worksheet.** `#/work/<figure>/<subject>` shows one stored
+  value's own page -- a school-child's "show your work" rather than a flat
+  roster of records. The title block prints the sentence, the stored value
+  large beside its version, and, when the live re-derivation disagrees, the
+  sentence saying so (a record moved since the pass that wrote the row).
+  Below it, the working: a tree of the calculation as declared, each step
+  its expression on the left and its value on the right, nested exactly as
+  deep as the calculation is. Sets show what a narrowing removed; a sum or
+  extreme shows every record it read, including the ones that carried no
+  measurement and so contributed nothing -- present and stated, never
+  dropped; a ladder shows every rung's verdict in order, matched, failed,
+  unknown or not reached; an operand that is itself a stored value opens its
+  own worksheet in place with a *work* toggle, or links straight to its own
+  page. Every value on the page that cites another figure -- a "computed for
+  this record" row, a "counted into" row, an arithmetic operand -- links
+  here instead of to the figure's general definition page, because the
+  reader followed one number, not the figure's whole population. Nothing on
+  this page is computed by the browser: the tree, the notes and every
+  display are rendered by the one evaluator the engine itself runs.
 - **Activity.** One entry per engine pass, newest first, cause before
   effect: what arrived (written/deleted counts, the kinds covered, whether it
   was a full rebuild) and then the movements it caused, each one

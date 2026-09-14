@@ -41,7 +41,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from ..engine.buckets import SEPARATOR, measure_of, subject_of
 from ..engine.project import format_value
@@ -727,6 +727,76 @@ class CitedPageOut(BaseModel):
     the reason `ComputedPageOut.order` gives. The page was composing this
     sentence itself, which is a client making a claim about a sequence it did
     not choose and cannot verify."""
+
+
+class RecordLineOut(BaseModel):
+    """One record under a working step's ledger: what it contributed, or the
+    reason it did not."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    key: str
+    title: str | None = None
+    url: str | None = None
+    held: bool
+    display: str | None = None
+    role: Literal["counted", "nothing", "removed", "absent", "winner", "listed"]
+    note: str | None = None
+
+
+class StepOut(BaseModel):
+    """One node of a value's working -- the tree mirrors the plan, and every
+    number on it is server-rendered: the client draws the tree, it never
+    sums, counts, divides or formats."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    op: Literal[
+        "set", "set-index", "set-op",
+        "count", "sum-measure", "list", "extreme", "stat", "field-total", "field-pick",
+        "figure-total", "spread", "rollup", "part", "coord", "figure", "subject-field",
+        "number", "text", "arith", "pick", "ladder", "rung", "otherwise", "days-between", "band",
+    ]
+    label: str
+    display: str | None = None
+    note: str | None = None
+    verdict: Literal["matched", "failed", "unknown", "not-reached"] | None = None
+    definition: str | None = None
+    figure: str | None = None
+    figure_subject: str | None = None
+    bucket: str | None = None
+    record_kind: str | None = None
+    records: list[RecordLineOut] = []
+    records_total: int = 0
+    records_more: bool = False
+    children: list[StepOut] = []
+
+
+class WorkingOut(BaseModel):
+    """One stored value's working: the citation joined to the arithmetic over
+    it, all the way to the facts. `evidence` answers "what does this cite";
+    this answers "how was it worked out" -- the same value, one level deeper."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    figure: str
+    version: str
+    unit: str
+    scope: str
+    subject: str
+    subject_key: str
+    subject_name: str | None
+    coordinate: str | None
+    dimension: str | None
+    sentence: str
+    state: Availability
+    stored: str | None
+    level: str | None
+    live: str | None
+    agrees: bool | None
+    note: str | None
+    root: StepOut | None
+    band: StepOut | None
 
 
 def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
@@ -1784,6 +1854,26 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                 detail=f"Nothing is stored for {subject} under {name}",
             )
         return answer
+
+    @ui.get(
+        "/ui/api/tenants/{tenant}/working/{figure}",
+        response_model=WorkingOut,
+        include_in_schema=False,
+    )
+    async def working(tenant: str, figure: str, subject: str, request: Request) -> WorkingOut:
+        s = _state(request)
+        world, library = ready(s)
+        facade = facade_for(s, world, library)
+        try:
+            answer = await facade.working(tenant, figure, subject)
+        except LookupError as refusal:
+            raise HTTPException(status_code=404, detail=str(refusal)) from refusal
+        if answer is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Nothing is stored for {subject} under {figure}",
+            )
+        return WorkingOut.model_validate(answer)
 
     return ui
 

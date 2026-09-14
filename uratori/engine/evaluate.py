@@ -144,6 +144,7 @@ class Readers:
         instants: InstantReader | None = None,
         subject_fields: SubjectFieldReader | None = None,
         spans: SpanReader | None = None,
+        trace: dict[int, object] | None = None,
     ) -> None:
         self.buckets = buckets
         self.measures = measures
@@ -154,6 +155,7 @@ class Readers:
         self.instants = instants or (lambda kind, path, member: None)
         self.subject_fields = subject_fields or (lambda kind, field, subject: None)
         self.spans = spans or (lambda index, member: 0)
+        self.trace = trace
 
 
 def evaluate(plan: FigurePlan, subject: str, readers: Readers) -> Result:
@@ -252,6 +254,19 @@ def _resolve(
     defined: dict[str, frozenset[str]],
     readers: Readers,
 ) -> frozenset[str]:
+    """Thin wrapper over `_resolve_body` that records the trace, when asked."""
+    value = _resolve_body(expr, subject, defined, readers)
+    if readers.trace is not None:
+        readers.trace[id(expr)] = value
+    return value
+
+
+def _resolve_body(
+    expr: SetExpr,
+    subject: str,
+    defined: dict[str, frozenset[str]],
+    readers: Readers,
+) -> frozenset[str]:
     if isinstance(expr, SetIndex):
         if isinstance(expr.bucket, BucketScope):
             return readers.buckets(expr.index, subject)
@@ -277,6 +292,20 @@ def _resolve(
 
 
 def _eval(
+    e: CalcExpr,
+    plan: FigurePlan,
+    subject: str,
+    sets: dict[str, frozenset[str]],
+    readers: Readers,
+) -> Value:
+    """Thin wrapper over `_eval_body` that records the trace, when asked."""
+    value = _eval_body(e, plan, subject, sets, readers)
+    if readers.trace is not None:
+        readers.trace[id(e)] = value
+    return value
+
+
+def _eval_body(
     e: CalcExpr,
     plan: FigurePlan,
     subject: str,
@@ -376,6 +405,8 @@ def _eval(
                 _eval(rung.right, plan, subject, sets, readers) if rung.right is not None else None
             )
             verdict = _compare(left, rung.op, right)
+            if readers.trace is not None:
+                readers.trace[id(rung)] = verdict
             if verdict is None:
                 # **A ladder stops on an unknown rather than falling through.**
                 # `otherwise` is the bottom of the band, and banding somebody the

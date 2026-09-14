@@ -45,6 +45,8 @@ from .engine.serve import (
     serve_figure,
     serve_reading,
 )
+from .engine.working import Working
+from .engine.working import build as build_working
 from .lang.plan import BundlePlan, Library
 from .lang.source import declaration_source
 from .results import BundleResult, Evidence, Result
@@ -890,6 +892,54 @@ class Uratori:
             raise LookupError(
                 f"{name} is a bundle: it composes definitions, computes nothing and "
                 "cites nothing. Each member's evidence lives on the member, under the "
+                "member's own name."
+            )
+        raise LookupError(f"No figure called {name}")
+
+    async def working(
+        self,
+        tenant: str,
+        name: str,
+        subject: str,
+    ) -> Working | None:
+        """One stored value's working: the citation `evidence` shows, joined
+        to the arithmetic that turned it into the number -- the same
+        evaluator that computed it, walked once more with a trace on.
+
+        Figures only, for the reason `evidence` gives, and the same
+        forwarding sentences: a reading, a projection, a summary and a
+        bundle all store nothing, so there is no working to show, only
+        somewhere else the answer lives.
+        """
+        lib = self._library
+
+        plan = lib.figure(name)
+        if plan is not None:
+            return await build_working(
+                self._store, self._facts, lib, self._schema, tenant, plan, subject
+            )
+
+        reading = lib.reading(name)
+        if reading is not None and reading.source is not None:
+            raise LookupError(
+                f"{name} is a reading: it stores nothing and is recomputed when asked. "
+                f"Its windows summarise {reading.source}'s stored days -- the working "
+                "lives there."
+            )
+        if reading is not None:
+            raise LookupError(
+                f"{name} is a live reading: it measures records against the clock and "
+                "stores nothing, so there is no stored working to show."
+            )
+        if lib.projection(name) is not None or lib.summary(name) is not None:
+            raise LookupError(
+                f"{name} is re-evaluated on every request and stores no values; its "
+                "rows are the evidence, and the results route serves them."
+            )
+        if lib.bundle(name) is not None:
+            raise LookupError(
+                f"{name} is a bundle: it composes definitions, computes nothing and "
+                "cites nothing. Each member's working lives on the member, under the "
                 "member's own name."
             )
         raise LookupError(f"No figure called {name}")
