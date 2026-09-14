@@ -1647,7 +1647,7 @@ class _Parser:
                 rank = int(raw)
                 self._keyword("of")
                 target = self._name("a set defined in depends")
-                out.append(Statistic(fn="percentile", set=target, rank=rank, line=line))  # type: ignore[arg-type]
+                out.append(Statistic(fn="percentile", set=target, rank=rank, line=line))
                 self._end_of_line()
                 self._skip_newlines()
                 continue

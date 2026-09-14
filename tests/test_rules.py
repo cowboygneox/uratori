@@ -677,6 +677,28 @@ def test_percentile_is_the_nearest_rank_value_never_an_interpolation() -> None:
     assert statistics_of(plan, ten)["percentile"] == 9.0
 
 
+def test_percentile_rank_index_does_not_drift_on_float_rounding() -> None:
+    """The float form of `ceil(rank / 100 * n)` overshoots for pairs like p7
+    of a hundred and p14 of fifty -- the product lands a hair above the
+    integer (7/100 * 100 is 7.000000000000001), which would answer the
+    record one past the one the rank names."""
+    hundred = Sample(
+        values=tuple(float(v) for v in range(1, 101)),
+        points=(),
+        buckets_covered=100,
+        buckets_requested=100,
+    )
+    assert statistic_of("percentile", hundred, rank=7) == 7.0
+
+    fifty = Sample(
+        values=tuple(float(v) for v in range(1, 51)),
+        points=(),
+        buckets_covered=50,
+        buckets_requested=50,
+    )
+    assert statistic_of("percentile", fifty, rank=14) == 7.0
+
+
 def test_percentile_of_a_single_value_is_that_value() -> None:
     """The rank cannot fall outside a sample of one -- every rank from 1 to 99
     names the same, only, value."""

@@ -14,7 +14,6 @@ into its version.
 
 from __future__ import annotations
 
-import math
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -108,7 +107,11 @@ def statistic_of(fn: StatisticFn, sample: Sample, rank: int | None = None) -> fl
             return None
         ordered = sorted(values)
         n = len(ordered)
-        index = math.ceil(rank / 100 * n) - 1
+        # Integer ceiling division, not `math.ceil(rank / 100 * n)`: the
+        # float product overshoots for some pairs (7/100 * 100 is
+        # 7.000000000000001), which would answer the 8th value as the p7 of
+        # a hundred -- one record off the one the rank names.
+        index = -(-rank * n // 100) - 1
         index = min(max(index, 0), n - 1)
         return ordered[index]
     # `series` and `delta` are one cell per bucket rather than a statistic;
