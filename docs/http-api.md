@@ -1029,6 +1029,15 @@ a teach that removes a definition ends every standing entry on it with one
 `error` frame naming the entry, because a subscription that can never be
 impacted again going quiet would be the freeze this protocol exists to end.
 
+An entry may carry `subject`, the same repeatable list `?subject=` is on the
+HTTP route -- but the socket does not serve pooling **yet**, so an entry
+that names one is refused the same way an unknown name is, rather than
+silently accepted and answered unpooled: a client asking to follow a pooled
+row and getting back an ordinary per-subject one would not notice the
+argument was dropped until the numbers disagreed with the HTTP route it
+matches against. Pooling is HTTP-only for now; poll `GET
+.../results/{name}?subject=` for a pooled row instead of subscribing to it.
+
 Anything that does not parse as one of these frames is **ignored** rather
 than fatal: a client that sends nonsense is a bug in that client, and taking
 the connection down makes the bug look like an outage. The one parseable

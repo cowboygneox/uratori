@@ -15,9 +15,13 @@ know nothing about which store they were given.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from uratori import MemoryEngineStore, MemoryFactStore, Schema, Uratori, compile_source
+from uratori.engine.serve import _pool_kind
+from uratori.lang.ast import Extreme
 from uratori.results import BundleResult, Result
 from uratori.windows import WindowError
 
@@ -28,6 +32,7 @@ DEFS = """
 fact room:
     name name
     name as text
+    goal_seconds as number
 
 # One case, start to finish.
 fact turnover_record:
@@ -102,6 +107,59 @@ reading room.cases_banded(range):
     calculate:
         sum(c)
 
+# The room's own turnover, reduced to one statistic per bucket already --
+# a `median` figure, not a `list` or a `count`. Exists to prove pooling
+# refuses it: re-pooling an already-reduced bucket by concatenating or
+# summing it across subjects would be a median of medians.
+figure room.turnover_typical bucketed:
+    display "{room} typical turnover"
+    depends:
+        t = turnover_record.by_day:{room}
+    calculate:
+        median(turnover_record.length over t)
+
+# The room's typical turnover, reduced from the median figure above.
+reading room.typical(range):
+    display "{room} typical"
+    depends:
+        m = room.turnover_typical in range
+    calculate:
+        median(m)
+
+# The daily turnover goal, read straight off the room's own record -- the
+# same value at every bucket and, in the fixture below, the same value on
+# every room, so pooling several rooms must not move it.
+figure room.goal_day bucketed:
+    display "{room} goal"
+    unit duration
+
+    depends:
+        t = turnover_record.by_day:{room}
+    calculate:
+        room.goal_seconds
+
+# Turnover banded against the shared goal, on the median.
+reading room.turnover_median_banded(range):
+    display "{room} vs goal (median)"
+    band on median:
+        when value > room.goal_day then "over"
+        otherwise "ok"
+    depends:
+        d = room.turnover_day in range
+    calculate:
+        median(d)
+
+# Turnover banded against the shared goal, on the p90.
+reading room.turnover_p90_banded(range):
+    display "{room} vs goal (p90)"
+    band on percentile:
+        when value > room.goal_day then "over"
+        otherwise "ok"
+    depends:
+        d = room.turnover_day in range
+    calculate:
+        percentile 90 of d
+
 # A note left on a room, with no time dimension at all.
 fact room_note:
     name ref
@@ -129,9 +187,10 @@ async def _engine():
     library = compile_source(DEFS, WORLD)
     engine = Uratori(schema=WORLD, library=library, store=store, facts=facts)
 
-    facts.put("t1", "room", "r1", {"name": "OR 1"})
-    facts.put("t1", "room", "r2", {"name": "OR 2"})
-    facts.put("t1", "room", "r3", {"name": "OR 3"})
+    facts.put("t1", "room", "r1", {"name": "OR 1", "goal_seconds": 1200.0})
+    facts.put("t1", "room", "r2", {"name": "OR 2", "goal_seconds": 1200.0})
+    facts.put("t1", "room", "r3", {"name": "OR 3", "goal_seconds": 1200.0})
+    facts.put("t1", "room", "r5", {"name": "OR 5", "goal_seconds": 1200.0})
 
     # r1: two cases on 2026-08-20, lengths 10 and 30 minutes.
     facts.put(
@@ -151,6 +210,14 @@ async def _engine():
          "started_at": "2026-08-20T09:00:00Z", "completed_at": "2026-08-20T09:50:00Z"},
     )
     # r3 (a room with nothing stored -- named in the pool, contributes nothing).
+
+    # r5: one case on 2026-08-20, length 30 minutes -- a third contributor
+    # to the goal-invariance tests, sharing r1 and r2's own goal value.
+    facts.put(
+        "t1", "turnover_record", "tv5",
+        {"ref": "TV5", "room_id": "r5",
+         "started_at": "2026-08-20T11:00:00Z", "completed_at": "2026-08-20T11:30:00Z"},
+    )
 
     # Cases closed: r1 has 2 on the 20th, r2 has 3 on the 20th.
     for i in range(2):
@@ -234,6 +301,88 @@ async def test_a_band_threshold_is_pooled_over_the_same_subjects() -> None:
     row = result.subjects[0]
     assert row.windows[0].total == pytest.approx(5.0)
     assert row.level == "ok"
+
+
+async def test_a_reading_over_a_per_bucket_statistic_refuses_pooling() -> None:
+    """`room.turnover_typical` is a `median` figure: each bucket is already a
+    statistic taken over one room's own records. Pooling it by concatenating
+    or summing across rooms would be a median of medians -- the exact
+    arithmetic a reading exists to withhold -- so the request is refused
+    before any data is even fetched."""
+    engine, *_ = await _engine()
+    with pytest.raises(WindowError, match="median of medians"):
+        await engine.answer(
+            "t1", "room.typical", trailing=[7], at="2026-08-24", subject=["r1", "r2"]
+        )
+
+
+async def test_a_carried_or_extreme_figure_is_not_a_poolable_kind() -> None:
+    """`_pool_kind` is what `serve_reading` asks before it will pool a
+    reading's source at all -- the same decision `room.turnover_typical`'s
+    end-to-end refusal above exercises for a `median` figure. Checked
+    directly here for the other two unpoolable shapes, since compiling a
+    `latest(...)` figure needs a moment measure and produces a figure whose
+    unit a *reading* refuses outright regardless of pooling, which would
+    test the wrong refusal.
+
+    A point value taken over one subject's own records -- the latest record,
+    or a carried-forward value repeated across buckets nobody moved it in --
+    is not an additive total and not a list: pooling it by summing or
+    concatenating would answer a number no definition claims."""
+    engine, store, library, facts = await _engine()
+    turnover_day = library.figure("room.turnover_day")
+    assert turnover_day is not None
+
+    extreme = replace(turnover_day, calculate=Extreme(which="latest", measure="x", set="t"))
+    assert _pool_kind(extreme) is None
+
+    carried_count = replace(library.figure("room.cases_day"), carried=True)
+    assert _pool_kind(carried_count) is None
+
+
+async def test_list_and_count_figures_still_pool_after_the_kind_check() -> None:
+    """The control for the two refusals above: the kind check must not have
+    collaterally broken the two shapes that were always meant to pool."""
+    engine, *_ = await _engine()
+    median = _windowed(
+        await engine.answer(
+            "t1", "room.turnover_median", trailing=[7], at="2026-08-24", subject=["r1", "r2"]
+        )
+    )
+    assert median.subjects[0].windows[0].median == pytest.approx(30 * 60.0)
+    total = _windowed(
+        await engine.answer(
+            "t1", "room.cases_total", trailing=[7], at="2026-08-24", subject=["r1", "r2"]
+        )
+    )
+    assert total.subjects[0].windows[0].total == pytest.approx(5.0)
+
+
+async def test_a_band_threshold_shared_across_pooled_subjects_is_not_multiplied() -> None:
+    """r1, r2 and r5 all carry the *same* goal, 1200 seconds. Pooled turnover
+    is [600, 1800, 3000, 1800] (r1's two cases, r2's one, r5's one) -- median
+    1800, p90 3000, both above the shared goal. Concatenating the goal
+    (the correct pooling for a threshold) leaves it at 1200 regardless of how
+    many rooms echo it, so both bands read "over"; summing it the way a
+    `count` source pools would inflate it to 3600 and flip both to "ok" --
+    which is exactly the bug this test would catch."""
+    engine, *_ = await _engine()
+    median_band = _windowed(
+        await engine.answer(
+            "t1", "room.turnover_median_banded", trailing=[7], at="2026-08-24",
+            subject=["r1", "r2", "r5"],
+        )
+    )
+    p90_band = _windowed(
+        await engine.answer(
+            "t1", "room.turnover_p90_banded", trailing=[7], at="2026-08-24",
+            subject=["r1", "r2", "r5"],
+        )
+    )
+    assert median_band.subjects[0].windows[0].median == pytest.approx(1800.0)
+    assert median_band.subjects[0].level == "over"
+    assert p90_band.subjects[0].windows[0].percentile == pytest.approx(3000.0)
+    assert p90_band.subjects[0].level == "over"
 
 
 async def test_a_duplicate_subject_is_refused() -> None:

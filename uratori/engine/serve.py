@@ -749,6 +749,15 @@ async def serve_reading(
     if source is None:
         raise ValueError(f"{plan.name} reads a figure that is not in the library")
 
+    pool_kind = _pool_kind(source) if pool is not None else None
+    if pool is not None and pool_kind is None:
+        raise WindowError(
+            f"{plan.name} was asked with ?subject=, and its source {source.name} stores a "
+            "per-bucket statistic rather than a list or a count -- pooling it would be a "
+            "median of medians (or a sum of instants), the exact arithmetic a reading "
+            "exists to withhold. Pool a reading over a list or a count figure instead."
+        )
+
     state = await availability(store, library, tenant, source)
     # **Every subject's own calendar, and they need not agree.** A window is
     # a span of positions in a subject's bucket sequence, and that sequence
@@ -887,9 +896,19 @@ async def serve_reading(
             # forced into -- averaging three medians, or fetching all three
             # and computing client-side, either of which is the duplicate
             # computation this engine exists to refuse.
-            pooled_held = _pool_held(by_subject, pool)
+            pooled_held = (
+                _pool_concat(by_subject, pool)
+                if pool_kind == "list"
+                else _pool_sum(by_subject, pool)
+            )
+            # The threshold always concatenates, whatever the goal figure's
+            # own kind -- several subjects sharing one facility-wide goal
+            # carry the same value at every label, and concatenating them
+            # before reducing through the band's own statistic answers back
+            # that shared goal; summing it the way a count source pools
+            # would triple it instead.
             pooled_goals = {
-                name: _pool_held(per_subject, pool) for name, per_subject in goals.items()
+                name: _pool_concat(per_subject, pool) for name, per_subject in goals.items()
             }
             # A calendar written in the definition applies to the pool too;
             # short of that there is no single subject's calendar to borrow,
@@ -1005,25 +1024,50 @@ async def serve_reading(
     )
 
 
-def _pool_held(
+def _pool_kind(source: FigurePlan) -> str | None:
+    """Whether -- and how -- `source`'s own buckets may be pooled across
+    subjects, decided from the figure's **declaration**, never from the
+    shape of a stored value: a scalar bucket looks the same on the wire
+    whether it came from `count(...)`, `median(... over ...)` or `latest(...)
+    carried forward`, and only the plan that produced it knows which.
+
+    `list` figures concatenate: a distribution statistic then sees the
+    pooled population rather than a mean of subject means. `count` and
+    `sum` figures are per-bucket totals, additive by construction, so they
+    sum per label the way a lone subject's own scalar bucket already is one
+    number.
+
+    Everything else refuses. A `mean`/`median`/`worst` bucket, an
+    `latest`/`earliest` extreme, or a carried-forward value is *already* a
+    statistic taken over one subject's own records -- re-pooling it by
+    summing or concatenating would be a median of medians, or a sum of
+    instants, which is the exact arithmetic a reading exists to withhold
+    from a client and must not perform on its own behalf either.
+    """
+    if source.carried:
+        return None
+    if isinstance(source.calculate, ListOf):
+        return "list"
+    if isinstance(source.calculate, (Count, LangSum)):
+        return "count"
+    return None
+
+
+def _pool_concat(
     by_subject: Mapping[str, Sequence[tuple[str, Value]]],
     subject_ids: Sequence[str],
 ) -> list[tuple[str, Value]]:
-    """Several subjects' stored buckets, pooled into the one shape a single
-    subject's own `held` list already has -- so window slicing, `sample_over`
-    and the band threshold all run over it **unchanged**, rather than a
-    second implementation of any of the three.
+    """Several subjects' stored buckets, concatenated per label -- the
+    pooling a `list` figure's own values take, and the pooling a band's
+    **threshold** figure always takes regardless of its own kind: several
+    rooms of one facility share one goal, so concatenating their goal
+    figure's values and reducing through the band's own statistic answers
+    back that same shared goal, where summing would triple it.
 
-    A `list` figure's buckets are concatenated, so a distribution statistic
-    sees the pooled population rather than a mean of subject means -- the
-    duplicate arithmetic a client computing "the median of three medians"
-    would otherwise be forced into. A `count` figure's buckets are summed per
-    label first, matching the single scalar a lone subject's own bucket
-    already is, so `sum`, `per_bucket` and `delta` stay meaningful over the
-    result. A label none of the named subjects wrote is absent here too -- a
-    hole, not a pooled nought -- and a subject the tenant holds nothing for
-    simply contributes no labels, which is a true zero contribution rather
-    than an error.
+    A label none of the named subjects wrote is absent here too -- a hole,
+    not a pooled nought -- and a subject the tenant holds nothing for simply
+    contributes no labels, which is a true zero contribution rather than an
+    error.
     """
     per_label: dict[str, list[float | list[float | None]]] = {}
     for sid in subject_ids:
@@ -1033,17 +1077,32 @@ def _pool_held(
             per_label.setdefault(label, []).append(value)
     out: list[tuple[str, Value]] = []
     for label, values in per_label.items():
-        if any(isinstance(v, list) for v in values):
-            merged: list[float | None] = []
-            for v in values:
-                if isinstance(v, list):
-                    merged.extend(v)
-                else:
-                    merged.append(v)
-            out.append((label, merged))
-        else:
-            out.append((label, float(sum(values))))  # type: ignore[arg-type]
+        merged: list[float | None] = []
+        for v in values:
+            if isinstance(v, list):
+                merged.extend(v)
+            else:
+                merged.append(v)
+        out.append((label, merged))
     return out
+
+
+def _pool_sum(
+    by_subject: Mapping[str, Sequence[tuple[str, Value]]],
+    subject_ids: Sequence[str],
+) -> list[tuple[str, Value]]:
+    """Several subjects' scalar buckets, summed per label -- the pooling a
+    `count` or `sum` figure's own values take, matching the single scalar a
+    lone subject's own bucket already is, so `sum`, `per_bucket` and `delta`
+    stay meaningful over the result. Absence and true-zero contribution work
+    the same way `_pool_concat` documents."""
+    per_label: dict[str, list[float]] = {}
+    for sid in subject_ids:
+        for label, value in by_subject.get(sid, ()):
+            if value is None or isinstance(value, (str, list)):
+                continue
+            per_label.setdefault(label, []).append(value)
+    return [(label, float(sum(values))) for label, values in per_label.items()]
 
 
 async def _band_goals(
