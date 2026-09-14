@@ -329,7 +329,7 @@ async def test_a_carried_or_extreme_figure_is_not_a_poolable_kind() -> None:
     or a carried-forward value repeated across buckets nobody moved it in --
     is not an additive total and not a list: pooling it by summing or
     concatenating would answer a number no definition claims."""
-    engine, store, library, facts = await _engine()
+    _e, _store, library, _facts = await _engine()
     turnover_day = library.figure("room.turnover_day")
     assert turnover_day is not None
 
@@ -404,7 +404,7 @@ async def test_a_figure_refuses_subject() -> None:
 
 
 async def test_a_projection_refuses_subject() -> None:
-    engine, store, library, facts = await _engine()
+    _e, store, _library, facts = await _engine()
     extra = """
 # One row per case.
 projection case_record.item:
@@ -418,7 +418,7 @@ projection case_record.item:
 
 
 async def test_a_summary_refuses_subject() -> None:
-    engine, store, library, facts = await _engine()
+    _e, store, _library, facts = await _engine()
     extra = """
 # One row per case.
 projection case_record.item:
@@ -441,7 +441,7 @@ async def test_a_bundle_with_a_figure_member_refuses_subject_with_400_shaped_mes
     refusal uses -- rather than the 422 a bare figure gets, because the
     figure being wrong is one member of a request that named several things
     at once."""
-    engine, store, library, facts = await _engine()
+    _e, store, _library, facts = await _engine()
     extra = """
 # A tile: cases total beside the raw daily figure.
 bundle room.board:
@@ -455,7 +455,7 @@ bundle room.board:
 
 
 async def test_a_bundle_of_readings_pools_every_member() -> None:
-    engine, store, library, facts = await _engine()
+    _e, store, _library, facts = await _engine()
     extra = """
 # A tile: two readings, both poolable.
 bundle room.readings_board:
