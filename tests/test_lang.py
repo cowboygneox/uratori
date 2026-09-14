@@ -1378,10 +1378,14 @@ reading team_person.to_merge(range):
     )
 
 
-def test_an_effort_figure_may_not_be_read_over_a_range() -> None:
-    """Every renderer on the reading path branches on count or duration, so an
-    effort would be banded as wall-clock and printed as raw seconds."""
-    refuses(
+def test_an_effort_figure_read_over_a_range_answers_effort() -> None:
+    """Effort used to be refused as a reading source because it rendered
+    against a tenant working-day dial the reading path did not have. That
+    dial is gone -- effort now goes through the same `format_value` every
+    window cell already calls, so the plan an effort reading compiles to
+    says `unit == "effort"`, the same way an amount measure's sum infers
+    `unit == "amount"` (see the amount-inference test above)."""
+    lib = compile_ok(
         """
 # d
 figure team_person.effort_by_day bucketed:
@@ -1398,9 +1402,11 @@ reading team_person.effort(range):
         m = team_person.effort_by_day in range
     calculate:
         sum(m)
-""",
-        "measured in effort",
+"""
     )
+    plan = lib.reading("team_person.effort")
+    assert plan is not None
+    assert plan.unit == "effort"
 
 
 # ----------------------------------------------------------- projection --

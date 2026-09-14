@@ -2773,23 +2773,29 @@ class _Checker:
 
     def _reading_unit(
         self, source: FigureUnit, d: ReadingDecl
-    ) -> Literal["count", "duration", "amount"]:
-        if source == "effort":
-            raise CheckError(
-                f"{d.name} reads a figure measured in effort -- seconds of working time, "
-                "rendered against the tenant's working day. Every renderer on the reading "
-                "path branches on count or duration, so an effort would be banded as "
-                "wall-clock and printed as raw seconds.",
-                d.line,
-            )
+    ) -> Literal["count", "duration", "effort", "amount"]:
+        # Effort used to be refused here: it rendered against a tenant's
+        # working-day dial that the reading renderers did not have, so a sum
+        # of estimates over a window would have printed as raw seconds
+        # instead of hours. That dial is gone -- effort now prints through
+        # the same `format_value` every window cell already calls, exactly
+        # the way a figure prints it, so `sum(delivered)` over an effort
+        # figure reads "40.0h" like the figure would. `count` still renders
+        # as a plain tally (serve.py's window formatting), and a `band` on an
+        # effort reading scales its literals the same way a figure's effort
+        # ladder does (`_scaled`, `_TIMED_UNITS`), so `2 days` on the band
+        # means 48 hours of working time -- the same reading a figure gives
+        # that literal today.
+        #
         # Amount is not folded into the `duration` branch below: `sum`, `mean`,
         # `median`, `worst` and every per-bucket `series`/`delta` cell render
         # through `format_value`, which already has an amount branch of its
         # own -- compact and abbreviated, no `%g` fallback and no seconds
-        # arithmetic to get wrong. Unlike effort there is no tenant dial in
-        # the way, so there is nothing here to get wrong the way effort would.
+        # arithmetic to get wrong.
         if source == "amount":
             return "amount"
+        if source == "effort":
+            return "effort"
         return "count" if source == "count" else "duration"
 
     def _band(

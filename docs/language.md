@@ -1522,18 +1522,21 @@ figures agree by construction about which bucket an order is in, because
 every label is derived from the same zoned day.
 
 The source figure must share the reading's scope, be time-keyed, and store a
-number -- an effort figure is refused (the reading path renders count,
-duration or amount, so an effort would be banded as wall-clock and printed as
-raw seconds), as are a word and a moment. An amount figure is not refused: a
-board's trailing spend is exactly `sum`/`series`/`delta` over a day-bucketed
-amount figure, and every one of those renders through the same compact,
-abbreviated formatting the figure path uses, with no tenant dial in the way
-an effort has one. `band on sum` over an amount reading takes a plain
-number as its threshold -- an amount has no scale words the way a duration
-does (`3 days`), so there is nothing to convert. And **a
-reading may only read a figure**, never another reading: composing them is
-how a team number becomes a mean of means, weighting each person equally
-instead of each record.
+number -- a word and a moment are refused. An effort figure is not refused:
+it renders through the same hours formatting the figure path already uses
+(there is no working-day dial left to divide by), so `sum`/`series`/`delta`
+over a day-bucketed effort figure prints "40.0h" the same way the figure
+would, and a `band` on it scales its literals the same way a figure's effort
+ladder does -- `2 days` still means forty-eight hours of working time. An
+amount figure is not refused either: a board's trailing spend is exactly
+`sum`/`series`/`delta` over a day-bucketed amount figure, and every one of
+those renders through the same compact, abbreviated formatting the figure
+path uses, with no tenant dial in the way an effort used to have. `band on
+sum` over an amount reading takes a plain number as its threshold -- an
+amount has no scale words the way a duration does (`3 days`), so there is
+nothing to convert. And **a reading may only read a figure**, never another
+reading: composing them is how a team number becomes a mean of means,
+weighting each person equally instead of each record.
 
 ### Live: over records, right now
 

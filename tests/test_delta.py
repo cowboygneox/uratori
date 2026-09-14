@@ -576,6 +576,187 @@ async def test_an_amount_reading_renders_sum_series_and_delta_compactly() -> Non
     ], "a fall renders signed and abbreviated, with no currency mark"
 
 
+EFFORT_DAILY = compile_source(
+    BASE
+    + """
+measure work_issue.estimate = estimateSeconds in effort
+
+# Delivered estimate, day by day.
+figure team_person.effort_delivered bucketed:
+    display "{team_person} delivered"
+    depends:
+        done = work_issue.delivered_by_day:{team_person}
+    calculate:
+        sum(work_issue.estimate over done)
+
+# Delivered estimate, summed over a window, with its shape and its movement.
+reading team_person.velocity(range):
+    display "{team_person} velocity"
+    depends:
+        d = team_person.effort_delivered in range
+    calculate:
+        sum(d)
+        series(d)
+        delta(d)
+
+# Delivered estimate, per day of the window -- a rate, not a total.
+reading team_person.effort_rate(range):
+    display "{team_person} rate"
+    depends:
+        d = team_person.effort_delivered in range
+    calculate:
+        per_bucket(d)
+
+# Delivered estimate, banded against a team's own pace.
+reading team_person.effort_banded(range):
+    display "{team_person} velocity"
+    band on sum:
+        when value >= 2 days then "over"
+        otherwise "ok"
+    depends:
+        d = team_person.effort_delivered in range
+    calculate:
+        sum(d)
+"""
+)
+
+
+async def _seeded_effort() -> tuple[SpyStore, float]:
+    store = SpyStore()
+    figure = EFFORT_DAILY.figure("team_person.effort_delivered")
+    assert figure is not None
+    tenant = "t1"
+    await store.set_pointer(
+        tenant,
+        figure.name,
+        Pointer(version=figure.version, settings_fingerprint=""),
+    )
+    await store.set_buckets(tenant, "work_issue.delivered_by_day", "c1", ["p1@2026-03-10"])
+    for day, value in (
+        ("2026-03-08", [3600.0]),  # the window's oldest day, 1h
+        ("2026-03-09", [7200.0]),  # 2h -- the middle day
+        ("2026-03-10", [3600.0]),  # 1h -- a fall from the day before
+    ):
+        await store.save(
+            tenant, figure.name, figure.version, f"p1@{day}", value, (), "P One"
+        )
+    return store, 1_773_172_800_000.0  # 2026-03-10T20:00Z, midday in Los Angeles
+
+
+async def _seeded_effort_totalling(seconds: float) -> tuple[SpyStore, float]:
+    """One day's delivery inside the window, totalling exactly `seconds` --
+    the shape a band test needs: one number to compare against a threshold,
+    with no series or delta arithmetic to get in the way of reading the
+    verdict."""
+    store = SpyStore()
+    figure = EFFORT_DAILY.figure("team_person.effort_delivered")
+    assert figure is not None
+    tenant = "t1"
+    await store.set_pointer(
+        tenant,
+        figure.name,
+        Pointer(version=figure.version, settings_fingerprint=""),
+    )
+    await store.set_buckets(tenant, "work_issue.delivered_by_day", "c1", ["p1@2026-03-10"])
+    await store.save(
+        tenant, figure.name, figure.version, "p1@2026-03-10", [seconds], (), "P One"
+    )
+    return store, 1_773_172_800_000.0  # 2026-03-10T20:00Z, midday in Los Angeles
+
+
+async def test_an_effort_reading_renders_sum_in_hours_not_raw_seconds() -> None:
+    """The motivating case for lifting the effort refusal: a windowed sum of
+    estimate-seconds must print through the same hours formatting a figure
+    already uses, not the raw total a `count`-shaped renderer would have
+    produced (a total printed as "10800" instead of "3.0h")."""
+    store, at = await _seeded_effort()
+    reading = EFFORT_DAILY.reading("team_person.velocity")
+    assert reading is not None
+    result = await serve_reading(store, EFFORT_DAILY, "t1", reading, [3], at_ms=at)
+    window = result.subjects[0].windows[0]
+
+    assert window.total == pytest.approx(3600.0 + 7200.0 + 3600.0)
+    assert window.display["total"] == "4.0h", (
+        "a sum of estimate-seconds renders in hours, the way the underlying "
+        "effort figure would -- not as the raw seconds total"
+    )
+
+
+async def test_an_effort_readings_series_and_delta_render_in_hours_too() -> None:
+    """`series` carries the raw, untouched points -- a screen's
+    parts-and-totals check has to compare against the same floats the sum
+    was built from, not a rendered string -- while `delta` renders each cell
+    the same way `total` does. A mistake that replaced the effort branch of
+    `format_value` with the `%g` fallthrough would leave `delta_display`
+    reading raw seconds ("3600") instead of hours ("1.0h"), which is exactly
+    what this asserts against."""
+    store, at = await _seeded_effort()
+    reading = EFFORT_DAILY.reading("team_person.velocity")
+    assert reading is not None
+    result = await serve_reading(store, EFFORT_DAILY, "t1", reading, [3], at_ms=at)
+    window = result.subjects[0].windows[0]
+
+    assert window.series == [3600.0, 7200.0, 3600.0], (
+        "the raw points are untouched -- rendering happens once, in display"
+    )
+    assert window.display["total"] == "4.0h"
+
+    assert window.delta is not None
+    assert window.delta[1] == pytest.approx(7200.0 - 3600.0)
+    assert window.delta[2] == pytest.approx(3600.0 - 7200.0)
+    # Signed the same way a duration delta is (see the negative-duration test
+    # below): unsigned when positive, a leading "-" when negative -- there is
+    # no "+" anywhere on this wire.
+    assert window.delta_display == [None, "1.0h", "-1.0h"], (
+        "a rise and a fall both render in hours, the fall signed"
+    )
+
+
+async def test_an_effort_readings_per_bucket_rate_reads_as_hours_per_day() -> None:
+    """A rate of effort per day is still effort -- `per_bucket` divides the
+    window's total by the days it spans, and the quotient is still a number
+    of hours of working time, never the raw seconds a `%g` fallthrough would
+    print. 14400 seconds delivered over the 3-day window this asks for is
+    4800 seconds, i.e. one hour twenty, per day -- "1.3h", not "4800" and not
+    a duration's day."""
+    store, at = await _seeded_effort()
+    reading = EFFORT_DAILY.reading("team_person.effort_rate")
+    assert reading is not None
+    result = await serve_reading(store, EFFORT_DAILY, "t1", reading, [3], at_ms=at)
+    window = result.subjects[0].windows[0]
+
+    assert window.buckets_requested == 3
+    assert window.per_bucket == pytest.approx((3600.0 + 7200.0 + 3600.0) / 3)
+    assert window.display["per_bucket"] == "1.3h"
+
+
+async def test_an_effort_readings_band_scales_its_days_literal_to_working_hours() -> None:
+    """`_scaled` converts a ladder's `2 days` to seconds before comparing --
+    172800 of them, `SECONDS_PER["days"] * 2` -- and does it identically for
+    `effort` and `duration` (`_TIMED_UNITS`), which is what the language docs
+    promise ("2 days still means forty-eight hours of working time"). A
+    subject delivering 10800 seconds (3h) reads under that threshold; one
+    delivering 180000 seconds (50h) reads over it. If the effort branch fell
+    back to comparing raw values against an unscaled `2`, both would read
+    "over"."""
+    reading = EFFORT_DAILY.reading("team_person.effort_banded")
+    assert reading is not None
+
+    under_store, at = await _seeded_effort_totalling(10_800.0)
+    under = await serve_reading(under_store, EFFORT_DAILY, "t1", reading, [3], at_ms=at)
+    under_window = under.subjects[0].windows[0]
+    assert under_window.level == "ok", (
+        f"10800s (3h) against a 172800s (48h) threshold read {under_window.level!r}"
+    )
+
+    over_store, at = await _seeded_effort_totalling(180_000.0)
+    over = await serve_reading(over_store, EFFORT_DAILY, "t1", reading, [3], at_ms=at)
+    over_window = over.subjects[0].windows[0]
+    assert over_window.level == "over", (
+        f"180000s (50h) against a 172800s (48h) threshold read {over_window.level!r}"
+    )
+
+
 def test_a_negative_duration_renders_in_the_same_unit_as_a_positive_one() -> None:
     """`delta` is the first statistic that can be negative, and it found the
     unit ladder testing `seconds < 60` -- which every negative satisfies."""
