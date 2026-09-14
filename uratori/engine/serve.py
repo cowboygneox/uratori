@@ -684,8 +684,23 @@ async def serve_reading(
     at_ms: float | None = None,
     at_day: str | None = None,
     facts: FactSource | None = None,
+    pool: Sequence[str] | None = None,
 ) -> Result:
     """One request serves several windows from a single fetch.
+
+    `pool`, when given, collapses every named subject into the **one** row
+    the population's answer is: the response carries a single `Subject` whose
+    id is `pool:` followed by the sorted subject ids, and whose windows are
+    computed over the concatenation of every named subject's stored buckets
+    rather than over each one's own. It exists because the engine already
+    holds every subject's stored buckets and refuses client-side arithmetic
+    everywhere else -- a screen letting somebody select three rooms would
+    otherwise have no honest way to show "the median turnover across these
+    three" except averaging three medians, which is a different, wrong
+    number, or fetching all three and doing the arithmetic itself, which is
+    the duplicate computation this whole engine exists to refuse. A
+    facility-level figure is the wrong population for the same request: it
+    answers every room, not the three asked for.
 
     A window is a **span of positions in the source figure's own bucket
     sequence**, counted back from the anchor -- the trailing `30`, the
@@ -865,44 +880,92 @@ async def serve_reading(
             store, library, tenant, plan, min(all_labels), max(all_labels)
         )
 
-        for base, held in sorted(by_subject.items()):
+        if pool is not None:
+            # One row for every subject named, pooled: the engine already
+            # holds each one's stored buckets, so it does the arithmetic a
+            # screen letting a reader pick several rooms would otherwise be
+            # forced into -- averaging three medians, or fetching all three
+            # and computing client-side, either of which is the duplicate
+            # computation this engine exists to refuse.
+            pooled_held = _pool_held(by_subject, pool)
+            pooled_goals = {
+                name: _pool_held(per_subject, pool) for name, per_subject in goals.items()
+            }
+            # A calendar written in the definition applies to the pool too;
+            # short of that there is no single subject's calendar to borrow,
+            # so the shared calendar across the subjects in play stands in --
+            # `None` (UTC) where they disagree, the same fallback the empty
+            # subject below uses for the same reason.
+            where = written or shared
             served: list[Window] = []
-            # A calendar written in the definition applies to every subject,
-            # so it is the window's too -- taken here as well as at the top,
-            # or the heading would say Auckland while the bounds were cut in
-            # UTC.
-            where = written or (zones.get(base) if zones else None)
             for spec, labels in spans_in(where):
                 covered = set(labels)
-                inside = [(d, v) for d, v in held if d in covered]
+                inside = [(d, v) for d, v in pooled_held if d in covered]
                 sample = sample_over(inside, labels)  # type: ignore[arg-type]
                 against = {
                     name: threshold_of(
                         plan.band_on or "mean",
                         sample,
                         sample_over(
-                            [
-                                (d, v)  # type: ignore[misc]  # a goal stores numbers
-                                for d, v in per_subject.get(base, [])
-                                if d in covered
-                            ],
+                            [(d, v) for d, v in held if d in covered],  # type: ignore[misc]
                             labels,
                         ),
                         plan.band_on_rank,
                     )
-                    for name, per_subject in goals.items()
+                    for name, held in pooled_goals.items()
                 }
                 served.append(
                     _window(plan, sample, spec, labels, rule, where, against)
                 )
+            ordered = sorted(pool)
             subjects.append(
                 Subject(
-                    id=base,
-                    name=names.get(base, base),
+                    id="pool:" + ",".join(ordered),
+                    name=f"{len(ordered)} pooled",
                     windows=served,
                     level=served[0].level if served else "unknown",
+                    pooled=ordered,
                 )
             )
+        else:
+            for base, held in sorted(by_subject.items()):
+                served = []
+                # A calendar written in the definition applies to every
+                # subject, so it is the window's too -- taken here as well as
+                # at the top, or the heading would say Auckland while the
+                # bounds were cut in UTC.
+                where = written or (zones.get(base) if zones else None)
+                for spec, labels in spans_in(where):
+                    covered = set(labels)
+                    inside = [(d, v) for d, v in held if d in covered]
+                    sample = sample_over(inside, labels)  # type: ignore[arg-type]
+                    against = {
+                        name: threshold_of(
+                            plan.band_on or "mean",
+                            sample,
+                            sample_over(
+                                [
+                                    (d, v)  # type: ignore[misc]  # a goal stores numbers
+                                    for d, v in per_subject.get(base, [])
+                                    if d in covered
+                                ],
+                                labels,
+                            ),
+                            plan.band_on_rank,
+                        )
+                        for name, per_subject in goals.items()
+                    }
+                    served.append(
+                        _window(plan, sample, spec, labels, rule, where, against)
+                    )
+                subjects.append(
+                    Subject(
+                        id=base,
+                        name=names.get(base, base),
+                        windows=served,
+                        level=served[0].level if served else "unknown",
+                    )
+                )
 
     # The empty subject is what somebody with nothing looks like. It has no
     # record of its own, so there is no calendar to read off one -- but where
@@ -940,6 +1003,47 @@ async def serve_reading(
         subjects=subjects,
         empty=empty,
     )
+
+
+def _pool_held(
+    by_subject: Mapping[str, Sequence[tuple[str, Value]]],
+    subject_ids: Sequence[str],
+) -> list[tuple[str, Value]]:
+    """Several subjects' stored buckets, pooled into the one shape a single
+    subject's own `held` list already has -- so window slicing, `sample_over`
+    and the band threshold all run over it **unchanged**, rather than a
+    second implementation of any of the three.
+
+    A `list` figure's buckets are concatenated, so a distribution statistic
+    sees the pooled population rather than a mean of subject means -- the
+    duplicate arithmetic a client computing "the median of three medians"
+    would otherwise be forced into. A `count` figure's buckets are summed per
+    label first, matching the single scalar a lone subject's own bucket
+    already is, so `sum`, `per_bucket` and `delta` stay meaningful over the
+    result. A label none of the named subjects wrote is absent here too -- a
+    hole, not a pooled nought -- and a subject the tenant holds nothing for
+    simply contributes no labels, which is a true zero contribution rather
+    than an error.
+    """
+    per_label: dict[str, list[float | list[float | None]]] = {}
+    for sid in subject_ids:
+        for label, value in by_subject.get(sid, ()):
+            if value is None or isinstance(value, str):
+                continue
+            per_label.setdefault(label, []).append(value)
+    out: list[tuple[str, Value]] = []
+    for label, values in per_label.items():
+        if any(isinstance(v, list) for v in values):
+            merged: list[float | None] = []
+            for v in values:
+                if isinstance(v, list):
+                    merged.extend(v)
+                else:
+                    merged.append(v)
+            out.append((label, merged))
+        else:
+            out.append((label, float(sum(values))))  # type: ignore[arg-type]
+    return out
 
 
 async def _band_goals(
@@ -1519,9 +1623,16 @@ async def answer_bundle(
     tenant: str,
     plan: BundlePlan,
     default_trailing: Sequence[int],
+    pool: Sequence[str] | None = None,
 ) -> BundleResult:
     """A bundle, whole: every member's ordinary answer, in declaration order,
     at one instant.
+
+    `pool`, when given, is served to every **reading** member -- our bundles
+    are readings only, so this is the common case -- and refused for any
+    other member kind with a 400: a figure, a projection or a summary is a
+    stored or computed point value with no per-record population underneath
+    it in this response for the engine to pool.
 
     A bundle defines no calculation, so this function composes and computes
     nothing: each member is served by the same code that serves it alone,
@@ -1569,6 +1680,13 @@ async def answer_bundle(
 
     for member in plan.members:
         if member.kind == "figure":
+            if pool is not None:
+                raise ValueError(
+                    f"{plan.name} was asked with ?subject=, and its {member.name} member "
+                    "is a figure -- a stored point value with no per-record population "
+                    "underneath it in this response for the engine to pool. Pooling is a "
+                    "reading's operation."
+                )
             figure = library.figure(member.name)
             if figure is None:  # pragma: no cover - the checker refuses this
                 raise ValueError(f"{plan.name} names a figure that is not compiled")
@@ -1602,10 +1720,18 @@ async def answer_bundle(
                         else list(default_trailing),
                         at_ms=at,
                         facts=facts,
+                        pool=pool,
                     ),
                 )
             )
         elif member.kind == "projection":
+            if pool is not None:
+                raise ValueError(
+                    f"{plan.name} was asked with ?subject=, and its {member.name} member "
+                    "is a projection -- a computed point value with no per-record "
+                    "population underneath it in this response for the engine to pool. "
+                    "Pooling is a reading's operation."
+                )
             projection = library.projection(member.name)
             if projection is None:  # pragma: no cover - the checker refuses this
                 raise ValueError(f"{plan.name} names a projection that is not compiled")
@@ -1617,6 +1743,13 @@ async def answer_bundle(
                 )
             )
         else:  # summary
+            if pool is not None:
+                raise ValueError(
+                    f"{plan.name} was asked with ?subject=, and its {member.name} member "
+                    "is a summary -- a computed point value with no per-record population "
+                    "underneath it in this response for the engine to pool. Pooling is a "
+                    "reading's operation."
+                )
             summary_plan = library.summary(member.name)
             if summary_plan is None:  # pragma: no cover - the checker refuses this
                 raise ValueError(f"{plan.name} names a summary that is not compiled")

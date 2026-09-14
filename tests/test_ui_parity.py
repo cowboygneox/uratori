@@ -794,6 +794,7 @@ def _referenced(source: str, field: str) -> bool:
 UNRENDERED: dict[str, str] = {
     "WorldOut.name_fields": "records arrive already named by the server; the map is for API clients",
     "Subject.value": "positional only, and the page draws series bars from the served scale, not this scalar",
+    "Subject.pooled": "no surface offers a multi-subject picker yet; the field is for API clients of ?subject=",
     "Window.series": "the page draws the served series_scale; the raw values are for clients with axes of their own",
     "Window.delta": (
         "the page prints the served delta_display cells; the raw signed numbers are "

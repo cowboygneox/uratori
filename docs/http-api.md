@@ -665,6 +665,58 @@ artifact -- and appears in no storage key and no number's citation.
   silently serving a tile one member short.
 - `400` when the engine refuses the request, in its own words.
 
+#### `?subject={id}` (repeatable) -- pooling several subjects into one row
+
+A reading answers one row per subject, and a screen that lets a reader
+select *several* -- three rooms, say -- has no honest way to show "the
+median turnover across these three": the engine refuses client-side
+arithmetic everywhere else, so a client cannot fetch three rows and average
+three medians, and a facility-level figure is the wrong population -- it
+answers every room, not the three asked for. The engine already holds every
+room's stored buckets, so this parameter has it pool them itself.
+
+```bash
+curl -s "$BASE/tenants/t1/results/room.turnover?subject=or-1&subject=or-2&subject=or-3" -H "$AUTH"
+```
+
+With one or more `subject` values, a **reading**'s answer carries exactly
+one row, in place of the usual one per subject:
+
+- `id` is `pool:` followed by the sorted subject ids, joined by `,`.
+- `name` is `"<n> pooled"`, where `n` is the number of subjects named --
+  regardless of whether all of them held anything.
+- `pooled` carries the subject ids, sorted, so a client need not parse the
+  id string back apart.
+- Each window is computed over the **pooled sample**: a `list` figure's
+  values are concatenated across the named subjects, a scalar (`count`)
+  figure's buckets are summed per bucket label before any statistic sees
+  them -- the same shape a single subject's own scalar bucket already has,
+  so `sum`, `per_bucket` and `delta` stay meaningful over the result.
+  `buckets_covered` is the number of bucket labels where at least one named
+  subject held a value; `buckets_requested` is unchanged; `sample` is the
+  pooled value count.
+- A band's threshold figure is pooled the same way, over the same subjects,
+  before it is reduced by the reading's own statistic -- the one
+  implementation both sides go through, so the value and its threshold
+  cannot disagree about what "pooled" means.
+- A subject the tenant holds nothing for contributes nothing and is still
+  listed in the id: a room with no turnovers is a true zero contribution,
+  not an error.
+
+A **bundle** requested with `subject` serves every reading member pooled;
+a figure, projection or summary member is refused with `400` -- a stored or
+computed point value has no per-record population underneath it in that
+response for the engine to pool. Our bundles are readings only, so this is
+the common case. A plain figure, projection or summary requested by name
+with `subject` is refused with `422`: pooling is a reading's operation, and
+none of the three has a population underneath the one value they already
+answer. An empty or a repeated subject id is refused with `422`, in the
+words of the existing window-argument refusals.
+
+The websocket does not carry `?subject=` today: `SubscribeEntry` takes the
+same arguments a `GET` does except this one, so a client following a pooled
+row currently has to poll the HTTP route rather than subscribe to it.
+
 ### `GET /tenants/{tenant}/evidence/{name}?subject={id}`
 
 The records behind one stored value. The engine stores every value with the
@@ -858,6 +910,7 @@ join.
 | `row` | For a projection: the assembled row, below. Otherwise `null`. |
 | `level` | The band word, from the definition's own ladder evaluated against the value beside it and the goal figures it names. See "band words", below. |
 | `dimension` | The other half of a pair when the figure is split across something (or time-keyed) -- present so two rows about one subject are told apart by a field rather than by a reader noticing. |
+| `pooled` | The subject ids a `?subject=` request pooled into this row, sorted -- `null` for an ordinary row. So a client need not parse `id`'s `pool:a,b,c` back apart to know which subjects are in it. |
 
 ### `Window` (readings)
 

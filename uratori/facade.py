@@ -53,7 +53,7 @@ from .results import BundleResult, Evidence, Result
 from .schema import Schema
 from .store import EngineStore, FactSource, Pointer
 from .verify import verify_writes
-from .windows import WindowSpec
+from .windows import WindowError, WindowSpec
 
 log = logging.getLogger("uratori")
 
@@ -760,6 +760,7 @@ class Uratori:
         *,
         trailing: Sequence[int | str | WindowSpec] = DEFAULT_TRAILING,
         at: str | None = None,
+        subject: Sequence[str] | None = None,
     ) -> Result | BundleResult | None:
         """One definition's current answer, by name. None when nothing is
         called that; a live reading raises, because "no such definition" and
@@ -777,11 +778,44 @@ class Uratori:
         an anchor moves only a reading's windows, and the other members --
         stored figures, live pages -- can only be served as they stand, so an
         anchored tile would put June's reading beside today's page under a
-        wrapper claiming one clock. Anchor the reading by its own name."""
+        wrapper claiming one clock. Anchor the reading by its own name.
+
+        `subject`, when given, pools the named subjects into one row rather
+        than answering one per subject -- see `serve_reading`'s own docstring
+        for why the engine does this rather than a client fetching each
+        subject and averaging. It only means anything over a *reading*, whose
+        answer is reduced from a per-record population; a figure, a
+        projection and a summary are already a stored or computed point
+        value with nothing underneath them in this response left to pool, so
+        each refuses it. An empty or a repeated subject id is refused the
+        same way a malformed window argument is -- a 422, the caller's to
+        fix."""
         lib = self._library
+
+        if subject is not None:
+            seen: set[str] = set()
+            for one in subject:
+                if not one:
+                    raise WindowError(
+                        "a subject id may not be empty -- an empty ?subject= names no "
+                        "population to pool."
+                    )
+                if one in seen:
+                    raise WindowError(
+                        f'subject "{one}" is named twice. One request pools each subject '
+                        "once."
+                    )
+                seen.add(one)
 
         figure = lib.figure(name)
         if figure is not None:
+            if subject is not None:
+                raise WindowError(
+                    f"{name} is a figure, and pooling is a reading's operation: a figure "
+                    "already answers one value per subject, so there is no per-record "
+                    "population underneath it for the engine to pool. Pool the reading "
+                    "that summarises it instead."
+                )
             # Every figure serves, whatever its shape. Day-keyed and split ones
             # were refused for a release, and the origin project's Data screen
             # wore the 400 as its values panel -- on the page whose whole claim
@@ -804,16 +838,29 @@ class Uratori:
                 list(trailing),
                 at_day=at,
                 facts=self._facts,
+                pool=subject,
             )
 
         projection = lib.projection(name)
         if projection is not None:
+            if subject is not None:
+                raise WindowError(
+                    f"{name} is a projection, and pooling is a reading's operation: a "
+                    "projection's rows are already the population, with nothing further "
+                    "underneath any one of them for the engine to pool."
+                )
             return await answer_projection(
                 self._store, self._facts, lib, tenant, projection
             )
 
         summary = lib.summary(name)
         if summary is not None:
+            if subject is not None:
+                raise WindowError(
+                    f"{name} is a summary, and pooling is a reading's operation: it "
+                    "already answers over its whole population, with nothing further "
+                    "underneath it for the engine to pool."
+                )
             # A summary is answered by evaluating the projection it is over and
             # handing back what came with it. There is no cheaper path and there
             # should not be one: the counts are *defined* as being over the
@@ -843,6 +890,7 @@ class Uratori:
                 tenant,
                 bundle,
                 default_trailing=DEFAULT_TRAILING,
+                pool=subject,
             )
 
         return None

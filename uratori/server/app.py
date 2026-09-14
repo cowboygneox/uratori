@@ -533,6 +533,7 @@ def create_app(
         s: S,
         trailing: Annotated[list[str] | None, Query()] = None,
         at: Annotated[str | None, Query()] = None,
+        subject: Annotated[list[str] | None, Query()] = None,
     ) -> Result | BundleResult:
         world, library = ready(s)
         facade = facade_for(s, world, library)
@@ -542,6 +543,7 @@ def create_app(
                 name,
                 trailing=windows_of(trailing) or DEFAULT_TRAILING,
                 at=anchor_of(at),
+                subject=subject,
             )
         except WindowError as refusal:
             # Before the ValueError arm, deliberately: a WindowError is a

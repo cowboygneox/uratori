@@ -342,6 +342,12 @@ class Subject(BaseModel):
     Present so two rows about one person are told apart by a field rather than
     by a reader noticing."""
 
+    pooled: list[str] | None = None
+    """The subject ids a `?subject=` request pooled into this one row, in the
+    order the id string sorted them -- `null` for an ordinary row. Carried so
+    a client need not parse `pool:a,b,c` back apart to know which subjects
+    are in it."""
+
 
 class EvidenceMember(BaseModel):
     """One thing a stored value cites: a record, or (for a rollup) a part.
