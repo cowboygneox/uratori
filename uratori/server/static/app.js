@@ -562,31 +562,44 @@ async function membershipSection(declaration, params) {
   if (m.note) blocks.push(el('p', { class: 'faint' }, m.note));
 
   const chosen = m.kind === 'filter' ? '' : params.get('bucket');
+  // A bucket chosen from a worksheet is what an iframe reader came for --
+  // "which records were in this bucket" -- so its list goes first, right
+  // under the counts sentence. The ledger that names every OTHER bucket is
+  // the browsing tool, not the answer, and folds under <details> so it does
+  // not push the answer below the fold; with no bucket chosen there is no
+  // answer yet, so the ledger is what there is and opens as it always did.
+  if (chosen !== null) {
+    blocks.push(await memberList(declaration, m, chosen, params));
+  }
   if (m.kind === 'group') {
     const lastBucket = m.buckets.length ? m.buckets[m.buckets.length - 1].bucket : null;
-    blocks.push(el('table', { class: 'ledger' },
-      el('tr', {}, el('th', {}, 'bucket'), el('th', { class: 'num' }, 'records')),
-      m.buckets.map((b) => el('tr', { class: b.bucket === chosen ? 'here' : '' },
-        el('td', {}, el('a', {
-          class: 'mono',
-          href: defHash(declaration.name, { bucket: b.bucket, bafter, btrail: params.get('btrail') }),
-          ...(b.bucket === chosen ? { 'aria-current': 'true' } : {}),
-        }, b.bucket)),
-        el('td', { class: 'mono num' }, String(b.members))))));
+    const ledger = [
+      el('table', { class: 'ledger' },
+        el('tr', {}, el('th', {}, 'bucket'), el('th', { class: 'num' }, 'records')),
+        m.buckets.map((b) => el('tr', { class: b.bucket === chosen ? 'here' : '' },
+          el('td', {},
+            el('a', {
+              class: 'mono',
+              href: defHash(declaration.name, { bucket: b.bucket, bafter, btrail: params.get('btrail') }),
+              ...(b.bucket === chosen ? { 'aria-current': 'true' } : {}),
+            }, b.label || b.bucket),
+            b.label ? el('span', { class: 'faint' }, ' ', b.bucket) : null,
+            b.coordinate ? el('span', { class: 'dim' }, ` × ${b.coordinate}`) : null),
+          el('td', { class: 'mono num' }, String(b.members))))),
+    ];
     if (m.buckets_total > m.buckets.length || m.buckets_more || params.get('btrail')) {
-      blocks.push(el('div', { class: 'controls' },
-        el('span', { class: 'faint' },
-          `${m.buckets_total} buckets`),
+      ledger.push(el('div', { class: 'controls' },
         el('span', { class: 'spacer' }),
         pager(params, m.buckets_more, lastBucket, (nextAfter, trail) => {
           location.hash = defHash(declaration.name, { bafter: nextAfter, btrail: trail });
         }, { after: 'bafter', trail: 'btrail' })));
     }
-  }
-  if (chosen !== null) {
-    blocks.push(await memberList(declaration, m, chosen, params));
-  } else if (m.kind === 'group') {
-    blocks.push(el('p', { class: 'faint' }, 'Pick a bucket to see the records it holds.'));
+    blocks.push(el('details', { open: chosen === null ? '' : undefined },
+      el('summary', {}, `${m.buckets_total} buckets`),
+      ...ledger));
+    if (chosen === null) {
+      blocks.push(el('p', { class: 'faint' }, 'Pick a bucket to see the records it holds.'));
+    }
   }
   return el('div', {}, blocks);
 }
@@ -609,13 +622,23 @@ async function memberList(declaration, m, bucket, params) {
       after: nextAfter, trail,
     });
   };
+  // The label the ledger would show for this same bucket, served here too
+  // because this page is reachable for a bucket the ledger's current page
+  // does not carry -- a hand-typed cursor, or a worksheet link straight to
+  // an older bucket.
+  const heading = page.subject_kind
+    ? el('a', { href: recordHash(page.subject_kind, page.subject) }, page.label || page.subject)
+    : (page.label || page.subject);
   return el('div', {},
     // Count and pager in one bar, above the rows: a pager fifty rows below
     // the total is a pager the reader has already lost their place by.
     el('div', { class: 'controls' },
       el('span', { class: 'dim' },
         m.kind === 'group'
-          ? ['bucket ', el('span', { class: 'mono' }, bucket), ` — ${page.total} records`]
+          ? ['bucket ', heading,
+             page.coordinate ? ` × ${page.coordinate}` : '',
+             el('span', { class: 'faint' }, ' ', bucket),
+             ` — ${page.total} records`]
           : `${page.total} records`),
       el('span', { class: 'spacer' }),
       pager(params, page.more, lastKey, go)),

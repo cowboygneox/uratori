@@ -1043,6 +1043,173 @@ async def test_a_group_shows_its_buckets_with_counts(pg_dsn: str) -> None:
         ).json()
         assert {r["key"] for r in c1["records"]} == {"o0", "o1", "o2"}
 
+        held_by_bucket = {b["bucket"]: b for b in held["buckets"]}
+        # `shop_order.carried_by` is a bare `from courier_id`: nothing in the
+        # grouping's own spec says whose id that is. `shop_courier.carrying`
+        # is the only thing that does, by scoping itself over this index --
+        # so its scope is where the label and the kind must come from.
+        assert held_by_bucket["c1"]["subject_kind"] == "shop_courier"
+        assert held_by_bucket["c1"]["subject"] == "c1"
+        assert held_by_bucket["c1"]["coordinate"] is None
+        assert held_by_bucket["c1"]["label"] == "Aki", (
+            "the schema's shop_courier name field (name), read off the live "
+            "record, not composed by a client"
+        )
+        # c2 has orders but no shop_courier record was ever fed for it: the
+        # kind is still known (the figure's scope says so), and the label is
+        # None rather than a guessed name for a record that is not there.
+        assert held_by_bucket["c2"]["subject_kind"] == "shop_courier"
+        assert held_by_bucket["c2"]["label"] is None
+
+        # The members page for a bucket carries the same four fields, so a
+        # worksheet linking straight to `?bucket=c1` names it without the
+        # ledger row being on screen.
+        assert c1["subject_kind"] == "shop_courier"
+        assert c1["subject"] == "c1"
+        assert c1["coordinate"] is None
+        assert c1["label"] == "Aki"
+
+
+async def test_a_through_hop_labels_buckets_with_the_target_kind(pg_dsn: str) -> None:
+    """`from reviewer_account_id through team_person.accounts.account_id` --
+    the grouping's own spec names the target kind directly, so a bucket's
+    subject_kind and label come off the through hop with no figure needed to
+    say whose ids they are."""
+    from .world import WORLD
+
+    async with serve(pg_dsn) as http:
+        assert (await http.put("/schema", json=WORLD.to_document())).status_code == 200
+        assert (
+            await http.put("/definitions", json={"source": FULL_SOURCE})
+        ).status_code == 200
+        pushed = await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "team_person": {
+                        "p1": {"display_name": "Aki", "accounts": [{"account_id": "acc1"}]}
+                    },
+                    "code_review_request": {
+                        "r1": {
+                            "title": "Review the thing",
+                            "reviewer_account_id": "acc1",
+                            "pending": True,
+                            "requested_at": "2026-01-01T00:00:00Z",
+                        }
+                    },
+                }
+            },
+        )
+        assert pushed.status_code == 200, pushed.text
+
+        held = (
+            await http.get("/ui/api/tenants/t1/membership/code_review_request.asked_of")
+        ).json()
+        assert held["state"]["ok"] is True
+        by_bucket = {b["bucket"]: b for b in held["buckets"]}
+        # The through hop resolves to the owner's own id (p1), not the raw
+        # account id it was matched on -- the bucket key already names the
+        # team_person record, and the label comes off that record directly.
+        assert by_bucket["p1"]["subject_kind"] == "team_person"
+        assert by_bucket["p1"]["subject"] == "p1"
+        assert by_bucket["p1"]["coordinate"] is None
+        assert by_bucket["p1"]["label"] == "Aki"
+
+
+async def test_a_bare_grouping_read_by_two_scopes_names_nobody(pg_dsn: str) -> None:
+    """`from courier_id` declares no kind, and nothing refuses a second figure
+    of another scope over the same grouping. Two scopes are two claims about
+    whose ids the buckets are; the page prints the key rather than the first
+    figure's answer, because declaration order is not evidence."""
+    two_scopes = COURIER_SOURCE + """
+# The same buckets, claimed by another kind.
+figure shop_order.siblings:
+    display "{shop_order} siblings"
+    depends:
+        mine = shop_order.carried_by:{shop_order}
+    calculate:
+        count(mine)
+"""
+    async with serve(pg_dsn) as http:
+        assert (await http.put("/schema", json=COURIER_WORLD.to_document())).status_code == 200
+        put = await http.put("/definitions", json={"source": two_scopes})
+        assert put.status_code == 200, put.text
+        await _feed_couriers(http)
+        held = (
+            await http.get("/ui/api/tenants/t1/membership/shop_order.carried_by")
+        ).json()
+        assert held["state"]["ok"] is True
+        by_bucket = {b["bucket"]: b for b in held["buckets"]}
+        assert by_bucket["c1"]["subject_kind"] is None
+        assert by_bucket["c1"]["label"] is None
+        assert by_bucket["c1"]["subject"] == "c1"
+
+
+async def test_a_composite_grouping_splits_subject_from_coordinate(pg_dsn: str) -> None:
+    """`from (author_account_id through team_person.accounts.account_id,
+    merged_at by day)` -- a composite key's subject is the through-resolved
+    part, and its coordinate is everything past the separator, kept apart on
+    the wire rather than left for the client to split a raw key on `@`."""
+    from .world import WORLD
+
+    async with serve(pg_dsn) as http:
+        assert (await http.put("/schema", json=WORLD.to_document())).status_code == 200
+        assert (
+            await http.put("/definitions", json={"source": FULL_SOURCE})
+        ).status_code == 200
+        pushed = await http.post(
+            "/tenants/t1/facts",
+            json={
+                "writes": {
+                    "team_person": {
+                        "p1": {
+                            "display_name": "Aki",
+                            "accounts": [{"account_id": "acc1"}],
+                            "timezone": "UTC",
+                        }
+                    },
+                    "code_change": {
+                        "mr1": {
+                            "title": "Fix the thing",
+                            "author_account_id": "acc1",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "merged_at": "2026-01-01T02:00:00Z",
+                            "updated_at": "2026-01-01T02:00:00Z",
+                        }
+                    },
+                }
+            },
+        )
+        assert pushed.status_code == 200, pushed.text
+
+        held = (
+            await http.get("/ui/api/tenants/t1/membership/code_change.merged_by_day")
+        ).json()
+        assert held["state"]["ok"] is True
+        assert len(held["buckets"]) == 1
+        bucket = held["buckets"][0]
+        # The through hop resolves to the owner's own id (p1), same as the
+        # pure-through case above; the coordinate rides along past the
+        # separator untouched.
+        assert bucket["bucket"] == "p1@2026-01-01"
+        assert bucket["subject"] == "p1"
+        assert bucket["coordinate"] == "2026-01-01"
+        assert bucket["subject_kind"] == "team_person"
+        assert bucket["label"] == "Aki"
+
+        # The members page for this bucket carries the same split, reachable
+        # even though the ledger above is not paged past it.
+        members = (
+            await http.get(
+                "/ui/api/tenants/t1/membership/code_change.merged_by_day/members"
+                f"?bucket={bucket['bucket']}"
+            )
+        ).json()
+        assert members["subject"] == "p1"
+        assert members["coordinate"] == "2026-01-01"
+        assert members["subject_kind"] == "team_person"
+        assert members["label"] == "Aki"
+
 
 async def test_a_grouping_over_an_uncollected_kind_states_the_absence_itself(
     pg_dsn: str,
