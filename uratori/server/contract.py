@@ -351,10 +351,18 @@ class SubscribeEntry(BaseModel):
     windowed reading and refused for a bundle (whose windows are declared in
     its definition). Entry identity -- for unsubscribe, and for delivering one
     evaluation to every client that asked the same question -- is the name
-    plus the canonical spelling of the windows."""
+    plus the canonical spelling of the windows.
+
+    `subject` is declared, not omitted, even though the socket does not serve
+    it yet: an unknown key silently accepted would be an argument a client
+    could believe it had asked for and never had answered, which the HTTP
+    door's own repeatable `?subject=` refuses being anywhere close to. The
+    hub refuses an entry that carries it, by name, with the same "not yet"
+    an unservable live reading gets."""
 
     name: str
     trailing: list[str] | None = None
+    subject: list[str] | None = None
 
 
 class Subscribe(BaseModel):

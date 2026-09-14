@@ -533,6 +533,7 @@ def create_app(
         s: S,
         trailing: Annotated[list[str] | None, Query()] = None,
         at: Annotated[str | None, Query()] = None,
+        subject: Annotated[list[str] | None, Query()] = None,
     ) -> Result | BundleResult:
         world, library = ready(s)
         facade = facade_for(s, world, library)
@@ -542,6 +543,7 @@ def create_app(
                 name,
                 trailing=windows_of(trailing) or DEFAULT_TRAILING,
                 at=anchor_of(at),
+                subject=subject,
             )
         except WindowError as refusal:
             # Before the ValueError arm, deliberately: a WindowError is a
@@ -874,6 +876,13 @@ def _refuse_entry(library: Library, asked: SubscribeEntry) -> str | None:
     )
     if not known:
         return f"No definition called {asked.name}"
+    if asked.subject:
+        return (
+            f"{asked.name} was asked with a subject list: pooling is served over HTTP "
+            "only, for now -- `GET .../results/{name}?subject=` -- and not yet followed "
+            "over this socket. Subscribe to it bare, or poll the HTTP route for the "
+            "pooled row."
+        )
     if asked.trailing:
         if library.bundle(asked.name) is not None:
             return (

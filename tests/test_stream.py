@@ -391,6 +391,42 @@ def test_a_bad_entry_is_refused_by_name_while_the_good_one_proceeds(pg_dsn: str)
             assert pushed["result"]["name"] == "shop_courier.carrying"
 
 
+def test_an_entry_naming_a_subject_is_refused_not_followed(pg_dsn: str) -> None:
+    """Pooling is served over HTTP only, for now: an entry that carries
+    `subject` is refused by name -- the same treatment an unknown name or an
+    unparseable window gets -- rather than silently accepted and answered
+    unpooled, which a client comparing it against the HTTP route it matches
+    against would have no way to notice."""
+    with _service(pg_dsn) as client:
+        _teach_and_feed(client)
+        with client.websocket_connect("/stream") as socket:
+            socket.send_json(
+                {
+                    "type": "subscribe",
+                    "tenant": "t1",
+                    "entries": [
+                        {"name": "shop_courier.carrying", "subject": ["c1", "c2"]}
+                    ],
+                }
+            )
+            refused = socket.receive_json()
+            assert refused["type"] == "error"
+            assert refused["name"] == "shop_courier.carrying"
+            assert "subject" in refused["message"]
+            assert "HTTP" in refused["message"]
+
+            # Not followed: a fact write that would otherwise push this
+            # entry produces nothing, because the refusal above never
+            # registered it.
+            client.post(
+                "/tenants/t1/facts",
+                json={"writes": {"shop_order": {"o3": {"ref": "A-3", "courier_id": "c1", "status": "riding"}}}},
+            )
+            socket.send_json({"type": "ping"})
+            pong = socket.receive_json()
+            assert pong["type"] == "pong"
+
+
 def test_windows_on_a_bundle_entry_are_refused(pg_dsn: str) -> None:
     """A bundle's windows are declared in its definition; an entry that could
     move them would be a different tile under the same hash -- the same
