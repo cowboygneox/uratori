@@ -1588,12 +1588,20 @@ async def project_rows(
     one, with nothing downstream able to detect it.
 
     A projection has no pointer of its own: it stores nothing, so there is no
-    version a tenant can be behind on and nothing to be stale against a moved
-    dial. Every row is this build's definition over this board's records,
-    always. What *can* be missing is the figures a row reads, which is why the
-    unavailable ones are named rather than the whole projection being withheld:
-    a row whose judgements are absent still carries its key and its name, and
-    dropping it would empty the screen over a gap in one column.
+    version a tenant can be behind on. With neither a `from` nor a `scoped
+    by` clause, that is the whole story -- nothing here reads a stored
+    bucket, so there is nothing to be stale against a moved dial, and every
+    row is this build's definition over this board's records, always. A
+    `from` or a `scoped by` clause changes that: both narrow through a
+    stored composite index, built under a recorded spec version the same
+    way any group's is, so a page reading either can be `behind-deploy` or
+    `never-computed` against it -- staled by the index, never by the
+    projection's own, since the projection still has none. What *can* be
+    missing besides that population is the figures a row reads, which is
+    why the unavailable ones are named rather than the whole projection
+    being withheld: a row whose judgements are absent still carries its key
+    and its name, and dropping it would empty the screen over a gap in one
+    column.
     """
     from ..engine.project import project
 

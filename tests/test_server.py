@@ -1858,6 +1858,24 @@ async def test_a_scoped_projection_refuses_a_span_over_http(server: Server) -> N
     assert "one bucket" in got.text
 
 
+async def test_a_scoped_projection_refuses_the_default_trailing_span(
+    server: Server,
+) -> None:
+    """Omitting `trailing=` falls through to `DEFAULT_TRAILING` -- three
+    windows, not one -- and that is the mistake a real caller is most
+    likely to make: ask for the page and forget the window entirely. It
+    must refuse exactly as a written-out span does, not quietly answer over
+    whichever of the three windows a served page happened to pick."""
+    await _teach_scoped(server.http)
+    got = await server.http.get(
+        "/tenants/t1/results/shop_order.oldest_by_courier_month",
+        params={"subject": "c1"},
+    )
+    assert got.status_code == 422, got.text
+    assert "one bucket" in got.text
+    assert "not a span or a list of them" in got.text
+
+
 async def test_an_unscoped_projection_still_refuses_subject_over_http(
     server: Server,
 ) -> None:
