@@ -41,6 +41,7 @@ from .engine.engine import Engine
 from .engine.serve import (
     answer_bundle,
     answer_projection,
+    answer_scoped_projection,
     serve_evidence,
     serve_figure,
     serve_reading,
@@ -843,11 +844,31 @@ class Uratori:
 
         projection = lib.projection(name)
         if projection is not None:
+            if projection.scoped_by is not None:
+                # A scoped projection is the one projection shape `?subject=`
+                # means something for: not pooling (there is nothing to pool,
+                # same as any other projection) but *which bucket* is the
+                # page. `answer_scoped_projection` refuses a missing or
+                # plural subject and a window that is not exactly one bucket
+                # itself, in its own terms.
+                return await answer_scoped_projection(
+                    self._store,
+                    self._facts,
+                    lib,
+                    tenant,
+                    projection,
+                    subject=subject,
+                    trailing=list(trailing),
+                    at_day=at,
+                )
             if subject is not None:
                 raise WindowError(
                     f"{name} is a projection, and pooling is a reading's operation: a "
                     "projection's rows are already the population, with nothing further "
-                    "underneath any one of them for the engine to pool."
+                    "underneath any one of them for the engine to pool. (A projection "
+                    "declared `scoped by` an index would take `?subject=` to mean the "
+                    "one bucket the page is about instead -- this one declares no "
+                    "`scoped by`.)"
                 )
             return await answer_projection(
                 self._store, self._facts, lib, tenant, projection

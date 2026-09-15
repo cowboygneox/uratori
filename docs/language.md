@@ -1918,6 +1918,74 @@ deliberately against a page that cannot silently be wrong. A population that
 matches nothing is served `ok` with no rows -- records were collected, and
 the empty page is the population's truthful answer.
 
+### `scoped by` -- one bucket, asked for
+
+`from` can never carry a scope: it decides which records *become* rows, so
+there is no row yet for a bucket to be scoped by. A request is a different
+question. A caller asking for "the five longest turnovers, for this room,
+this month" already knows the subject and the period before a single row
+exists -- the same way a reading's caller already knows which subject and
+which window they want. `scoped by` is the projection's way of saying which
+composite group answers that question, so `?subject=` and a window have
+something to resolve against instead of the request inventing its own
+population language:
+
+```
+# Room and month, one bucket per combination.
+group code_change.by_repo_month from (repo_id, created_at by month)
+
+# The five open changes, for one repo and one month.
+projection code_change.oldest_by_repo_month scoped by code_change.by_repo_month:
+    from code_change.open
+
+    field:
+        key = title as text
+        opened = created_at as date
+    sort by key ascending
+    limit 5
+```
+
+Asked as `GET /tenants/{t}/results/code_change.oldest_by_repo_month
+?subject=<repo id>&trailing=3`, this answers one page: the repo's third
+bucket back, narrowed further by whatever `from` already declared -- the two
+intersect exactly as any two set expressions do. It refuses rather than
+paging over a subset nobody asked for:
+
+- **No `?subject=`, or more than one.** A scoped page has no whole-population
+  reading to fall back to -- the population *is* the one bucket the request
+  names -- and pooling several subjects into one bucket is a reading's
+  operation, not a projection's.
+- **Any window that is not exactly one bucket.** A span or an `each` list
+  would ask for several pages under a contract that answers one; the six-week
+  comparison is six requests, one bucket each, the same way a caller pages
+  through anything else this engine paints one bucket at a time.
+- **A stale or never-built scoping index**, the same `behind-deploy` and
+  `never-computed` absences `from` itself answers, because a request-scoped
+  bucket is read through the same stored index a `from` population reads
+  through.
+
+The index named must be exactly a subject crossed with a calendar period --
+`group ... from (subject_field, moment_field by week|month|quarter)` -- and
+nothing looser: a single-bucket filter has no subject dimension for
+`?subject=` to mean anything against, a fan-out index with no calendar part
+has nothing for a window to resolve against, and the period part may not read
+a subject's own calendar (`by month in team_person.timezone`), because a bare
+`?subject=` id is not a stored record yet -- there is nothing to read a zone
+off before a bucket has even been resolved. Every scoped page is cut in UTC
+for that reason.
+
+The scoping index is part of the projection's version for the reason `from`'s
+indexes are: two projections narrowing the request to different composite
+groups are two different pages, and citing them identically would let a
+caller compare one against the other without either side able to tell. The
+summary follows through the projection's version exactly as it already does
+-- it is the summary of *this* page's population, the one bucket the request
+named intersected with `from`, never the whole kind's rows. That is not a
+special case for a scoped projection: an unscoped projection's summary was
+already over `from`'s population and never over every record of the kind: a
+scoped population is `from`'s population narrowed one step further, and the
+summary follows it the same way it always has.
+
 ### `field` -- values off the record
 
 `<name> = <path> as <type>`, where the type is `text`, `date`, `number` or

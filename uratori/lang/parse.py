@@ -1675,6 +1675,13 @@ class _Parser:
         self._keyword("projection")
         name = self._name("a projection name, e.g. work_issue.item")
         self._prefix_of(name, "a projection", line)
+        scoped_by: str | None = None
+        scoped_by_line = 0
+        if self._peek().value == "scoped":
+            scoped_by_line = self._peek().line
+            self._next()
+            self._keyword("by")
+            scoped_by = self._name("the index this projection is scoped by")
         self._punct(":")
         self._end_of_line()
         self._expect("indent", "an indented block after the projection name")
@@ -1749,6 +1756,8 @@ class _Parser:
             name=name,
             doc="",
             frm=frm,
+            scoped_by=scoped_by,
+            scoped_by_line=scoped_by_line,
             fields=tuple(fields),
             reads=tuple(reads),
             values=tuple(values),
