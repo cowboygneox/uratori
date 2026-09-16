@@ -241,6 +241,12 @@ class ProjectPlan:
     values: tuple[tuple[str, CalcExpr, FigureUnit], ...] = ()
     flags: tuple[FlagDecl, ...] = ()
     frm: SetExpr | None = None
+    scoped_by: str | None = None
+    """The composite index (subject part x calendar part) a request narrows
+    this projection's population to, via `?subject=` and a single-bucket
+    window. `None` for an unscoped projection, which answers whole exactly
+    as it always has."""
+
     omit: Condition | None = None
     """The row-level gate: a row it holds for is off the page and out of the
     summary. Unknown keeps the row -- see the declaration's own note."""

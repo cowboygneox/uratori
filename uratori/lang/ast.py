@@ -1760,6 +1760,26 @@ class ProjectDecl:
     name: str
     doc: str
     frm: SetExpr | None = None
+    scoped_by: str | None = None
+    """`scoped by turnover_interval.by_room_month` -- a composite group index
+    (subject part, then a calendar part) that the request narrows to one
+    bucket, via `?subject=` and a single-bucket window.
+
+    Where `from` can never carry a scope -- there is no row yet for a bucket
+    to be scoped by -- a request for one *already knows* which subject and
+    which period it wants, the same way a reading's caller does. `scoped_by`
+    is the projection's way of saying which composite index answers that
+    question, so the request door has something to resolve `?subject=` and
+    `trailing=` against instead of inventing its own population language.
+
+    Orthogonal to `from`: a population may still narrow by predicate or
+    presence (`from turnover_interval.plausible`), and the scope then
+    intersects that population with the one bucket the request named, the
+    same way any two set expressions combine. Refused unless the named index
+    is exactly a subject part crossed with a week/month/quarter part -- see
+    the checker for why."""
+
+    scoped_by_line: int = 0
     fields: tuple[FieldDecl, ...] = ()
     reads: tuple[ReadDecl, ...] = ()
     values: tuple[ValueDecl, ...] = ()

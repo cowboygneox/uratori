@@ -2017,6 +2017,150 @@ def test_a_population_indexes_label_does_not_move_a_version() -> None:
     assert first.version == second.version
 
 
+# -------------------------------------------------------------- scoped by --
+
+SCOPED_BASE = (
+    """
+group code_change.by_repo_month from (repoId, createdAt by month)
+
+# The five slowest-to-merge open changes, for one repo and one month.
+projection code_change.oldest_by_repo_month scoped by code_change.by_repo_month:
+    from code_change.open
+    field:
+        key = title as text
+        opened = createdAt as date
+        wait_seconds = waitSeconds as number
+    sort by wait_seconds descending
+    limit 5
+"""
+)
+
+
+def test_a_projection_may_be_scoped_by_a_composite_index() -> None:
+    """The plan carries the index name, and it joins `from`'s indexes in
+    `plan.indexes` -- the staleness gate that guards `from`'s buckets has to
+    guard this one's the same way, since a request resolves a bucket through
+    it exactly as `_population` resolves one through a `from` index."""
+    lib = compile_ok(SCOPED_BASE)
+    plan = lib.projection("code_change.oldest_by_repo_month")
+    assert plan is not None
+    assert plan.scoped_by == "code_change.by_repo_month"
+    assert "code_change.by_repo_month" in plan.indexes
+
+
+def test_scoped_by_refuses_an_index_that_does_not_exist() -> None:
+    refuses(
+        SCOPED_BASE.replace("code_change.by_repo_month:", "code_change.nope:", 1),
+        "not a declared group or filter",
+    )
+
+
+def test_scoped_by_refuses_a_single_bucket_filter() -> None:
+    """`code_change.open` holds one bucket for everybody -- there is no
+    subject dimension in it at all, so `?subject=` would resolve to a key
+    nothing was ever bucketed under."""
+    refuses(
+        SCOPED_BASE.replace(
+            "scoped by code_change.by_repo_month:", "scoped by code_change.open:", 1
+        ),
+        "not a subject crossed with a calendar period",
+    )
+
+
+def test_scoped_by_refuses_a_fan_out_index_with_no_calendar_part() -> None:
+    """`code_change.by_source` fans by `connectionId` alone -- a subject with
+    no period beside it, so a window argument would have nothing to resolve
+    against."""
+    refuses(
+        SCOPED_BASE.replace(
+            "scoped by code_change.by_repo_month:", "scoped by code_change.by_source:", 1
+        ),
+        "not a subject crossed with a calendar period",
+    )
+
+
+def test_scoped_by_refuses_the_parts_written_backwards() -> None:
+    """The first part is what `?subject=` names; a calendar rule there would
+    make the request supply a period where the engine expects a plain id."""
+    refuses(
+        SCOPED_BASE.replace(
+            "group code_change.by_repo_month from (repoId, createdAt by month)",
+            "group code_change.by_repo_month from (createdAt by month, repoId)",
+        ),
+        "itself a calendar rule",
+    )
+
+
+def test_scoped_by_refuses_a_day_grain() -> None:
+    """A scoped page is asked for at week, month or quarter grain -- the
+    grains a dashboard actually pages through -- not day."""
+    refuses(
+        SCOPED_BASE.replace(
+            "group code_change.by_repo_month from (repoId, createdAt by month)",
+            "group code_change.by_repo_month from (repoId, createdAt by day)",
+        ),
+        "week, month or quarter",
+    )
+
+
+def test_scoped_by_refuses_a_subject_read_calendar() -> None:
+    """A scoped request is a bare `?subject=` id, not a stored record --
+    there is nothing to read a zone off before the bucket is even resolved,
+    so the period has to be cut in one calendar for everybody."""
+    refuses(
+        SCOPED_BASE.replace(
+            "group code_change.by_repo_month from (repoId, createdAt by month)",
+            "group code_change.by_repo_month from (repoId, createdAt by month in "
+            "team_person.timezone)",
+        ),
+        "no stored subject to read a zone off",
+    )
+
+
+def test_scoped_by_index_is_part_of_the_projections_version() -> None:
+    """Two projections that read different scoping indexes are two different
+    pages, so citing them identically would let a caller compare a page over
+    one bucket rule against a page over another without either side able to
+    tell."""
+    other = SCOPED_BASE + "\ngroup code_change.by_source_month from (connectionId, createdAt by month)\n"
+    second = other.replace(
+        "scoped by code_change.by_repo_month:", "scoped by code_change.by_source_month:", 1
+    )
+    first_plan = compile_ok(SCOPED_BASE).projection("code_change.oldest_by_repo_month")
+    second_plan = compile_ok(second).projection("code_change.oldest_by_repo_month")
+    assert first_plan is not None and second_plan is not None
+    assert first_plan.version != second_plan.version
+
+
+def test_scoped_by_must_hold_ids_of_its_own_kind() -> None:
+    """`work_issue.by_container_month` is a group over work_issue, not
+    code_change -- its bucket keys are built from work_issue ids. A
+    `?subject=` naming a code_change subject resolves to a bucket keyed
+    under the wrong space, matching no bucket this index ever built -- an
+    empty page that looks complete."""
+    refuses(
+        SCOPED_BASE
+        + "\ngroup work_issue.by_container_month from (containerId, statusChangedAt "
+        "by month)\n"
+        + "\n# The five slowest-to-merge open changes, for one container and one month.\n"
+        "projection code_change.oldest_by_container_month scoped by "
+        "work_issue.by_container_month:\n"
+        "    from code_change.open\n"
+        "    field:\n"
+        "        key = title as text\n"
+        "    sort by key descending\n"
+        "    limit 5\n",
+        "whose bucket keys are built from",
+    )
+
+
+def test_scoped_by_may_hold_ids_of_the_projections_own_kind() -> None:
+    """The control: `code_change.by_repo_month` fans by `repoId` -- plain
+    code_change ids -- so the same scoped projection compiles cleanly."""
+    lib = compile_ok(SCOPED_BASE)
+    assert lib.projection("code_change.oldest_by_repo_month") is not None
+
+
 def test_a_summary_may_not_shadow_a_row_value() -> None:
     """One word would otherwise mean one row in one line and the whole
     population in the next, whichever way it resolved."""

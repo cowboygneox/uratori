@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, assert_never
 
 from ..lang.ast import (
     Arith,
+    ByComposite,
     Count,
     Extreme,
     Ladder,
@@ -55,7 +56,7 @@ from ..results import (
     Window,
 )
 from ..schema import Schema
-from ..store import EngineStore, FactSource, StoredValue
+from ..store import EngineStore, FactRow, FactSource, StoredValue
 from ..windows import (
     WindowError,
     WindowSpec,
@@ -66,6 +67,7 @@ from ..windows import (
 )
 from .buckets import (
     SEPARATOR,
+    compose,
     end_of_day_ms,
     measure_of,
     ordinal_rule_of,
@@ -1434,6 +1436,109 @@ async def answer_projection(
     return _compose_projection(library, plan, rows, state, at)
 
 
+async def answer_scoped_projection(
+    store: EngineStore,
+    facts: Any,
+    library: Library,
+    tenant: str,
+    plan: ProjectPlan,
+    *,
+    subject: Sequence[str] | None,
+    trailing: Sequence[int | str | WindowSpec],
+    at_day: str | None = None,
+    at_ms: float | None = None,
+) -> Result:
+    """A `scoped by` projection's page: one subject, one bucket, resolved
+    from the request rather than read whole.
+
+    Everything `answer_projection` guarantees still holds -- read, then
+    summarise, then page, at one instant -- this only adds the step that
+    decides *which* rows that instant reads: the bucket `?subject=` and the
+    window resolve to, intersected with whatever `from` already narrowed.
+    The summary that comes back is the summary of exactly that scoped
+    population, never the whole kind's -- the same rule an unscoped
+    projection's summary already follows (it is always over `from`'s
+    population, never every record of the kind), so a scoped page's summary
+    is not a special case, just `from` narrowed one step further.
+
+    Refuses rather than serving a short or empty page for anything the
+    caller could not have known was wrong: no subject, more than one
+    subject, a window that is not exactly one bucket, or a bucket the
+    library has not been built under yet (the same staleness gate `from`
+    itself is checked against, since the scoping index is walked the same
+    way).
+    """
+    assert plan.scoped_by is not None
+    idx = library.indexes.get(plan.scoped_by)
+    if idx is None:  # pragma: no cover - the checker refuses this at compile time
+        raise ValueError(f"{plan.name} is scoped by an index that is not compiled")
+
+    if subject is None or len(subject) == 0:
+        raise WindowError(
+            f"{plan.name} is scoped by {plan.scoped_by} and needs exactly one "
+            "?subject=, naming which bucket's subject this page is about. There is "
+            "no whole-population reading of a scoped projection to fall back to -- "
+            "the population is the one bucket the request names."
+        )
+    if len(subject) > 1:
+        raise WindowError(
+            f"{plan.name} answers one subject's bucket, not several pooled into one: "
+            "a scoped projection's rows are already one bucket's population, with "
+            "nothing further underneath any one of them for the engine to pool. Ask "
+            "once per subject."
+        )
+    one_subject = subject[0]
+    if not one_subject:
+        raise WindowError(
+            "a subject id may not be empty -- an empty ?subject= names no bucket to "
+            "scope this page to."
+        )
+    if SEPARATOR in one_subject:
+        raise WindowError(
+            f'?subject= may not contain "{SEPARATOR}" -- that character joins the '
+            "subject to its period to build the bucket key, so a subject id "
+            "carrying one would be read back as two fields instead of one, "
+            "resolving to a bucket that was never built. Pass the subject's own id, "
+            f'with no "{SEPARATOR}" in it.'
+        )
+
+    specs = list(expand_window_args(trailing))
+    if len(specs) != 1 or specs[0].first != specs[0].last:
+        raise WindowError(
+            f"{plan.name} answers one page for one bucket, not a span or a list of "
+            "them: pass a single window naming exactly one bucket (`trailing=1` for "
+            "the current bucket, `trailing=\"3-3\"` for the third bucket back), not "
+            "`trailing=1-6` or `trailing=each:1-6`. Ask the six-window case as six "
+            "separate requests, one bucket per page -- the same way a caller pages "
+            "through anything else this engine paints one bucket at a time."
+        )
+    spec = specs[0]
+
+    assert isinstance(idx.spec, ByComposite) and len(idx.spec.parts) == 2
+    grain = idx.spec.parts[1].truncate
+    assert grain is not None
+
+    refusal = refuse_reach(spec, grain)
+    if refusal is not None:
+        raise WindowError(refusal)
+
+    at = end_of_day_ms(at_day, None) if at_day is not None else (
+        at_ms if at_ms is not None else now_ms()
+    )
+    # The period part refuses a subject-read zone at compile time (the
+    # checker's own rule -- there is no stored subject to read a calendar
+    # off before a bucket has been resolved), so every scoped page is cut in
+    # UTC. `resolve_span` is the same walk a reading's window takes; a
+    # single-bucket span always resolves to exactly one label.
+    [label] = resolve_span(at, None, spec, grain)
+    bucket = compose([one_subject, label])
+
+    rows, state, _missing = await project_rows(
+        store, facts, library, tenant, plan, at, scope=(plan.scoped_by, bucket)
+    )
+    return _compose_projection(library, plan, rows, state, at)
+
+
 def _compose_projection(
     library: Library,
     plan: ProjectPlan,
@@ -1476,8 +1581,14 @@ async def project_rows(
     tenant: str,
     plan: ProjectPlan,
     at_ms: float,
+    scope: tuple[str, str] | None = None,
 ) -> tuple[list[ProjectedRow], Ok | Unavailable, list[str]]:
     """Every row of a projection, and which of its figures were unavailable.
+
+    `scope`, when given, is `(index name, bucket key)` -- the one composite
+    bucket a scoped request resolved `?subject=` and its window to. Applied
+    as one more narrowing on top of `from`, never in place of it: the two
+    intersect, exactly as any two set expressions in this language do.
 
     **Every record, never the page.** The sort and the limit are applied by the
     caller *after* this returns, because a summary over a projection aggregates
@@ -1486,23 +1597,51 @@ async def project_rows(
     one, with nothing downstream able to detect it.
 
     A projection has no pointer of its own: it stores nothing, so there is no
-    version a tenant can be behind on and nothing to be stale against a moved
-    dial. Every row is this build's definition over this board's records,
-    always. What *can* be missing is the figures a row reads, which is why the
-    unavailable ones are named rather than the whole projection being withheld:
-    a row whose judgements are absent still carries its key and its name, and
-    dropping it would empty the screen over a gap in one column.
+    version a tenant can be behind on. With neither a `from` nor a `scoped
+    by` clause, that is the whole story -- nothing here reads a stored
+    bucket, so there is nothing to be stale against a moved dial, and every
+    row is this build's definition over this board's records, always. A
+    `from` or a `scoped by` clause changes that: both narrow through a
+    stored composite index, built under a recorded spec version the same
+    way any group's is, so a page reading either can be `behind-deploy` or
+    `never-computed` against it -- staled by the index, never by the
+    projection's own, since the projection still has none. What *can* be
+    missing besides that population is the figures a row reads, which is
+    why the unavailable ones are named rather than the whole projection
+    being withheld: a row whose judgements are absent still carries its key
+    and its name, and dropping it would empty the screen over a gap in one
+    column.
     """
     from ..engine.project import project
 
-    records = await facts.of_kind(tenant, plan.kind)
-    if not records:
-        return [], Unavailable(
+    async def _nothing_collected() -> Unavailable:
+        return Unavailable(
             because="nothing-collected",
             detail=f"no {plan.kind} records have been collected for this board",
-        ), []
+        )
 
-    if plan.frm is not None:
+    records: list[FactRow]
+    if plan.frm is None and scope is None:
+        # Nothing here reads a stored bucket, so there is no narrower key set
+        # to read the fact table at -- this genuinely wants the whole kind.
+        records = await facts.of_kind(tenant, plan.kind)
+        if not records:
+            return [], await _nothing_collected(), []
+    else:
+        # A scoped or `from`-bound request knows the exact key set it wants
+        # before it reads a single record: resolve that set from the indexes
+        # first, then read the fact table only at those keys, instead of
+        # loading the whole kind and filtering it afterwards. Two narrowings
+        # intersect exactly as any two set expressions in this language do.
+        wanted: frozenset[str] | None = None
+        if plan.frm is not None:
+            wanted = await _population(store, tenant, plan)
+        if scope is not None:
+            index_name, bucket_key = scope
+            scoped_ids = await store.members(tenant, index_name, bucket_key)
+            wanted = scoped_ids if wanted is None else wanted & scoped_ids
+        assert wanted is not None
+
         # The discipline a figure's pointer enforces, applied to the
         # population -- per grouping. The buckets `from` filters through are
         # stored state, each built under a recorded spec version, and the
@@ -1514,6 +1653,10 @@ async def project_rows(
         # different definition (or none), and filtering through them would
         # serve an Ok page with records silently missing: a confident zero
         # on exactly the screen this gate was written for.
+        #
+        # Run ahead of the fact read on purpose: it reads only
+        # `index_stamps` and the plan, never a record, so there is nothing
+        # here for it to wait on.
         stamps = await store.index_stamps(tenant)
         built = {name: stamp.version for name, stamp in stamps.items()}
         legacy = None
@@ -1531,6 +1674,13 @@ async def project_rows(
             and built.get(name) != _index_version(library.indexes[name])
         ]
         if stale:
+            # `nothing-collected` still outranks a stale index -- a tenant
+            # nothing has ever synced is nothing-collected regardless of
+            # what the index stamps say, so this is the one place the stale
+            # path pays for a probe: a narrowed read never ran, so there are
+            # no fetched records to read the answer off any more.
+            if not await facts.any_of_kind(tenant, plan.kind):
+                return [], await _nothing_collected(), []
             # Two different absences: a tenant nothing ever bucketed, and a
             # tenant whose buckets exist but describe other definitions. A
             # mismatched legacy stamp is the SECOND kind -- it was bucketed,
@@ -1548,11 +1698,16 @@ async def project_rows(
                 ),
             ), []
 
-        # After the emptiness check, deliberately: `nothing-collected` is a
-        # claim about the sync, and a population that matches nothing is a
-        # truthful empty page over records that were collected.
-        wanted = await _population(store, tenant, plan)
-        records = [record for record in records if record.key in wanted]
+        records = await facts.some(tenant, plan.kind, sorted(wanted)) if wanted else []
+        if not records:
+            # Same ambiguity as the unnarrowed path's emptiness check, but a
+            # narrowed read cannot tell "this board has collected nothing"
+            # from "this bucket, truthfully, has nothing in it" by itself --
+            # the probe is the one extra query that tells them apart, paid
+            # only here, never on the happy path where records came back.
+            if not await facts.any_of_kind(tenant, plan.kind):
+                return [], await _nothing_collected(), []
+            # else: collected, just empty here -- a truthful `Ok` page.
 
     values: dict[str, dict[tuple[str, bool], Value]] = {}
     missing: list[str] = []
@@ -1616,7 +1771,9 @@ async def _population(store: EngineStore, tenant: str, plan: ProjectPlan) -> fro
     """
     from .evaluate import Readers, _resolve
 
-    members = {name: await store.members(tenant, name, "") for name in plan.indexes}
+    assert plan.frm is not None
+    names = _set_index_names(plan.frm)
+    members = {name: await store.members(tenant, name, "") for name in names}
 
     def read_bucket(index: str, bucket: str | None) -> frozenset[str]:
         return members.get(index, frozenset())
@@ -1631,8 +1788,22 @@ async def _population(store: EngineStore, tenant: str, plan: ProjectPlan) -> fro
         parts=unreachable,
         settings=unreachable,
     )
-    assert plan.frm is not None
     return _resolve(plan.frm, "", {}, readers)
+
+
+def _set_index_names(expr: SetExpr) -> frozenset[str]:
+    """Every index name a `from` expression actually reads, walked the same
+    shape `_resolve` walks -- so `_population` looks up membership only for
+    the groupings its own population reads, not every index the plan's
+    staleness gate also tracks (which now includes a `scoped by` index that
+    `from` never touches)."""
+    if isinstance(expr, SetIndex):
+        return frozenset({expr.index})
+    if isinstance(expr, SetRef):
+        return frozenset()
+    if isinstance(expr, SetOp):
+        return _set_index_names(expr.left) | _set_index_names(expr.right)
+    assert_never(expr)
 
 
 # -------------------------------------------------------------- bundles --

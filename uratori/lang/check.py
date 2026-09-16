@@ -3062,10 +3062,92 @@ class _Checker:
                 expr.line,
             )
 
+    def _scoped(self, d: ProjectDecl, kind: str) -> None:
+        """`scoped by <index>`: the one composite the request may narrow to
+        a single bucket -- a subject and a calendar period, and nothing
+        looser.
+
+        A projection's `from` refuses a scoped bucket because there is no row
+        yet to scope by; this is the request's own subject, known before any
+        row exists, so the same objection does not apply. What still must
+        hold is that the index actually names a subject crossed with a
+        period -- anything else would let `?subject=` and a window resolve
+        to a key nothing was ever bucketed under, an empty page that looks
+        complete.
+        """
+        assert d.scoped_by is not None
+        idx = self.indexes.get(d.scoped_by)
+        if idx is None:
+            raise CheckError(
+                f'projection {d.name} is scoped by "{d.scoped_by}", which is not a '
+                f"declared group or filter. Declared: {', '.join(sorted(self.indexes)) or 'none'}.",
+                d.scoped_by_line,
+            )
+        if not isinstance(idx.spec, ByComposite) or len(idx.spec.parts) != 2:
+            raise CheckError(
+                f"projection {d.name} is scoped by {d.scoped_by}, which is not a subject "
+                "crossed with a calendar period. A request narrows to one bucket by "
+                "naming a subject (`?subject=`) and a window, so the index has to be a "
+                "composite of exactly those two parts -- `group ... from (room_id, "
+                "ended_at by month)` -- or there is no bucket key for the request to "
+                "resolve to.",
+                d.scoped_by_line,
+            )
+        subject_part, period_part = idx.spec.parts
+        if subject_part.truncate is not None or subject_part.select is not None:
+            raise CheckError(
+                f"projection {d.name} is scoped by {d.scoped_by}, whose first part is "
+                "itself a calendar rule. The first part is the subject `?subject=` "
+                "names -- a plain field -- and the second is the period a window "
+                "selects; this index has the shape backwards.",
+                d.scoped_by_line,
+            )
+        if period_part.truncate not in ("week", "month", "quarter"):
+            what = (
+                "selects a calendar component rather than truncating to one"
+                if period_part.select is not None
+                else f"buckets by {period_part.truncate}"
+                if period_part.truncate is not None
+                else "carries no calendar rule at all"
+            )
+            raise CheckError(
+                f"projection {d.name} is scoped by {d.scoped_by}, whose second part "
+                f"{what}. A "
+                "scoped page is asked for at week, month or quarter grain -- the grains "
+                "a dashboard actually pages through -- so the period part must truncate "
+                "to one of those.",
+                d.scoped_by_line,
+            )
+        if period_part.zone is not None:
+            raise CheckError(
+                f"projection {d.name} is scoped by {d.scoped_by}, whose period part "
+                "reads a subject's own calendar. A scoped request has no stored subject "
+                "to read a zone off before it has resolved one -- it is given a bare "
+                "`?subject=` id -- so the period here has to be cut in one calendar for "
+                "everybody. Drop the `by ... in ...` zone and let it truncate in UTC.",
+                d.scoped_by_line,
+            )
+        # Compared in id space, not raw kind: see `_population`'s identical
+        # check for why. A `scoped by` index in another kind's id space holds
+        # bucket keys built from that kind's ids, so `?subject=` and the
+        # window would resolve to a key nothing here was ever bucketed
+        # under -- every request served an empty page that looks complete.
+        if idx.id_space != self._keyed.get(kind, kind):
+            raise CheckError(
+                f"projection {d.name} is over {kind} and is scoped by {d.scoped_by}, "
+                f"whose bucket keys are built from {idx.id_space} ids. A `?subject=` "
+                f"naming a {kind} subject resolves to a bucket keyed under a different "
+                "space, matching no bucket this index ever built -- an empty page that "
+                "looks like a complete one, with nothing thrown.",
+                d.scoped_by_line,
+            )
+
     def _projection(self, d: ProjectDecl) -> None:
         self._claim(d.name, "projection", d.line)
         kind = d.name.split(".", 1)[0]
         self._fact_kind(kind, f"projection {d.name} is over", d.line)
+        if d.scoped_by is not None:
+            self._scoped(d, kind)
         if d.frm is not None:
             self._population(d, kind, d.frm)
 
@@ -3194,11 +3276,17 @@ class _Checker:
             values=tuple(values),
             flags=d.flags,
             frm=d.frm,
+            scoped_by=d.scoped_by,
             omit=d.omit,
             sort=d.sort,
             limit=d.limit,
             joins=tuple(joins),  # type: ignore[arg-type]
-            indexes=tuple(sorted(_indexes_in(d.frm))) if d.frm is not None else (),
+            indexes=tuple(
+                sorted(
+                    (set(_indexes_in(d.frm)) if d.frm is not None else set())
+                    | ({d.scoped_by} if d.scoped_by is not None else set())
+                )
+            ),
             figures=tuple(r.figure for r in d.reads),
         )
         self.projections.append(
@@ -4334,6 +4422,11 @@ def _project_hash(plan: ProjectPlan, indexes: dict[str, CompiledIndex]) -> objec
         # review reads, and on the wire. `or None` so a projection with no
         # `from` stays on its historic hash; `canonical` drops absent keys.
         "from_indexes": [_index_hash(indexes[n]) for n in plan.indexes] or None,
+        # A request-scoped page cites a different index than `from` reads,
+        # and a caller narrowing to `?subject=`+a window over one index is a
+        # different page than the same call over another -- so the index
+        # named here has to move the version exactly as `from`'s do above.
+        "scoped_by": _index_hash(indexes[plan.scoped_by]) if plan.scoped_by is not None else None,
         "fields": [
             {
                 "name": n,

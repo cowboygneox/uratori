@@ -1772,3 +1772,141 @@ async def test_a_bundle_over_a_live_reading_is_a_501_like_the_reading_itself(
     got = await server.http.get("/tenants/t1/results/shop_courier.live_card")
     assert got.status_code == 501, got.text
     assert "live" in got.json()["detail"]
+
+
+# ------------------------------------------------------------- scoped by --
+
+SCOPED_EXTRA = """
+group shop_order.by_courier_month from (courier_id, started_at by month)
+filter shop_order.every where courier_id != ""
+
+# The three oldest orders, for one courier and one calendar month.
+projection shop_order.oldest_by_courier_month scoped by shop_order.by_courier_month:
+    from shop_order.every
+    field:
+        key = ref as text
+        started = started_at as date
+    sort by key ascending
+    limit 3
+"""
+
+
+async def _teach_scoped(http: httpx.AsyncClient) -> None:
+    put = await http.put("/schema", json=COURIER_WORLD.to_document())
+    assert put.status_code == 200, put.text
+    put = await http.put("/definitions", json={"source": COURIER_SOURCE + SCOPED_EXTRA})
+    assert put.status_code == 200, put.text
+
+
+async def test_a_scoped_projection_is_asked_with_subject_and_a_single_window(
+    server: Server,
+) -> None:
+    """The one route every projection already answers on now doubles as the
+    scoped door: `?subject=` names the bucket's subject and `trailing=`
+    names its one bucket, and what comes back is that bucket's page --
+    never another courier's, never another month's."""
+    await _teach_scoped(server.http)
+    pushed = await server.http.post(
+        "/tenants/t1/facts",
+        json={
+            "writes": {
+                "shop_courier": {"c1": {"name": "Aki"}, "c2": {"name": "Beno"}},
+                "shop_order": {
+                    "o1": {"ref": "A-1", "courier_id": "c1", "status": "riding",
+                           "started_at": "2026-08-05T10:00:00Z"},
+                    "o2": {"ref": "A-2", "courier_id": "c1", "status": "riding",
+                           "started_at": "2026-08-20T10:00:00Z"},
+                    "o3": {"ref": "A-3", "courier_id": "c1", "status": "riding",
+                           "started_at": "2026-07-15T10:00:00Z"},  # a different month
+                    "o4": {"ref": "A-4", "courier_id": "c2", "status": "riding",
+                           "started_at": "2026-08-10T10:00:00Z"},  # a different courier
+                },
+            }
+        },
+    )
+    assert pushed.status_code == 200, pushed.text
+
+    got = await server.http.get(
+        "/tenants/t1/results/shop_order.oldest_by_courier_month",
+        params={"subject": "c1", "trailing": "1", "at": "2026-08-31"},
+    )
+    assert got.status_code == 200, got.text
+    body = got.json()
+    assert body["state"]["ok"] is True
+    assert [s["id"] for s in body["subjects"]] == ["o1", "o2"], (
+        "one courier, one month, oldest first"
+    )
+
+
+async def test_a_scoped_projection_refuses_no_subject_over_http(server: Server) -> None:
+    await _teach_scoped(server.http)
+    got = await server.http.get(
+        "/tenants/t1/results/shop_order.oldest_by_courier_month",
+        params={"trailing": "1"},
+    )
+    assert got.status_code == 422, got.text
+    assert "needs exactly one" in got.text
+
+
+async def test_a_scoped_projection_refuses_a_subject_with_the_separator(
+    server: Server,
+) -> None:
+    """A subject id carrying `@`, the character that joins a bucket's parts,
+    would be read back as two fields instead of one and resolve to a bucket
+    that was never built -- a caller error, refused with a 422, not a
+    ValueError leaking out of `compose` as a 400."""
+    await _teach_scoped(server.http)
+    got = await server.http.get(
+        "/tenants/t1/results/shop_order.oldest_by_courier_month",
+        params={"subject": "c1@c2", "trailing": "1"},
+    )
+    assert got.status_code == 422, got.text
+    assert "may not contain" in got.text
+
+
+async def test_a_scoped_projection_refuses_a_span_over_http(server: Server) -> None:
+    await _teach_scoped(server.http)
+    got = await server.http.get(
+        "/tenants/t1/results/shop_order.oldest_by_courier_month",
+        params={"subject": "c1", "trailing": "1-6"},
+    )
+    assert got.status_code == 422, got.text
+    assert "one bucket" in got.text
+
+
+async def test_a_scoped_projection_refuses_the_default_trailing_span(
+    server: Server,
+) -> None:
+    """Omitting `trailing=` falls through to `DEFAULT_TRAILING` -- three
+    windows, not one -- and that is the mistake a real caller is most
+    likely to make: ask for the page and forget the window entirely. It
+    must refuse exactly as a written-out span does, not quietly answer over
+    whichever of the three windows a served page happened to pick."""
+    await _teach_scoped(server.http)
+    got = await server.http.get(
+        "/tenants/t1/results/shop_order.oldest_by_courier_month",
+        params={"subject": "c1"},
+    )
+    assert got.status_code == 422, got.text
+    assert "one bucket" in got.text
+    assert "not a span or a list of them" in got.text
+
+
+async def test_an_unscoped_projection_still_refuses_subject_over_http(
+    server: Server,
+) -> None:
+    """The control: a projection that declares no `scoped by` keeps its old
+    behaviour exactly -- `?subject=` still means nothing to it, and the
+    refusal still says so in a projection's own terms."""
+    put = await server.http.put("/schema", json=COURIER_WORLD.to_document())
+    assert put.status_code == 200, put.text
+    put = await server.http.put(
+        "/definitions", json={"source": COURIER_SOURCE + BOARD_EXTRA}
+    )
+    assert put.status_code == 200, put.text
+
+    got = await server.http.get(
+        "/tenants/t1/results/shop_order.board", params={"subject": "c1"}
+    )
+    assert got.status_code == 422, got.text
+    assert "pooling is a reading's operation" in got.text

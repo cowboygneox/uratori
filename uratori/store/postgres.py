@@ -602,6 +602,14 @@ class PostgresFactStore:
         )
         return [_fact(r) for r in rows]
 
+    async def any_of_kind(self, tenant: str, kind: str) -> bool:
+        row = await self._pool.fetchrow(
+            "select 1 from fact where tenant_id = $1 and kind = $2 limit 1",
+            tenant,
+            kind,
+        )
+        return row is not None
+
     async def upsert(
         self,
         tenant: str,

@@ -49,6 +49,8 @@ class FactSource(Protocol):
 
     async def some(self, tenant: str, kind: str, keys: Sequence[str]) -> list[FactRow]: ...
 
+    async def any_of_kind(self, tenant: str, kind: str) -> bool: ...
+
 
 @dataclass(frozen=True)
 class Pointer:
