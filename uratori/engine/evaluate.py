@@ -605,11 +605,21 @@ def _compare(left: Value, op: Comparison | str, right: Value) -> bool | None:
 
     The two presence tests answer *before* the null guard, because "is there a
     value at all" is never itself unknown -- that is the whole point of them.
+
+    `left == ""` also answers `nothing`, and this is the projection layer's
+    counterpart to `_is_set` in `buckets.py` -- not identical to it: `_is_set`
+    also treats nought as absent, and this does not, because a numeric field
+    can never hold `""` and nothing here should start reading a real zero as
+    unanswered. Needed because a text field now projects a cleared value as
+    `""` rather than as `None` (see `_field_value` in `project.py`), and this
+    layer has no `is set` beside `is nothing`/`is something` the way a filter
+    does: without this, `""` becoming a real value would flip every cleared
+    field to `is something` with no way left to ask the other question.
     """
     if op == "nothing":
-        return left is None
+        return left is None or left == ""
     if op == "something":
-        return left is not None
+        return left is not None and left != ""
     if left is None or right is None:
         return None
     if isinstance(left, list) or isinstance(right, list):

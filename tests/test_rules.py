@@ -29,8 +29,8 @@ from uratori.engine.buckets import (
     read_values,
     selected_day,
 )
-from uratori.engine.evaluate import Parts, Readers, evaluate, same_value
-from uratori.engine.project import holds, ordered, summarise
+from uratori.engine.evaluate import Parts, Readers, _compare, evaluate, same_value
+from uratori.engine.project import holds, ordered, project, summarise
 from uratori.engine.read import (
     Sample,
     level_of,
@@ -42,7 +42,7 @@ from uratori.engine.read import (
     unmet_of,
 )
 from uratori.engine.serve import serve_reading
-from uratori.lang.ast import Condition, Number, Part, SortDecl
+from uratori.lang.ast import Condition, FlagDecl, Number, Part, SortDecl, Text
 from uratori.lang.plan import ProjectPlan
 from uratori.results import Ok
 from uratori.store import MemoryFactStore
@@ -511,6 +511,72 @@ def test_a_presence_test_answers_before_the_null_guard() -> None:
         holds(Condition(left=Part(name="x"), op=">=", right=Number(value=1)), {"x": None}, 0.0)
         is None
     )
+
+
+def test_a_projected_field_keeps_a_cleared_value_over_no_value() -> None:
+    """The projection layer's half of the split `read_path`/`read_values`
+    argues for. A field somebody cleared used to project `None`, indistinguishable
+    from a field nobody ever touched -- this is the row-shaped version of the
+    bug `test_a_filter_tells_an_empty_field_from_one_nobody_set` catches at the
+    index layer."""
+    plan = ProjectPlan(
+        name="work_issue.x",
+        kind="work_issue",
+        doc="",
+        fields=(("status", "status", "text", None),),
+    )
+    cleared = project(plan, "r1", {"status": ""}, {}, {}, 0.0)
+    unset = project(plan, "r2", {}, {}, {}, 0.0)
+    answered = project(plan, "r3", {"status": "open"}, {}, {}, 0.0)
+    assert cleared is not None and cleared.values["status"] == ""
+    assert unset is not None and unset.values["status"] is None
+    assert answered is not None and answered.values["status"] == "open"
+
+    # The tiebreak this needs and a naive `sorted(read_values(...))[0]` would
+    # not: an empty string sorts before every written word, so a record
+    # holding both would go blank on a fix that forgot to prefer the answer.
+    mixed = project(plan, "r4", {"status": ["", "open"]}, {}, {}, 0.0)
+    assert mixed is not None and mixed.values["status"] == "open"
+
+
+def test_when_status_is_the_empty_string_fires_in_a_flag() -> None:
+    """The user-visible consequence of the fix, exercised through `_flag`
+    rather than `_field_value` directly -- the point is that a board renders
+    the sentence, not that some internal reader returns a string."""
+    flag = FlagDecl(
+        name="cleared",
+        when=Condition(left=Part(name="status"), op="==", right=Text(value="")),
+        label="cleared",
+        detail="status was cleared",
+        severity="info",
+    )
+    plan = ProjectPlan(
+        name="work_issue.x",
+        kind="work_issue",
+        doc="",
+        fields=(("status", "status", "text", None),),
+        flags=(flag,),
+    )
+    cleared_row = project(plan, "r1", {"status": ""}, {}, {}, 0.0)
+    unset_row = project(plan, "r2", {}, {}, {}, 0.0)
+    assert cleared_row is not None and [f.name for f in cleared_row.flags] == ["cleared"]
+    assert unset_row is not None and unset_row.flags == ()
+
+
+def test_nothing_and_something_read_a_cleared_field_as_nothing() -> None:
+    """`_compare`'s presence tests are the projection layer's counterpart to
+    `_is_set` in `buckets.py`, and deliberately not identical to it: this must
+    not start reading a real zero as absent just because it now reads `""`
+    that way."""
+    assert _compare("", "nothing", None) is True
+    assert _compare("", "something", None) is False
+    assert _compare("open", "nothing", None) is False
+    assert _compare("open", "something", None) is True
+    assert _compare(None, "nothing", None) is True
+
+    # A numeric zero is not touched by the `== ""` term.
+    assert _compare(0.0, "nothing", None) is False
+    assert _compare(0.0, "something", None) is True
 
 
 def test_an_unsorted_row_goes_last_in_either_direction() -> None:

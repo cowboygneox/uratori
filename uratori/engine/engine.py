@@ -972,6 +972,12 @@ class Engine:
         rows = await self._facts.some(tenant, plan.scope, [base])
         if not rows:
             return base
+        # `read_path`, not `read_values`, and load-bearing: the fallback to
+        # `base` above is what makes printing the raw id honest where a name
+        # is missing, and a name field holding `""` is missing in exactly the
+        # sense this docstring means. Swap the reader and a cleared name field
+        # returns `""` here instead of falling through, and the label renders
+        # blank instead of the id it was worth showing.
         found = read_path(rows[0].value, field)
         return found[0] if found else base
 
