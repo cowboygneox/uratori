@@ -1946,10 +1946,14 @@ projection code_change.oldest_by_repo_month scoped by code_change.by_repo_month:
 ```
 
 Asked as `GET /tenants/{t}/results/code_change.oldest_by_repo_month
-?subject=<repo id>&trailing=3`, this answers one page: the repo's third
+?subject=<repo id>&trailing=3-3`, this answers one page: the repo's third
 bucket back, narrowed further by whatever `from` already declared -- the two
-intersect exactly as any two set expressions do. It refuses rather than
-paging over a subset nobody asked for:
+intersect exactly as any two set expressions do. The window names one bucket,
+so it is written as a position, not as a reach: `trailing=1` for the bucket
+the anchor falls in, `trailing=3-3` for the third back. A bare `trailing=3`
+is the *last three* buckets everywhere else in this language, and it means
+the same here -- which is three pages, so it is refused rather than quietly
+served as one. It refuses rather than paging over a subset nobody asked for:
 
 - **No `?subject=`, or more than one.** A scoped page has no whole-population
   reading to fall back to -- the population *is* the one bucket the request
@@ -1959,6 +1963,11 @@ paging over a subset nobody asked for:
   would ask for several pages under a contract that answers one; the six-week
   comparison is six requests, one bucket each, the same way a caller pages
   through anything else this engine paints one bucket at a time.
+- **An index whose members are another kind's ids.** A projection over one
+  kind scoped by a group over another resolves `?subject=` to a bucket keyed
+  in the wrong id space, matching no record on the page -- an empty page that
+  looks like a complete one. Refused when the definitions are compiled, the
+  same way `from`'s populations already are.
 - **A stale or never-built scoping index**, the same `behind-deploy` and
   `never-computed` absences `from` itself answers, because a request-scoped
   bucket is read through the same stored index a `from` population reads
