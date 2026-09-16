@@ -209,6 +209,25 @@ def test_a_finite_number_is_a_key_and_an_infinity_is_not() -> None:
     assert read_path({"n": float("nan")}, "n") == []
 
 
+def test_an_empty_string_is_a_key_distinct_from_absence() -> None:
+    """Same asymmetry as the numeric case, and it was not fixed alongside it:
+    an absent value satisfies `!=` by design, so `where status != ""` used to
+    over-match every record with no `status` at all *and* every record whose
+    `status` was genuinely `""`, and `where status == ""` matched nobody.
+    A record holding `""` and a record holding nothing must answer
+    differently to both forms."""
+    holds_empty = {"status": ""}
+    holds_nothing: dict[str, object] = {}
+
+    assert read_path(holds_empty, "status") == [""]
+    assert read_path(holds_nothing, "status") == []
+
+    # `==` keys off what `read_path` returns: only the record that actually
+    # holds "" should be a member of the "" bucket.
+    assert "" in read_path(holds_empty, "status")
+    assert "" not in read_path(holds_nothing, "status")
+
+
 def test_a_clock_measure_refuses_to_invent_an_instant() -> None:
     """A per-record clock never produces a visibly wrong number -- it produces a
     queue whose oldest wait disagrees with itself by milliseconds, and an `at`

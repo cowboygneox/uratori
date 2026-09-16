@@ -86,6 +86,19 @@ def read_path(record: Mapping[str, Any], path: str) -> list[str]:
     predicate over a numeric field matched *every record in the tenant* rather
     than none of them. An over-count, silently. Infinities and NaN are not keys,
     because they are not values anybody wrote down.
+
+    **The empty string is a key, for the same reason.** It was dropped once,
+    silently, on the same asymmetry: `where status == ""` matched no record
+    (a nought a definition asked for came back nought for everybody, not
+    thrown), and `where status != ""` over-matched, catching records whose
+    `status` was genuinely absent as well as the ones that held `""`. There is
+    a real cost the other way -- several providers write `""` into a field to
+    mean "no value", the same way others write `0` or `null`, so a `!= ""`
+    guard that used to catch those records stops catching them, and an
+    `is set` reading of the same field is what those definitions want instead
+    (see `_is_set`, which keeps treating `""` as absent on purpose, because
+    that decision is about *whether anybody answered*, not about what counts
+    as a key).
     """
     nodes: list[Any] = [record]
     for segment in path.split("."):
@@ -110,7 +123,7 @@ def read_path(record: Mapping[str, Any], path: str) -> list[str]:
             float("-inf"),
         ):
             out.append(_number_key(float(node)))
-        elif isinstance(node, str) and node != "":
+        elif isinstance(node, str):
             out.append(node)
     return out
 
