@@ -166,6 +166,18 @@ def _field_value(
         if len(raw) != 1:
             return None
         return raw[0] == "true"
+    # `read_path` and not `read_values`, so a field somebody cleared projects as
+    # absent -- deliberately, and not for the reason the index filters have.
+    # Three things would have to be decided first, and none of them is decided
+    # here: `sorted(raw)[0]` would start answering `""` for a record holding
+    # `["", "open"]`, so a row that shows a value today would go blank; `is
+    # nothing` is `left is None`, so every cleared field would flip to `is
+    # something`; and this layer has no `is set`, so there would be no way left
+    # to ask "did anybody answer" once it had. `where status == ""` in a ladder
+    # therefore still never fires -- a known gap, argued in PR #8, not an
+    # oversight. (Its mirror does not exist here: `_compare` answers *unknown*
+    # rather than true for `!= ""` against an absence, so this layer never had
+    # the over-match half of the bug.)
     raw = read_path(record, path)
     # A plain field with several values takes the first in sorted order: the
     # ambiguity is inside one record and the row is at least about the right

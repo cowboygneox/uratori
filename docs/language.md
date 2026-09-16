@@ -394,6 +394,12 @@ providers write `""` into a field where others write `null`, so a definition
 that meant "has anybody answered" wants the next form instead, which goes on
 reading `""` as absent on purpose.
 
+This is about **filters**. A projection's own `when`/`is nothing` still reads a
+cleared field as absent, so `when status == ""` in a ladder does not fire --
+the value a row projects is a separate decision from the key a record is
+filtered on, and changing it would take a row that shows a value today and
+blank it.
+
 **Presence**: `where estimate_seconds is set` (and `is not set`). Membership
 is decided by whether anybody has *said* something, and two decisions are
 folded into it. **Nought counts as absent** -- providers routinely write `0`
