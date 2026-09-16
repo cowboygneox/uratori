@@ -26,6 +26,7 @@ from uratori.engine.buckets import (
     part_of,
     read_number,
     read_path,
+    read_values,
     selected_day,
 )
 from uratori.engine.evaluate import Parts, Readers, evaluate, same_value
@@ -57,6 +58,9 @@ group work_issue.assigned_to from assignee_account_id through team_person.accoun
 filter work_issue.active where active == true
 filter work_issue.stuck where status_changed_at older than 14 days
 filter work_issue.fresh where status_changed_at younger than 14 days
+filter work_issue.unset_status where status == ""
+filter work_issue.some_status where status != ""
+group team_person.own_day from joined_at by day in team_person.timezone
 group work_issue.by_day from (assignee_account_id through team_person.accounts.account_id, completed_at by day in team_person.timezone)
 group work_issue.by_quarter from (assignee_account_id through team_person.accounts.account_id, completed_at by 15 minutes in team_person.timezone)
 group work_issue.by_minute from (assignee_account_id through team_person.accounts.account_id, completed_at by minute in team_person.timezone)
@@ -209,23 +213,61 @@ def test_a_finite_number_is_a_key_and_an_infinity_is_not() -> None:
     assert read_path({"n": float("nan")}, "n") == []
 
 
-def test_an_empty_string_is_a_key_distinct_from_absence() -> None:
-    """Same asymmetry as the numeric case, and it was not fixed alongside it:
-    an absent value satisfies `!=` by design, so `where status != ""` used to
-    over-match every record with no `status` at all *and* every record whose
-    `status` was genuinely `""`, and `where status == ""` matched nobody.
-    A record holding `""` and a record holding nothing must answer
-    differently to both forms."""
-    holds_empty = {"status": ""}
-    holds_nothing: dict[str, object] = {}
+def test_the_empty_string_is_compared_but_is_never_a_key() -> None:
+    """One function answering both questions is what the first attempt at this
+    tried, and it cannot: a predicate has to see `""` or `where status == ""`
+    asks about records it can never match, while a *key* of `""` files records
+    under a blank bucket, lands joins on a blank owner id, and hands `ZoneInfo`
+    an empty calendar. So there are two readers, and the only difference
+    between them is this one case."""
+    assert read_values({"status": ""}, "status") == [""]
+    assert read_path({"status": ""}, "status") == []
 
-    assert read_path(holds_empty, "status") == [""]
-    assert read_path(holds_nothing, "status") == []
+    # Nothing else may drift apart, or "one is the other minus a case" stops
+    # being true and each fix has to be made twice.
+    for record, path in (
+        ({"status": "open"}, "status"),
+        ({"status": ["a", "", "b"]}, "status"),
+        ({"n": 3}, "n"),
+        ({"n": float("inf")}, "n"),
+        ({"flag": False}, "flag"),
+        ({}, "status"),
+    ):
+        kept = [v for v in read_values(record, path) if v != ""]
+        assert read_path(record, path) == kept
 
-    # `==` keys off what `read_path` returns: only the record that actually
-    # holds "" should be a member of the "" bucket.
-    assert "" in read_path(holds_empty, "status")
-    assert "" not in read_path(holds_nothing, "status")
+
+def test_a_filter_tells_an_empty_field_from_one_nobody_set() -> None:
+    """The bug this whole split exists for. `where status == ""` matched no
+    record at all -- a nought a definition asked for, answered nought for
+    everybody and nothing thrown -- and `!= ""` over-matched, catching the
+    genuinely empty alongside the answered."""
+    empty = {"status": ""}
+    unset: dict[str, object] = {}
+    answered = {"status": "open"}
+
+    assert buckets_of(_index("work_issue.unset_status"), empty, _resolve, NOW) == [""]
+    assert buckets_of(_index("work_issue.unset_status"), unset, _resolve, NOW) == []
+    assert buckets_of(_index("work_issue.unset_status"), answered, _resolve, NOW) == []
+
+    # An absence still satisfies `!=` -- that is the documented design and it is
+    # unchanged. What changed is that the genuinely empty no longer do too.
+    assert buckets_of(_index("work_issue.some_status"), empty, _resolve, NOW) == []
+    assert buckets_of(_index("work_issue.some_status"), unset, _resolve, NOW) == [""]
+    assert buckets_of(_index("work_issue.some_status"), answered, _resolve, NOW) == [""]
+
+
+def test_a_blank_calendar_is_no_bucket_rather_than_a_raise() -> None:
+    """`ZoneInfo("")` raises, and `buckets_of` runs per record inside the
+    tenant's reindex with nothing catching it -- so one blank `timezone` on one
+    record would abort every figure for everybody. That branch reads the zone
+    with `read_path` and answers "absent" only because the empty string is not
+    a key; this is that dependency, written down where breaking it fails."""
+    blank = {"joined_at": "2025-08-24T02:26:40Z", "timezone": ""}
+    assert buckets_of(_index("team_person.own_day"), blank, _resolve, NOW) == []
+
+    real = {"joined_at": "2025-08-24T02:26:40Z", "timezone": "America/Los_Angeles"}
+    assert buckets_of(_index("team_person.own_day"), real, _resolve, NOW) == ["2025-08-23"]
 
 
 def test_a_clock_measure_refuses_to_invent_an_instant() -> None:
