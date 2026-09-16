@@ -30,7 +30,7 @@ from ..lang.ast import (
     Text,
 )
 from ..lang.plan import ProjectPlan, SummarisePlan, Value
-from .buckets import days_between, parse_instant, read_number, read_path
+from .buckets import days_between, parse_instant, read_number, read_path, read_values
 from .evaluate import _arith, _compare  # one implementation of each, shared deliberately
 
 
@@ -165,12 +165,29 @@ def _field_value(
         raw = read_path(record, path)
         if len(raw) != 1:
             return None
+        # A field holding `""` is not a boolean, and `None` -- "we cannot tell"
+        # -- is the honest answer where `False` would be a fabrication: nobody
+        # said the box was unchecked, they said nothing about it. `verify.py`
+        # already refuses a declared `flag` field whose value is `""`, so this
+        # is a belt, not the only strap.
         return raw[0] == "true"
-    raw = read_path(record, path)
+    # `read_values`, not `read_path`: a field somebody cleared is a field
+    # somebody answered, and `where status == ""` in a ladder or a flag is
+    # asking about exactly those rows -- the projection layer's half of the
+    # bug `read_path` vs. `read_values` exists to fix, argued in full on
+    # `read_path`'s docstring in `buckets.py`.
+    raw = read_values(record, path)
     # A plain field with several values takes the first in sorted order: the
     # ambiguity is inside one record and the row is at least about the right
-    # thing, which is not true of a join.
-    return sorted(raw)[0] if raw else None
+    # thing, which is not true of a join. Sorting bare would put `""` first --
+    # a record holding `["", "open"]` would project the blank over the answer,
+    # which is a regression a reader would see as a row that used to show a
+    # value going empty for no reason. So a written value wins the tie over an
+    # empty one, and only when every value is `""` does the row project it.
+    written = sorted(v for v in raw if v != "")
+    if written:
+        return written[0]
+    return "" if raw else None
 
 
 def _eval(

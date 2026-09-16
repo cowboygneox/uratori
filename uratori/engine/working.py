@@ -346,6 +346,9 @@ def _article(noun: str) -> str:
 
 
 def _field_text(record: Mapping[str, Any] | None, field_name: str | None) -> str | None:
+    # `read_path`, not `read_values`: this produces a record's *display name*,
+    # and a blank name is not a name -- the next line already strips `""`
+    # explicitly, so this does not depend on which reader dropped it first.
     if record is None or field_name is None:
         return None
     found = read_path(record, field_name)

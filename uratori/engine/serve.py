@@ -589,6 +589,10 @@ async def serve_evidence(
 
 def _field_of(value: Mapping[str, Any] | None, field: str | None) -> str | None:
     """A record's schema-declared field, or nothing -- never a guess."""
+    # `read_path`, not `read_values`: like `_field_text` in `working.py`, this
+    # produces a *display name*, a blank one is not a name, and the explicit
+    # strip on the next line means it does not depend on which reader dropped
+    # `""` first.
     from .buckets import read_path
 
     if value is None or field is None:

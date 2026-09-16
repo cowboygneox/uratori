@@ -387,6 +387,21 @@ memorising -- `where estimate_seconds != "0"` matches every *unsized* record
 rather than none of them. When the question is whether a field has been
 filled in at all, that question has its own form:
 
+An **empty string is a value, not an absence**: `where status == ""` matches
+the records somebody cleared, and `!= ""` therefore no longer matches them --
+it still matches records with no `status` at all, by the rule above. Several
+providers write `""` into a field where others write `null`, so a definition
+that meant "has anybody answered" wants the next form instead, which goes on
+reading `""` as absent on purpose.
+
+The rule is the same wherever it is written. A projection reads it too:
+`when status == ""` in a ladder or a flag fires for exactly the records a
+filter's `where status == ""` would match, because a row's text field is the
+same value read the same way. `is nothing`/`is something` go on reading `""`
+as absent, on purpose and for the reason above -- presence and content are two
+different questions, and a projection needs both of them answerable just as a
+filter does.
+
 **Presence**: `where estimate_seconds is set` (and `is not set`). Membership
 is decided by whether anybody has *said* something, and two decisions are
 folded into it. **Nought counts as absent** -- providers routinely write `0`

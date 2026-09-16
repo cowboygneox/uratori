@@ -75,17 +75,25 @@ def tail_of(key: str) -> str | None:
 # ------------------------------------------------------------- reading --
 
 
-def read_path(record: Mapping[str, Any], path: str) -> list[str]:
-    """Every value at a path, flattened, as keys.
+def read_values(record: Mapping[str, Any], path: str) -> list[str]:
+    """Every value at a path, flattened, as a *predicate* compares them.
 
     Flattened because an index fans a record out across all of them:
     `accounts.accountId` means "any accountId of any account".
 
-    **Finite numbers are keys.** They were not once, and the asymmetry was
+    **Finite numbers are values.** They were not once, and the asymmetry was
     dangerous rather than narrow: an absent value satisfies `!=` by design, so a
     predicate over a numeric field matched *every record in the tenant* rather
-    than none of them. An over-count, silently. Infinities and NaN are not keys,
-    because they are not values anybody wrote down.
+    than none of them. An over-count, silently. Infinities and NaN are not
+    values, because they are not things anybody wrote down.
+
+    **So is the empty string, and that is why this is not `read_path`.** A
+    provider that writes `""` has written something down, and a definition
+    asking `where status == ""` is asking about exactly those records -- it
+    used to match none of them, and its mirror `!= ""` used to over-match by
+    catching them. `read_path` is this function minus that one case, because
+    what a predicate compares and what a record can be *filed under* are two
+    questions with two answers; the argument for the difference is there.
     """
     nodes: list[Any] = [record]
     for segment in path.split("."):
@@ -110,9 +118,40 @@ def read_path(record: Mapping[str, Any], path: str) -> list[str]:
             float("-inf"),
         ):
             out.append(_number_key(float(node)))
-        elif isinstance(node, str) and node != "":
+        elif isinstance(node, str):
             out.append(node)
     return out
+
+
+def read_path(record: Mapping[str, Any], path: str) -> list[str]:
+    """Every value at a path, flattened, as *keys*.
+
+    `read_values` minus the empty string. A key is something a record is filed
+    under -- a bucket on a board, the subject part of a composite, the value a
+    join lands on -- and the empty string is none of those things, so it is
+    dropped here and kept there. Three specifics, because "it is not a key" on
+    its own reads like squeamishness:
+
+    - **A calendar cannot be empty.** `_keys_for` reads a record's own zone off
+      it with this function, and `""` is not a zone: `ZoneInfo("")` raises, out
+      of the bucketing, aborting the whole tenant's pass -- every figure for
+      everybody, on one blank field on one record. Absent is the answer that
+      branch already has, and dropping the empty string is what makes it true.
+    - **A join must not land on a blank.** Both sides of a hop are read with
+      this function, so an empty string that counted would file every record
+      with an unset owner id under every owner whose own id was unset: an
+      unassigned issue attributed to a person, silently and at scale.
+    - **A subject has to be something a reader can point at.** A bucket keyed
+      by the empty string is what an unbucketed group read looks for and never
+      finds (`docs/language.md`), and a composite whose first part were empty
+      would compose to a row with no subject at the head of it.
+
+    None of that is an argument about what `""` *means* -- `read_values` says
+    it means something -- only about what it can be used as. `_is_set` is a
+    third answer again, and deliberately: it keeps treating `""` as absent
+    because whether anybody answered is not the same question as either.
+    """
+    return [value for value in read_values(record, path) if value != ""]
 
 
 def _number_key(value: float) -> str:
@@ -623,13 +662,20 @@ def buckets_of(
     spec = index.spec
 
     if isinstance(spec, ByPredicate):
-        values = read_path(record, spec.field)
+        # `read_values`, not `read_path`: this is the one place that compares a
+        # value rather than files a record under one, so it is the one place the
+        # empty string counts. A field somebody cleared is a field somebody
+        # answered, and `where status == ""` is a definition asking for exactly
+        # those records.
+        values = read_values(record, spec.field)
         if spec.op == "==":
             return [""] if spec.value in values else []
         # **An absent value satisfies `!=` by design**: a record with no `state`
         # is not in state "merged". That is right, and it is exactly why a
         # presence test needs its own arm rather than being spelled
-        # `!= "0"` -- see `ByPresence`.
+        # `!= "0"` -- see `ByPresence`. It is also what `!= ""` now means and
+        # did not before: the records with no `status` at all, and no longer
+        # the ones whose `status` is genuinely empty.
         return [""] if spec.value not in values else []
 
     if isinstance(spec, ByPresence):
