@@ -2132,6 +2132,35 @@ def test_scoped_by_index_is_part_of_the_projections_version() -> None:
     assert first_plan.version != second_plan.version
 
 
+def test_scoped_by_must_hold_ids_of_its_own_kind() -> None:
+    """`work_issue.by_container_month` is a group over work_issue, not
+    code_change -- its bucket keys are built from work_issue ids. A
+    `?subject=` naming a code_change subject resolves to a bucket keyed
+    under the wrong space, matching no bucket this index ever built -- an
+    empty page that looks complete."""
+    refuses(
+        SCOPED_BASE
+        + "\ngroup work_issue.by_container_month from (containerId, statusChangedAt "
+        "by month)\n"
+        + "\n# The five slowest-to-merge open changes, for one container and one month.\n"
+        "projection code_change.oldest_by_container_month scoped by "
+        "work_issue.by_container_month:\n"
+        "    from code_change.open\n"
+        "    field:\n"
+        "        key = title as text\n"
+        "    sort by key descending\n"
+        "    limit 5\n",
+        "whose bucket keys are built from",
+    )
+
+
+def test_scoped_by_may_hold_ids_of_the_projections_own_kind() -> None:
+    """The control: `code_change.by_repo_month` fans by `repoId` -- plain
+    code_change ids -- so the same scoped projection compiles cleanly."""
+    lib = compile_ok(SCOPED_BASE)
+    assert lib.projection("code_change.oldest_by_repo_month") is not None
+
+
 def test_a_summary_may_not_shadow_a_row_value() -> None:
     """One word would otherwise mean one row in one line and the whole
     population in the next, whichever way it resolved."""

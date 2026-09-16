@@ -984,6 +984,25 @@ def _turnover(
     )
 
 
+class CallSpyFacts(MemoryFactStore):
+    """Records which `FactSource` methods a request actually called, so a
+    test can assert the narrowed path reads the fact table only at the keys
+    the index already named -- never the whole kind."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.of_kind_calls: list[tuple[str, str]] = []
+        self.some_calls: list[tuple[str, str, tuple[str, ...]]] = []
+
+    async def of_kind(self, tenant: str, kind: str):  # type: ignore[override]
+        self.of_kind_calls.append((tenant, kind))
+        return await super().of_kind(tenant, kind)
+
+    async def some(self, tenant: str, kind: str, keys):  # type: ignore[override]
+        self.some_calls.append((tenant, kind, tuple(keys)))
+        return await super().some(tenant, kind, keys)
+
+
 async def test_a_scoped_projection_answers_one_rooms_one_month() -> None:
     """`answer_scoped_projection` resolves `?subject=` and a single-bucket
     window to the composite key the group index built under, and the rows it
@@ -1012,6 +1031,35 @@ async def test_a_scoped_projection_answers_one_rooms_one_month() -> None:
     assert result.state.ok is True
     ids = [s.id for s in result.subjects]
     assert ids == ["t2", "t1"], "sorted longest-first, one room, one month, plausible only"
+
+
+async def test_a_scoped_projection_answers_an_older_bucket() -> None:
+    """`trailing="3-3"` names the third bucket back, not the current one --
+    every other test in this file only ever asks `trailing=1`, so this is
+    the only proof the older-bucket path resolves to the right month at all
+    rather than silently falling back to the anchor's own bucket."""
+    from uratori.engine.buckets import end_of_day_ms
+    from uratori.engine.serve import answer_scoped_projection
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    _turnover(facts, "t1", "repo-1", "2026-08-05T10:00:00Z", 6000)  # current month
+    _turnover(facts, "t2", "repo-1", "2026-06-10T10:00:00Z", 9000)  # three months back
+    _turnover(facts, "t3", "repo-1", "2026-06-20T10:00:00Z", 3000)  # also three back
+    _turnover(facts, "t4", "repo-1", "2026-07-15T10:00:00Z", 12000)  # two months back
+    await Engine(store, facts, SCOPED, WORLD).run(TENANT, full=True)
+
+    plan = SCOPED.projection("code_change.longest_by_repo_month")
+    assert plan is not None
+
+    at = end_of_day_ms("2026-08-31", None)
+    result = await answer_scoped_projection(
+        store, facts, SCOPED, TENANT, plan,
+        subject=["repo-1"], trailing=["3-3"], at_ms=at,
+    )
+    assert result.state.ok is True
+    ids = [s.id for s in result.subjects]
+    assert ids == ["t2", "t3"], "the June bucket, three months back -- not August or July"
 
 
 async def test_a_scoped_projection_refuses_without_a_subject() -> None:
@@ -1085,6 +1133,106 @@ async def test_a_scoped_projection_is_behind_deploy_before_its_index_is_built() 
     )
     assert result.state.ok is False
     assert result.subjects == []
+
+
+async def test_a_scoped_projection_reads_the_fact_table_through_the_index() -> None:
+    """A scoped request already knows the exact key set it wants from the
+    index, so the fact table must be read at exactly those keys -- `some`,
+    never `of_kind` -- instead of loading the whole kind and filtering it
+    after the fact."""
+    from uratori.engine.buckets import end_of_day_ms
+    from uratori.engine.serve import answer_scoped_projection
+
+    facts = CallSpyFacts()
+    store = MemoryEngineStore()
+    _turnover(facts, "t1", "repo-1", "2026-08-05T10:00:00Z", 6000)
+    _turnover(facts, "t2", "repo-1", "2026-08-20T10:00:00Z", 9000)
+    _turnover(facts, "t3", "repo-2", "2026-08-10T10:00:00Z", 15000)  # a different room
+    await Engine(store, facts, SCOPED, WORLD).run(TENANT, full=True)
+    facts.some_calls.clear()
+    facts.of_kind_calls.clear()
+
+    plan = SCOPED.projection("code_change.longest_by_repo_month")
+    assert plan is not None
+    at = end_of_day_ms("2026-08-31", None)
+    result = await answer_scoped_projection(
+        store, facts, SCOPED, TENANT, plan,
+        subject=["repo-1"], trailing=["1"], at_ms=at,
+    )
+    assert result.state.ok is True
+    assert facts.of_kind_calls == [], "a scoped read must never load the whole kind"
+    assert len(facts.some_calls) == 1
+    _tenant, kind, keys = facts.some_calls[0]
+    assert kind == "code_change"
+    assert set(keys) == {"t1", "t2"}, "exactly the bucket's ids, never t3's"
+
+
+async def test_an_unscoped_projection_still_reads_the_whole_kind() -> None:
+    """The control: a projection with neither `from` nor `scoped by` genuinely
+    wants the whole kind, and must keep reading it through `of_kind`."""
+    from uratori.engine.serve import answer_projection
+
+    facts = CallSpyFacts()
+    store = MemoryEngineStore()
+    _turnover(facts, "t1", "repo-1", "2026-08-05T10:00:00Z", 6000)
+    await Engine(store, facts, SCOPED, WORLD).run(TENANT, full=True)
+    facts.some_calls.clear()
+    facts.of_kind_calls.clear()
+
+    plan = SCOPED.projection("code_change.every")
+    assert plan is not None
+    result = await answer_projection(store, facts, SCOPED, TENANT, plan)
+    assert result.state.ok is True
+    assert facts.of_kind_calls == [(TENANT, "code_change")]
+    assert facts.some_calls == []
+
+
+async def test_a_scoped_projections_empty_bucket_is_a_truthful_ok_page() -> None:
+    """A populated kind whose bucket for this subject and month happens to be
+    empty is a truthful `Ok` empty page, never `nothing-collected` -- the
+    narrowed read coming back empty must not be confused with the board
+    having collected nothing."""
+    from uratori.engine.buckets import end_of_day_ms
+    from uratori.engine.serve import answer_scoped_projection
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    _turnover(facts, "t1", "repo-1", "2026-08-05T10:00:00Z", 6000)
+    await Engine(store, facts, SCOPED, WORLD).run(TENANT, full=True)
+
+    plan = SCOPED.projection("code_change.longest_by_repo_month")
+    assert plan is not None
+    at = end_of_day_ms("2026-08-31", None)
+    # A room with no changes at all in this month, but repo-1's own changes
+    # (and its index) are collected and built.
+    result = await answer_scoped_projection(
+        store, facts, SCOPED, TENANT, plan,
+        subject=["repo-nobody-here"], trailing=["1"], at_ms=at,
+    )
+    assert result.state.ok is True
+    assert result.subjects == []
+
+
+async def test_a_scoped_projection_over_an_uncollected_kind_is_nothing_collected() -> None:
+    """A kind with no records at all -- nothing ever synced -- must still
+    report `nothing-collected`, not a truthful-looking empty page, even
+    though the narrowed read never touches the whole table any more."""
+    from uratori.engine.buckets import end_of_day_ms
+    from uratori.engine.serve import answer_scoped_projection
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    # Never write a single code_change record, and never run the engine.
+
+    plan = SCOPED.projection("code_change.longest_by_repo_month")
+    assert plan is not None
+    at = end_of_day_ms("2026-08-31", None)
+    result = await answer_scoped_projection(
+        store, facts, SCOPED, TENANT, plan,
+        subject=["repo-1"], trailing=["1"], at_ms=at,
+    )
+    assert result.state.ok is False
+    assert result.state.because == "nothing-collected"
 
 
 async def test_scoping_by_a_different_index_moves_the_projections_version() -> None:

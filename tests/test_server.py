@@ -1848,6 +1848,22 @@ async def test_a_scoped_projection_refuses_no_subject_over_http(server: Server) 
     assert "needs exactly one" in got.text
 
 
+async def test_a_scoped_projection_refuses_a_subject_with_the_separator(
+    server: Server,
+) -> None:
+    """A subject id carrying `@`, the character that joins a bucket's parts,
+    would be read back as two fields instead of one and resolve to a bucket
+    that was never built -- a caller error, refused with a 422, not a
+    ValueError leaking out of `compose` as a 400."""
+    await _teach_scoped(server.http)
+    got = await server.http.get(
+        "/tenants/t1/results/shop_order.oldest_by_courier_month",
+        params={"subject": "c1@c2", "trailing": "1"},
+    )
+    assert got.status_code == 422, got.text
+    assert "may not contain" in got.text
+
+
 async def test_a_scoped_projection_refuses_a_span_over_http(server: Server) -> None:
     await _teach_scoped(server.http)
     got = await server.http.get(

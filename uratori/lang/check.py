@@ -3062,7 +3062,7 @@ class _Checker:
                 expr.line,
             )
 
-    def _scoped(self, d: ProjectDecl) -> None:
+    def _scoped(self, d: ProjectDecl, kind: str) -> None:
         """`scoped by <index>`: the one composite the request may narrow to
         a single bucket -- a subject and a calendar period, and nothing
         looser.
@@ -3103,9 +3103,16 @@ class _Checker:
                 d.scoped_by_line,
             )
         if period_part.truncate not in ("week", "month", "quarter"):
+            what = (
+                "selects a calendar component rather than truncating to one"
+                if period_part.select is not None
+                else f"buckets by {period_part.truncate}"
+                if period_part.truncate is not None
+                else "carries no calendar rule at all"
+            )
             raise CheckError(
                 f"projection {d.name} is scoped by {d.scoped_by}, whose second part "
-                f"buckets by {period_part.truncate or 'no calendar rule at all'}. A "
+                f"{what}. A "
                 "scoped page is asked for at week, month or quarter grain -- the grains "
                 "a dashboard actually pages through -- so the period part must truncate "
                 "to one of those.",
@@ -3120,12 +3127,27 @@ class _Checker:
                 "everybody. Drop the `by ... in ...` zone and let it truncate in UTC.",
                 d.scoped_by_line,
             )
+        # Compared in id space, not raw kind: see `_population`'s identical
+        # check for why. A `scoped by` index in another kind's id space holds
+        # bucket keys built from that kind's ids, so `?subject=` and the
+        # window would resolve to a key nothing here was ever bucketed
+        # under -- every request served an empty page that looks complete.
+        if idx.id_space != self._keyed.get(kind, kind):
+            raise CheckError(
+                f"projection {d.name} is over {kind} and is scoped by {d.scoped_by}, "
+                f"whose bucket keys are built from {idx.id_space} ids. A `?subject=` "
+                f"naming a {kind} subject resolves to a bucket keyed under a different "
+                "space, matching no bucket this index ever built -- an empty page that "
+                "looks like a complete one, with nothing thrown.",
+                d.scoped_by_line,
+            )
+
     def _projection(self, d: ProjectDecl) -> None:
         self._claim(d.name, "projection", d.line)
         kind = d.name.split(".", 1)[0]
         self._fact_kind(kind, f"projection {d.name} is over", d.line)
         if d.scoped_by is not None:
-            self._scoped(d)
+            self._scoped(d, kind)
         if d.frm is not None:
             self._population(d, kind, d.frm)
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, assert_never
 
 from ..lang.ast import (
     Arith,
@@ -56,7 +56,7 @@ from ..results import (
     Window,
 )
 from ..schema import Schema
-from ..store import EngineStore, FactSource, StoredValue
+from ..store import EngineStore, FactRow, FactSource, StoredValue
 from ..windows import (
     WindowError,
     WindowSpec,
@@ -1493,13 +1493,22 @@ async def answer_scoped_projection(
             "a subject id may not be empty -- an empty ?subject= names no bucket to "
             "scope this page to."
         )
+    if SEPARATOR in one_subject:
+        raise WindowError(
+            f'?subject= may not contain "{SEPARATOR}" -- that character joins the '
+            "subject to its period to build the bucket key, so a subject id "
+            "carrying one would be read back as two fields instead of one, "
+            "resolving to a bucket that was never built. Pass the subject's own id, "
+            f'with no "{SEPARATOR}" in it.'
+        )
 
     specs = list(expand_window_args(trailing))
     if len(specs) != 1 or specs[0].first != specs[0].last:
         raise WindowError(
             f"{plan.name} answers one page for one bucket, not a span or a list of "
-            "them: pass a single window naming exactly one bucket (`trailing=3`, not "
-            "`trailing=1-6` or `trailing=each:1-6`). Ask the six-window case as six "
+            "them: pass a single window naming exactly one bucket (`trailing=1` for "
+            "the current bucket, `trailing=\"3-3\"` for the third bucket back), not "
+            "`trailing=1-6` or `trailing=each:1-6`. Ask the six-window case as six "
             "separate requests, one bucket per page -- the same way a caller pages "
             "through anything else this engine paints one bucket at a time."
         )
@@ -1605,14 +1614,34 @@ async def project_rows(
     """
     from ..engine.project import project
 
-    records = await facts.of_kind(tenant, plan.kind)
-    if not records:
-        return [], Unavailable(
+    async def _nothing_collected() -> Unavailable:
+        return Unavailable(
             because="nothing-collected",
             detail=f"no {plan.kind} records have been collected for this board",
-        ), []
+        )
 
-    if plan.frm is not None or scope is not None:
+    records: list[FactRow]
+    if plan.frm is None and scope is None:
+        # Nothing here reads a stored bucket, so there is no narrower key set
+        # to read the fact table at -- this genuinely wants the whole kind.
+        records = await facts.of_kind(tenant, plan.kind)
+        if not records:
+            return [], await _nothing_collected(), []
+    else:
+        # A scoped or `from`-bound request knows the exact key set it wants
+        # before it reads a single record: resolve that set from the indexes
+        # first, then read the fact table only at those keys, instead of
+        # loading the whole kind and filtering it afterwards. Two narrowings
+        # intersect exactly as any two set expressions in this language do.
+        wanted: frozenset[str] | None = None
+        if plan.frm is not None:
+            wanted = await _population(store, tenant, plan)
+        if scope is not None:
+            index_name, bucket_key = scope
+            scoped_ids = await store.members(tenant, index_name, bucket_key)
+            wanted = scoped_ids if wanted is None else wanted & scoped_ids
+        assert wanted is not None
+
         # The discipline a figure's pointer enforces, applied to the
         # population -- per grouping. The buckets `from` filters through are
         # stored state, each built under a recorded spec version, and the
@@ -1624,6 +1653,10 @@ async def project_rows(
         # different definition (or none), and filtering through them would
         # serve an Ok page with records silently missing: a confident zero
         # on exactly the screen this gate was written for.
+        #
+        # Run ahead of the fact read on purpose: it reads only
+        # `index_stamps` and the plan, never a record, so there is nothing
+        # here for it to wait on.
         stamps = await store.index_stamps(tenant)
         built = {name: stamp.version for name, stamp in stamps.items()}
         legacy = None
@@ -1641,6 +1674,13 @@ async def project_rows(
             and built.get(name) != _index_version(library.indexes[name])
         ]
         if stale:
+            # `nothing-collected` still outranks a stale index -- a tenant
+            # nothing has ever synced is nothing-collected regardless of
+            # what the index stamps say, so this is the one place the stale
+            # path pays for a probe: a narrowed read never ran, so there are
+            # no fetched records to read the answer off any more.
+            if not await facts.any_of_kind(tenant, plan.kind):
+                return [], await _nothing_collected(), []
             # Two different absences: a tenant nothing ever bucketed, and a
             # tenant whose buckets exist but describe other definitions. A
             # mismatched legacy stamp is the SECOND kind -- it was bucketed,
@@ -1658,17 +1698,16 @@ async def project_rows(
                 ),
             ), []
 
-        # After the emptiness check, deliberately: `nothing-collected` is a
-        # claim about the sync, and a population that matches nothing is a
-        # truthful empty page over records that were collected.
-        if plan.frm is not None:
-            wanted = await _population(store, tenant, plan)
-            records = [record for record in records if record.key in wanted]
-
-        if scope is not None:
-            index_name, bucket_key = scope
-            scoped_ids = await store.members(tenant, index_name, bucket_key)
-            records = [record for record in records if record.key in scoped_ids]
+        records = await facts.some(tenant, plan.kind, sorted(wanted)) if wanted else []
+        if not records:
+            # Same ambiguity as the unnarrowed path's emptiness check, but a
+            # narrowed read cannot tell "this board has collected nothing"
+            # from "this bucket, truthfully, has nothing in it" by itself --
+            # the probe is the one extra query that tells them apart, paid
+            # only here, never on the happy path where records came back.
+            if not await facts.any_of_kind(tenant, plan.kind):
+                return [], await _nothing_collected(), []
+            # else: collected, just empty here -- a truthful `Ok` page.
 
     values: dict[str, dict[tuple[str, bool], Value]] = {}
     missing: list[str] = []
@@ -1732,7 +1771,9 @@ async def _population(store: EngineStore, tenant: str, plan: ProjectPlan) -> fro
     """
     from .evaluate import Readers, _resolve
 
-    members = {name: await store.members(tenant, name, "") for name in plan.indexes}
+    assert plan.frm is not None
+    names = _set_index_names(plan.frm)
+    members = {name: await store.members(tenant, name, "") for name in names}
 
     def read_bucket(index: str, bucket: str | None) -> frozenset[str]:
         return members.get(index, frozenset())
@@ -1747,8 +1788,22 @@ async def _population(store: EngineStore, tenant: str, plan: ProjectPlan) -> fro
         parts=unreachable,
         settings=unreachable,
     )
-    assert plan.frm is not None
     return _resolve(plan.frm, "", {}, readers)
+
+
+def _set_index_names(expr: SetExpr) -> frozenset[str]:
+    """Every index name a `from` expression actually reads, walked the same
+    shape `_resolve` walks -- so `_population` looks up membership only for
+    the groupings its own population reads, not every index the plan's
+    staleness gate also tracks (which now includes a `scoped by` index that
+    `from` never touches)."""
+    if isinstance(expr, SetIndex):
+        return frozenset({expr.index})
+    if isinstance(expr, SetRef):
+        return frozenset()
+    if isinstance(expr, SetOp):
+        return _set_index_names(expr.left) | _set_index_names(expr.right)
+    assert_never(expr)
 
 
 # -------------------------------------------------------------- bundles --

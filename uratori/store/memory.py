@@ -56,6 +56,9 @@ class MemoryFactStore:
                 out.append(FactRow(kind=kind, key=key, value=value))
         return out
 
+    async def any_of_kind(self, tenant: str, kind: str) -> bool:
+        return any(t == tenant and k == kind for t, k, _key in self._rows)
+
 
 class MemoryEngineStore:
     """The engine's persistence over dictionaries. Mirrors the Postgres store
