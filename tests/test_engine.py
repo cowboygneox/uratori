@@ -597,6 +597,29 @@ summarise code_change.board_size over code_change.active_board:
 )
 
 
+async def test_a_pass_serves_its_projections_at_its_own_instant() -> None:
+    """A pass declares one instant for the whole thing -- `run(..., at_ms=X)`
+    -- and every reading it serves answers at that instant. Before this fix,
+    `_serve` threaded `at_ms` into `serve_reading` but not into
+    `answer_projection`, which fell back to wall-clock `now_ms()`: a pass run
+    at a declared instant served its readings at that instant and its
+    projections at whatever moment the server happened to be running,
+    disagreeing with itself under one envelope."""
+    from uratori.engine.serve import _iso
+    from uratori.facade import Uratori
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    _change(facts, "c1", "open")
+    facade = Uratori(schema=WORLD, library=POPULATED, store=store, facts=facts)
+
+    at_ms = 1_000_000.0  # nowhere near wall-clock now
+    report = await facade.run(TENANT, full=True, at_ms=at_ms)
+
+    served = next(r for r in report.results if r.name == "code_change.card")
+    assert served.at == _iso(at_ms)
+
+
 async def test_an_omitted_row_is_off_the_page_and_out_of_the_summary() -> None:
     """`omit` decides *on the page* once, before the summary, the sort and the
     limit. A summary still counting a row the gate dropped would put three on

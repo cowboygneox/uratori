@@ -717,7 +717,7 @@ class Uratori:
                 continue
             out.append(
                 await answer_projection(
-                    self._store, self._facts, lib, tenant, projection
+                    self._store, self._facts, lib, tenant, projection, at_ms=at_ms
                 )
             )
 
