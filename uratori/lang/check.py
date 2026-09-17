@@ -3152,6 +3152,7 @@ class _Checker:
             self._population(d, kind, d.frm)
 
         bound: dict[str, str] = {}
+        flags: set[str] = set()
         moments: set[str] = set()
         fields: list[tuple[str, str, object, object]] = []
         joins: list[object] = []
@@ -3167,6 +3168,8 @@ class _Checker:
                 bound[f.name] = "date"
             elif f.type == "number" or f.type == "flag":
                 bound[f.name] = "number"
+                if f.type == "flag":
+                    flags.add(f.name)
             else:
                 bound[f.name] = "text"
             fields.append((f.name, f.path, f.type, f.join))
@@ -3219,18 +3222,18 @@ class _Checker:
         values: list[tuple[str, CalcExpr, FigureUnit]] = []
         for v in d.values:
             self._bind(bound, v.name, "value", d.name, v.line)
-            unit = self._row_value(v, bound, moments, d.name, "projection")
+            unit = self._row_value(v, bound, moments, d.name, "projection", flags=frozenset(flags))
             bound[v.name] = "text" if unit == "level" else "number"
             values.append((v.name, v.expr, unit))
 
         for flag in d.flags:
-            self._flag(flag, bound, d.name, "projection")
+            self._flag(flag, bound, d.name, "projection", flags=frozenset(flags))
 
         if d.omit is not None:
             # The same row language a flag's `when` speaks, checked the same
             # way: a gate naming nothing would judge every row by a value that
             # is never there, keep them all, and read as a rule being enforced.
-            self._condition(d.omit, bound, d.name, "projection")
+            self._condition(d.omit, bound, d.name, "projection", flags=frozenset(flags))
 
         if d.sort is not None:
             if d.sort.name not in bound:
@@ -3367,7 +3370,7 @@ class _Checker:
                     c.line,
                 )
             if c.when is not None:
-                self._condition(c.when, _row_kinds(over), d.name, "count")
+                self._condition(c.when, _row_kinds(over), d.name, "count", _flag_fields(over))
             bound[c.name] = "number"
 
         for t in d.totals:
@@ -3387,7 +3390,7 @@ class _Checker:
                     t.line,
                 )
             if t.when is not None:
-                self._condition(t.when, _row_kinds(over), d.name, "total")
+                self._condition(t.when, _row_kinds(over), d.name, "total", _flag_fields(over))
             bound[t.name] = "number"
 
         values: list[tuple[str, CalcExpr, FigureUnit]] = []
@@ -3600,8 +3603,9 @@ class _Checker:
         moments: set[str],
         owner: str,
         noun: str,
+        flags: frozenset[str] = frozenset(),
     ) -> FigureUnit:
-        kind = self._row_kind(v.expr, bound, moments, owner, noun)
+        kind = self._row_kind(v.expr, bound, moments, owner, noun, flags)
         arithmetic = not isinstance(v.expr, Ladder)
         if isinstance(v.expr, Ladder):
             if kind == "text":
@@ -3631,7 +3635,13 @@ class _Checker:
         return v.unit
 
     def _row_kind(
-        self, e: CalcExpr, bound: dict[str, str], moments: set[str], owner: str, noun: str
+        self,
+        e: CalcExpr,
+        bound: dict[str, str],
+        moments: set[str],
+        owner: str,
+        noun: str,
+        flags: frozenset[str] = frozenset(),
     ) -> _Kind:
         if isinstance(e, Number):
             return "number"
@@ -3641,6 +3651,13 @@ class _Checker:
             return "number"
         if isinstance(e, Part):
             if e.name not in bound:
+                if e.name in ("true", "false"):
+                    raise CheckError(
+                        f'{noun} {owner} compares against {e.name}. A bare true/false only '
+                        "resolves here when the other side of the comparison is a flag "
+                        "binding -- it is not a name of its own.",
+                        e.line,
+                    )
                 raise CheckError(
                     f'{noun} {owner} reads "{e.name}", which nothing binds. Bound: '
                     f"{', '.join(sorted(bound)) or 'nothing'}.",
@@ -3661,7 +3678,7 @@ class _Checker:
             return "number"
         if isinstance(e, Arith):
             for operand in (e.left, e.right):
-                found = self._row_kind(operand, bound, moments, owner, noun)
+                found = self._row_kind(operand, bound, moments, owner, noun, flags)
                 if found != "number":
                     raise CheckError(
                         f"arithmetic needs numbers on both sides, and this side is a {found}.",
@@ -3670,7 +3687,7 @@ class _Checker:
             return "number"
         if isinstance(e, Pick):
             for operand in (e.left, e.right):
-                found = self._row_kind(operand, bound, moments, owner, noun)
+                found = self._row_kind(operand, bound, moments, owner, noun, flags)
                 if found != "number":
                     raise CheckError(
                         f"{e.which} needs numbers on both sides, and this side is a {found}.",
@@ -3680,11 +3697,11 @@ class _Checker:
         if isinstance(e, Ladder):
             results = []
             for rung in e.rungs:
-                self._row_kind(rung.left, bound, moments, owner, noun)
-                if rung.right is not None:
-                    self._row_kind(rung.right, bound, moments, owner, noun)
-                results.append(self._row_kind(rung.then, bound, moments, owner, noun))
-            results.append(self._row_kind(e.otherwise, bound, moments, owner, noun))
+                self._check_comparison(
+                    rung.left, rung.op, rung.right, bound, moments, flags, owner, noun
+                )
+                results.append(self._row_kind(rung.then, bound, moments, owner, noun, flags))
+            results.append(self._row_kind(e.otherwise, bound, moments, owner, noun, flags))
             if len(set(results)) > 1:
                 raise CheckError(
                     f"a value in {noun} {owner} returns a word from one rung and a number "
@@ -3745,13 +3762,75 @@ class _Checker:
             )
         assert_never(e)
 
-    def _condition(self, c: Condition, bound: dict[str, str], owner: str, noun: str) -> None:
-        self._row_kind(c.left, bound, set(), owner, noun)
-        if c.right is not None:
-            self._row_kind(c.right, bound, set(), owner, noun)
+    def _condition(
+        self,
+        c: Condition,
+        bound: dict[str, str],
+        owner: str,
+        noun: str,
+        flags: frozenset[str] = frozenset(),
+    ) -> None:
+        self._check_comparison(c.left, c.op, c.right, bound, set(), flags, owner, noun)
 
-    def _flag(self, f: FlagDecl, bound: dict[str, str], owner: str, noun: str) -> None:
-        self._condition(f.when, bound, owner, noun)
+    def _check_comparison(
+        self,
+        left: CalcExpr,
+        op: object,
+        right: CalcExpr | None,
+        bound: dict[str, str],
+        moments: set[str],
+        flags: frozenset[str],
+        owner: str,
+        noun: str,
+    ) -> None:
+        """A comparison's two sides, with one carve-out: a bare `true`/`false`
+        against `==`/`!=` is how a flag is spelled in a projection -- the
+        same claim `== 1`/`== 0` makes, in the words the guide's filters
+        already use. It resolves only when the *other* side is a flag
+        binding; anywhere else a bare true/false is still an unbound name,
+        caught below with a message that names the real problem instead of
+        listing every bound name in the row.
+
+        Written on either side: `active == true` and `true == active` are
+        the same claim, so a bare literal on the left is swapped with one on
+        the right before either is evaluated, rather than teaching the two
+        positions two different rules.
+        """
+        if (
+            op in ("==", "!=")
+            and right is not None
+            and _is_bare_bool(left, bound)
+            and not _is_bare_bool(right, bound)
+        ):
+            left, right = right, left
+        left_kind = self._row_kind(left, bound, moments, owner, noun, flags)
+        if right is None:
+            return
+        if (
+            op in ("==", "!=")
+            and isinstance(right, Part)
+            and right.name in ("true", "false")
+            and right.name not in bound
+        ):
+            if isinstance(left, Part) and left.name in flags:
+                return
+            raise CheckError(
+                f"{noun} {owner} compares a {left_kind} against {right.name}, which is "
+                "how a flag is tested. The left side is not a flag, so this would never "
+                "match.",
+                right.line,
+            )
+        self._row_kind(right, bound, moments, owner, noun, flags)
+
+    def _flag(
+        self,
+        f: FlagDecl,
+        bound: dict[str, str],
+        owner: str,
+        noun: str,
+        flags: frozenset[str] = frozenset(),
+    ) -> None:
+        self._condition(f.when, bound, owner, noun, flags)
         for template in (f.label, f.detail, f.action):
             if template is None:
                 continue
@@ -3986,6 +4065,19 @@ def _find(items, name: str):  # type: ignore[no-untyped-def]
         if item.name == name:
             return item
     return None
+
+
+def _is_bare_bool(e: CalcExpr, bound: dict[str, str]) -> bool:
+    """Whether `e` is an unbound `true`/`false` -- the literal spelling,
+    never a binding that happens to share the word."""
+    return isinstance(e, Part) and e.name in ("true", "false") and e.name not in bound
+
+
+def _flag_fields(plan: ProjectPlan) -> frozenset[str]:
+    """Which of a projection's raw fields are flags, for a summary's `where`
+    -- `_row_kinds` types them as "number" like any other, so this is the
+    one place that still knows which of those numbers is really a flag."""
+    return frozenset(name for name, _path, ftype, _join in plan.fields if ftype == "flag")
 
 
 def _row_kinds(plan: ProjectPlan) -> dict[str, str]:
