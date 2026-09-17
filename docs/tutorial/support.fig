@@ -1,0 +1,805 @@
+# ---------------------------------------------------------------------------
+# support.fig -- every definition the tutorial teaches, in tutorial order.
+#
+# The world is a customer support desk: agents answering tickets for
+# customers, against a service-level target that changes over time.
+# docs/tutorial.md prints the whole dataset; each chapter under
+# docs/tutorial/ introduces the part of this file it needs.
+# ---------------------------------------------------------------------------
+
+
+# ---- 01 -- the world ------------------------------------------------------
+
+# A team on the desk. Front Desk takes everything that arrives; Escalations
+# takes what Front Desk cannot finish. A team owns its own service-level
+# targets and its own working calendar.
+fact desk_team:
+    name name
+    id as text
+    name as text
+    # The calendar this team's months are cut on.
+    timezone as text
+
+# Somebody who answers tickets. An agent belongs to one team, works to one
+# calendar, and carries the two numbers that decide when their queue is too
+# full -- written on their own record, because a queue limit is a fact about
+# a person and not a setting on a screen.
+fact desk_agent:
+    name name
+    name as text
+    team_id as text
+    timezone as text
+    in_hand_warn as number
+    in_hand_over as number
+    closes_target as number
+    on_shift as flag
+    # The handles this person signs in with. Several, because the desk grew
+    # by acquisition and nobody ever merged the accounts.
+    many logins:
+        handle as text
+
+# A company whose people raise tickets. `plan` is the tier they bought;
+# `grace_days` is how long a ticket of theirs may sit before the desk calls
+# it overdue.
+fact desk_customer:
+    name name
+    id as text
+    name as text
+    plan as text
+    grace_days as number
+
+# One sign-in handle, as the ticketing tool holds it. The tool knows handles;
+# only the desk's own roster knows which person is behind each one.
+fact desk_login:
+    name handle
+    handle as text
+    agent_id as text
+
+# How a ticket reached the desk.
+fact desk_channel:
+    name name
+    name as text
+
+# One request for help, as the ticketing tool last showed it. Every timestamp
+# is absent until it happens: a ticket nobody has answered has no
+# `first_reply_at`, and one nobody has finished has no `resolved_at`.
+fact desk_ticket:
+    name subject
+    url url
+    id as text
+    subject as text
+    url as text
+    queue_team_id as text
+    # The handle of whoever is working it -- absent while unassigned.
+    assigned_login as text
+    customer_id as text
+    channel as text
+    priority as text
+    opened_at as moment
+    first_reply_at as moment
+    resolved_at as moment
+    reopens as number
+    handling_seconds as number
+    refund_amount as number
+    escalated as flag
+    one reporter:
+        name as text
+        email as text
+    many tags:
+        label as text
+
+# One change to one service-level target, by one person, at one moment.
+# Nothing is written in the months nobody moves a target.
+fact desk_target_change:
+    name setting
+    team_id as text
+    setting as text
+    value as number
+    set_at as moment
+    set_by as text
+
+# The SLA tool's verdict on one ticket, keyed by the ticket it is about. A
+# record exists only where something was missed.
+fact desk_breach:
+    ticket_id as text
+    reply_breached as flag
+    resolve_breached as flag
+
+
+# ---- 02 -- which tickets count --------------------------------------------
+
+# Every ticket, filed under the login of whoever is working it.
+group desk_ticket.by_login from assigned_login label "filed under the handle on the ticket"
+
+# Every ticket, filed under the customer who raised it.
+group desk_ticket.raised_by from customer_id label "raised by this customer"
+
+# Every ticket, filed under the team whose queue it landed in.
+group desk_ticket.queued_with from queue_team_id label "in this team's queue"
+
+# Still in hand: nobody has recorded a resolution.
+filter desk_ticket.open where resolved_at is not set label "still open"
+
+# Finished: somebody recorded a resolution.
+filter desk_ticket.resolved where resolved_at is set label "resolved"
+
+# The tickets the desk treats as urgent.
+filter desk_ticket.urgent where priority == "urgent" label "urgent"
+
+
+# ---- 03 -- the identity hop -----------------------------------------------
+
+# Every ticket, filed under the *person* behind the handle on it.
+group desk_ticket.handled_by from assigned_login through desk_agent.logins.handle label "handled by this agent"
+
+# Every agent, filed under their team.
+group desk_agent.on_team from team_id label "on this team"
+
+
+# ---- 04 -- the first figure -----------------------------------------------
+
+# How many tickets this agent has in hand right now: open, and assigned to
+# one of their handles. A nought here is a measured nought -- an agent with
+# an empty queue -- and not a blank.
+figure desk_agent.in_hand:
+    display "{desk_agent} has {value} tickets in hand"
+    depends:
+        mine = desk_ticket.handled_by:{desk_agent} & desk_ticket.open
+
+    calculate:
+        count(mine)
+
+    band:
+        when value >= desk_agent.in_hand_over then "over"
+        when value >= desk_agent.in_hand_warn then "warn"
+        otherwise "ok"
+
+# The same question asked of the handle rather than of the person: how many
+# open tickets are signed out to this login. It is here so chapter 3 can show
+# what it produces. It is not a number anybody should put on a screen.
+figure desk_login.in_hand_by_handle:
+    display "{desk_login} has {value} tickets in hand"
+
+    depends:
+        theirs = desk_ticket.by_login:{desk_login} & desk_ticket.open
+
+    calculate:
+        count(theirs)
+
+# How many tickets this customer has open with the desk.
+figure desk_customer.open_tickets:
+    display "{desk_customer} has {value} tickets open"
+    depends:
+        theirs = desk_ticket.raised_by:{desk_customer} & desk_ticket.open
+
+    calculate:
+        count(theirs)
+
+
+# ---- 05 -- measures, and calculating with them ----------------------------
+
+# How long the customer waited for the first human answer.
+measure desk_ticket.first_reply_seconds = first_reply_at - opened_at
+
+# Working time an agent has logged against this ticket.
+measure desk_ticket.handling = handling_seconds in effort
+
+# How many times this ticket came back after somebody called it finished.
+measure desk_ticket.reopen_count = reopens in count
+
+# Money credited back to the customer over this ticket.
+measure desk_ticket.refund = refund_amount in amount
+
+# When this ticket was finished.
+measure desk_ticket.closed_at = moment resolved_at
+
+# When this ticket arrived.
+measure desk_ticket.raised_at = moment opened_at
+
+# How long this ticket has been waiting, as at the moment somebody asks.
+measure desk_ticket.waiting_seconds = now - opened_at
+
+# Working time this agent is currently holding: the hours logged against
+# every ticket still in their hands.
+figure desk_agent.effort_in_hand:
+    display "{desk_agent} is holding {value} of work"
+
+    depends:
+        mine = desk_ticket.handled_by:{desk_agent} & desk_ticket.open
+
+    calculate:
+        sum(desk_ticket.handling over mine)
+
+# Money this customer has been credited back, over every ticket they raised.
+figure desk_customer.refunds:
+    display "{desk_customer} has been credited {value}"
+
+    depends:
+        theirs = desk_ticket.raised_by:{desk_customer}
+
+    calculate:
+        sum(desk_ticket.refund over theirs)
+
+# Every ticket this customer has raised, finished or not.
+figure desk_customer.tickets:
+    display "{desk_customer} has raised {value} tickets"
+
+    depends:
+        theirs = desk_ticket.raised_by:{desk_customer}
+
+    calculate:
+        count(theirs)
+
+# When this agent last finished anything.
+figure desk_agent.last_close:
+    display "{desk_agent} last closed a ticket at {value}"
+
+    depends:
+        mine = desk_ticket.handled_by:{desk_agent} & desk_ticket.resolved
+
+    calculate:
+        latest(desk_ticket.closed_at over mine)
+
+# The arrival time of the oldest thing still in this agent's hands.
+figure desk_agent.oldest_open:
+    display "{desk_agent}'s oldest open ticket arrived at {value}"
+
+    depends:
+        mine = desk_ticket.handled_by:{desk_agent} & desk_ticket.open
+
+    calculate:
+        earliest(desk_ticket.raised_at over mine)
+
+# How many more tickets this agent could take before crossing their own
+# over-line. A negative number means they are already past it.
+figure desk_agent.headroom:
+    display "{desk_agent} has room for {value} more"
+    unit count
+
+    calculate:
+        desk_agent.in_hand_over - desk_agent.in_hand
+
+# How far past their own over-line this agent is, and nought when they are
+# under it.
+figure desk_agent.over_by:
+    display "{desk_agent} is {value} past the line"
+    unit count
+
+    calculate:
+        max(0 - desk_agent.headroom, 0)
+
+# Room left across the whole team: every member's headroom, added up.
+figure desk_team.spare_seats:
+    display "{desk_team} has room for {value} more"
+
+    depends:
+        ours = desk_agent.on_team:{desk_team}
+
+    calculate:
+        sum(desk_agent.headroom over ours)
+
+# The word a queue screen puts beside an agent's name.
+figure desk_agent.queue_state:
+    display "{desk_agent}'s queue is {value}"
+
+    calculate:
+        when desk_agent.in_hand >= desk_agent.in_hand_over then "over"
+        when desk_agent.in_hand >= desk_agent.in_hand_warn then "filling"
+        when desk_agent.in_hand == 0 then "clear"
+        otherwise "ok"
+
+
+# ---- 06 -- presence, absence and age --------------------------------------
+
+# Tickets that came back after somebody called them finished.
+filter desk_ticket.reopened where reopens is set label "reopened at least once"
+
+# Tickets nobody has answered at all.
+filter desk_ticket.unanswered where first_reply_at is not set label "never answered"
+
+# The tickets somebody thought were worth calling out to Escalations.
+filter desk_ticket.escalations where escalated == true label "escalated"
+
+# Anything filed under the billing tag.
+filter desk_ticket.billing where tags.label == "billing" label "about billing"
+
+# Customers somebody has recorded a plan tier for.
+filter desk_customer.plan_stated where plan is set label "plan recorded"
+
+# Customers whose plan tier was filled in and then cleared.
+filter desk_customer.plan_cleared where plan == "" label "plan cleared"
+
+# Tickets that have been sitting a fortnight.
+filter desk_ticket.stale where opened_at older than 14 days label "open over 14 days"
+
+# Tickets past the grace period their own customer's plan buys them.
+filter desk_ticket.past_grace where opened_at older than grace_days from customer_id through desk_customer.id label "past this customer's grace"
+
+# The tickets the SLA tool recorded a missed first reply against.
+filter desk_breach.reply_missed keyed as desk_ticket where reply_breached == true label "first reply missed"
+
+# The agents on shift today.
+filter desk_agent.rostered where on_shift == true label "on shift"
+
+# Tickets from this customer nobody has answered yet.
+figure desk_customer.never_answered:
+    display "{desk_customer} is waiting on {value} first replies"
+
+    depends:
+        theirs = desk_ticket.raised_by:{desk_customer} & desk_ticket.unanswered
+
+    calculate:
+        count(theirs)
+
+# How many of this customer's tickets came back after being closed.
+figure desk_customer.reopened_tickets:
+    display "{desk_customer} has had {value} tickets reopened"
+
+    depends:
+        theirs = desk_ticket.raised_by:{desk_customer} & desk_ticket.reopened
+
+    calculate:
+        count(theirs)
+
+# How many times, in total, this customer's tickets have come back -- a
+# ticket reopened twice counts twice, where reopened_tickets counts it once.
+figure desk_customer.reopens_total:
+    display "{desk_customer}'s tickets have come back {value} times"
+
+    depends:
+        theirs = desk_ticket.raised_by:{desk_customer}
+
+    calculate:
+        sum(desk_ticket.reopen_count over theirs)
+
+# The share of this customer's tickets that came back after being closed.
+figure desk_customer.reopen_rate:
+    display "{value} of {desk_customer}'s tickets came back"
+    unit share
+
+    calculate:
+        desk_customer.reopened_tickets / desk_customer.tickets
+
+# The grace this customer's tickets actually get: what their plan buys them,
+# capped at the three days the desk promises everybody. A customer nobody has
+# recorded a grace for has no answer here -- an absence does not lose a
+# comparison, it propagates through it.
+figure desk_customer.effective_grace:
+    display "{desk_customer} tickets get {value} of grace"
+    unit days
+
+    depends:
+        theirs = desk_ticket.raised_by:{desk_customer}
+
+    calculate:
+        min(desk_customer.grace_days, 3)
+
+# Tickets in this agent's hands that are past their customer's grace period.
+figure desk_agent.past_grace:
+    display "{desk_agent} has {value} tickets past grace"
+
+    depends:
+        late = desk_ticket.handled_by:{desk_agent} & desk_ticket.open & desk_ticket.past_grace
+
+    calculate:
+        count(late)
+
+# First replies the SLA tool recorded as missed against this agent.
+figure desk_agent.reply_breaches:
+    display "{desk_agent} missed {value} first replies"
+
+    depends:
+        missed = desk_ticket.handled_by:{desk_agent} & desk_breach.reply_missed
+
+    calculate:
+        count(missed)
+
+
+# ---- 07 -- days, months, quarters, and a second dimension -----------------
+
+# Every ticket, filed under the agent who closed it and the day they closed
+# it -- in that agent's own calendar.
+group desk_ticket.closed_by_day from (assigned_login through desk_agent.logins.handle, resolved_at by day in desk_agent.timezone) label "closed by this agent that day"
+
+# The same records, cut into calendar months.
+group desk_ticket.closed_by_month from (assigned_login through desk_agent.logins.handle, resolved_at by month in desk_agent.timezone) label "closed by this agent that month"
+
+# And into calendar quarters.
+group desk_ticket.closed_by_quarter from (assigned_login through desk_agent.logins.handle, resolved_at by quarter in desk_agent.timezone) label "closed by this agent that quarter"
+
+# Every ticket, filed under the agent who answered it and the day the first
+# reply went out.
+group desk_ticket.replied_by_day from (assigned_login through desk_agent.logins.handle, first_reply_at by day in desk_agent.timezone) label "first answered by this agent that day"
+
+# Every ticket, filed under the agent who worked it and the channel it came
+# in on. The second part is a dimension, not a date.
+group desk_ticket.worked_in from (assigned_login through desk_agent.logins.handle, channel) label "worked by this agent on this channel"
+
+# Tickets closed that day, counted per agent.
+figure desk_agent.closed_day bucketed:
+    display "{desk_agent} closed {value} that day"
+
+    depends:
+        done = desk_ticket.closed_by_day:{desk_agent}
+
+    calculate:
+        count(done)
+
+# Tickets closed that calendar month, counted per agent -- the month's own
+# records, never a rollup of the days.
+figure desk_agent.closed_month bucketed:
+    display "{desk_agent} closed {value} that month"
+
+    depends:
+        done = desk_ticket.closed_by_month:{desk_agent}
+
+    calculate:
+        count(done)
+
+# Tickets closed that calendar quarter, counted per agent.
+figure desk_agent.closed_quarter bucketed:
+    display "{desk_agent} closed {value} that quarter"
+
+    depends:
+        done = desk_ticket.closed_by_quarter:{desk_agent}
+
+    calculate:
+        count(done)
+
+# Every first-reply wait this agent recorded that day, kept as the list of
+# waits rather than averaged -- which statistic a reader wants is a question
+# for the read.
+figure desk_agent.reply_waits_day bucketed:
+    display "{desk_agent} first replies that day"
+
+    depends:
+        answered = desk_ticket.replied_by_day:{desk_agent}
+
+    calculate:
+        list(desk_ticket.first_reply_seconds over answered)
+
+# The number of tickets this agent is expected to close in a month, carried
+# beside the months themselves so a window can compare like with like.
+figure desk_agent.closes_target_month bucketed:
+    display "{desk_agent} is aiming at {value} that month"
+    unit count
+
+    depends:
+        done = desk_ticket.closed_by_month:{desk_agent}
+
+    calculate:
+        desk_agent.closes_target
+
+# Tickets this agent closed, split by the channel they came in on.
+figure desk_agent.closed_by_channel across desk_channel:
+    display "{desk_agent} closed {value} on {desk_channel}"
+
+    depends:
+        done = desk_ticket.worked_in:{desk_agent} & desk_ticket.resolved
+
+    calculate:
+        count(done)
+
+# Every ticket this agent closed, all channels together -- the parts of
+# closed_by_channel, added up, so a total and its parts cannot disagree.
+figure desk_agent.closed_total:
+    display "{desk_agent} closed {value} tickets"
+
+    calculate:
+        sum(desk_agent.closed_by_channel)
+
+
+# Every ticket, filed under itself. A figure answers one value per subject,
+# so a figure about one ticket needs a grouping that files each ticket under
+# its own id.
+group desk_ticket.itself from id label "this ticket"
+
+# The working time logged against this one ticket.
+figure desk_ticket.effort:
+    display "{desk_ticket} has taken {value}"
+
+    depends:
+        just_this = desk_ticket.itself:{desk_ticket}
+
+    calculate:
+        sum(desk_ticket.handling over just_this)
+
+# Every ticket, filed under itself and under every week it was open in --
+# both ends inclusive, so a ticket opened and closed inside one week is in
+# that week rather than in none.
+group desk_ticket.its_open_weeks from (id, opened_at until resolved_at by week) label "open during this week"
+
+# A ticket's working time, shared evenly across the weeks it was open.
+figure desk_ticket.effort_by_week bucketed:
+    display "{desk_ticket} effort that week"
+
+    depends:
+        weeks = desk_ticket.its_open_weeks:{desk_ticket}
+
+    calculate:
+        spread(desk_ticket.effort over weeks)
+
+# The same span, filed under the team queue instead of the ticket -- cut on
+# the same calendar, so the two agree about which week is which.
+group desk_ticket.team_open_weeks from (queue_team_id, opened_at until resolved_at by week) label "open in this queue during this week"
+
+# What each week cost the team: every ticket that was open in that week, at
+# the share of its working time the week carries.
+figure desk_team.effort_by_week bucketed:
+    display "{desk_team} effort that week"
+
+    depends:
+        running = desk_ticket.team_open_weeks:{desk_team}
+
+    calculate:
+        sum(desk_ticket.effort_by_week over running)
+
+
+# ---- 08 -- the target that changes ----------------------------------------
+
+# Just the changes to the first-reply target; the same stream carries the
+# resolve target too.
+filter desk_target_change.reply_target where setting == "first_reply_target" label "first-reply target changes"
+
+# Every target change, filed under the team it is about and the month it was
+# made in.
+group desk_target_change.by_month from (team_id, set_at by month in desk_team.timezone) label "set for this team that month"
+
+# Every ticket, filed under the team whose queue it landed in and the month
+# the first reply went out.
+group desk_ticket.replied_by_team_month from (queue_team_id, first_reply_at by month in desk_team.timezone) label "first answered in this queue that month"
+
+# The first-reply target in force for this team each month: the last one set
+# in the month, carried across every month nobody changed it. Months before
+# anybody set one report nothing, because nothing was in force.
+figure desk_team.reply_target_month bucketed:
+    display "{desk_team} first-reply target"
+    unit duration
+
+    depends:
+        sets = desk_target_change.by_month:{desk_team} & desk_target_change.reply_target
+
+    calculate:
+        latest(desk_target_change.value over sets) carried forward
+
+# The middle first-reply wait in this team's queue each month, over the
+# tickets somebody actually answered.
+figure desk_team.median_reply_month bucketed:
+    display "{desk_team} typical first reply"
+
+    depends:
+        answered = desk_ticket.replied_by_team_month:{desk_team}
+
+    calculate:
+        median(desk_ticket.first_reply_seconds over answered)
+
+    band:
+        when value > desk_team.reply_target_month:{bucket} then "over target"
+        otherwise "within target"
+
+# How far this team's typical first reply ran over or under the target that
+# was in force that same month.
+figure desk_team.reply_gap_month bucketed:
+    display "{desk_team} against target"
+    unit duration
+
+    calculate:
+        desk_team.median_reply_month:{bucket} - desk_team.reply_target_month:{bucket}
+
+
+# ---- 09 -- reading it back ------------------------------------------------
+
+# How many tickets this agent closed over the window, day by day.
+reading desk_agent.closes_daily(range):
+    display "{desk_agent} closes, day by day"
+
+    depends:
+        days = desk_agent.closed_day in range
+
+    calculate:
+        sum(days)
+        series(days)
+        delta(days)
+
+# Closes over the window against the target for the same months.
+reading desk_agent.closes_monthly(range):
+    display "{desk_agent} closes, month by month"
+
+    band on sum:
+        when value < desk_agent.closes_target_month then "under"
+        otherwise "met"
+
+    depends:
+        months = desk_agent.closed_month in range
+
+    calculate:
+        sum(months)
+        series(months)
+
+# Closes per quarter, the same records cut a third way.
+reading desk_agent.closes_quarterly(range):
+    display "{desk_agent} closes, quarter by quarter"
+
+    depends:
+        quarters = desk_agent.closed_quarter in range
+
+    calculate:
+        sum(quarters)
+        series(quarters)
+
+# Closes per day of the window, counting the days nobody closed anything --
+# a different question from the average of the days they did.
+reading desk_agent.closes_per_day(range):
+    display "{desk_agent} closes per day of the window"
+
+    depends:
+        days = desk_agent.closed_day in range
+
+    calculate:
+        per_bucket(days)
+
+# How long this agent's customers waited for a first answer over the window.
+reading desk_agent.reply_pace(range):
+    display "{desk_agent} first-reply wait"
+
+    band on median:
+        when value > 2 hours then "slow"
+        otherwise "ok"
+
+    depends:
+        waits = desk_agent.reply_waits_day in range
+
+    requires:
+        at least 3 values in waits
+
+    calculate:
+        mean(waits)
+        median(waits)
+        worst(waits)
+        percentile 90 of waits
+
+# How this team's typical first reply moved, month over month.
+reading desk_team.reply_trend(range):
+    display "{desk_team} first reply, month by month"
+
+    depends:
+        months = desk_team.median_reply_month in range
+
+    calculate:
+        series(months)
+        delta(months)
+
+# What is waiting on this agent right now, and how long the worst of it has
+# been waiting. Measured against the clock at the moment somebody asks, so
+# nothing here is stored.
+reading desk_agent.waiting_now():
+    display "{desk_agent}'s queue, right now"
+
+    depends:
+        waiting = desk_ticket.waiting_seconds over (desk_ticket.handled_by:{desk_agent} & desk_ticket.open)
+
+    calculate:
+        count(waiting)
+        worst(waiting)
+
+
+# ---- 10 -- the queue as a page --------------------------------------------
+
+# Every ticket still open, one row each, oldest first -- with the customer's
+# plan, the grace their plan buys them, and the sentence a row earns when it
+# has run past it.
+projection desk_ticket.queue:
+    from desk_ticket.open
+    sort by waiting_days descending
+    limit 50
+
+    field:
+        ticket = subject as text
+        opened = opened_at as date
+        replied = first_reply_at as date
+        priority = priority as text
+        escalated = escalated as flag
+        reporter = reporter.email as text
+        customer = name from customer_id through desk_customer.id as text
+        plan = plan from customer_id through desk_customer.id as text
+        grace = grace_days from customer_id through desk_customer.id as number
+
+    value:
+        waiting_days in days = days from opened to now
+        answered in count =
+            when replied is nothing then 0
+            otherwise 1
+        overdue in count =
+            when grace is nothing then 0
+            when waiting_days > grace then 1
+            otherwise 0
+        parked in count =
+            when escalated == 1 then 0
+            when answered == 1 then 0
+            when priority == "low" then 1
+            otherwise 0
+
+    flag ticket-overdue when overdue == 1:
+        label "Past grace by {waiting_days}"
+        detail "{customer} has waited {waiting_days}, and their plan buys {grace}."
+        action "Answer {ticket} or move it to Escalations."
+        severity attention
+
+    flag ticket-unanswered when answered == 0:
+        label "Never answered"
+        detail "Nobody has replied to {customer} on this one yet."
+        severity attention
+
+    omit when parked == 1
+
+# One row per agent on shift: the count, the word beside it, and the room
+# they have left.
+projection desk_agent.roster:
+    from desk_agent.rostered
+    sort by in_hand descending
+    limit 20
+
+    field:
+        who = name as text
+        team = name from team_id through desk_team.id as text
+        over_at = in_hand_over as number
+
+    read:
+        in_hand = desk_agent.in_hand
+        in_hand_word = band of desk_agent.in_hand
+
+    value:
+        spare in count = over_at - in_hand
+
+    flag agent-over-line when spare < 1:
+        label "Queue is full"
+        detail "{who} is holding {in_hand} and their line is {over_at}."
+        action "Move something off {who}."
+        severity attention
+
+# Every ticket, filed under the team queue it landed in and the month it
+# arrived -- the group a scoped request resolves against.
+group desk_ticket.opened_by_team_month from (queue_team_id, opened_at by month) label "arrived in this queue that month"
+
+# The urgent tickets one team took in one month, five at a time.
+projection desk_ticket.urgent_by_month scoped by desk_ticket.opened_by_team_month:
+    from desk_ticket.urgent
+    sort by ticket ascending
+    limit 5
+
+    field:
+        ticket = subject as text
+        opened = opened_at as date
+        customer = name from customer_id through desk_customer.id as text
+
+
+# ---- 11 -- one row about the queue ----------------------------------------
+
+# The open queue in one row: how big it is, how much of it is past grace,
+# and how much of it nobody has answered.
+summarise desk_ticket.queue_health over desk_ticket.queue:
+    count tickets
+    count tickets_overdue where overdue == 1
+    count tickets_unanswered where answered == 0
+    total waiting_total in days = waiting_days
+
+    value:
+        verdict =
+            when tickets_overdue > 0 then "attention"
+            otherwise "clear"
+
+    flag queue-past-grace when tickets_overdue > 0:
+        label "Past grace"
+        detail "{tickets_overdue} of {tickets} open {tickets|ticket is:tickets are} past grace."
+        action "Work the overdue rows first."
+        severity attention
+
+
+# ---- 12 -- what travels together ------------------------------------------
+
+# Everything the agent card on the desk dashboard shows.
+bundle desk_agent.card:
+    in_hand  = figure desk_agent.in_hand
+    closes   = reading desk_agent.closes_monthly over 1, 1-3
+    queue    = projection desk_ticket.queue
+    health   = summarise desk_ticket.queue_health
