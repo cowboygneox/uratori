@@ -56,8 +56,8 @@ fact code_repo:
 
 # One person's verdict on one change.
 fact code_review:
-    name ref
-    ref as text
+    name title
+    title as text
     change_id as text
     reviewer_id as text
     approved as flag
@@ -65,8 +65,8 @@ fact code_review:
 
 # An outstanding request for a review.
 fact code_review_request:
-    name ref
-    ref as text
+    name title
+    title as text
     reviewer_id as text
     requested_at as moment
     answered_at as moment
@@ -102,8 +102,8 @@ fact shop_courier:
 
 # One order, from pickup to doorstep.
 fact shop_order:
-    name ref
-    ref as text
+    name order_no
+    order_no as text
     courier_id as text
     status as text
     delivered_at as moment
@@ -116,16 +116,16 @@ fact site:
 
 # One job at one site.
 fact job:
-    name ref
-    ref as text
+    name title
+    title as text
     site_id as text
     started_at as moment
     finished_at as moment
 
 # One change to one setting, at one site.
 fact setting_change:
-    name ref
-    ref as text
+    name title
+    title as text
     site_id as text
     setting as text
     value as number

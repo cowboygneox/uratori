@@ -30,9 +30,9 @@ an identity -- a *kind* and a *key* -- and a body of fields
 shop_courier "c1"  { "name": "Aki", "max_orders": 3 }
 shop_courier "c2"  { "name": "Bo",  "max_orders": 1 }
 
-shop_order "o1"    { "ref": "A-1", "courier_id": "c1", "status": "riding" }
-shop_order "o2"    { "ref": "A-2", "courier_id": "c1", "status": "riding" }
-shop_order "o3"    { "ref": "B-7", "courier_id": "c2", "status": "delivered" }
+shop_order "o1"    { "order_no": "A-1", "courier_id": "c1", "status": "riding" }
+shop_order "o2"    { "order_no": "A-2", "courier_id": "c1", "status": "riding" }
+shop_order "o3"    { "order_no": "B-7", "courier_id": "c2", "status": "delivered" }
 ```
 
 The correlations are already in the data -- each order's `courier_id` names a
@@ -48,8 +48,8 @@ fact shop_courier:
 
 # One order, from pickup to doorstep.
 fact shop_order:
-    name ref
-    ref as text
+    name order_no
+    order_no as text
     courier_id as text
     status as text
 
@@ -211,9 +211,9 @@ that may name it store nothing.
 ```
 # An order in the shop, as the provider last showed it.
 fact shop_order:
-    name ref
+    name order_no
     url link
-    ref as text
+    order_no as text
     link as text
     # Which courier holds it; absent until assigned.
     courier_id as text
@@ -437,7 +437,7 @@ number.
 
 The bare form exists because the join was the only one, and reaching a
 column on the record itself meant writing a *self-join* -- `older than
-grace_days from ref through code_change.ref`, pairing a record with itself.
+grace_days from title through code_change.title`, pairing a record with itself.
 The other two positions a threshold appears in read a bare field off the
 subject already; this one demanded ceremony to reach a number that was
 already there.

@@ -136,7 +136,7 @@ field for field:
 ```bash
 curl -s -X PUT "$BASE/schema" -H "$AUTH" -H 'Content-Type: application/json' -d '{
   "kinds": ["shop_courier", "shop_order"],
-  "name_fields": {"shop_courier": "name", "shop_order": "ref"},
+  "name_fields": {"shop_courier": "name", "shop_order": "order_no"},
   "url_fields": {"shop_order": "url"},
   "defaults": {}
 }'
@@ -237,10 +237,10 @@ Responses:
       "name": "shop_order",
       "version": "af4ffe488502",
       "prose": "An order in the shop, as the provider last showed it.",
-      "name_field": "ref",
+      "name_field": "order_no",
       "url_field": "url",
       "fields": [
-        {"path": "ref", "type": "text", "repeats": false, "prose": ""},
+        {"path": "order_no", "type": "text", "repeats": false, "prose": ""},
         {"path": "courier_id", "type": "text", "repeats": false, "prose": "Which courier holds it; absent until assigned."}
       ]
     }
@@ -334,9 +334,9 @@ curl -s -X POST "$BASE/tenants/t1/facts" -H "$AUTH" -H 'Content-Type: applicatio
   "writes": {
     "shop_courier": {"c1": {"name": "Aki"}},
     "shop_order": {
-      "o1": {"ref": "A-1", "courier_id": "c1", "status": "riding"},
-      "o2": {"ref": "A-2", "courier_id": "c1", "status": "riding"},
-      "o3": {"ref": "A-3", "courier_id": "c1", "status": "riding"}
+      "o1": {"order_no": "A-1", "courier_id": "c1", "status": "riding"},
+      "o2": {"order_no": "A-2", "courier_id": "c1", "status": "riding"},
+      "o3": {"order_no": "A-3", "courier_id": "c1", "status": "riding"}
     }
   },
   "stamps": {"shop_order": {"o1": "2026-08-24T12:00:00Z"}}
@@ -1118,7 +1118,7 @@ open and push a fact from another shell --
 
 ```bash
 curl -s -X POST "$BASE/tenants/t1/facts" -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"writes": {"shop_order": {"o4": {"ref": "A-4", "courier_id": "c1", "status": "riding"}}}}'
+  -d '{"writes": {"shop_order": {"o4": {"order_no": "A-4", "courier_id": "c1", "status": "riding"}}}}'
 ```
 
 -- and the socket prints exactly the answers that moved:

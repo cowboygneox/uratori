@@ -25,9 +25,9 @@ couriers, three orders.
 shop_courier "c1"  { "name": "Aki" }
 shop_courier "c2"  { "name": "Bo" }
 
-shop_order "o1"    { "ref": "A-1", "courier_id": "c1", "status": "riding" }
-shop_order "o2"    { "ref": "A-2", "courier_id": "c1", "status": "riding" }
-shop_order "o3"    { "ref": "B-7", "courier_id": "c2", "status": "delivered" }
+shop_order "o1"    { "order_no": "A-1", "courier_id": "c1", "status": "riding" }
+shop_order "o2"    { "order_no": "A-2", "courier_id": "c1", "status": "riding" }
+shop_order "o3"    { "order_no": "B-7", "courier_id": "c2", "status": "delivered" }
 ```
 
 The correlations are already in the bodies. `courier_id` is how an order
@@ -65,7 +65,7 @@ about the world is a class of bug the object exists to make unwritable.
 ```json
 {
   "kinds": ["shop_courier", "shop_order"],
-  "name_fields": {"shop_courier": "name", "shop_order": "ref"},
+  "name_fields": {"shop_courier": "name", "shop_order": "order_no"},
   "url_fields": {"shop_order": "url"},
   "defaults": {}
 }
@@ -106,9 +106,9 @@ that way:
 ```
 # An order in the shop, as the provider last showed it.
 fact shop_order:
-    name ref
+    name order_no
     url url
-    ref as text
+    order_no as text
     url as text
     courier_id as text
     status as text
