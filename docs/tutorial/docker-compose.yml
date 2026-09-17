@@ -1,0 +1,79 @@
+# The tutorial's world, running, in one command.
+#
+#   cd docs/tutorial
+#   docker compose up
+#
+# Three services: Postgres, the engine, and a one-shot seeder that loads
+# support.fig and facts.json and then exits. When the seeder's output stops,
+# open http://localhost:8080/ui/ and start at ../tutorial.md.
+#
+# The engine is built from this checkout (`build: ../..`) rather than pulled
+# as `cowboygneox/uratori:latest`, deliberately: support.fig is written
+# against the language in *this* tree, and a published image from before a
+# language change would refuse it with a compiler error rather than a
+# tutorial. To run the published image instead, swap the two `build:` lines
+# for `image: cowboygneox/uratori:latest`.
+#
+# No URATORI_TOKEN here, deliberately. The built-in UI at /ui/ is mounted
+# exactly when there is no token (see docs/setup.md), and the UI is most of
+# the point of this file. That also makes this a local playground and not a
+# deployment: anything anything else can reach sets a token.
+#
+# State lives in the named volume `uratori-tutorial-data`, so it survives
+# `docker compose down` and a restart. To go back to a clean tutorial world:
+#
+#   docker compose down -v && docker compose up
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: uratori
+      POSTGRES_USER: uratori
+      POSTGRES_PASSWORD: uratori
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "uratori", "-d", "uratori"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - uratori-tutorial-data:/var/lib/postgresql/data
+
+  uratori:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgres://uratori:uratori@postgres:5432/uratori
+    ports:
+      - "8080:8080"
+    # The image ships a health probe on a sixty-second interval, which is
+    # right for a deployment and slow for somebody waiting at a terminal.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Loads the schema, support.fig and facts.json into tenant `desk`, prints
+  # two answers, and exits. Idempotent: identical definitions move no version
+  # and identical records land as `written: 0`, so bringing the stack up again
+  # re-runs it harmlessly. It uses the standard library only, which is why a
+  # bare python image with this directory mounted is all it needs.
+  seed:
+    image: python:3.12-slim
+    working_dir: /tutorial
+    command: ["python", "seed.py", "--base", "http://uratori:8080", "--tenant", "desk"]
+    volumes:
+      - .:/tutorial:ro
+    depends_on:
+      uratori:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  uratori-tutorial-data:

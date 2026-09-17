@@ -1,0 +1,1196 @@
+{
+  "desk_team": {
+    "tm-front": {
+      "id": "tm-front",
+      "name": "Front Desk",
+      "timezone": "Europe/Berlin"
+    },
+    "tm-deep": {
+      "id": "tm-deep",
+      "name": "Escalations",
+      "timezone": "UTC"
+    }
+  },
+  "desk_agent": {
+    "ag-mira": {
+      "name": "Mira Halloran",
+      "team_id": "tm-front",
+      "timezone": "Europe/Dublin",
+      "in_hand_warn": 2,
+      "in_hand_over": 3,
+      "closes_target": 3,
+      "on_shift": true,
+      "logins": [
+        {
+          "handle": "mira"
+        },
+        {
+          "handle": "m.halloran"
+        }
+      ]
+    },
+    "ag-tomas": {
+      "name": "Tomas Beck",
+      "team_id": "tm-front",
+      "timezone": "Europe/Berlin",
+      "in_hand_warn": 3,
+      "in_hand_over": 4,
+      "closes_target": 2,
+      "on_shift": true,
+      "logins": [
+        {
+          "handle": "tomas"
+        }
+      ]
+    },
+    "ag-nour": {
+      "name": "Nour Aziz",
+      "team_id": "tm-front",
+      "timezone": "Europe/Berlin",
+      "in_hand_warn": 3,
+      "in_hand_over": 4,
+      "closes_target": 2,
+      "on_shift": true,
+      "logins": [
+        {
+          "handle": "nour"
+        },
+        {
+          "handle": "naziz"
+        }
+      ]
+    },
+    "ag-pell": {
+      "name": "Pell Okonkwo",
+      "team_id": "tm-deep",
+      "timezone": "America/New_York",
+      "in_hand_warn": 2,
+      "in_hand_over": 3,
+      "closes_target": 1,
+      "on_shift": true,
+      "logins": [
+        {
+          "handle": "pell"
+        }
+      ]
+    },
+    "ag-sindre": {
+      "name": "Sindre Vik",
+      "team_id": "tm-deep",
+      "timezone": "Europe/Oslo",
+      "in_hand_warn": 2,
+      "in_hand_over": 3,
+      "closes_target": 2,
+      "on_shift": true,
+      "logins": [
+        {
+          "handle": "sindre"
+        },
+        {
+          "handle": "sv-oncall"
+        }
+      ]
+    },
+    "ag-jules": {
+      "name": "Jules Amari",
+      "team_id": "tm-front",
+      "timezone": "Europe/Berlin",
+      "in_hand_warn": 3,
+      "in_hand_over": 4,
+      "closes_target": 2,
+      "on_shift": false,
+      "logins": [
+        {
+          "handle": "jules"
+        }
+      ]
+    }
+  },
+  "desk_login": {
+    "mira": {
+      "handle": "mira",
+      "agent_id": "ag-mira"
+    },
+    "m.halloran": {
+      "handle": "m.halloran",
+      "agent_id": "ag-mira"
+    },
+    "tomas": {
+      "handle": "tomas",
+      "agent_id": "ag-tomas"
+    },
+    "nour": {
+      "handle": "nour",
+      "agent_id": "ag-nour"
+    },
+    "naziz": {
+      "handle": "naziz",
+      "agent_id": "ag-nour"
+    },
+    "pell": {
+      "handle": "pell",
+      "agent_id": "ag-pell"
+    },
+    "sindre": {
+      "handle": "sindre",
+      "agent_id": "ag-sindre"
+    },
+    "sv-oncall": {
+      "handle": "sv-oncall",
+      "agent_id": "ag-sindre"
+    },
+    "jules": {
+      "handle": "jules",
+      "agent_id": "ag-jules"
+    }
+  },
+  "desk_customer": {
+    "cu-northwind": {
+      "id": "cu-northwind",
+      "name": "Northwind Traders",
+      "plan": "enterprise",
+      "grace_days": 1
+    },
+    "cu-luma": {
+      "id": "cu-luma",
+      "name": "Luma Health",
+      "plan": "enterprise",
+      "grace_days": 1
+    },
+    "cu-brightpath": {
+      "id": "cu-brightpath",
+      "name": "Brightpath Logistics",
+      "plan": "business",
+      "grace_days": 3
+    },
+    "cu-kestrel": {
+      "id": "cu-kestrel",
+      "name": "Kestrel Studios",
+      "plan": "business",
+      "grace_days": 3
+    },
+    "cu-oakline": {
+      "id": "cu-oakline",
+      "name": "Oakline Bakery",
+      "grace_days": 7
+    },
+    "cu-veld": {
+      "id": "cu-veld",
+      "name": "Veld Analytics",
+      "plan": ""
+    },
+    "cu-harrow": {
+      "id": "cu-harrow",
+      "name": "Harrow & Sons",
+      "plan": "starter",
+      "grace_days": 7
+    }
+  },
+  "desk_channel": {
+    "email": {
+      "name": "Email"
+    },
+    "chat": {
+      "name": "Chat"
+    },
+    "phone": {
+      "name": "Phone"
+    }
+  },
+  "desk_ticket": {
+    "T-101": {
+      "id": "T-101",
+      "subject": "Invoice PDF will not open",
+      "url": "https://desk.example.com/tickets/T-101",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-northwind",
+      "channel": "email",
+      "priority": "normal",
+      "opened_at": "2026-03-03T09:15:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Dana Reyes",
+        "email": "dana@northwind.example"
+      },
+      "tags": [
+        {
+          "label": "billing"
+        }
+      ],
+      "assigned_login": "mira",
+      "first_reply_at": "2026-03-03T10:05:00Z",
+      "resolved_at": "2026-03-04T11:20:00Z",
+      "reopens": 0,
+      "handling_seconds": 3600
+    },
+    "T-102": {
+      "id": "T-102",
+      "subject": "SSO login loop",
+      "url": "https://desk.example.com/tickets/T-102",
+      "queue_team_id": "tm-deep",
+      "customer_id": "cu-luma",
+      "channel": "email",
+      "priority": "urgent",
+      "opened_at": "2026-03-05T08:40:00Z",
+      "escalated": true,
+      "reporter": {
+        "name": "Ife Balogun",
+        "email": "ife@lumahealth.example"
+      },
+      "tags": [
+        {
+          "label": "auth"
+        },
+        {
+          "label": "sso"
+        }
+      ],
+      "assigned_login": "pell",
+      "first_reply_at": "2026-03-05T09:10:00Z",
+      "resolved_at": "2026-03-06T14:00:00Z",
+      "reopens": 1,
+      "handling_seconds": 10800
+    },
+    "T-103": {
+      "id": "T-103",
+      "subject": "Export is missing rows",
+      "url": "https://desk.example.com/tickets/T-103",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-brightpath",
+      "channel": "chat",
+      "priority": "normal",
+      "opened_at": "2026-03-09T13:30:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Sam Okafor",
+        "email": "sam@brightpath.example"
+      },
+      "tags": [
+        {
+          "label": "export"
+        }
+      ],
+      "assigned_login": "tomas",
+      "first_reply_at": "2026-03-09T13:52:00Z",
+      "resolved_at": "2026-03-10T09:45:00Z",
+      "reopens": 0,
+      "handling_seconds": 5400
+    },
+    "T-104": {
+      "id": "T-104",
+      "subject": "Password reset email never arrives",
+      "url": "https://desk.example.com/tickets/T-104",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-kestrel",
+      "channel": "email",
+      "priority": "normal",
+      "opened_at": "2026-03-11T10:00:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Rae Lindqvist",
+        "email": "rae@kestrel.example"
+      },
+      "tags": [
+        {
+          "label": "auth"
+        }
+      ],
+      "assigned_login": "m.halloran",
+      "first_reply_at": "2026-03-11T11:30:00Z",
+      "resolved_at": "2026-03-12T10:15:00Z",
+      "reopens": 0,
+      "handling_seconds": 2700
+    },
+    "T-105": {
+      "id": "T-105",
+      "subject": "Webhook retries flooding our endpoint",
+      "url": "https://desk.example.com/tickets/T-105",
+      "queue_team_id": "tm-deep",
+      "customer_id": "cu-northwind",
+      "channel": "email",
+      "priority": "urgent",
+      "opened_at": "2026-03-16T09:05:00Z",
+      "escalated": true,
+      "reporter": {
+        "name": "Dana Reyes",
+        "email": "dana@northwind.example"
+      },
+      "tags": [
+        {
+          "label": "webhooks"
+        }
+      ],
+      "assigned_login": "sindre",
+      "first_reply_at": "2026-03-16T09:35:00Z",
+      "resolved_at": "2026-03-18T16:30:00Z",
+      "reopens": 2,
+      "handling_seconds": 14400
+    },
+    "T-106": {
+      "id": "T-106",
+      "subject": "Add a seat to our plan",
+      "url": "https://desk.example.com/tickets/T-106",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-oakline",
+      "channel": "phone",
+      "priority": "low",
+      "opened_at": "2026-03-18T14:20:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Bo Tran",
+        "email": "bo@oakline.example"
+      },
+      "tags": [
+        {
+          "label": "billing"
+        }
+      ],
+      "assigned_login": "nour",
+      "first_reply_at": "2026-03-18T14:40:00Z",
+      "resolved_at": "2026-03-18T15:30:00Z",
+      "reopens": 0,
+      "handling_seconds": 1800
+    },
+    "T-107": {
+      "id": "T-107",
+      "subject": "Report totals look wrong",
+      "url": "https://desk.example.com/tickets/T-107",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-veld",
+      "channel": "email",
+      "priority": "normal",
+      "opened_at": "2026-03-24T11:10:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Kit Marsden",
+        "email": "kit@veld.example"
+      },
+      "tags": [
+        {
+          "label": "reports"
+        }
+      ],
+      "assigned_login": "tomas",
+      "first_reply_at": "2026-03-24T15:10:00Z",
+      "resolved_at": "2026-03-26T12:00:00Z",
+      "reopens": 1,
+      "handling_seconds": 7200
+    },
+    "T-108": {
+      "id": "T-108",
+      "subject": "Mobile app crashes on open",
+      "url": "https://desk.example.com/tickets/T-108",
+      "queue_team_id": "tm-deep",
+      "customer_id": "cu-luma",
+      "channel": "chat",
+      "priority": "urgent",
+      "opened_at": "2026-03-27T09:50:00Z",
+      "escalated": true,
+      "reporter": {
+        "name": "Ife Balogun",
+        "email": "ife@lumahealth.example"
+      },
+      "tags": [
+        {
+          "label": "mobile"
+        }
+      ],
+      "assigned_login": "pell",
+      "first_reply_at": "2026-03-27T10:20:00Z",
+      "resolved_at": "2026-03-30T10:00:00Z",
+      "reopens": 0,
+      "handling_seconds": 12600
+    },
+    "T-109": {
+      "id": "T-109",
+      "subject": "Duplicate charges in March",
+      "url": "https://desk.example.com/tickets/T-109",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-northwind",
+      "channel": "email",
+      "priority": "urgent",
+      "opened_at": "2026-04-02T09:30:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Dana Reyes",
+        "email": "dana@northwind.example"
+      },
+      "tags": [
+        {
+          "label": "billing"
+        }
+      ],
+      "assigned_login": "mira",
+      "first_reply_at": "2026-04-02T10:00:00Z",
+      "resolved_at": "2026-04-03T13:00:00Z",
+      "reopens": 0,
+      "handling_seconds": 5400,
+      "refund_amount": 480
+    },
+    "T-110": {
+      "id": "T-110",
+      "subject": "API rate limit is unclear",
+      "url": "https://desk.example.com/tickets/T-110",
+      "queue_team_id": "tm-deep",
+      "customer_id": "cu-brightpath",
+      "channel": "email",
+      "priority": "normal",
+      "opened_at": "2026-04-07T10:15:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Sam Okafor",
+        "email": "sam@brightpath.example"
+      },
+      "tags": [
+        {
+          "label": "api"
+        }
+      ],
+      "assigned_login": "sindre",
+      "first_reply_at": "2026-04-07T12:15:00Z",
+      "resolved_at": "2026-04-08T09:20:00Z",
+      "reopens": 0,
+      "handling_seconds": 3600
+    },
+    "T-111": {
+      "id": "T-111",
+      "subject": "Cannot invite teammates",
+      "url": "https://desk.example.com/tickets/T-111",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-kestrel",
+      "channel": "chat",
+      "priority": "normal",
+      "opened_at": "2026-04-09T13:00:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Rae Lindqvist",
+        "email": "rae@kestrel.example"
+      },
+      "tags": [
+        {
+          "label": "auth"
+        }
+      ],
+      "assigned_login": "naziz",
+      "first_reply_at": "2026-04-09T13:18:00Z",
+      "resolved_at": "2026-04-09T16:40:00Z",
+      "reopens": 0,
+      "handling_seconds": 2700
+    },
+    "T-112": {
+      "id": "T-112",
+      "subject": "Scheduled report stopped running",
+      "url": "https://desk.example.com/tickets/T-112",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-luma",
+      "channel": "email",
+      "priority": "normal",
+      "opened_at": "2026-04-14T08:45:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Ife Balogun",
+        "email": "ife@lumahealth.example"
+      },
+      "tags": [
+        {
+          "label": "reports"
+        }
+      ],
+      "assigned_login": "tomas",
+      "first_reply_at": "2026-04-14T09:30:00Z",
+      "resolved_at": "2026-04-15T11:00:00Z",
+      "reopens": 0,
+      "handling_seconds": 3600
+    },
+    "T-113": {
+      "id": "T-113",
+      "subject": "Refund for a duplicate seat",
+      "url": "https://desk.example.com/tickets/T-113",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-oakline",
+      "channel": "email",
+      "priority": "low",
+      "opened_at": "2026-04-16T11:20:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Bo Tran",
+        "email": "bo@oakline.example"
+      },
+      "tags": [
+        {
+          "label": "billing"
+        }
+      ],
+      "assigned_login": "mira",
+      "first_reply_at": "2026-04-16T14:20:00Z",
+      "resolved_at": "2026-04-17T10:30:00Z",
+      "reopens": 0,
+      "handling_seconds": 1800,
+      "refund_amount": 240
+    },
+    "T-114": {
+      "id": "T-114",
+      "subject": "SAML metadata rejected",
+      "url": "https://desk.example.com/tickets/T-114",
+      "queue_team_id": "tm-deep",
+      "customer_id": "cu-luma",
+      "channel": "email",
+      "priority": "urgent",
+      "opened_at": "2026-04-21T09:00:00Z",
+      "escalated": true,
+      "reporter": {
+        "name": "Ife Balogun",
+        "email": "ife@lumahealth.example"
+      },
+      "tags": [
+        {
+          "label": "auth"
+        },
+        {
+          "label": "sso"
+        }
+      ],
+      "assigned_login": "pell",
+      "first_reply_at": "2026-04-21T09:25:00Z",
+      "resolved_at": "2026-04-23T15:45:00Z",
+      "reopens": 1,
+      "handling_seconds": 16200
+    },
+    "T-115": {
+      "id": "T-115",
+      "subject": "Chat widget slow to load",
+      "url": "https://desk.example.com/tickets/T-115",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-veld",
+      "channel": "chat",
+      "priority": "normal",
+      "opened_at": "2026-04-23T15:30:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Kit Marsden",
+        "email": "kit@veld.example"
+      },
+      "tags": [
+        {
+          "label": "widget"
+        }
+      ],
+      "assigned_login": "nour",
+      "first_reply_at": "2026-04-23T16:05:00Z",
+      "resolved_at": "2026-04-24T12:10:00Z",
+      "reopens": 0,
+      "handling_seconds": 4500
+    },
+    "T-116": {
+      "id": "T-116",
+      "subject": "Data export encoding is garbled",
+      "url": "https://desk.example.com/tickets/T-116",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-brightpath",
+      "channel": "email",
+      "priority": "normal",
+      "opened_at": "2026-04-28T10:40:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Sam Okafor",
+        "email": "sam@brightpath.example"
+      },
+      "tags": [
+        {
+          "label": "export"
+        }
+      ],
+      "assigned_login": "m.halloran",
+      "first_reply_at": "2026-04-28T12:40:00Z",
+      "resolved_at": "2026-04-30T09:15:00Z",
+      "reopens": 0,
+      "handling_seconds": 5400
+    },
+    "T-117": {
+      "id": "T-117",
+      "subject": "Bulk import fails at 500 rows",
+      "url": "https://desk.example.com/tickets/T-117",
+      "queue_team_id": "tm-deep",
+      "customer_id": "cu-northwind",
+      "channel": "email",
+      "priority": "urgent",
+      "opened_at": "2026-05-04T09:10:00Z",
+      "escalated": true,
+      "reporter": {
+        "name": "Dana Reyes",
+        "email": "dana@northwind.example"
+      },
+      "tags": [
+        {
+          "label": "import"
+        }
+      ],
+      "assigned_login": "sv-oncall",
+      "first_reply_at": "2026-05-04T09:40:00Z",
+      "resolved_at": "2026-05-06T11:30:00Z",
+      "reopens": 1,
+      "handling_seconds": 12600
+    },
+    "T-118": {
+      "id": "T-118",
+      "subject": "Cannot change our billing address",
+      "url": "https://desk.example.com/tickets/T-118",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-kestrel",
+      "channel": "email",
+      "priority": "low",
+      "opened_at": "2026-05-06T14:00:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Rae Lindqvist",
+        "email": "rae@kestrel.example"
+      },
+      "tags": [
+        {
+          "label": "billing"
+        }
+      ],
+      "assigned_login": "tomas",
+      "first_reply_at": "2026-05-06T16:30:00Z",
+      "resolved_at": "2026-05-07T10:00:00Z",
+      "reopens": 0,
+      "handling_seconds": 1800
+    },
+    "T-119": {
+      "id": "T-119",
+      "subject": "Dashboard blank after the update",
+      "url": "https://desk.example.com/tickets/T-119",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-luma",
+      "channel": "chat",
+      "priority": "urgent",
+      "opened_at": "2026-05-08T08:50:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Ife Balogun",
+        "email": "ife@lumahealth.example"
+      },
+      "tags": [
+        {
+          "label": "dashboard"
+        }
+      ],
+      "assigned_login": "mira",
+      "first_reply_at": "2026-05-08T09:05:00Z",
+      "resolved_at": "2026-05-08T14:20:00Z",
+      "reopens": 0,
+      "handling_seconds": 5400
+    },
+    "T-120": {
+      "id": "T-120",
+      "subject": "Two-factor codes rejected",
+      "url": "https://desk.example.com/tickets/T-120",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-brightpath",
+      "channel": "phone",
+      "priority": "urgent",
+      "opened_at": "2026-05-12T10:30:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Sam Okafor",
+        "email": "sam@brightpath.example"
+      },
+      "tags": [
+        {
+          "label": "auth"
+        }
+      ],
+      "assigned_login": "naziz",
+      "first_reply_at": "2026-05-12T10:50:00Z",
+      "resolved_at": "2026-05-13T09:40:00Z",
+      "reopens": 0,
+      "handling_seconds": 4500
+    },
+    "T-121": {
+      "id": "T-121",
+      "subject": "Usage numbers disagree with the invoice",
+      "url": "https://desk.example.com/tickets/T-121",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-northwind",
+      "channel": "email",
+      "priority": "normal",
+      "opened_at": "2026-05-14T11:05:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Dana Reyes",
+        "email": "dana@northwind.example"
+      },
+      "tags": [
+        {
+          "label": "billing"
+        },
+        {
+          "label": "reports"
+        }
+      ],
+      "assigned_login": "tomas",
+      "first_reply_at": "2026-05-14T15:05:00Z",
+      "resolved_at": "2026-05-18T10:00:00Z",
+      "reopens": 2,
+      "handling_seconds": 9000,
+      "refund_amount": 1200
+    },
+    "T-122": {
+      "id": "T-122",
+      "subject": "Latency spikes on the write API",
+      "url": "https://desk.example.com/tickets/T-122",
+      "queue_team_id": "tm-deep",
+      "customer_id": "cu-northwind",
+      "channel": "email",
+      "priority": "urgent",
+      "opened_at": "2026-05-19T09:20:00Z",
+      "escalated": true,
+      "reporter": {
+        "name": "Dana Reyes",
+        "email": "dana@northwind.example"
+      },
+      "tags": [
+        {
+          "label": "api"
+        }
+      ],
+      "assigned_login": "pell",
+      "first_reply_at": "2026-05-19T09:45:00Z",
+      "reopens": 1,
+      "handling_seconds": 18000
+    },
+    "T-123": {
+      "id": "T-123",
+      "subject": "Add a read-only role",
+      "url": "https://desk.example.com/tickets/T-123",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-kestrel",
+      "channel": "email",
+      "priority": "low",
+      "opened_at": "2026-05-21T13:40:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Rae Lindqvist",
+        "email": "rae@kestrel.example"
+      },
+      "tags": [
+        {
+          "label": "auth"
+        }
+      ],
+      "assigned_login": "nour",
+      "first_reply_at": "2026-05-22T09:40:00Z",
+      "resolved_at": "2026-05-26T11:15:00Z",
+      "reopens": 0,
+      "handling_seconds": 3600
+    },
+    "T-124": {
+      "id": "T-124",
+      "subject": "Attachments over 10MB are rejected",
+      "url": "https://desk.example.com/tickets/T-124",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-veld",
+      "channel": "email",
+      "priority": "normal",
+      "opened_at": "2026-05-26T10:00:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Kit Marsden",
+        "email": "kit@veld.example"
+      },
+      "tags": [
+        {
+          "label": "attachments"
+        }
+      ],
+      "assigned_login": "mira",
+      "first_reply_at": "2026-05-26T11:15:00Z",
+      "reopens": 0,
+      "handling_seconds": 2700
+    },
+    "T-125": {
+      "id": "T-125",
+      "subject": "Weekly digest sent twice",
+      "url": "https://desk.example.com/tickets/T-125",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-oakline",
+      "channel": "email",
+      "priority": "low",
+      "opened_at": "2026-05-28T09:30:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Bo Tran",
+        "email": "bo@oakline.example"
+      },
+      "tags": [
+        {
+          "label": "email"
+        }
+      ],
+      "assigned_login": "m.halloran",
+      "first_reply_at": "2026-05-28T10:30:00Z",
+      "resolved_at": "2026-05-29T09:00:00Z",
+      "reopens": 0,
+      "handling_seconds": 1800
+    },
+    "T-126": {
+      "id": "T-126",
+      "subject": "Invoice tax rate wrong for the EU",
+      "url": "https://desk.example.com/tickets/T-126",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-luma",
+      "channel": "email",
+      "priority": "normal",
+      "opened_at": "2026-06-02T09:00:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Ife Balogun",
+        "email": "ife@lumahealth.example"
+      },
+      "tags": [
+        {
+          "label": "billing"
+        }
+      ],
+      "assigned_login": "tomas",
+      "first_reply_at": "2026-06-02T10:30:00Z",
+      "resolved_at": "2026-06-04T11:00:00Z",
+      "reopens": 0,
+      "handling_seconds": 5400
+    },
+    "T-127": {
+      "id": "T-127",
+      "subject": "Sandbox data reset unexpectedly",
+      "url": "https://desk.example.com/tickets/T-127",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-brightpath",
+      "channel": "email",
+      "priority": "urgent",
+      "opened_at": "2026-06-04T08:30:00Z",
+      "escalated": true,
+      "reporter": {
+        "name": "Sam Okafor",
+        "email": "sam@brightpath.example"
+      },
+      "tags": [
+        {
+          "label": "sandbox"
+        }
+      ],
+      "assigned_login": "nour",
+      "first_reply_at": "2026-06-04T09:00:00Z",
+      "resolved_at": "2026-06-05T16:10:00Z",
+      "reopens": 0,
+      "handling_seconds": 7200
+    },
+    "T-128": {
+      "id": "T-128",
+      "subject": "Custom fields missing on export",
+      "url": "https://desk.example.com/tickets/T-128",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-kestrel",
+      "channel": "email",
+      "priority": "normal",
+      "opened_at": "2026-06-09T10:20:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Rae Lindqvist",
+        "email": "rae@kestrel.example"
+      },
+      "tags": [
+        {
+          "label": "export"
+        }
+      ],
+      "assigned_login": "m.halloran",
+      "first_reply_at": "2026-06-09T13:20:00Z",
+      "reopens": 0,
+      "handling_seconds": 3600
+    },
+    "T-129": {
+      "id": "T-129",
+      "subject": "Seat count is not updating",
+      "url": "https://desk.example.com/tickets/T-129",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-oakline",
+      "channel": "chat",
+      "priority": "normal",
+      "opened_at": "2026-06-11T11:00:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Bo Tran",
+        "email": "bo@oakline.example"
+      },
+      "tags": [
+        {
+          "label": "billing"
+        }
+      ],
+      "assigned_login": "mira",
+      "first_reply_at": "2026-06-11T11:25:00Z",
+      "reopens": 0,
+      "handling_seconds": 1800
+    },
+    "T-130": {
+      "id": "T-130",
+      "subject": "Login blocked after an email change",
+      "url": "https://desk.example.com/tickets/T-130",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-veld",
+      "channel": "email",
+      "priority": "urgent",
+      "opened_at": "2026-06-15T09:40:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Kit Marsden",
+        "email": "kit@veld.example"
+      },
+      "tags": [
+        {
+          "label": "auth"
+        }
+      ],
+      "assigned_login": "m.halloran",
+      "first_reply_at": "2026-06-15T10:10:00Z",
+      "reopens": 1,
+      "handling_seconds": 5400
+    },
+    "T-131": {
+      "id": "T-131",
+      "subject": "Report scheduler timezone off by one",
+      "url": "https://desk.example.com/tickets/T-131",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-northwind",
+      "channel": "email",
+      "priority": "normal",
+      "opened_at": "2026-06-16T13:15:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Dana Reyes",
+        "email": "dana@northwind.example"
+      },
+      "tags": [
+        {
+          "label": "reports"
+        }
+      ],
+      "assigned_login": "tomas",
+      "first_reply_at": "2026-06-17T09:15:00Z",
+      "reopens": 0,
+      "handling_seconds": 2700
+    },
+    "T-132": {
+      "id": "T-132",
+      "subject": "Webhook signature mismatch",
+      "url": "https://desk.example.com/tickets/T-132",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-luma",
+      "channel": "email",
+      "priority": "urgent",
+      "opened_at": "2026-06-18T08:45:00Z",
+      "escalated": true,
+      "reporter": {
+        "name": "Ife Balogun",
+        "email": "ife@lumahealth.example"
+      },
+      "tags": [
+        {
+          "label": "webhooks"
+        }
+      ],
+      "assigned_login": "naziz",
+      "first_reply_at": "2026-06-18T09:15:00Z",
+      "reopens": 0,
+      "handling_seconds": 4500
+    },
+    "T-133": {
+      "id": "T-133",
+      "subject": "Read replica lag on reports",
+      "url": "https://desk.example.com/tickets/T-133",
+      "queue_team_id": "tm-deep",
+      "customer_id": "cu-brightpath",
+      "channel": "email",
+      "priority": "urgent",
+      "opened_at": "2026-06-19T10:00:00Z",
+      "escalated": true,
+      "reporter": {
+        "name": "Sam Okafor",
+        "email": "sam@brightpath.example"
+      },
+      "tags": [
+        {
+          "label": "api"
+        }
+      ],
+      "assigned_login": "pell",
+      "first_reply_at": "2026-06-19T10:40:00Z",
+      "reopens": 0,
+      "handling_seconds": 10800
+    },
+    "T-134": {
+      "id": "T-134",
+      "subject": "Audit log export times out",
+      "url": "https://desk.example.com/tickets/T-134",
+      "queue_team_id": "tm-deep",
+      "customer_id": "cu-luma",
+      "channel": "email",
+      "priority": "normal",
+      "opened_at": "2026-06-22T09:30:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Ife Balogun",
+        "email": "ife@lumahealth.example"
+      },
+      "tags": [
+        {
+          "label": "export"
+        },
+        {
+          "label": "audit"
+        }
+      ],
+      "assigned_login": "sv-oncall",
+      "first_reply_at": "2026-06-22T15:30:00Z",
+      "reopens": 0,
+      "handling_seconds": 6300
+    },
+    "T-135": {
+      "id": "T-135",
+      "subject": "Cannot delete a saved view",
+      "url": "https://desk.example.com/tickets/T-135",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-kestrel",
+      "channel": "chat",
+      "priority": "low",
+      "opened_at": "2026-06-25T14:10:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Rae Lindqvist",
+        "email": "rae@kestrel.example"
+      },
+      "tags": [
+        {
+          "label": "views"
+        }
+      ]
+    },
+    "T-136": {
+      "id": "T-136",
+      "subject": "Pricing page 404s from inside the app",
+      "url": "https://desk.example.com/tickets/T-136",
+      "queue_team_id": "tm-front",
+      "customer_id": "cu-oakline",
+      "channel": "email",
+      "priority": "normal",
+      "opened_at": "2026-06-26T11:30:00Z",
+      "escalated": false,
+      "reporter": {
+        "name": "Bo Tran",
+        "email": "bo@oakline.example"
+      },
+      "tags": [
+        {
+          "label": "website"
+        }
+      ],
+      "first_reply_at": null
+    }
+  },
+  "desk_target_change": {
+    "tc-1": {
+      "team_id": "tm-front",
+      "setting": "first_reply_target",
+      "value": 7200,
+      "set_at": "2026-03-05T09:00:00Z",
+      "set_by": "Ines Dorn"
+    },
+    "tc-2": {
+      "team_id": "tm-front",
+      "setting": "resolve_target",
+      "value": 172800,
+      "set_at": "2026-03-05T09:05:00Z",
+      "set_by": "Ines Dorn"
+    },
+    "tc-3": {
+      "team_id": "tm-deep",
+      "setting": "first_reply_target",
+      "value": 3600,
+      "set_at": "2026-04-02T08:00:00Z",
+      "set_by": "Ines Dorn"
+    },
+    "tc-4": {
+      "team_id": "tm-front",
+      "setting": "first_reply_target",
+      "value": 3600,
+      "set_at": "2026-05-11T10:00:00Z",
+      "set_by": "Ines Dorn"
+    }
+  },
+  "desk_breach": {
+    "T-107": {
+      "ticket_id": "T-107",
+      "reply_breached": true,
+      "resolve_breached": false
+    },
+    "T-110": {
+      "ticket_id": "T-110",
+      "reply_breached": true,
+      "resolve_breached": false
+    },
+    "T-113": {
+      "ticket_id": "T-113",
+      "reply_breached": true,
+      "resolve_breached": false
+    },
+    "T-118": {
+      "ticket_id": "T-118",
+      "reply_breached": true,
+      "resolve_breached": false
+    },
+    "T-121": {
+      "ticket_id": "T-121",
+      "reply_breached": true,
+      "resolve_breached": true
+    },
+    "T-123": {
+      "ticket_id": "T-123",
+      "reply_breached": true,
+      "resolve_breached": true
+    },
+    "T-124": {
+      "ticket_id": "T-124",
+      "reply_breached": true,
+      "resolve_breached": false
+    },
+    "T-126": {
+      "ticket_id": "T-126",
+      "reply_breached": true,
+      "resolve_breached": false
+    },
+    "T-128": {
+      "ticket_id": "T-128",
+      "reply_breached": true,
+      "resolve_breached": false
+    },
+    "T-131": {
+      "ticket_id": "T-131",
+      "reply_breached": true,
+      "resolve_breached": false
+    },
+    "T-134": {
+      "ticket_id": "T-134",
+      "reply_breached": true,
+      "resolve_breached": false
+    },
+    "T-135": {
+      "ticket_id": "T-135",
+      "reply_breached": true,
+      "resolve_breached": false
+    },
+    "T-136": {
+      "ticket_id": "T-136",
+      "reply_breached": true,
+      "resolve_breached": false
+    }
+  }
+}
