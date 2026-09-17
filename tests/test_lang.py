@@ -1597,6 +1597,92 @@ def test_a_projection_compiles_and_carries_its_flag() -> None:
     assert [f.name for f in plan.flags] == ["issue-long-wip"]
 
 
+def test_a_flag_when_reads_true_and_false_the_same_as_1_and_0() -> None:
+    """A flag is spelled `1`/`0` in a filter's `where` and, until now, only
+    that -- a projection's `flag ... when` demanded the same field wear a
+    different spelling. `== true`/`== false` must work everywhere `== 1`/
+    `== 0` already does, and must not break the numeric spelling in doing
+    it."""
+    for literal in ("true", "false"):
+        lib = compile_ok(
+            PROJECTION.replace(
+                "flag issue-long-wip when stuck == 1:",
+                f"flag issue-long-wip when active == {literal}:",
+            )
+        )
+        plan = lib.projection("work_issue.item")
+        assert plan is not None
+        assert [f.name for f in plan.flags] == ["issue-long-wip"]
+
+    for spelling in ("0", "1"):
+        lib = compile_ok(
+            PROJECTION.replace(
+                "flag issue-long-wip when stuck == 1:",
+                f"flag issue-long-wip when active == {spelling}:",
+            )
+        )
+        plan = lib.projection("work_issue.item")
+        assert plan is not None
+
+
+def test_an_omit_when_also_reads_true_and_false() -> None:
+    """The same row language a flag's `when` speaks, so the same carve-out
+    applies to `omit when`."""
+    lib = compile_ok(
+        PROJECTION.replace(
+            "sort by age_days descending", "omit when active == false\n    sort by age_days descending"
+        )
+    )
+    plan = lib.projection("work_issue.item")
+    assert plan is not None
+    assert plan.omit is not None
+
+
+def test_a_ladder_rung_in_value_also_reads_true_and_false() -> None:
+    """A `when` rung inside a `value:` ladder is the third place this
+    comparison is written, and it must resolve the same way."""
+    lib = compile_ok(
+        PROJECTION.replace(
+            "when active == 0 then 0", "when active == false then 0"
+        )
+    )
+    plan = lib.projection("work_issue.item")
+    assert plan is not None
+
+
+def test_a_boolean_against_a_field_that_is_not_a_flag_is_refused() -> None:
+    """`age_days == true` must not silently become `age_days == 1` -- age_days
+    is a number, not a flag, and the two are different claims. The message
+    must name that, rather than the misdirecting "which nothing binds" a bare
+    `true` produced before this resolved in the checker."""
+    message = refuses(
+        PROJECTION.replace(
+            "flag issue-long-wip when stuck == 1:",
+            "flag issue-long-wip when age_days == true:",
+        ),
+        "true",
+        "flag is tested",
+    )
+    assert "which nothing binds" not in message
+
+
+def test_a_binding_actually_named_true_still_shadows_the_literal() -> None:
+    """The language has no reserved words: a field genuinely called `true` is
+    still a name a row can bind, and a comparison against it must resolve as
+    that binding, not as the boolean literal."""
+    lib = compile_ok(
+        PROJECTION.replace(
+            "key = key as text",
+            'key = key as text\n        true = key as text',
+        ).replace(
+            "flag issue-long-wip when stuck == 1:",
+            'flag issue-long-wip when true == "x":',
+        )
+    )
+    plan = lib.projection("work_issue.item")
+    assert plan is not None
+
+
 def test_the_old_project_keyword_says_what_to_write_instead() -> None:
     """`project` read as an imperative where every other keyword here names the
     thing declared. Renamed -- and the old spelling is refused *by name*, because
