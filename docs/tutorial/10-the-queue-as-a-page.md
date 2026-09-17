@@ -43,7 +43,7 @@ projection desk_ticket.queue:
             when waiting_days > grace then 1
             otherwise 0
         parked in count =
-            when escalated == 1 then 0
+            when escalated == true then 0
             when answered == 1 then 0
             when priority == "low" then 1
             otherwise 0
@@ -129,6 +129,12 @@ cell holds one value.
 *Find the `desk_customer` whose `id` matches this ticket's `customer_id`, and
 read `name` off it.* Byte for byte the same `through` phrase a group and an age
 filter use.
+
+This is why `desk_customer` and `desk_team` each carry an `id` field back in
+chapter 1 that looks like it just repeats the record's own key: `through`
+matches against a *declared field*, and there is no syntax for matching a
+record's own key directly. Without it, nothing here could look a customer or
+a team back up from the id a ticket names.
 
 **Anything other than exactly one match is nothing.** A group resolves a
 relation to *every* owner on purpose; a field holds one value, so the choice is
@@ -254,7 +260,7 @@ Look at how `parked` is written:
 
 ```fig
         parked in count =
-            when escalated == 1 then 0
+            when escalated == true then 0
             when answered == 1 then 0
             when priority == "low" then 1
             otherwise 0
