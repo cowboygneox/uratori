@@ -3784,13 +3784,25 @@ class _Checker:
         noun: str,
     ) -> None:
         """A comparison's two sides, with one carve-out: a bare `true`/`false`
-        on the right of `==`/`!=` is how a flag is spelled in a projection --
-        the same claim `== 1`/`== 0` makes, in the words the guide's filters
-        already use. It resolves only when the left side is a flag binding;
-        anywhere else a bare true/false is still an unbound name, caught
-        below with a message that names the real problem instead of listing
-        every bound name in the row.
+        against `==`/`!=` is how a flag is spelled in a projection -- the
+        same claim `== 1`/`== 0` makes, in the words the guide's filters
+        already use. It resolves only when the *other* side is a flag
+        binding; anywhere else a bare true/false is still an unbound name,
+        caught below with a message that names the real problem instead of
+        listing every bound name in the row.
+
+        Written on either side: `active == true` and `true == active` are
+        the same claim, so a bare literal on the left is swapped with one on
+        the right before either is evaluated, rather than teaching the two
+        positions two different rules.
         """
+        if (
+            op in ("==", "!=")
+            and right is not None
+            and _is_bare_bool(left, bound)
+            and not _is_bare_bool(right, bound)
+        ):
+            left, right = right, left
         left_kind = self._row_kind(left, bound, moments, owner, noun, flags)
         if right is None:
             return
@@ -4053,6 +4065,12 @@ def _find(items, name: str):  # type: ignore[no-untyped-def]
         if item.name == name:
             return item
     return None
+
+
+def _is_bare_bool(e: CalcExpr, bound: dict[str, str]) -> bool:
+    """Whether `e` is an unbound `true`/`false` -- the literal spelling,
+    never a binding that happens to share the word."""
+    return isinstance(e, Part) and e.name in ("true", "false") and e.name not in bound
 
 
 def _flag_fields(plan: ProjectPlan) -> frozenset[str]:

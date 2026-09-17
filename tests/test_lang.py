@@ -2017,6 +2017,41 @@ def test_a_summary_compiles_over_its_projection() -> None:
     assert [n for n, _ in plan.counts] == ["items", "items_stuck"]
 
 
+def test_a_summary_count_where_reads_true_and_false_the_same_as_1_and_0() -> None:
+    """The same carve-out a projection's `flag ... when` gets applies to a
+    summary's `count ... where`, which is checked over the projection's row
+    kinds -- `active` is a flag there exactly as it is inside the
+    projection, and the boolean spelling must resolve the same way."""
+    for spelling in ("true", "false", "1", "0"):
+        lib = compile_ok(SUMMARY.replace("stuck == 1", f"active == {spelling}"))
+        plan = lib.summary("work_issue.backlog")
+        assert plan is not None
+
+
+def test_a_summary_total_where_reads_true_and_false_the_same_as_1_and_0() -> None:
+    """The same carve-out again, on `total ... where` rather than `count
+    ... where` -- a different condition list, checked by the same code."""
+    for spelling in ("true", "false", "1", "0"):
+        lib = compile_ok(
+            SUMMARY.replace("days_waiting in days = age_days where stuck == 1", f"days_waiting in days = age_days where active == {spelling}")
+        )
+        plan = lib.summary("work_issue.backlog")
+        assert plan is not None
+
+
+def test_a_summary_where_refuses_a_boolean_against_a_field_that_is_not_a_flag() -> None:
+    """`age_days == true` in a summary's `where` is the same mistake as in a
+    projection's `flag ... when`, and must be refused with the same reasoned
+    message -- naming that the field is not a flag, rather than claiming the
+    bare word `true` is unbound."""
+    message = refuses(
+        SUMMARY.replace("stuck == 1", "age_days == true"),
+        "true",
+        "flag is tested",
+    )
+    assert "which nothing binds" not in message
+
+
 def test_a_summary_hashes_its_projections_version() -> None:
     """Rename what a row value means and every count moves, so a version that
     did not follow would claim nothing had changed."""
