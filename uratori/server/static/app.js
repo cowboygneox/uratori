@@ -2040,7 +2040,7 @@ const FIG_SECTIONS = {
   projection: ['from', 'field', 'read', 'value', 'flag', 'omit', 'sort', 'limit'],
   summarise: ['count', 'total', 'value', 'flag'],
 };
-const FIG_UNITS = ['share', 'days', 'effort', 'count', 'duration'];
+const FIG_UNITS = ['share', 'days', 'effort', 'count', 'duration', 'decimal'];
 const FIG_FACT_TYPES = ['text', 'number', 'flag', 'moment'];
 const FIG_FIELD_TYPES = ['text', 'date', 'number', 'flag'];
 const FIG_WORDS = new Set([

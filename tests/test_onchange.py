@@ -568,10 +568,13 @@ fact measurement:
 group measurement.itself from id
 
 # Nested exactly the way D5's BMI nests height: the shape the worksheet's
-# parenthesisation has to get right, not a flat ratio.
+# parenthesisation has to get right, not a flat ratio. `unit decimal`,
+# D5's own unit, now that package 0's item (d) has landed `decimal` --
+# also the shape `test_intermediates_render_at_full_precision_under_decimal`
+# needs below.
 figure measurement.bmi:
     display "{measurement} BMI"
-    unit count
+    unit decimal
     depends:
         me = measurement.itself:{measurement}
     calculate:
@@ -608,6 +611,42 @@ async def test_a_nested_arithmetic_labels_the_formula_as_computed() -> None:
         "measurement.weight_kg / "
         "(measurement.height_cm / 100 * (measurement.height_cm / 100))"
     ), working.root.label
+
+
+async def test_intermediates_render_at_full_precision_under_decimal() -> None:
+    """D5's own complaint: under a rounding unit, the worksheet used to
+    format every intermediate node in the figure's unit too, so a reader
+    saw `height_cm / 100 = 2` beside a final answer of `26` -- arithmetic
+    that cannot be checked because the operand lost its digits on the way.
+
+    The root is the one node this figure's `unit decimal` is *for*, and
+    stays rounded to three significant figures; every node under it must
+    show what was actually computed."""
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_source(LABEL_SOURCE, LABEL)
+    engine = Uratori(schema=LABEL, library=library, store=store, facts=facts)
+    facts.put(
+        "t1", "measurement", "m1", {"id": "m1", "height_cm": 178.456, "weight_kg": 82.0}
+    )
+    await engine.run("t1", full=True)
+
+    working = await engine.working("t1", "measurement.bmi", "m1")
+    assert working is not None
+    assert working.root.display == "25.7", (
+        "the root, decimal-rounded to three significant figures"
+    )
+    square_step = working.root.children[1]  # (height/100) * (height/100)
+    height_over_100 = square_step.children[0]
+    assert height_over_100.display == "1.78456", (
+        f"an intermediate rounded to {height_over_100.display!r} -- the figure's "
+        "own `decimal` unit leaked into a node that is not the final answer"
+    )
+    assert square_step.display == "3.18465", (
+        f"an intermediate rounded to {square_step.display!r}, not full precision"
+    )
 
 
 # ------------------------------------------------------ carried forward --

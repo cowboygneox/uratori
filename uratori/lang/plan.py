@@ -196,7 +196,7 @@ class ReadingPlan:
     mode: Literal["window", "live"]
     doc: str
     display: str
-    unit: Literal["count", "duration", "effort", "amount"]
+    unit: Literal["count", "duration", "effort", "amount", "decimal"]
     calculate: tuple[Statistic, ...]
     requires: tuple[Requirement, ...] = ()
     band: Ladder | None = None

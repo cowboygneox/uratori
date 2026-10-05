@@ -641,7 +641,9 @@ that is not a value, and every comparison against it would then need a rule.
 
 ArithOperator: TypeAlias = Literal["+", "-", "*", "/"]
 
-DeclaredUnit: TypeAlias = Literal["share", "days", "effort", "count", "duration", "amount"]
+DeclaredUnit: TypeAlias = Literal[
+    "share", "days", "effort", "count", "duration", "amount", "decimal"
+]
 """What an arithmetic value *is*, because nothing else can tell.
 
 `delivered / committed` is mute. It could be a share, and `breakdown -
@@ -652,6 +654,12 @@ of unknown unit; guessing puts "144000" or "0.6d" on a screen.
 So arithmetic **must** declare one and every other calculation must **not** --
 for those it stays derivable, and a second place to write it is a first place
 for the two to disagree.
+
+`decimal` is the odd one in the list: not a share, not a clock, not a
+magnitude a reader skims for scale rather than digits -- a body-mass index,
+a rate that can run past 1. It renders to a fixed number of significant
+figures rather than fixed decimal places, because a quantity like this is
+read for its actual digits at whatever scale it happens to sit.
 """
 
 FigureUnit: TypeAlias = DeclaredUnit | Literal["level", "moment"]

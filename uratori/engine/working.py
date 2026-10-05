@@ -589,8 +589,19 @@ def _set_step(name: str, ctx: _Ctx) -> Step:
 # ------------------------------------------------------------- main step --
 
 
-def _step(e: CalcExpr, ctx: _Ctx) -> Step:
+def _step(e: CalcExpr, ctx: _Ctx, root: bool = True) -> Step:
+    # **Intermediates render at full precision under `decimal`.** The figure's
+    # declared unit is right for the one number this worksheet is *about* --
+    # the root -- but applying it to every node under it is what turned
+    # `height / 100` into `height_cm / 100 = 2`: the operand lost the digits
+    # a reader needs to check the arithmetic, rounded to the same three
+    # significant figures the final answer gets. `count`'s plain `%g` is
+    # what every other unit already shows its intermediates in by accident
+    # (none of them round as aggressively as `decimal` does), so reusing it
+    # here rather than inventing a second "raw" formatting path.
     unit = ctx.plan.unit
+    if not root and unit == "decimal":
+        unit = "count"
     value = _traced(ctx.trace, e)
 
     if isinstance(e, Count):
@@ -882,8 +893,8 @@ def _step(e: CalcExpr, ctx: _Ctx) -> Step:
         )
 
     if isinstance(e, Arith):
-        left_step = _step(e.left, ctx)
-        right_step = _step(e.right, ctx)
+        left_step = _step(e.left, ctx, root=False)
+        right_step = _step(e.right, ctx, root=False)
         note = None
         if value is None:
             rv = _traced(ctx.trace, e.right)
@@ -894,8 +905,8 @@ def _step(e: CalcExpr, ctx: _Ctx) -> Step:
         return Step(op="arith", label=_calc_label(e, ctx), display=_fmt(value, unit), note=note, children=(left_step, right_step))
 
     if isinstance(e, Pick):
-        left_step = _step(e.left, ctx)
-        right_step = _step(e.right, ctx)
+        left_step = _step(e.left, ctx, root=False)
+        right_step = _step(e.right, ctx, root=False)
         note = None if value is not None else "an absent operand makes the result absent."
         return Step(op="pick", label=_calc_label(e, ctx), display=_fmt(value, unit), note=note, children=(left_step, right_step))
 
@@ -903,9 +914,9 @@ def _step(e: CalcExpr, ctx: _Ctx) -> Step:
         children = []
         for rung in e.rungs:
             verdict = _rung_verdict(rung, ctx.trace)
-            rung_children = [_step(rung.left, ctx)]
+            rung_children = [_step(rung.left, ctx, root=False)]
             if rung.right is not None:
-                rung_children.append(_step(rung.right, ctx))
+                rung_children.append(_step(rung.right, ctx, root=False))
             note = (
                 "a ladder stops on an unknown rather than falling through."
                 if verdict == "unknown"

@@ -697,6 +697,56 @@ figure team_person.balance:
     assert plan.unit == "amount"
 
 
+def test_unit_decimal_is_accepted_wherever_a_declared_unit_is() -> None:
+    """`unit decimal` compiles on arithmetic exactly as `unit share` and
+    `unit amount` do -- the vocabulary grew by one, not by a new rule."""
+    lib = compile_ok(
+        """
+# d
+figure team_person.ratio:
+    display "x"
+    unit decimal
+    calculate:
+        team_person.wip - team_person.wip
+"""
+    )
+    plan = lib.figure("team_person.ratio")
+    assert plan is not None
+    assert plan.unit == "decimal"
+
+
+def test_a_decimal_figure_may_be_read_over_a_range_and_answers_decimal() -> None:
+    """A `decimal`-unit figure fed into a reading must keep rendering in
+    significant figures -- `_reading_unit`'s fallback is `duration`, which
+    would turn a BMI series into hours-and-minutes if decimal fell through
+    it the way `share`/`days` deliberately do."""
+    lib = compile_ok(
+        """
+# d
+figure team_person.ratio_by_day bucketed:
+    display "x"
+    unit decimal
+    depends:
+        mine = work_issue.delivered_by_day:{team_person}
+    calculate:
+        count(mine) - count(mine)
+
+# d
+reading team_person.ratio(range):
+    display "x"
+    depends:
+        m = team_person.ratio_by_day in range
+    calculate:
+        sum(m)
+        series(m)
+        delta(m)
+"""
+    )
+    reading = lib.reading("team_person.ratio")
+    assert reading is not None
+    assert reading.unit == "decimal"
+
+
 def test_an_amount_figure_may_be_read_over_a_range_and_answers_amount() -> None:
     """The whole reason the unit exists: a board's spend is a day-bucketed
     amount figure summed over a trailing window, and the reading path has to

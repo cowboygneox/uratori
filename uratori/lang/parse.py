@@ -96,7 +96,7 @@ from .lex import SyntaxError_, Token, lex, prose_above
 
 _FACT_TYPES: frozenset[str] = frozenset({"text", "number", "flag", "moment"})
 _DECLARED_UNITS: frozenset[str] = frozenset(
-    {"share", "days", "effort", "count", "duration", "amount"}
+    {"share", "days", "effort", "count", "duration", "amount", "decimal"}
 )
 
 _TIME_SCALES: tuple[str, ...] = ("seconds", "minutes", "hours", "days", "weeks")
@@ -1077,6 +1077,8 @@ class _Parser:
             return "duration"
         if word == "amount":
             return "amount"
+        if word == "decimal":
+            return "decimal"
         raise self._error(
             f'"{word}" is not a unit. Those are: {", ".join(sorted(_DECLARED_UNITS))}.'
         )

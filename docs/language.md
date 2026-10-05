@@ -931,10 +931,22 @@ meant. So arithmetic (and `max`/`min`) **must** declare a unit --
     unit share
 ```
 
--- from `share`, `days`, `effort`, `count`, `duration`, `amount`, and everything else
-must **not**: a second place to write it is a first place for the two to
-disagree. `level` and `moment` cannot be written at all; each comes from
-exactly one construct and is always derived.
+-- from `share`, `days`, `effort`, `count`, `duration`, `amount`, `decimal`,
+and everything else must **not**: a second place to write it is a first
+place for the two to disagree. `level` and `moment` cannot be written at
+all; each comes from exactly one construct and is always derived.
+
+`decimal` is for a quantity that is none of the others: not a 0-1 share, not
+a clock, not a magnitude where a reader cares about scale more than digits.
+A body-mass index, a conversion rate that is not a share, a ratio that can
+run past 1 -- numbers a reader checks by comparing their actual digits.
+`decimal` renders to **three significant figures**: `25.9`, `0.0821`,
+`1780`, trailing zeros kept when they are significant. The stored `value` on
+the wire is always the unrounded magnitude; only the rendered `display` is
+cut to three figures, and the worksheet's intermediate steps print at full
+precision so the arithmetic behind the rounded answer is still checkable. A
+parameterised spelling, `decimal(n)`, is not implemented in this release --
+`decimal` always means three.
 
 A figure built on another figure inherits its unit from **the binding it
 actually reads**, not from whichever binding happens to carry an inheritable

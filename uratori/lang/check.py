@@ -2374,7 +2374,7 @@ class _Checker:
                 f"figure {d.name} produces a number nothing can name. The same two operands "
                 "divided give a share and subtracted give the quantity they were both in, "
                 'and 0.6 renders as "60%" or as "0.6" with no way to tell which was meant. '
-                "Add `unit <share|days|effort|count|duration|amount>`.",
+                "Add `unit <share|days|effort|count|duration|amount|decimal>`.",
                 d.line,
             )
         if d.unit is not None:
@@ -2439,7 +2439,7 @@ class _Checker:
                 source = _find(self.figures, held[0])
                 if source is not None:
                     inherited: FigureUnit = source.unit
-                    if inherited in ("effort", "share", "days", "duration", "amount"):
+                    if inherited in ("effort", "share", "days", "duration", "amount", "decimal"):
                         return inherited
         return "count"
 
@@ -2792,7 +2792,7 @@ class _Checker:
 
     def _reading_unit(
         self, source: FigureUnit, d: ReadingDecl
-    ) -> Literal["count", "duration", "effort", "amount"]:
+    ) -> Literal["count", "duration", "effort", "amount", "decimal"]:
         # Effort used to be refused here: it rendered against a tenant's
         # working-day dial that the reading renderers did not have, so a sum
         # of estimates over a window would have printed as raw seconds
@@ -2806,13 +2806,16 @@ class _Checker:
         # means 48 hours of working time -- the same reading a figure gives
         # that literal today.
         #
-        # Amount is not folded into the `duration` branch below: `sum`, `mean`,
-        # `median`, `worst` and every per-bucket `series`/`delta` cell render
-        # through `format_value`, which already has an amount branch of its
-        # own -- compact and abbreviated, no `%g` fallback and no seconds
-        # arithmetic to get wrong.
+        # Amount and decimal are not folded into the `duration` branch below:
+        # `sum`, `mean`, `median`, `worst` and every per-bucket `series`/
+        # `delta` cell render through `format_value`, which already has its
+        # own branch for each -- compact and abbreviated for `amount`,
+        # significant figures for `decimal` -- no `%g` fallback and no
+        # seconds arithmetic to get wrong.
         if source == "amount":
             return "amount"
+        if source == "decimal":
+            return "decimal"
         if source == "effort":
             return "effort"
         return "count" if source == "count" else "duration"

@@ -38,7 +38,7 @@ from typing import Annotated, Literal, TypeAlias
 from pydantic import BaseModel, Field
 
 Unit: TypeAlias = Literal[
-    "count", "duration", "effort", "share", "days", "amount", "level", "moment"
+    "count", "duration", "effort", "share", "days", "amount", "decimal", "level", "moment"
 ]
 """What a value *is*, so a renderer never guesses.
 
@@ -61,6 +61,12 @@ magnitudes down a column is better served by that than by counting digits.
 (Effort used to render against a working-day dial, so 28,800 seconds read "1d".
 Hours say the same thing without a reader having to find out whose working day
 the engine had in mind.)
+
+`decimal` is the opposite of `amount`: a reader wants the actual digits, not
+a skimmed magnitude, because the quantity is read for precision rather than
+scale -- a body-mass index, a rate that is not a share. It renders to a
+fixed number of significant figures (three) rather than fixed decimal
+places, and never abbreviates, so `1780` stays `1780` rather than `1.78k`.
 """
 
 Level: TypeAlias = str

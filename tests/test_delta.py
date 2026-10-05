@@ -837,6 +837,27 @@ def test_an_amount_renders_compactly_and_abbreviated() -> None:
     )
 
 
+def test_a_decimal_renders_to_three_significant_figures_never_abbreviated() -> None:
+    """`decimal` is `amount`'s opposite: a body-mass index or a rate is read
+    for its actual digits, not skimmed for scale, so it never abbreviates --
+    `1780` stays `1780`, never `1.78k` -- and it rounds to a fixed *count of
+    significant digits* rather than a fixed number of decimal places, which
+    is why `0.0821` keeps four decimal places and `25.9` keeps one.
+
+    Trailing zeros are kept when they are significant -- the opposite of
+    `amount`'s rule, which trims a bare ".0": three significant figures of
+    `20` is `20.0`, and dropping the zero would silently serve two."""
+    from uratori.engine.project import format_value
+
+    assert format_value(25.88, "decimal") == "25.9"
+    assert format_value(0.082073, "decimal") == "0.0821"
+    assert format_value(1783.5, "decimal") == "1780", "never abbreviated to 1.78k"
+    assert format_value(20.0, "decimal") == "20.0", "a significant trailing zero is kept"
+    assert format_value(-25.88, "decimal") == "-25.9", "signed"
+    assert format_value(0.0, "decimal") == "0"
+    assert format_value(100.0, "decimal") == "100"
+
+
 def test_a_delta_over_a_sub_day_figure_is_refused_rather_than_served_empty() -> None:
     """A delta's cells are its source's own buckets, and it has no grain to
     group them to the way a series has.

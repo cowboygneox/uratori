@@ -381,6 +381,8 @@ def format_value(value: Value, unit: FigureUnit) -> str:
         return datetime.fromtimestamp(value / 1000.0, tz=UTC).date().isoformat()
     if unit == "amount":
         return _format_amount(value)
+    if unit == "decimal":
+        return _format_decimal(value)
     return f"{value:g}"
 
 
@@ -450,6 +452,47 @@ def _format_amount(value: float) -> str:
             text = text[:-2]
         return f"{sign}{text}{suffix}"
     return f"{sign}{round(magnitude)}"  # unreachable: the last tier matches everything
+
+
+_DECIMAL_FIGURES = 3
+"""Significant figures `unit decimal` renders to. Not configurable in this
+release -- a `decimal(n)` override spelling was considered, but the grammar
+only ever reads a single bare name after `unit` (`_declared_unit` in
+`lang/parse.py`), and admitting a parenthesised argument there is a parser
+change, not a formatting one. Shipped at a fixed 3 instead."""
+
+
+def _format_decimal(value: float, figures: int = _DECIMAL_FIGURES) -> str:
+    """Significant figures, not fixed decimal places -- `25.9`, `0.0821`,
+    `1780`. Unlike `amount`, this never abbreviates: a clinical quantity or
+    a rate is read for its actual digits, not skimmed for scale, so `1780`
+    stays `1780` rather than becoming `1.78k`.
+
+    **Via scientific notation, not `floor(log10(value))`.** The direct
+    route -- find the exponent, round to `figures` digits at that exponent --
+    has a classic failure at exact powers of ten: `log10(1000.0)` can come
+    back `2.9999999999996` from floating point, floor it to `2`, and round
+    1000 to two significant figures instead of three. Formatting with `:e`
+    lets the standard library do that rounding and exponent selection
+    correctly, and this only reconstructs fixed notation from what it
+    returns -- never scientific, which `:g` would reach for at exactly the
+    boundary this unit's own examples (`1780`) fall on.
+
+    **Trailing zeros are kept, deliberately** -- the opposite of `amount`,
+    which trims a bare ".0". `20.0` at three significant figures is `20.0`,
+    not `20`: the trailing zero after the point is the figure a reader
+    asked for, and dropping it would silently serve two significant figures
+    under a unit that promised three.
+    """
+    if value == 0:
+        return "0"
+    mantissa_text, _, exponent_text = f"{value:.{figures - 1}e}".partition("e")
+    exponent = int(exponent_text)
+    decimals = figures - 1 - exponent
+    scaled = float(mantissa_text) * (10.0**exponent)
+    if decimals > 0:
+        return f"{scaled:.{decimals}f}"
+    return f"{scaled:.0f}"
 
 
 def _duration(seconds: float) -> str:
