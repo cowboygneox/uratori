@@ -20,7 +20,8 @@ would make the common path slower to save the rare one nothing.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field as _field
 from typing import Any, Literal
 
 from ..lang.ast import (
@@ -100,7 +101,21 @@ class Step:
     records: tuple[RecordLine, ...] = ()
     records_total: int = 0
     records_more: bool = False
-    children: tuple[Step, ...] = field(default_factory=tuple)
+    children: tuple[Step, ...] = _field(default_factory=tuple)
+    field: str | None = None
+    """The fact field a *leaf* step read -- `SubjectField`, `FieldPick`,
+    `FieldTotal`, and a field-shaped measure's own `field_path`. Carried
+    alongside `record_kind` so a server layer attaching provenance (which
+    word on which page a number came from) can go straight to the field a
+    citation names, rather than parsing it back out of `label`, which is
+    prose and free to change. Null wherever a step is not a direct field
+    read -- a rollup, a count, a duration or moment measure.
+
+    Imported as `_field` above for exactly this reason: `dataclasses.field`
+    and this attribute would otherwise share one name in one class body,
+    and a class body runs top to bottom like any other code -- this
+    attribute's own `= None` would rebind `field` before `children`'s
+    default factory below it ran, calling `None(default_factory=tuple)`."""
 
 
 @dataclass(frozen=True)
@@ -682,8 +697,8 @@ def _step(e: CalcExpr, ctx: _Ctx, root: bool = True) -> Step:
         note = " ".join(x for x in (summary, cap_note) if x)
         return Step(
             op="sum-measure", label=_calc_label(e, ctx), display=_fmt(value, unit), note=note,
-            definition=e.measure, record_kind=kind, records=lines, records_total=total,
-            records_more=more, children=(_set_step(e.set, ctx),),
+            definition=e.measure, record_kind=kind, field=measure.field_path, records=lines,
+            records_total=total, records_more=more, children=(_set_step(e.set, ctx),),
         )
 
     if isinstance(e, Sum) and e.measure is None:
@@ -733,8 +748,8 @@ def _step(e: CalcExpr, ctx: _Ctx, root: bool = True) -> Step:
         lines, total, more = _record_lines(ctx, kind, members, displays, roles, {})
         return Step(
             op="extreme", label=_calc_label(e, ctx), display=_fmt(value, unit), note=note,
-            definition=e.measure, record_kind=kind, records=lines, records_total=total,
-            records_more=more, children=(_set_step(e.set, ctx),),
+            definition=e.measure, record_kind=kind, field=measure.field_path, records=lines,
+            records_total=total, records_more=more, children=(_set_step(e.set, ctx),),
         )
 
     if isinstance(e, BucketStat):
@@ -761,8 +776,8 @@ def _step(e: CalcExpr, ctx: _Ctx, root: bool = True) -> Step:
         lines, total, more = _record_lines(ctx, kind, members, displays, roles, {})
         return Step(
             op="stat", label=_calc_label(e, ctx), display=_fmt(value, unit), note=note,
-            definition=e.measure, record_kind=kind, records=lines, records_total=total,
-            records_more=more, children=(_set_step(e.set, ctx),),
+            definition=e.measure, record_kind=kind, field=measure.field_path, records=lines,
+            records_total=total, records_more=more, children=(_set_step(e.set, ctx),),
         )
 
     if isinstance(e, FieldTotal):
@@ -783,8 +798,8 @@ def _step(e: CalcExpr, ctx: _Ctx, root: bool = True) -> Step:
         lines, total, more = _record_lines(ctx, kind, members, displays, roles, notes)
         return Step(
             op="field-total", label=_calc_label(e, ctx), display=_fmt(value, unit),
-            record_kind=kind, records=lines, records_total=total, records_more=more,
-            children=(_set_step(e.set, ctx),),
+            record_kind=kind, field=e.field, records=lines, records_total=total,
+            records_more=more, children=(_set_step(e.set, ctx),),
         )
 
     if isinstance(e, FieldPick):
@@ -821,8 +836,8 @@ def _step(e: CalcExpr, ctx: _Ctx, root: bool = True) -> Step:
         lines, total, more = _record_lines(ctx, kind, members, displays, roles, {})
         return Step(
             op="field-pick", label=_calc_label(e, ctx), display=_fmt(value, unit),
-            record_kind=kind, records=lines, records_total=total, records_more=more,
-            children=(_set_step(e.set, ctx),),
+            record_kind=kind, field=e.field, records=lines, records_total=total,
+            records_more=more, children=(_set_step(e.set, ctx),),
         )
 
     if isinstance(e, FigureTotal):
@@ -889,7 +904,8 @@ def _step(e: CalcExpr, ctx: _Ctx, root: bool = True) -> Step:
         )
         return Step(
             op="subject-field", label=_calc_label(e, ctx), display=_fmt(value, unit),
-            record_kind=e.kind, records=lines, records_total=total, records_more=more,
+            record_kind=e.kind, field=e.field, records=lines, records_total=total,
+            records_more=more,
         )
 
     if isinstance(e, Arith):

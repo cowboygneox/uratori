@@ -649,6 +649,122 @@ async def test_intermediates_render_at_full_precision_under_decimal() -> None:
     )
 
 
+# ------------------------------------------------- Step.field, package (e) --
+
+FIELD_WORLD = Schema(kinds=frozenset())
+
+FIELD_SOURCE = '''
+# A site.
+fact site:
+    name name
+    name as text
+
+# One event at one site.
+fact event:
+    id as text
+    site_id as text
+    amount as number
+    happened_at as moment
+
+# A field re-labelled with what its number means -- still "field" shaped,
+# the one `measure` kind this package's leaf steps carry a field for.
+measure event.amount_measure = amount in count
+
+group event.itself from id
+group event.at_site from site_id
+group event.by_site_day from (site_id, happened_at by day in "UTC")
+
+# A leaf that reads its own field directly (`SubjectField`).
+figure event.doubled:
+    display "x"
+    unit decimal
+    depends:
+        me = event.itself:{event}
+    calculate:
+        event.amount + event.amount
+
+# The latest event's amount, read as a bare field (`FieldPick`).
+figure site.latest_amount bucketed:
+    display "x"
+    unit decimal
+    depends:
+        mine = event.by_site_day:{site}
+    calculate:
+        latest(event.amount over mine)
+
+# Every event's amount, summed as a bare field (`FieldTotal`).
+figure site.amount_total:
+    display "x"
+    unit decimal
+    depends:
+        mine = event.at_site:{site}
+    calculate:
+        sum(event.amount over mine)
+
+# Every event's amount, summed through a declared field-shaped measure
+# (`Sum` with `measure` set, not `FieldTotal`).
+figure site.cost_total:
+    display "x"
+    depends:
+        mine = event.at_site:{site}
+    calculate:
+        sum(event.amount_measure over mine)
+'''
+
+
+async def test_a_leaf_steps_field_names_the_fact_field_it_read() -> None:
+    """`Step` gains `field`, naming the fact field a leaf step read off a
+    record -- not a parsed-out guess from `label`, which is prose a later
+    release is free to reword, but the same name `evaluate()` itself read.
+
+    Four shapes, because each reaches the field a different way: a bare
+    `SubjectField` read, a bucketed `FieldPick`, an unbucketed `FieldTotal`,
+    and a `Sum` over a declared field-shaped measure -- the fourth is
+    `measure.field_path`, not the measure's own name, which is what
+    `definition` already carries."""
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_source(FIELD_SOURCE, FIELD_WORLD)
+    engine = Uratori(schema=FIELD_WORLD, library=library, store=store, facts=facts)
+    facts.put("t1", "site", "s1", {"name": "North"})
+    facts.put(
+        "t1", "event", "e1",
+        {"id": "e1", "site_id": "s1", "amount": 5.0, "happened_at": "2026-01-01T00:00:00Z"},
+    )
+    facts.put(
+        "t1", "event", "e2",
+        {"id": "e2", "site_id": "s1", "amount": 7.0, "happened_at": "2026-01-01T00:00:00Z"},
+    )
+    await engine.run("t1", full=True)
+
+    doubled = await engine.working("t1", "event.doubled", "e2")
+    assert doubled is not None
+    assert [c.field for c in doubled.root.children] == ["amount", "amount"], (
+        "the SubjectField leaves under the `+` did not name their field"
+    )
+
+    latest_amount = await engine.working("t1", "site.latest_amount", "s1@2026-01-01")
+    assert latest_amount is not None
+    assert latest_amount.root.op == "field-pick"
+    assert latest_amount.root.field == "amount"
+
+    amount_total = await engine.working("t1", "site.amount_total", "s1")
+    assert amount_total is not None
+    assert amount_total.root.op == "field-total"
+    assert amount_total.root.field == "amount"
+
+    cost_total = await engine.working("t1", "site.cost_total", "s1")
+    assert cost_total is not None
+    assert cost_total.root.op == "sum-measure"
+    assert cost_total.root.field == "amount", (
+        "a Sum over a field-shaped measure did not carry the measure's own "
+        "field_path -- definition names the measure, field must name what "
+        "it measures"
+    )
+
+
 # ------------------------------------------------------ carried forward --
 
 

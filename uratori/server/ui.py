@@ -793,6 +793,7 @@ class StepOut(BaseModel):
     figure_subject: str | None = None
     bucket: str | None = None
     record_kind: str | None = None
+    field: str | None = None
     records: list[RecordLineOut] = []
     records_total: int = 0
     records_more: bool = False

@@ -1084,8 +1084,13 @@ function workStep(step, opts) {
   const verdict = step.verdict
     ? el('span', { class: `work-verdict verdict-${step.verdict}` }, VERDICT_WORD[step.verdict] ?? step.verdict)
     : null;
+  // The one fact field this leaf read, when it read one directly -- a
+  // small annotation rather than a link, since there is no page for a
+  // bare field to open to yet; it is here for a later provenance layer to
+  // read off the tree instead of parsing it back out of the label text.
+  const fieldBadge = step.field ? el('span', { class: 'badge mono' }, step.field) : null;
   const row = el('div', { class: 'work-row' },
-    el('div', { class: 'work-label' }, label, verdict),
+    el('div', { class: 'work-label' }, label, fieldBadge, verdict),
     el('div', { class: 'work-display' }, step.display ?? '—'));
   const body = [row];
   if (step.note) body.push(el('div', { class: 'faint work-note' }, step.note));
