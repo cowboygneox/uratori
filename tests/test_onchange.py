@@ -523,6 +523,28 @@ async def test_the_evidence_is_the_one_change_the_value_came_from() -> None:
     )
 
 
+async def test_the_worksheets_field_pick_step_marks_the_record_it_read() -> None:
+    """The `extreme` step marks its one winning record (`working.py`'s
+    `roles[winner] = "winner"`); `field-pick` used to mark every record in
+    the bucket `counted` and none of them `winner`, so a worksheet showing
+    "why 25" could not point at the record the arithmetic actually read --
+    only the whole bucket, which `evidence` above already refuses to do."""
+    engine = await _run(
+        CARRIED,
+        [
+            ("c1", "2026-02-03T09:00:00Z", 30.0, "Aki", ""),
+            ("c2", "2026-02-20T09:00:00Z", 25.0, "Bo", ""),
+        ],
+    )
+    working = await engine.working("t1", "site.target_month", "s1@2026-02")
+    assert working is not None
+    assert working.root.op == "field-pick"
+    roles = {line.key: line.role for line in working.root.records}
+    assert roles == {"c1": "counted", "c2": "winner"}, (
+        f"roles are {roles}, not the one record read marked apart from the rest"
+    )
+
+
 # ------------------------------------------------------ carried forward --
 
 

@@ -742,15 +742,36 @@ def _step(e: CalcExpr, ctx: _Ctx) -> Step:
         )
 
     if isinstance(e, FieldPick):
+        from .buckets import read_instant
+
         members = sorted(ctx.resolved.get(e.set, frozenset()))
         kind = e.kind
         roles = dict.fromkeys(members, "counted")
         displays = {}
+        # Which one record `FieldPick` actually read -- the same ordering
+        # `evaluate._picked` uses, so the record marked here is never a
+        # different one than the value beside it came from. A record whose
+        # ordering instant cannot be read takes no part, for the same reason
+        # `_picked` skips it: nought is a real instant and would otherwise
+        # win every `earliest` for ever.
+        picked: str | None = None
+        picked_at: tuple[float, str] | None = None
         for m in members:
             record = ctx.records.get(kind, {}).get(m)
             got = read_number(record, e.field) if record is not None else None
             if got is not None:
                 displays[m] = _fmt(got, unit)
+            at = read_instant(record, e.ordered_by) if record is not None else None
+            if at is None:
+                continue
+            here = (at, m)
+            if picked_at is None or (
+                here > picked_at if e.which == "latest" else here < picked_at
+            ):
+                picked_at = here
+                picked = m
+        if picked is not None:
+            roles[picked] = "winner"
         lines, total, more = _record_lines(ctx, kind, members, displays, roles, {})
         return Step(
             op="field-pick", label=_calc_label(e, ctx), display=_fmt(value, unit),
