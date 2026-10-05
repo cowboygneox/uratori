@@ -73,6 +73,17 @@ class CompiledFact:
     doc: str = ""
     version: str = ""
 
+    shape: Literal["document", "page"] | None = None
+    """`as document` / `as page of <kind>`, carried through from `FactDecl`
+    for the server's documents routes and the manifest. `fields` already
+    includes the shape's own fields, merged before the version was hashed --
+    nothing downstream needs to know which fields came from the shape and
+    which from the host."""
+
+    page_of: str | None = None
+    """The document fact kind this page kind belongs to, set only when
+    `shape == "page"`."""
+
 
 @dataclass(frozen=True)
 class CompiledIndex:

@@ -327,6 +327,49 @@ the property that makes adoption safe -- a host that moves its kinds into
 and the test that pins this compiles the same definitions both ways and
 compares every version.
 
+### `as document` / `as page of` -- a fact shape the language knows
+
+```
+# A patient's uploaded records, one file at a time.
+fact medical_record as document:
+    name title
+    source as text            # host fields beside the shape's own
+
+# One page of one.
+fact medical_record_page as page of medical_record
+```
+
+A document is not a built-in kind -- it is an ordinary fact, host-named, of a
+*shape the language knows*. `as document` brings fields nothing here
+declared: `title, mime, sha256, pages, uploaded_at`. `as page of
+medical_record` brings `document_id, number, text_source, words_sha`, and
+takes no block at all -- it is written on one line, because nothing may
+write a host field on a page; every byte a page carries beyond those four
+fields comes from the bytes themselves, read by the server, not asserted by
+a provider. The shape's fields merge in *before* the usual checks run, so
+`name title` above resolves against the shape's own `title` (not a host
+field), and a host field that happens to repeat one -- `sha256 as text` --
+is refused by the ordinary duplicate-field rule, for free.
+
+Every document kind takes **exactly one** page kind: a document declared
+`as document` with no fact `as page of` it is refused at compile, and so is
+a second `as page of` the same kind, because pages are where provenance
+points, and "which pages does an upload fill" must have one answer. A page
+fact's `page_of` may name its document kind before or after that kind is
+declared in the source -- facts are checked order-free, as they always have
+been, and a page fact is simply checked in a pass of its own, second.
+
+The version hashes the host fields, the shape, and the owning document
+kind's **name** -- never that kind's own version, so a page fact stays
+downstream of nothing, exactly like every other fact. What actually fills
+these fields -- uploading a file, rendering its pages, running OCR on the
+ones with no text layer -- is the server's own documents routes, described
+in [Documents](documents.md); the fact layer only knows the shape, not where
+the bytes live. The facts route refuses a direct write or delete against a
+document or page kind (document and page records move only through the
+documents routes, which run every write through this same verified
+boundary) -- see [the HTTP API](http-api.md).
+
 ---
 
 ## `group` and `filter` -- which records

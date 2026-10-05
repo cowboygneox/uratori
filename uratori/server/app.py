@@ -1011,6 +1011,8 @@ def _library_out(library: Library) -> LibraryOut:
                 name_field=f.name_field,
                 url_field=f.url_field,
                 fields=fact_leaves(f.fields, "", False),
+                shape=f.shape,
+                page_of=f.page_of,
             )
             for f in library.facts.values()
         ],

@@ -81,6 +81,20 @@ class FactDecl:
     the field's semantics."""
 
     url_field: str | None = None
+
+    shape: Literal["document", "page"] | None = None
+    """`as document` / `as page of <kind>` -- a document-shaped fact brings
+    fields the language itself knows (`title, mime, sha256, pages,
+    uploaded_at` for a document; `document_id, number, text_source,
+    words_sha` for a page) rather than fields a provider mapped. `None` for
+    an ordinary fact. See `uratori/server/documents.py` for who writes these:
+    the server's documents route, never a provider."""
+
+    page_of: str | None = None
+    """Set only when `shape == "page"`: the document fact kind this is one
+    page of. The version hashes this *name*, never that kind's own version,
+    so a page fact stays downstream of nothing, like every other fact."""
+
     line: int = 0
 
 

@@ -1,4 +1,4 @@
-"""The guide's examples, held to the compiler.
+"""The guides' examples, held to the compiler.
 
 `docs/language.md` is the authoring guide and the design rationale in one
 file, which makes its `.fig` blocks the piece of source most people will ever
@@ -8,13 +8,18 @@ example went on banding against tenant dials for a release after the dials
 were deleted, three sections below a paragraph explaining that a threshold is
 never a dial. One example was pinned by a test; that one was not.
 
-Every block is compiled now. The blocks are fragments by design -- a figure
-shown to explain `depends` names a group introduced three sections earlier,
-or one the guide never shows because it is not what that section is about --
-so each is compiled on top of `docs/language.fixture.fig`, which carries the
-scaffolding and nothing the guide is teaching. Where a block declares
-something the fixture also has, the fixture's copy stands aside: the guide is
-the authority on anything it shows.
+`docs/documents.md` gets the same treatment for the same reason: it is the
+authoring guide for document-shaped facts (`as document` / `as page of`,
+[the documents plan](~/.claude/notes/uratori/documents-plan-v3.md), D1), and
+its examples are the ones a reader actually pastes.
+
+Every block in either guide is compiled now. The blocks are fragments by
+design -- a figure shown to explain `depends` names a group introduced three
+sections earlier, or one the guide never shows because it is not what that
+section is about -- so each is compiled on top of `docs/language.fixture.fig`,
+which carries the scaffolding and nothing either guide is teaching. Where a
+block declares something the fixture also has, the fixture's copy stands
+aside: the guide is the authority on anything it shows.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from uratori import Schema, compile_source
 
 ROOT = Path(__file__).resolve().parent.parent
 GUIDE = ROOT / "docs" / "language.md"
+DOCUMENTS_GUIDE = ROOT / "docs" / "documents.md"
 FIXTURE = ROOT / "docs" / "language.fixture.fig"
 
 DECLARES = re.compile(
@@ -69,6 +75,13 @@ def _snippets(path: Path) -> list[tuple[int, str]]:
 
 
 GUIDE_SNIPPETS = _snippets(GUIDE)
+DOCUMENTS_GUIDE_SNIPPETS = _snippets(DOCUMENTS_GUIDE)
+
+# Every guide checked the same way, flattened into one parametrized case per
+# block so a failure names the file and the line, not just the line.
+_ALL_SNIPPETS = [
+    (GUIDE, line, body) for line, body in GUIDE_SNIPPETS
+] + [(DOCUMENTS_GUIDE, line, body) for line, body in DOCUMENTS_GUIDE_SNIPPETS]
 
 
 def test_the_guide_has_examples_to_check() -> None:
@@ -81,10 +94,20 @@ def test_the_guide_has_examples_to_check() -> None:
     )
 
 
+def test_the_documents_guide_has_examples_to_check() -> None:
+    assert len(DOCUMENTS_GUIDE_SNIPPETS) >= 1, (
+        f"only {len(DOCUMENTS_GUIDE_SNIPPETS)} blocks found in docs/documents.md -- "
+        "the extractor has stopped seeing them, and every case below is passing "
+        "vacuously"
+    )
+
+
 @pytest.mark.parametrize(
-    ("line", "body"), GUIDE_SNIPPETS, ids=[str(n) for n, _ in GUIDE_SNIPPETS]
+    ("path", "line", "body"),
+    _ALL_SNIPPETS,
+    ids=[f"{path.name}:{line}" for path, line, _ in _ALL_SNIPPETS],
 )
-def test_every_fig_block_in_the_guide_compiles(line: int, body: str) -> None:
+def test_every_fig_block_in_a_guide_compiles(path: Path, line: int, body: str) -> None:
     shown = frozenset(DECLARES.findall(body))
     preamble = "\n".join(
         chunk
@@ -95,7 +118,7 @@ def test_every_fig_block_in_the_guide_compiles(line: int, body: str) -> None:
         compile_source(preamble + "\n" + body, WORLD)
     except Exception as refusal:
         pytest.fail(
-            f"docs/language.md:{line} does not compile:\n  {refusal}\n\n"
+            f"{path.relative_to(ROOT)}:{line} does not compile:\n  {refusal}\n\n"
             "Either the example is wrong, or the scaffolding it assumes is "
             "missing from docs/language.fixture.fig."
         )

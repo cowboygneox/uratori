@@ -979,3 +979,203 @@ def test_the_data_screen_can_cite_a_fact() -> None:
     assert "as the provider last showed it" in declaration_prose(library, "shop_order")
     body = declaration_source(library, "shop_order")
     assert body is not None and "placed_at as moment" in body
+
+
+# ---------------------------------------------------- documents (D1) --
+#
+# `fact <kind> as document:` / `fact <kind> as page of <kind>` -- the two
+# document-shaped facts the documents plan (`~/.claude/notes/uratori/
+# documents-plan-v3.md`, D1) adds to `fact`. Both EV parser failures the
+# review found against the shape v2 proposed are pinned here, red first:
+# `fact X as document:` used to fail at the bare `as` (`parse.py:374`), and
+# a body-less page fact failed twice over ("expected an indented block",
+# then "has no fields", `parse.py:376,399-404`).
+
+DOCUMENT_SOURCE = """
+# A patient's uploaded records, one file at a time.
+fact medical_record as document:
+    name title
+    source as text
+
+# One page of one.
+fact medical_record_page as page of medical_record
+"""
+
+
+def test_the_bare_as_header_used_to_fail_at_as_and_now_parses() -> None:
+    """The EV parser failure D1 found at `parse.py:374`: `fact X as
+    document:` used to refuse with `expected ":", got "as"` before the
+    grammar knew the word. Pinned here so it cannot regress silently."""
+    library = compile_taught(DOCUMENT_SOURCE + "\n")
+    assert library.facts["medical_record"].shape == "document"
+
+
+def test_a_body_less_page_fact_used_to_fail_twice_and_now_parses() -> None:
+    """The second EV failure: a page fact with no block used to hit "expected
+    an indented block after the fact kind" (`parse.py:376`), and once a bare
+    `fact X:` with nothing under it was tried instead, "fact X has no
+    fields" (`parse.py:399-404`). `as page of <kind>` takes neither a colon
+    nor a block -- nothing can write a host field on a page."""
+    library = compile_taught(DOCUMENT_SOURCE + "\n")
+    page = library.facts["medical_record_page"]
+    assert page.shape == "page"
+    assert page.page_of == "medical_record"
+    # The parser attaches no block at all (`fields=()` on the `FactDecl`);
+    # every field compiled here comes from the shape, not from a body.
+    assert {f.name for f in page.fields} == {
+        "document_id",
+        "number",
+        "text_source",
+        "words_sha",
+    }
+
+
+def test_a_document_fact_brings_its_shapes_fields() -> None:
+    library = compile_taught(DOCUMENT_SOURCE + "\n")
+    record = library.facts["medical_record"]
+    types = {f.name: f.type for f in record.fields}
+    assert types == {
+        "title": "text",
+        "mime": "text",
+        "sha256": "text",
+        "pages": "number",
+        "uploaded_at": "moment",
+        "source": "text",
+    }
+    assert record.name_field == "title"
+
+
+def test_a_page_fact_brings_its_shapes_fields_and_no_others() -> None:
+    library = compile_taught(DOCUMENT_SOURCE + "\n")
+    page = library.facts["medical_record_page"]
+    types = {f.name: f.type for f in page.fields}
+    assert types == {
+        "document_id": "text",
+        "number": "number",
+        "text_source": "text",
+        "words_sha": "text",
+    }
+
+
+def test_as_must_be_followed_by_document_or_page() -> None:
+    refuses(
+        "# x\nfact medical_record as whatever:\n    source as text\n",
+        '"document" or "page"',
+    )
+
+
+def test_page_without_of_is_refused() -> None:
+    refuses("# x\nfact medical_record_page as page\n", '"of"')
+
+
+def test_page_of_with_no_name_is_refused() -> None:
+    refuses("# x\nfact medical_record_page as page of\n", "the fact kind this is a page of")
+
+
+def test_redeclaring_a_shape_field_is_refused() -> None:
+    """Shape fields merge in *before* `_unique_fields` runs, so a host field
+    that collides with one -- `sha256`, here -- is the ordinary duplicate-
+    field refusal, not a silent shadow."""
+    refuses(
+        "# x\nfact medical_record as document:\n    sha256 as text\n",
+        "declares \"sha256\" twice",
+    )
+
+
+def test_name_resolves_against_a_shape_field() -> None:
+    """`name title` points at the shape's own `title`, not a host field --
+    proof that shape fields are visible to the pointer check."""
+    library = compile_taught(
+        "# x\nfact medical_record as document:\n    name title\n    source as text\n"
+        "# y\nfact medical_record_page as page of medical_record\n"
+    )
+    assert library.facts["medical_record"].name_field == "title"
+
+
+def test_a_document_kind_with_no_page_kind_is_refused() -> None:
+    refuses(
+        "# x\nfact medical_record as document:\n    source as text\n",
+        "no fact is",
+        "medical_record",
+    )
+
+
+def test_a_document_kind_may_not_have_two_page_kinds() -> None:
+    refuses(
+        "# x\nfact medical_record as document:\n    source as text\n"
+        "# y\nfact medical_record_page as page of medical_record\n"
+        "# z\nfact medical_record_page_two as page of medical_record\n",
+        "already has a page kind",
+    )
+
+
+def test_a_page_kind_declared_before_its_document_still_compiles() -> None:
+    """Page facts are checked in a pass of their own, after every non-page
+    fact -- so a page kind may be written above the document it points at
+    without becoming a forward reference the checker cannot resolve."""
+    library = compile_taught(
+        "# y\nfact medical_record_page as page of medical_record\n"
+        "# x\nfact medical_record as document:\n    source as text\n"
+    )
+    assert library.facts["medical_record_page"].page_of == "medical_record"
+
+
+def test_a_page_fact_must_point_at_a_fact_kind() -> None:
+    refuses("# x\nfact medical_record_page as page of nope\n", "not a fact kind")
+
+
+def test_a_page_fact_must_point_at_a_document_kind() -> None:
+    refuses(
+        "# x\nfact plain:\n    ref as text\n"
+        "# y\nfact medical_record_page as page of plain\n",
+        'not declared "as document"',
+    )
+
+
+def test_a_page_version_hashes_the_document_kinds_name_not_its_version() -> None:
+    """D1: the version hashes the host fields, the shape, and the *name* of
+    the owning document kind -- never that kind's own version, so a page
+    fact stays downstream of nothing, like every fact. Changing the
+    document's own fields (which moves its version) must not move the
+    page's."""
+    library = compile_taught(DOCUMENT_SOURCE + "\n")
+    before = library.facts["medical_record_page"].version
+    changed = DOCUMENT_SOURCE.replace(
+        "    source as text\n", "    source as text\n    extra as text\n"
+    )
+    after = compile_taught(changed + "\n").facts["medical_record_page"].version
+    assert before == after
+
+
+def test_the_docs_fixtures_facts_keep_their_versions_through_this_change() -> None:
+    """`shape` and `page_of` are new keys in every fact's version hash
+    (`check.py` `_fact_decl`), and `canonical` drops a `None`-valued key at
+    every depth (`hash.py`) -- which is exactly what must make an ordinary
+    fact's version (`shape=None, page_of=None`) hash identically to before
+    those keys existed. Pinned against the fixture every guide example
+    compiles against, computed against the parent commit, so a regression
+    here is one a reader of the guide would actually hit."""
+    from pathlib import Path
+
+    from uratori import Schema
+
+    fixture = (
+        Path(__file__).resolve().parent.parent / "docs" / "language.fixture.fig"
+    ).read_text()
+    library = compile_source(fixture, Schema(kinds=frozenset()))
+    versions = {name: fact.version for name, fact in library.facts.items()}
+    assert versions == {
+        "team_person": "832eab928212",
+        "data_connection": "24b53a075071",
+        "code_change": "950ecb8e6684",
+        "code_repo": "972f8df61a38",
+        "code_review": "9e21899ec1e1",
+        "code_review_request": "47aab120fc81",
+        "work_issue": "29ad55e0c96a",
+        "work_container": "5e4ae37a4f6a",
+        "shop_courier": "8e3aaf326374",
+        "shop_order": "f1d40753514a",
+        "site": "4e9b0a5c58a9",
+        "job": "d6cd5c1c8fbb",
+        "setting_change": "f6f60e6044a1",
+    }

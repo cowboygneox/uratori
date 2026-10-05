@@ -186,6 +186,14 @@ class FactOut(BaseModel):
     url_field: str | None = None
     fields: list[FactFieldOut] = Field(default_factory=list)
 
+    shape: Literal["document", "page"] | None = None
+    """`as document` / `as page of <kind>` -- which document-shaped kind
+    this is, when it is one. `None` for an ordinary fact."""
+
+    page_of: str | None = None
+    """The document fact kind this is a page of, set only when
+    `shape == "page"`."""
+
 
 class LibraryOut(BaseModel):
     """What compiled: every declaration, described.

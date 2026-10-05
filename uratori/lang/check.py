@@ -151,6 +151,10 @@ class _Checker:
         self.summaries: list[SummarisePlan] = []
         self.bundles: list[BundlePlan] = []
         self._names: dict[str, str] = {}
+        self._page_of: dict[str, str] = {}
+        """document fact kind -> its one page fact kind, filled while facts
+        are checked so a second page kind for the same document is refused
+        the moment it is seen."""
 
     # --------------------------------------------------------------- run --
 
@@ -159,8 +163,23 @@ class _Checker:
         # world every other declaration is checked against, and unlike a
         # figure they can rest on nothing, so there is no cycle to forbid.
         for d in self._decls:
-            if isinstance(d, FactDecl):
+            if isinstance(d, FactDecl) and d.shape != "page":
                 self._fact_decl(d)
+        # Page facts second: `as page of <kind>` must resolve against a
+        # document fact already compiled, and requiring the document first in
+        # the source would be a textual-order rule nothing else in this file
+        # has -- this pass just does not care which order the host wrote them.
+        for d in self._decls:
+            if isinstance(d, FactDecl) and d.shape == "page":
+                self._fact_decl(d)
+        for d in self._decls:
+            if isinstance(d, FactDecl) and d.shape == "document" and d.name not in self._page_of:
+                raise CheckError(
+                    f'fact {d.name} is declared "as document" but no fact is "as page '
+                    f'of {d.name}": every document kind takes exactly one page kind, '
+                    "because pages are where provenance points.",
+                    d.line,
+                )
         self._world()
         self._id_spaces()
         for d in self._decls:
@@ -233,8 +252,43 @@ class _Checker:
 
     def _fact_decl(self, d: FactDecl) -> None:
         self._claim(d.name, "fact", d.line)
-        _unique_fields(d.name, d.fields, d.line)
-        top = {f.name: f for f in d.fields}
+        if d.shape == "page":
+            # The parser never produces a page `FactDecl` without `page_of`
+            # (both branches of `_fact` that return `shape="page"` set it);
+            # the assert is for the type checker, not a case this can hit.
+            assert d.page_of is not None
+            owns: str = d.page_of
+            owner = self.facts.get(owns)
+            if owner is None:
+                raise CheckError(
+                    f'fact {d.name} is "as page of {owns}", which is not a fact '
+                    f'kind. Those are: {", ".join(sorted(self.facts)) or "none"}.',
+                    d.line,
+                )
+            if owner.shape != "document":
+                raise CheckError(
+                    f'fact {d.name} is "as page of {owns}", and {owns} is not '
+                    'declared "as document" -- only a document kind has pages.',
+                    d.line,
+                )
+            held_page = self._page_of.get(owns)
+            if held_page is not None:
+                raise CheckError(
+                    f'fact {owns} already has a page kind, "{held_page}": every '
+                    "document kind takes exactly one, because pages are where "
+                    "provenance points.",
+                    d.line,
+                )
+            self._page_of[owns] = d.name
+
+        # A document or page shape brings fields the language itself knows
+        # (D1 of the documents plan), merged in *before* the uniqueness and
+        # pointer checks below run -- so `name title` resolving against the
+        # shape's own `title`, and a host field redeclaring `sha256` or
+        # `document_id`, are both the ordinary fact checks, for free.
+        fields_in = _SHAPE_FIELDS.get(d.shape, ()) + d.fields
+        _unique_fields(d.name, fields_in, d.line)
+        top = {f.name: f for f in fields_in}
         for pointer, word in ((d.name_field, "name"), (d.url_field, "url")):
             if pointer is None:
                 continue
@@ -256,14 +310,25 @@ class _Checker:
                     "and a record is rendered and linked by text.",
                     d.line,
                 )
-        fields = _compiled_fields(d.fields)
+        fields = _compiled_fields(fields_in)
         self.facts[d.name] = CompiledFact(
             name=d.name,
             fields=fields,
             name_field=d.name_field,
             url_field=d.url_field,
             doc=d.doc,
-            version=version_of({"name": d.name, "fields": _fact_field_hash(fields)}),
+            shape=d.shape,
+            page_of=d.page_of,
+            version=version_of(
+                {
+                    "name": d.name,
+                    "fields": _fact_field_hash(fields),
+                    "shape": d.shape,
+                    # The owning kind's *name*, never its version: a page
+                    # fact stays downstream of nothing, like every fact.
+                    "page_of": d.page_of,
+                }
+            ),
         )
 
     def _world(self) -> None:
@@ -3803,6 +3868,28 @@ def _measure_figure_unit(unit: MeasureUnit | None) -> FigureUnit:
     if unit == "amount":
         return "amount"
     return "count"
+
+
+_SHAPE_FIELDS: dict[str | None, tuple[FactField, ...]] = {
+    None: (),
+    "document": (
+        FactField(name="title", type="text"),
+        FactField(name="mime", type="text"),
+        FactField(name="sha256", type="text"),
+        FactField(name="pages", type="number"),
+        FactField(name="uploaded_at", type="moment"),
+    ),
+    "page": (
+        FactField(name="document_id", type="text"),
+        FactField(name="number", type="number"),
+        FactField(name="text_source", type="text"),
+        FactField(name="words_sha", type="text"),
+    ),
+}
+"""The fields `as document` and `as page of <kind>` bring, merged ahead of
+whatever the host wrote (D1 of the documents plan). Written here, once, so
+the shape's fields and the server's documents routes that fill them (sha256,
+the renderer's word-layer hash, ...) read from the same list."""
 
 
 def _unique_fields(owner: str, fields: tuple[FactField, ...], line: int) -> None:

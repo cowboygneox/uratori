@@ -371,6 +371,43 @@ class _Parser:
                 "make it indistinguishable from a figure name.",
                 line,
             )
+
+        shape: Literal["document", "page"] | None = None
+        page_of: str | None = None
+        if self._at_word("as"):
+            self._next()
+            if self._at_word("page"):
+                # `fact medical_record_page as page of medical_record` -- one
+                # line, no block: a page kind takes only the fields the
+                # language itself knows (`document_id, number, text_source,
+                # words_sha`), so nothing can write a host field on a page.
+                self._next()
+                if not self._at_word("of"):
+                    raise self._error(
+                        f'expected "of" after "page" -- a page fact is `fact {name} as '
+                        f"page of <document kind>`, got {self._describe()}"
+                    )
+                self._next()
+                page_of = self._name("the fact kind this is a page of")
+                self._end_of_line()
+                return FactDecl(
+                    name=name,
+                    doc="",
+                    fields=(),
+                    shape="page",
+                    page_of=page_of,
+                    line=line,
+                )
+            if self._at_word("document"):
+                self._next()
+                shape = "document"
+            else:
+                raise self._error(
+                    f'expected "document" or "page" after "as" -- a fact is `fact '
+                    f"{name}:`, `fact {name} as document:`, or `fact {name} as page of "
+                    f"<kind>`, got {self._describe()}"
+                )
+
         self._punct(":")
         self._end_of_line()
         self._expect("indent", "an indented block after the fact kind")
@@ -396,7 +433,7 @@ class _Parser:
             self._skip_newlines()
         self._expect("dedent", "the end of the fact block")
 
-        if not fields:
+        if not fields and shape is None:
             raise self._error(
                 f"fact {name} has no fields, so it verifies nothing and no definition "
                 "can read it.",
@@ -408,6 +445,8 @@ class _Parser:
             fields=tuple(fields),
             name_field=name_field,
             url_field=url_field,
+            shape=shape,
+            page_of=None,
             line=line,
         )
 

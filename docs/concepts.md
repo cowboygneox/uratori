@@ -50,6 +50,15 @@ the read path, because every convenience a fact source grows is a way a
 calculation could start depending on where the records live -- rule 4 of
 [the four rules](#the-four-rules), at the storage boundary.
 
+**Amendment, for document-shaped kinds** (`fact <kind> as document:` / `fact
+<kind> as page of <kind>`, [the definition language](language.md)): the
+server's own documents routes are a *provider*, exactly like any other
+upload path a host writes, and the facts they produce are ordinary verified
+writes through the same door every other record uses. The engine still
+fetches nothing and writes nothing itself -- what changed is which code
+plays the host's role for this one kind of record, not what the engine is
+permitted to do.
+
 Facts carry their own names. Aki's record has a `name` field, and the schema
 (next section) says so; when the engine writes a computed value it freezes
 the subject's rendered name alongside it, so a courier renamed next week does
