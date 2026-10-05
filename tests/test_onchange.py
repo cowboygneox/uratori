@@ -545,6 +545,71 @@ async def test_the_worksheets_field_pick_step_marks_the_record_it_read() -> None
     )
 
 
+# ------------------------------------------- arithmetic worksheet labels --
+
+# A minimal, standalone schema -- not `D5_WORLD` below, because `.working()`
+# over a figure that reads the same *stored figure* coordinate twice (as
+# `patient.bmi` reads `patient.height:{bucket}` for both height factors) hits
+# a separate, pre-existing bug in `working.py`'s own part-loading unrelated
+# to parentheses: it files that coordinate's parts twice and the reader then
+# finds two stored values where it expects one. Out of scope for this
+# package; reading the *same record's own field* twice, as here, does not
+# go through that path at all.
+LABEL = Schema(kinds=frozenset())
+
+LABEL_SOURCE = '''
+# One reading, scoped to itself so its own fields are readable directly --
+# the same shape D5 uses for the one-record `measurement.bmi`.
+fact measurement:
+    id as text
+    height_cm as number
+    weight_kg as number
+
+group measurement.itself from id
+
+# Nested exactly the way D5's BMI nests height: the shape the worksheet's
+# parenthesisation has to get right, not a flat ratio.
+figure measurement.bmi:
+    display "{measurement} BMI"
+    unit count
+    depends:
+        me = measurement.itself:{measurement}
+    calculate:
+        measurement.weight_kg / ((measurement.height_cm / 100) * (measurement.height_cm / 100))
+'''
+
+
+async def test_a_nested_arithmetic_labels_the_formula_as_computed() -> None:
+    """The worksheet used to drop parentheses entirely (`working.py`), so
+    this printed as `measurement.weight_kg / measurement.height_cm / 100 *
+    measurement.height_cm / 100` -- which reads left to right as a different
+    number than BMI actually computes.
+
+    The right child of the outer `/` is itself a `*` at the same
+    precedence, which is exactly the case parentheses are load-bearing for:
+    dropping them changes the grouping. That `*` node's own left child is
+    at the same precedence as its parent but on the *left*, which needs
+    none -- `h / 100 * (h / 100)` already means `(h / 100) * (h / 100)`."""
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_source(LABEL_SOURCE, LABEL)
+    engine = Uratori(schema=LABEL, library=library, store=store, facts=facts)
+    facts.put(
+        "t1", "measurement", "m1", {"id": "m1", "height_cm": 178.0, "weight_kg": 82.0}
+    )
+    await engine.run("t1", full=True)
+
+    working = await engine.working("t1", "measurement.bmi", "m1")
+    assert working is not None
+    assert working.root.op == "arith"
+    assert working.root.label == (
+        "measurement.weight_kg / "
+        "(measurement.height_cm / 100 * (measurement.height_cm / 100))"
+    ), working.root.label
+
+
 # ------------------------------------------------------ carried forward --
 
 

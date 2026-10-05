@@ -422,6 +422,39 @@ def _spine(expr: SetExpr) -> list[SetExpr]:
     return [expr]
 
 
+_ARITH_PRECEDENCE: dict[str, int] = {"+": 1, "-": 1, "*": 2, "/": 2}
+"""Standard arithmetic precedence, `*`/`/` over `+`/`-`. The parser never
+leaves parentheses in the tree -- source grouping is just nesting shape --
+so printing the formula "as computed" means reconstructing which nesting
+is ambiguous without them, not echoing whatever the author happened to
+type."""
+
+
+def _arith_operand_label(
+    child: CalcExpr, parent_op: str, side: Literal["left", "right"], ctx: _Ctx
+) -> str:
+    """One operand of an `Arith` node, parenthesised exactly when dropping
+    the parens would change what it means.
+
+    A child binding looser than its parent always needs them (`a - (b + c)`
+    would read as `a - b + c` otherwise). A child at the *same* precedence
+    needs them only on the right: `a - b - c` is `(a - b) - c` with no
+    parens required, because that is what left-to-right reading already
+    gives -- but `a - (b - c)` is not `a - b - c`, so the right side of an
+    equal-precedence parent must say so. The left side of an equal
+    precedence parent never needs them, which is why `w / h / 100 * h / 100`
+    was wrong: the real tree has `/` as the *right* child of the outer `/`,
+    the one case parentheses are load-bearing."""
+    label = _calc_label(child, ctx)
+    if not isinstance(child, Arith):
+        return label
+    child_prec = _ARITH_PRECEDENCE[child.op]
+    parent_prec = _ARITH_PRECEDENCE[parent_op]
+    if child_prec < parent_prec or (child_prec == parent_prec and side == "right"):
+        return f"({label})"
+    return label
+
+
 def _calc_label(e: CalcExpr, ctx: _Ctx) -> str:
     if isinstance(e, Count):
         return f"count({e.set})"
@@ -454,7 +487,9 @@ def _calc_label(e: CalcExpr, ctx: _Ctx) -> str:
     if isinstance(e, SubjectField):
         return f"{e.kind}.{e.field}"
     if isinstance(e, Arith):
-        return f"{_calc_label(e.left, ctx)} {e.op} {_calc_label(e.right, ctx)}"
+        left = _arith_operand_label(e.left, e.op, "left", ctx)
+        right = _arith_operand_label(e.right, e.op, "right", ctx)
+        return f"{left} {e.op} {right}"
     if isinstance(e, Pick):
         return f"{e.which}({_calc_label(e.left, ctx)}, {_calc_label(e.right, ctx)})"
     if isinstance(e, DaysBetween):
