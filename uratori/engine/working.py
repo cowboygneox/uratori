@@ -156,17 +156,33 @@ def _file_part(
     """The same filing `Engine._readers` does, narrowed to the rows this
     subject's working actually touches: under the value's own base subject,
     and -- for a coordinate -- under the full key too, so a bare read and a
-    coordinate read both find it."""
+    coordinate read both find it.
+
+    **Idempotent on `(source, stored.subject)`.** `_prefetch_calc` walks the
+    AST and calls here once per *occurrence* of a read, not once per
+    distinct row -- `patient.bmi`'s `(height / 100) * (height / 100)` reads
+    `patient.height:{bucket}` twice, and used to file the one stored row
+    twice. `Engine._readers` never has this problem because it loads a
+    whole figure's `store.values()` once per pass regardless of how many
+    places the calculate reads it; this function is the narrower per-subject
+    twin of that, so it has to refuse the duplicate itself. Filing the same
+    row twice under one key is indistinguishable, downstream, from the
+    store genuinely disagreeing with the plan -- which `evaluate._scalar`
+    exists to catch and abort on -- so an honest repeat read must never
+    reach it as a second entry."""
     if stored is None or stored.value is None:
         return
     if not isinstance(stored.value, (int, float)):
         return
+    entry = (stored.subject, float(stored.value))
     table = parts.setdefault(source, {})
-    table.setdefault(subject_of(stored.subject), []).append(
-        (stored.subject, float(stored.value))
-    )
+    base_rows = table.setdefault(subject_of(stored.subject), [])
+    if entry not in base_rows:
+        base_rows.append(entry)
     if SEPARATOR in stored.subject:
-        table.setdefault(stored.subject, []).append((stored.subject, float(stored.value)))
+        coord_rows = table.setdefault(stored.subject, [])
+        if entry not in coord_rows:
+            coord_rows.append(entry)
 
 
 async def _resolve_prefetch(

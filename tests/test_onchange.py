@@ -962,7 +962,7 @@ filter measurement.heighted where height_cm is set
 # days nobody measured it.
 figure patient.height bucketed:
     display "{patient} height"
-    unit count
+    unit decimal
     depends:
         measured = measurement.by_patient_day:{patient} & measurement.heighted
     calculate:
@@ -971,7 +971,7 @@ figure patient.height bucketed:
 # Weight on each day one was taken.
 figure patient.weight bucketed:
     display "{patient} weight"
-    unit count
+    unit decimal
     depends:
         weighed = measurement.by_patient_day:{patient} & measurement.weighed
     calculate:
@@ -980,13 +980,12 @@ figure patient.weight bucketed:
 # Body-mass index on each day, from that day's weight and the height in force.
 figure patient.bmi bucketed:
     display "{patient} BMI"
-    unit count
+    unit decimal
     calculate:
         patient.weight:{bucket} / ((patient.height:{bucket} / 100) * (patient.height:{bucket} / 100))
 '''
-# `unit count` above, deliberately, not `decimal`: this test is written as
-# part of package 0's carry fix (item a), before item (d) lands `decimal`.
-# Switch it once (d) is in.
+# `unit decimal`, D5's own unit (package 0 item (d) has landed it): the
+# acceptance tests below are the real BMI definitions, not a stand-in.
 
 
 async def test_a_2026_weight_and_a_2019_height_each_cite_their_own_record_in_that_days_bmi() -> None:
@@ -1064,6 +1063,69 @@ async def test_a_2026_weight_and_a_2019_height_each_cite_their_own_record_in_tha
         "the height BMI used does not trace to the carried height's "
         "originating 2019 record"
     )
+
+
+async def test_the_bmi_worksheet_renders_a_coordinate_read_twice() -> None:
+    """D5's own `patient.bmi` reads `patient.height:{bucket}` twice --
+    `((height / 100) * (height / 100))` -- and `.working()` used to raise
+    on it: `evidence()` above works because the engine's real pass-time
+    reader loads a figure's stored parts once per figure, but `working.py`'s
+    own prefetch (`_prefetch_calc`/`_file_part`) walks the AST and refetches
+    once per *occurrence*, filing the same stored row twice into the parts
+    table it hands `evaluate()`. Two identical rows under one key is exactly
+    what `_scalar` in `evaluate.py` exists to catch -- 'a bare read resolved
+    to more than one stored value' -- because that shape is supposed to mean
+    the store disagrees with the plan, not that one figure asked for the
+    same number twice honestly.
+
+    Page whose whole job is "show your work": it must render, not raise,
+    and the two reads of the same coordinate must show the one stored
+    value, identically, not two different numbers or a crash."""
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_source(D5_WORLD, PATIENT)
+    engine = Uratori(schema=PATIENT, library=library, store=store, facts=facts)
+    facts.put("t1", "patient", "p1", {"name": "Pat"})
+    facts.put(
+        "t1",
+        "measurement",
+        "d2019/p0001",
+        {
+            "patient_id": "p1",
+            "page": "d2019/p0001",
+            "measured_at": "2019-04-11T09:00:00Z",
+            "height_cm": 178.0,
+        },
+    )
+    facts.put(
+        "t1",
+        "measurement",
+        "d2026/p0003",
+        {
+            "patient_id": "p1",
+            "page": "d2026/p0003",
+            "measured_at": "2026-06-02T09:00:00Z",
+            "weight_kg": 81.0,
+        },
+    )
+    at_2026 = 1_782_864_000_000.0  # 2026-07-01T00:00Z, well past 2026-06-02
+    await engine.run("t1", full=True, at_ms=at_2026)
+
+    working = await engine.working("t1", "patient.bmi", "p1@2026-06-02")
+    assert working is not None
+    assert working.root.op == "arith"
+
+    square_step = working.root.children[1]  # (height/100) * (height/100)
+    left_height, right_height = square_step.children[0].children[0], square_step.children[1].children[0]
+    assert left_height.op == "coord" and right_height.op == "coord"
+    assert left_height.figure == right_height.figure == "patient.height"
+    assert left_height.figure_subject == right_height.figure_subject == "p1@2026-06-02"
+    assert left_height.display == right_height.display, (
+        "the same stored coordinate rendered two different values on one worksheet"
+    )
+    assert left_height.display is not None
 
 
 async def test_every_trigger_writes_byte_identical_rows() -> None:
