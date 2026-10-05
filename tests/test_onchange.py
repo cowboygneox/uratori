@@ -654,6 +654,176 @@ async def test_a_later_change_rewrites_forward_and_leaves_history_alone() -> Non
     assert after["s1@2026-07"] == 1500.0
 
 
+async def test_an_unrelated_setting_change_does_not_blank_the_carry() -> None:
+    """The bug `probe/carry.py` reproduced against this worktree: anchors
+    were read off the *group's* raw bucket keys (`setting_change.by_month`),
+    which hold a record for every setting, not off the figure's own filtered
+    set (`setting_change.target`). A `staffing` change landing in a month the
+    filter rejects is still a bucket the group has, so it was treated as an
+    anchor whose value is `evaluate()`'s correct answer for that month: no
+    record the filter accepts, so absent. The carry then served that absence
+    forward and the February target disappeared from June on.
+
+    February's target, set once, must stay in force through a later
+    `staffing` write that the figure's filter does not mention."""
+    engine, store, library, facts = await _carried(changes=[CHANGES[0]])
+    facts.put(
+        "t1",
+        "setting_change",
+        "c9",
+        {
+            "site_id": "s1",
+            "setting": "staffing",
+            "value": 4.0,
+            "set_at": "2026-06-10T09:00:00Z",
+            "set_by": "Cyd",
+        },
+    )
+    await engine.run("t1", written={"setting_change": ["c9"]}, at_ms=AT)
+    stored = await _stored(engine, store, library)
+    for label in ("s1@2026-02", "s1@2026-03", "s1@2026-06", "s1@2026-08"):
+        assert stored.get(label) == 1800.0, (
+            f"{label} reads {stored.get(label)!r} -- a staffing change the figure's "
+            "filter rejects blanked the February target"
+        )
+
+
+# --------------------------------------- D5's BMI shape, the acceptance test --
+
+# `documents-plan-v2.md` D5: a height is rarely re-measured, so the figure
+# that carries it forward is the shape the carry fix exists for. A separate
+# schema from `ONCHANGE` above -- this is a patient and a measurement, not a
+# site and a setting -- kept here because it exercises exactly the engine
+# behaviour this file is about: a sparse fact, a dense bucketed figure, and
+# (for `patient.bmi`) arithmetic over two such figures combined.
+PATIENT = Schema(kinds=frozenset())
+
+D5_WORLD = '''
+# A patient.
+fact patient:
+    name name
+    name as text
+
+# One set of vitals read off one page.
+fact measurement:
+    patient_id as text
+    page as text
+    measured_at as moment
+    height_cm as number
+    weight_kg as number
+
+group measurement.by_patient_day from (patient_id, measured_at by day in "UTC")
+filter measurement.weighed where weight_kg is set
+filter measurement.heighted where height_cm is set
+
+# The height in force each day: the latest one measured, carried across the
+# days nobody measured it.
+figure patient.height bucketed:
+    display "{patient} height"
+    unit count
+    depends:
+        measured = measurement.by_patient_day:{patient} & measurement.heighted
+    calculate:
+        latest(measurement.height_cm over measured) carried forward
+
+# Weight on each day one was taken.
+figure patient.weight bucketed:
+    display "{patient} weight"
+    unit count
+    depends:
+        weighed = measurement.by_patient_day:{patient} & measurement.weighed
+    calculate:
+        latest(measurement.weight_kg over weighed)
+
+# Body-mass index on each day, from that day's weight and the height in force.
+figure patient.bmi bucketed:
+    display "{patient} BMI"
+    unit count
+    calculate:
+        patient.weight:{bucket} / ((patient.height:{bucket} / 100) * (patient.height:{bucket} / 100))
+'''
+# `unit count` above, deliberately, not `decimal`: this test is written as
+# part of package 0's carry fix (item a), before item (d) lands `decimal`.
+# Switch it once (d) is in.
+
+
+async def test_a_2026_weight_and_a_2019_height_each_cite_their_own_record_in_that_days_bmi() -> None:
+    """D5's acceptance criterion for the carry fix, literally: a height
+    measured once in 2019 and a weight measured seven years later must both
+    still answer a BMI computed for the weight's day, and a reader tracing
+    that BMI must reach both source records -- the weight taken that day
+    and the measurement the carried height actually came from -- not just
+    whichever operand the arithmetic happened to read last.
+
+    Before the carry fix this is None: the 2026 weight lands in the same
+    `measurement.by_patient_day` bucket the height filter rejects (it has no
+    `height_cm`), so that bucket became a second, absent "anchor" for
+    `patient.height` -- and everything from 2026-06-02 on, including
+    2026-06-02 itself, carried that absence forward instead of the 2019
+    height still in force.
+    """
+    from uratori import MemoryEngineStore, MemoryFactStore, Uratori
+
+    facts = MemoryFactStore()
+    store = MemoryEngineStore()
+    library = compile_source(D5_WORLD, PATIENT)
+    engine = Uratori(schema=PATIENT, library=library, store=store, facts=facts)
+    facts.put("t1", "patient", "p1", {"name": "Pat"})
+    facts.put(
+        "t1",
+        "measurement",
+        "d2019/p0001",
+        {
+            "patient_id": "p1",
+            "page": "d2019/p0001",
+            "measured_at": "2019-04-11T09:00:00Z",
+            "height_cm": 178.0,
+        },
+    )
+    facts.put(
+        "t1",
+        "measurement",
+        "d2026/p0003",
+        {
+            "patient_id": "p1",
+            "page": "d2026/p0003",
+            "measured_at": "2026-06-02T09:00:00Z",
+            "weight_kg": 81.0,
+        },
+    )
+    at_2026 = 1_782_864_000_000.0  # 2026-07-01T00:00Z, well past 2026-06-02
+    await engine.run("t1", full=True, at_ms=at_2026)
+
+    subject = "p1@2026-06-02"
+    bmi = await engine.answer("t1", "patient.bmi")
+    values = {s.id: s.value for s in bmi.subjects}
+    expected = 81.0 / ((178.0 / 100) * (178.0 / 100))
+    assert values.get(subject) == pytest.approx(expected), (
+        f"patient.bmi at {subject} is {values.get(subject)!r}, not the 2019 "
+        "height applied to the 2026 weight -- the carried height went absent"
+    )
+
+    bmi_evidence = await engine.evidence("t1", "patient.bmi", subject)
+    assert bmi_evidence is not None
+    parts = {m.figure for m in bmi_evidence.members}
+    assert parts == {"patient.weight", "patient.height"}, (
+        f"patient.bmi's evidence names {parts}, not both operand figures"
+    )
+
+    weight_evidence = await engine.evidence("t1", "patient.weight", subject)
+    assert weight_evidence is not None
+    assert [m.key for m in weight_evidence.members] == ["d2026/p0003"], (
+        "the weight BMI used does not trace to the record weighed that day"
+    )
+
+    height_evidence = await engine.evidence("t1", "patient.height", subject)
+    assert height_evidence is not None
+    assert [m.key for m in height_evidence.members] == ["d2019/p0001"], (
+        "the height BMI used does not trace to the carried height's "
+        "originating 2019 record"
+    )
+
+
 async def test_every_trigger_writes_byte_identical_rows() -> None:
     """The rule that makes three triggers legal at all.
 

@@ -352,10 +352,33 @@ async def materialise(
                 # do not know would fabricate the very number this figure is
                 # supposed to be evidence for.
                 continue
+            if not row.members:
+                # `anchor_labels` came from the *group's* bucket keys, which
+                # answer "did anything of this kind land here" -- not "did
+                # the figure's own filtered set". A record the filter rejects
+                # (a `staffing` change where this figure wants `target`) puts
+                # its bucket in the group's index all the same, and the
+                # ordinary recompute above correctly found nothing there to
+                # pick, leaving `row.members` empty. That bucket is not a
+                # change to *this* figure's value -- it is `evaluate()`'s
+                # honest absence for a month nobody touched the setting we
+                # mean -- so it must not stand as an anchor. Treating it as
+                # one made a later unrelated write blank every bucket from
+                # there on, serving absence forward instead of the value
+                # still in force.
+                continue
             anchors.append(Anchor(label=label, value=row.value, members=row.members))
             anchor_rows[label] = row
         if not anchors:
             continue
+
+        # The labels the *ordinary* recompute actually owns -- a strict
+        # subset of `anchor_labels`, now that a bucket the filter rejected
+        # has been excluded above. Carry must not touch these (below); it
+        # must touch every other label the group's raw keys suggested,
+        # which is exactly the bucket the filter rejected and recompute left
+        # an honest absence in.
+        real_anchor_labels = {anchor.label for anchor in anchors}
 
         # This subject's own calendar. A carried sequence is a run of
         # consecutive buckets, and which buckets are consecutive is a question
@@ -412,10 +435,14 @@ async def materialise(
             moved.append((subject, row.value, None))
 
         for row in wanted:
-            if row.label in anchor_labels:
+            if row.label in real_anchor_labels:
                 # The ordinary recompute owns a bucket somebody changed
-                # something in. Writing it again here would be a second
-                # author for one row, and the two could drift.
+                # something *the filter accepts* in. Writing it again here
+                # would be a second author for one row, and the two could
+                # drift. `anchor_labels` would be wrong here: it also names
+                # buckets the group has a record in but the filter rejects,
+                # and skipping those left the carry unable to overwrite the
+                # absence recompute honestly left there.
                 continue
             subject = compose([base, row.label])
             before = held.get(subject)
