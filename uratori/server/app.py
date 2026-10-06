@@ -957,10 +957,21 @@ def create_app(
                 await facts.delete(tenant, kind, [document_id])
                 await PostgresWordStore(connection).delete(tenant, page_kind, page_keys)
                 await db.delete_documents(connection, tenant, kind, [document_id])
+                # Checked AFTER this row is gone, in the same transaction:
+                # blobs are keyed `(tenant, sha256)` alone, no kind, so two
+                # document kinds holding identical bytes (same sha256,
+                # therefore the same content-derived document_id) share one
+                # blob. Unlinking it here unconditionally would destroy an
+                # unrelated, still-live document under another kind the
+                # moment the two happened to collide on content.
+                still_referenced = await db.document_sha_referenced(connection, tenant, sha)
 
             # Rows before the file (D1): a reader racing this delete sees
             # the fact gone before the bytes are, never the other way.
-            await blob_store.delete(tenant, sha)
+            # Only when no other document row of this tenant -- any kind --
+            # still names these bytes.
+            if not still_referenced:
+                await blob_store.delete(tenant, sha)
 
             # A warm pass with the deleted keys, named here as the intent --
             # `engine.py`'s `_remove_departed` already handles a deletion

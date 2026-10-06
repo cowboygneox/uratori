@@ -841,3 +841,28 @@ async def delete_documents(
         kind,
         list(document_ids),
     )
+
+
+async def document_sha_referenced(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    sha256: str,
+) -> bool:
+    """Whether any `document` row of this tenant -- **any kind** -- still
+    names this sha256.
+
+    Content-addressed blobs are keyed `(tenant, sha256)` alone, with no
+    kind in the key (`uratori/server/blobs.py`): two document kinds that
+    happen to hold the same bytes share one blob. A delete must call this
+    *after* removing its own row (same transaction, so the row it just
+    deleted does not count itself) and only unlink the blob when it comes
+    back false -- otherwise deleting `medical_record`'s copy orphans
+    `insurance_form`'s, which still cites the same bytes.
+    """
+    return bool(
+        await conn.fetchval(
+            "select exists(select 1 from document where tenant_id = $1 and sha256 = $2)",
+            tenant,
+            sha256,
+        )
+    )

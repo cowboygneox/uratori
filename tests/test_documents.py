@@ -34,6 +34,15 @@ fact medical_record as document:
 
 # One page of one.
 fact medical_record_page as page of medical_record
+
+# A second, independent document kind -- for the cross-kind blob-sharing
+# tests: two kinds, same bytes, same content-derived document_id, one
+# shared blob (BlobStore is keyed (tenant, sha256) alone, no kind).
+fact insurance_form as document:
+    name title
+
+# One page of one.
+fact insurance_form_page as page of insurance_form
 """
 
 
@@ -266,6 +275,44 @@ async def test_delete_removes_facts_words_and_the_blob(docs: DocServer) -> None:
 
     listing = await docs.http.get("/tenants/t1/documents/medical_record")
     assert listing.json()["total"] == 0
+
+
+async def test_deleting_one_kinds_document_does_not_orphan_another_kinds_copy(
+    docs: DocServer,
+) -> None:
+    """Content-addressed blobs are keyed `(tenant, sha256)` alone, with no
+    kind in the key -- so the *same bytes* uploaded under two document
+    kinds in one tenant share one blob, and `document_id` (sha256[:16])
+    collides between them too. Deleting `medical_record`'s copy must not
+    unlink `insurance_form`'s: that kind's document was never touched by
+    the delete call, and its page must keep rendering."""
+    pdf = sample_bundle_pdf()
+    medical = await _upload(docs.http, pdf, filename="chart.pdf")
+    assert medical.status_code == 200, medical.text
+    document_id = medical.json()["id"]
+
+    insurance = await docs.http.post(
+        "/tenants/t1/documents/insurance_form",
+        files={"file": ("claim.pdf", pdf, "application/pdf")},
+    )
+    assert insurance.status_code == 200, insurance.text
+    # Content-derived: identical bytes, identical id, regardless of kind.
+    assert insurance.json()["id"] == document_id
+
+    deleted = await docs.http.delete(f"/tenants/t1/documents/medical_record/{document_id}")
+    assert deleted.status_code == 200, deleted.text
+
+    # The untouched kind's document must still be there, bytes included.
+    still_there = await docs.http.get(f"/tenants/t1/documents/insurance_form/{document_id}")
+    assert still_there.status_code == 200, still_there.text
+    assert still_there.json()["held"] is True
+    assert still_there.json()["reason"] is None
+
+    png = await docs.http.get(
+        f"/tenants/t1/documents/insurance_form/{document_id}/pages/1.png"
+    )
+    assert png.status_code == 200, png.text
+    assert png.content[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 async def test_remove_tenant_cascades_documents_and_blobs(docs: DocServer) -> None:
