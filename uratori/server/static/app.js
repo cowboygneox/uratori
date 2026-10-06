@@ -180,7 +180,7 @@ async function render() {
   const draw = (nodes) => view.replaceChildren(...nodes.flat(Infinity).filter((n) => n != null));
   if (route === 'facts') draw(await factsView(segments, params));
   else if (route === 'documents') draw(await documentsListView(segments[0]));
-  else if (route === 'document') draw(await documentViewerView(segments[0], segments[1], segments[2]));
+  else if (route === 'document') draw(await documentViewerView(segments[0], segments[1], segments[2], params));
   else if (route === 'activity') draw(await activityView(params));
   else if (route === 'edit') draw(await editorView(params));
   else if (route === 'work') draw(await workView(segments[0], segments[1]));
@@ -1151,7 +1151,7 @@ const OPEN_RECORD_OPS = new Set(['sum-measure', 'list', 'extreme', 'stat', 'fiel
 function workRecords(step) {
   if (!step.records || !step.records.length) return null;
   const capLine = step.records_more
-    ? el('tr', {}, el('td', { colspan: '3', class: 'faint' },
+    ? el('tr', {}, el('td', { colspan: '4', class: 'faint' },
         `showing ${step.records.length} of ${step.records_total}.`,
         step.note ? ` ${step.note}` : ''))
     : null;
@@ -1205,7 +1205,78 @@ function workRecordRow(record, kind) {
         : null,
       record.held ? null : el('span', { class: 'faint' }, ' (no longer held)')),
     el('td', { class: 'mono num' }, record.display ?? '—'),
-    el('td', { class: 'faint' }, record.note || ''));
+    el('td', { class: 'faint' }, record.note || ''),
+    // Where THIS field's own value came from (documents-plan-v3, D2/D3) --
+    // the box a reader checks a leaf step's number against. Empty for a
+    // record no citation ever named, which is every record on a server
+    // with no documents feature.
+    el('td', { class: 'work-sources' }, sourceBadges(record.sources)));
+}
+
+// ---------------------------------------------------------- provenance --
+//
+// A field's value traced to the page it was read from (documents-plan-v3,
+// D2/D3): `EvidenceMember.sources` / `RecordLineOut.sources` /
+// `RecordOut.provenance` are all the same `Source` shape, server-decorated
+// -- this is the one place that renders it, called from the record page's
+// "where it came from" block and the worksheet's record ledger alike.
+
+function viewerLinkFromSource(source) {
+  // `page_url` is already `<documents-root>/<kind>/<id>/pages/<n>.png`,
+  // percent-encoded by the server -- parsed back apart rather than carried
+  // separately, so there is one place that knows the shape of that URL.
+  if (!source.page_url) return null;
+  const match = /\/documents\/([^/]+)\/([^/]+)\/pages\/(\d+)\.png/.exec(source.page_url);
+  if (!match) return null;
+  const [, kind, id, page] = match;
+  const boxes = (source.boxes || []).map((b) => [b.x0, b.y0, b.x1, b.y1]);
+  return `#/document/${kind}/${id}/${page}?boxes=${encodeURIComponent(JSON.stringify(boxes))}`;
+}
+
+// A small crop of the page image, clipped client-side to the union of a
+// source's boxes (D3: "the worksheet's crop is the page image clipped to
+// the union of the boxes client-side"). Canvas, not CSS, because the crop
+// geometry depends on the image's own natural size, known only once it has
+// loaded.
+function cropThumbnail(pageUrl, boxes, width) {
+  if (!pageUrl || !boxes || !boxes.length) return null;
+  const x0 = Math.min(...boxes.map((b) => b.x0));
+  const y0 = Math.min(...boxes.map((b) => b.y0));
+  const x1 = Math.max(...boxes.map((b) => b.x1));
+  const y1 = Math.max(...boxes.map((b) => b.y1));
+  const canvas = el('canvas', { class: 'work-crop', width: String(width), height: String(width) });
+  const img = new Image();
+  img.addEventListener('load', () => {
+    const sw = Math.max(1, (x1 - x0) * img.naturalWidth);
+    const sh = Math.max(1, (y1 - y0) * img.naturalHeight);
+    const height = Math.max(1, Math.round(width * (sh / sw)));
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext('2d').drawImage(
+      img, x0 * img.naturalWidth, y0 * img.naturalHeight, sw, sh, 0, 0, width, height);
+  });
+  img.src = pageUrl;
+  return canvas;
+}
+
+function sourceBadges(sources) {
+  if (!sources || !sources.length) return null;
+  return sources.map((src) => {
+    const link = viewerLinkFromSource(src);
+    const label = src.page_label || src.page_key;
+    const head = [];
+    if (src.document_title) head.push(el('span', { class: 'faint' }, src.document_title, ' · '));
+    head.push(
+      link
+        ? el('a', { class: 'trace', href: link }, `${label} →`)
+        : el('span', { class: 'faint' }, src.note || 'page not held'));
+    if (src.printed) head.push(' ', el('span', { class: 'mono faint' }, `“${src.printed}”`));
+    if (!src.anchored) head.push(' ', el('span', { class: 'badge' }, 'unanchored'));
+    if (src.agrees === false) head.push(' ', el('span', { class: 'badge problem' }, 'disagrees'));
+    if (src.note && src.agrees !== false && link) head.push(' ', el('span', { class: 'faint' }, src.note));
+    const crop = link && src.boxes && src.boxes.length ? cropThumbnail(src.page_url, src.boxes, 96) : null;
+    return el('div', { class: 'source-badge' }, el('div', {}, head), crop);
+  });
 }
 
 // The page for one value's worksheet: `#/work/<figure>/<subject>`.
@@ -1495,6 +1566,18 @@ async function recordView(kind, key) {
         }, entry.measure)),
         el('td', { class: 'mono num' },
           entry.display ?? el('span', { class: 'faint' }, '— no measurement'))))));
+  }
+
+  // Where it came from (documents-plan-v3, D2/D3): every field a write's
+  // `provenance` map ever cited, each a link to the page and the words it
+  // was read off. Nothing to say when the list is empty — most records on
+  // a server with no documents feature — so the section states that
+  // plainly rather than vanishing, the same rule every section here keeps.
+  if (record.provenance && record.provenance.length) {
+    parts.push(el('h2', {}, 'Where it came from'));
+    parts.push(el('div', { class: 'provenance-block' },
+      record.provenance.map((src) => el('div', { class: 'provenance-row' },
+        el('span', { class: 'badge mono' }, src.field), ' ', sourceBadges([src])))));
   }
 
   // The upward half: what the library made of this record. Three verdicts,
@@ -1863,7 +1946,7 @@ async function documentsListView(kind) {
   ];
 }
 
-async function documentViewerView(kind, id, pageArg) {
+async function documentViewerView(kind, id, pageArg, params) {
   if (!kind || !id) return [el('h1', {}, 'Document'), el('p', { class: 'faint' }, 'No document given.')];
   const detailAnswer = await get(
     `tenants/${encodeURIComponent(tenant())}/documents/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`);
@@ -1910,6 +1993,27 @@ async function documentViewerView(kind, id, pageArg) {
     alt: `page ${page}`,
   });
 
+  // `?boxes=` (D3): every box of one `Source` a record page, a worksheet
+  // line or the evidence API linked here with -- percentage-positioned
+  // over the image, which needs no pixel geometry at all: a box is already
+  // page-normalised [0,1], and a percentage is relative to the same
+  // `position: relative` frame at any render scale.
+  let highlightBoxes = [];
+  const boxesParam = params && params.get('boxes');
+  if (boxesParam) {
+    try {
+      highlightBoxes = JSON.parse(boxesParam);
+    } catch {
+      highlightBoxes = [];
+    }
+  }
+  const overlay = el('div', { class: 'page-frame' }, img,
+    highlightBoxes.map(([x0, y0, x1, y1]) => el('div', {
+      class: 'page-highlight',
+      style: `left:${x0 * 100}%;top:${y0 * 100}%;`
+        + `width:${(x1 - x0) * 100}%;height:${(y1 - y0) * 100}%;`,
+    })));
+
   const results = el('div', { class: 'word-results' });
   const search = el('input', { type: 'search', placeholder: 'search this page’s words…' });
   let words = [];
@@ -1930,9 +2034,9 @@ async function documentViewerView(kind, id, pageArg) {
         el('td', { class: 'mono faint' }, String(w.line)),
         el('td', {}, el('span', { class: `badge ${w.source}` }, w.source)),
         // The box itself -- x0/y0/x1/y1, page-normalised [0,1] in the
-        // rendered frame -- is not drawn yet (no highlights this MR), but
-        // it is what a reviewer would check the word against, so it is
-        // printed rather than hidden.
+        // rendered frame -- is what a reviewer checks a cited word
+        // against; printed here too, beside the `?boxes=` overlay a
+        // provenance link draws over the image itself.
         el('td', { class: 'mono faint' },
           `${w.x0.toFixed(3)},${w.y0.toFixed(3)} – ${w.x1.toFixed(3)},${w.y1.toFixed(3)}`)))));
   };
@@ -1943,7 +2047,7 @@ async function documentViewerView(kind, id, pageArg) {
   words = wordsAnswer.ok ? wordsAnswer.body.words : [];
   fillWords('');
 
-  parts.push(el('div', { class: 'document-viewer' }, img, el('div', { class: 'word-panel' }, search, results)));
+  parts.push(el('div', { class: 'document-viewer' }, overlay, el('div', { class: 'word-panel' }, search, results)));
   return parts;
 }
 

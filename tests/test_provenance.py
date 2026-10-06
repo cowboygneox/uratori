@@ -34,15 +34,36 @@ fact medical_record as document:
 # One page of one.
 fact medical_record_page as page of medical_record
 
+# A patient, so `figure patient.weight` below has a fact kind to scope
+# against -- the figure itself never writes or reads one of these; it only
+# needs the kind to exist.
+fact patient:
+    name name
+    name as text
+
 # An ordinary host-written fact -- not a D4 extract (package 3), just a
 # record whose fields a write's `provenance` map can cite.
 fact measurement:
     patient_id as text
     page as text
+    measured_at as moment
     weight_kg as number
     one visit:
         many events:
             kind as text
+
+group measurement.by_patient_day from (patient_id, measured_at by day in "UTC")
+
+# D5's shape, narrowed to one figure: the read path (2b) decorates this
+# figure's evidence and worksheet with the `weight_kg` provenance a write
+# cited, via `FieldPick` -- `evidence_field`'s whole reason to exist.
+figure patient.weight bucketed:
+    display "{patient} weight"
+    unit decimal
+    depends:
+        weighed = measurement.by_patient_day:{patient}
+    calculate:
+        latest(measurement.weight_kg over weighed)
 """
 
 
@@ -386,6 +407,106 @@ async def test_provenance_deleted_with_the_record(srv: ProvServer) -> None:
     )
     assert deleted.status_code == 200, deleted.text
     assert await _provenance_rows(srv.pool, "measurement", "m1") == []
+
+
+async def _write_weighed_measurement(http: httpx.AsyncClient, page_key: str, word_ids: list[int]) -> None:
+    resp = await http.post(
+        "/tenants/t1/facts",
+        json={
+            "writes": {
+                "measurement": {
+                    "m1": {
+                        "patient_id": "p1",
+                        "measured_at": "2026-01-01T00:00:00Z",
+                        "weight_kg": 82,
+                    }
+                }
+            },
+            "provenance": {
+                "measurement": {"m1": {"weight_kg": {"page": page_key, "words": word_ids}}}
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+
+async def test_the_evidence_route_attaches_sources_to_the_field_it_read(
+    srv: ProvServer,
+) -> None:
+    http = srv.http
+    _document_id, page_key, words = await _upload_page_one(http)
+    weight_ids = _word_ids(words, "82")
+    await _write_weighed_measurement(http, page_key, weight_ids)
+
+    evidence = await http.get(
+        "/tenants/t1/evidence/patient.weight", params={"subject": "p1@2026-01-01"}
+    )
+    assert evidence.status_code == 200, evidence.text
+    body = evidence.json()
+    assert body["kind"] == "measurement"
+    members = {m["key"]: m for m in body["members"]}
+    assert "m1" in members
+    sources = members["m1"]["sources"]
+    assert sources and sources[0]["field"] == "weight_kg"
+    assert sources[0]["page_key"] == page_key
+    assert sources[0]["printed"] == "82"
+    assert sources[0]["agrees"] is True
+    assert sources[0]["page_url"] is not None
+
+
+async def test_the_working_route_attaches_sources_to_the_winning_line(
+    srv: ProvServer,
+) -> None:
+    http = srv.http
+    _document_id, page_key, words = await _upload_page_one(http)
+    weight_ids = _word_ids(words, "82")
+    await _write_weighed_measurement(http, page_key, weight_ids)
+
+    working = await http.get(
+        "/ui/api/tenants/t1/working/patient.weight", params={"subject": "p1@2026-01-01"}
+    )
+    assert working.status_code == 200, working.text
+    root = working.json()["root"]
+    assert root["op"] == "field-pick"
+    assert root["field"] == "weight_kg"
+    winner = next(r for r in root["records"] if r["role"] == "winner")
+    assert winner["key"] == "m1"
+    assert winner["sources"] and winner["sources"][0]["page_key"] == page_key
+
+
+async def test_the_record_page_lists_where_it_came_from(srv: ProvServer) -> None:
+    http = srv.http
+    _document_id, page_key, words = await _upload_page_one(http)
+    weight_ids = _word_ids(words, "82")
+    await _write_weighed_measurement(http, page_key, weight_ids)
+
+    record = await http.get("/ui/api/tenants/t1/facts/measurement/m1")
+    assert record.status_code == 200, record.text
+    provenance = record.json()["provenance"]
+    assert [p["field"] for p in provenance] == ["weight_kg"]
+    assert provenance[0]["page_url"] is not None
+
+
+async def test_a_disagreeing_value_renders_a_note(srv: ProvServer) -> None:
+    http = srv.http
+    _document_id, page_key, words = await _upload_page_one(http)
+    weight_ids = _word_ids(words, "82")
+    await _write_weighed_measurement(http, page_key, weight_ids)
+
+    # Re-attest the same field with a different value, same citation --
+    # the row now disagrees with the record it describes.
+    resp = await http.post(
+        "/tenants/t1/facts",
+        json={
+            "writes": {"measurement": {"m1": {"patient_id": "p1", "weight_kg": 90}}},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+    record = await http.get("/ui/api/tenants/t1/facts/measurement/m1")
+    source = record.json()["provenance"][0]
+    assert source["agrees"] is False
+    assert source["note"]
 
 
 async def test_provenance_removed_with_the_tenant(srv: ProvServer) -> None:

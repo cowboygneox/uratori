@@ -65,6 +65,19 @@ provider. The facts route refuses a direct write or delete against a
 document or page kind, naming the documents routes instead: a document's
 bytes, its page images, and its facts move together, or not at all.
 
+## Provenance
+
+A page record is what the facts route's `provenance` map cites: a write of
+any *other* fact kind can name `{"page": "<page key>", "words": [id, …]}`
+beside one of its fields, and the server derives the box and the printed
+text from that page's own word layer. The citation lives beside the fact,
+never inside it -- the same rule that keeps a page's own text out of its
+body -- and it is replaced wholesale alongside the write it attests, never
+patched. See [the HTTP API](http-api.md#provenance-in-the-writes) for the
+request shape and the rules it is checked against, and
+[`Source`/`Box`](http-api.md#source-and-box) for what comes back on
+`GET /evidence` and the built-in UI.
+
 ## Versions
 
 A document kind's version hashes its host fields and the shape, exactly as

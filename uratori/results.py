@@ -355,6 +355,50 @@ class Subject(BaseModel):
     are in it."""
 
 
+class Box(BaseModel):
+    """One rectangle, page-normalised `[0,1]` in the *rendered* frame: CropBox
+    and `/Rotate` applied, origin top-left, y down (`docs/http-api.md`'s
+    coordinate contract) -- correct at any render scale, on this page image
+    or a later one. The same shape `WordOut` reports a word's own box in."""
+
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+
+class Source(BaseModel):
+    """One field's provenance, read for a reader to check by eye.
+
+    `boxes` is a list -- at least one when `anchored`, several when the cited
+    words wrap a line or a value is assembled from two places ("5 ft" and
+    "10 in"). The client draws every box in it; the worksheet's crop is the
+    page image clipped to their union, client-side. `anchored: false` means
+    `boxes` came from the write's own fallback, not matched to page text --
+    "region asserted by the extractor, not matched to page text" -- and
+    `printed` is then `None`: there are no cited words to read it off.
+
+    `agrees` compares the row's attested value against the record's value
+    *now*; `note` carries the sentence when they differ ("page 7 said 82 kg;
+    the record now says 85") or when the page behind the citation is no
+    longer held. `held: false` on the *page* -- a deleted or never-collected
+    page -- answers a `Source` with no `boxes` and a `note` saying so, never
+    a 404: the citation is listed because the field still names one, exactly
+    as `EvidenceMember.held` lists a deleted record rather than omitting it.
+    """
+
+    field: str
+    page_key: str
+    page_label: str | None = None
+    document_title: str | None = None
+    page_url: str | None = None
+    printed: str | None = None
+    boxes: list[Box] = Field(default_factory=list)
+    anchored: bool = True
+    agrees: bool | None = None
+    note: str | None = None
+
+
 class EvidenceMember(BaseModel):
     """One thing a stored value cites: a record, or (for a rollup) a part.
 
@@ -378,6 +422,16 @@ class EvidenceMember(BaseModel):
     `figure` is set on a part: the source figure whose stored row this is. Two
     operands of one calculation are two different claims, and an unlabelled
     number under a total is not evidence of anything.
+
+    `sources` is where this member's field came from, when there is a field
+    to trace (documents-plan-v3, D2/D3): one entry per field the figure
+    actually read off this record (a leaf figure reads one; a count reads
+    none, and this stays `None` for every one of its members -- a region
+    beside a number nothing computed would be a citation of nothing).
+    Server-decorated, by the same rule as every provenance surface: the
+    engine never sees this, `serve_evidence` stores and joins records
+    exactly as it always has, and a host with no documents feature gets
+    `None` here for ever.
     """
 
     key: str
@@ -393,6 +447,10 @@ class EvidenceMember(BaseModel):
     season cells all read "Seattle Seahawks" with nothing telling them apart.
     A record's key is never split -- a raw fact key may contain the separator
     without it meaning anything."""
+
+    sources: list[Source] | None = None
+    """See the class docstring. `None` for a member no field was read
+    through (a count) or that no documents feature decorated."""
 
 
 class Evidence(BaseModel):

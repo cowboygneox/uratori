@@ -53,11 +53,14 @@ product's end users; a host builds its own screens against the
 - **The document viewer.** `#/documents/<kind>` lists one document kind's
   uploads; `#/document/<kind>/<id>/<page>` reads one page -- the rendered
   image beside its word layer, with a substring search over the words
-  already fetched for that page (no highlights yet: drawing a box on the
-  image from a citation is D2/D3, once a stored value actually names which
-  words it came from). Gated by `URATORI_UI_DOCUMENTS` (see the posture
-  below) -- unlike every other UI screen, this one serves bytes an `<img
-  src>` cannot carry a bearer token alongside, so it needs its own grant.
+  already fetched for that page. A link from a record's page, a worksheet
+  line or the evidence panel carries `?boxes=` -- every box of one
+  `Source` (documents-plan-v3, D2/D3), page-normalised `[0,1]` -- drawn as
+  highlights over the image at any render scale, percentage-positioned so
+  no pixel geometry is needed at all. Gated by `URATORI_UI_DOCUMENTS` (see
+  the posture below) -- unlike every other UI screen, this one serves
+  bytes an `<img src>` cannot carry a bearer token alongside, so it needs
+  its own grant.
 - **A record's page walks both directions.** Downward: the stored document,
   where every grouping filed it, what every measure reads off it. Upward,
   which is where a verification usually starts: every figure scoped to the
@@ -79,6 +82,11 @@ product's end users; a host builds its own screens against the
   row -- the figure's own order for computed rows, subject order for
   citations, keyset-paged so a boundary neither drops nor doubles a row; an
   unavailable figure answers with its state rather than an empty table.
+  A **"Where it came from"** section (documents-plan-v3, D2/D3) lists every
+  field a write's `provenance` map ever cited: the page it was read from,
+  the words' own printed text, and a link to the viewer with that citation's
+  boxes highlighted. Absent when nothing was ever cited, which is most
+  records on a server with no documents feature.
 - **A value's worksheet.** `#/work/<figure>/<subject>` shows one stored
   value's own page -- a school-child's "show your work" rather than a flat
   roster of records. The title block prints the sentence, the stored value
@@ -95,9 +103,16 @@ product's end users; a host builds its own screens against the
   page. Every value on the page that cites another figure -- a "computed for
   this record" row, a "counted into" row, an arithmetic operand -- links
   here instead of to the figure's general definition page, because the
-  reader followed one number, not the figure's whole population. Nothing on
-  this page is computed by the browser: the tree, the notes and every
-  display are rendered by the one evaluator the engine itself runs.
+  reader followed one number, not the figure's whole population. A leaf
+  step that read a field directly (`field-pick`, `field-total`,
+  `subject-field`) shows, beside each record it actually read, where that
+  field's own value came from: a link to the page, the printed words, and a
+  small crop of the page image clipped client-side to the union of the
+  cited boxes (documents-plan-v3, D3) -- the box a reader checks the number
+  against without leaving the worksheet. Nothing on this page is computed
+  by the browser: the tree, the notes and every display are rendered by the
+  one evaluator the engine itself runs; the crop is a clip of an image the
+  server already rendered, not a calculation.
 - **Activity.** One entry per engine pass, newest first, cause before
   effect: what arrived (written/deleted counts, the kinds covered, whether it
   was a full rebuild) and then the movements it caused, each one
@@ -204,6 +219,15 @@ setup.md's table has it beside `URATORI_BLOB_DIR`. Where the document
 viewer is wanted beside a token, grant it explicitly and treat it the way
 you would treat the editor: for a deployment whose UI sits behind its own
 authenticating proxy, not for one relying on the API's own token.
+
+The same gate decides `Source.page_url` (documents-plan-v3, D2/D3) on
+every `/ui/api` route that decorates one -- the record page, the
+worksheet, the UI's own evidence mirror. Without the grant every other
+field of a source still renders (the field name, the printed words,
+whether it agrees with the record now); there is simply nothing to click
+through to a page image with. The authenticated API's `GET /evidence`
+always links the authenticated page-image route regardless of this
+setting, the same split as everywhere else in this document.
 
 `/ui/api/*` is the UI's own contract, versioned with the page it serves, and
 may change between releases without notice. Integrate against the

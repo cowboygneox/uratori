@@ -843,6 +843,50 @@ key may contain `@` without it meaning anything) -- because a total's
 evidence is its parts and re-listing the records underneath would re-derive
 the number a second way.
 
+### `Source` and `Box`
+
+A member carries `sources` (documents-plan-v3, D2/D3) -- a reviewer's trace
+from the value to the box it was read from -- when the figure reads exactly
+one field off its members directly (today: `latest(kind.field over set)`, or
+a measure-backed `list`/`sum`/`latest` whose measure is itself a bare field).
+`null` otherwise: a count reads no field, a rollup's evidence is its parts
+(each with its own `sources`, one level down), and a figure mixing more than
+one field read (arithmetic, a ladder) is a documented deferral -- see D3 in
+the plan. This is the server's own decoration (D1-D4's "provider" layer): a
+host with no documents feature, or a record provenance never named, gets
+`sources: null` for ever.
+
+```json
+{
+  "field": "weight_kg",
+  "page_key": "a1b2c3d4e5f6a7b8/p0001",
+  "page_label": "page 1",
+  "document_title": "chart.pdf",
+  "page_url": "/tenants/t1/documents/medical_record/a1b2c3d4e5f6a7b8/pages/1.png",
+  "printed": "82",
+  "boxes": [{"x0": 0.14, "y0": 0.22, "x1": 0.17, "y1": 0.24}],
+  "anchored": true,
+  "agrees": true,
+  "note": null
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `field` | The record field this citation is about. |
+| `page_key` | The page fact's own key. |
+| `page_label`, `document_title` | Rendering, not data -- "page 1" and the document's own `title`. |
+| `page_url` | The page image route (`GET .../documents/{kind}/{id}/pages/{n}.png`) -- a plain page PNG; the client draws the boxes. `null` when the page is no longer held. |
+| `printed` | The cited words' own text, in reading order. `null` when `anchored` is false -- there are no cited words to read one off. |
+| `boxes` | **A list** -- page-normalised `[0,1]` in the rendered frame, one per cited word (several when a value wraps a line, or is assembled from two places: "5 ft" and "10 in"). At least one when `anchored`. Draw every one of them. |
+| `anchored` | `false` means `boxes` came from the write's own fallback, not matched to page text. |
+| `agrees` | Whether the record's value at `field`, read now, still matches what this row attested when it was written. `null` when there is nothing to compare. |
+| `note` | The sentence when it does not agree, or when the page behind the citation is no longer held -- never a box silently vouching for a number the record no longer carries. |
+
+The worksheet (`docs/ui.md`) carries the same shape on its own record
+lines, by the leaf step's own `field` -- this is one decoration, read from
+two surfaces.
+
 When the figure is unavailable the response carries its `state` and no
 members -- an empty list under an `ok` state would read as "this value cites
 nothing", a confident claim about a figure the tenant has never run.

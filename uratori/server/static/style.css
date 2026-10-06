@@ -244,14 +244,39 @@ h2.subject {
 }
 .page-image {
   max-width: min(70vw, 56rem);
+  display: block;
   border: 1px solid var(--line);
   background: var(--surface);
+}
+/* The frame a provenance link's `?boxes=` draws over -- percentage
+   positioning needs no pixel geometry at all, since a box is already
+   page-normalised [0,1] relative to this same frame at any render scale. */
+.page-frame {
+  position: relative;
+  display: inline-block;
+  max-width: min(70vw, 56rem);
+}
+.page-frame .page-image { max-width: 100%; }
+.page-highlight {
+  position: absolute;
+  border: 2px solid var(--accent);
+  background: rgba(138, 184, 221, 0.22);
+  pointer-events: none;
 }
 .word-panel {
   flex: 1 1 18rem;
   min-width: 18rem;
 }
 .word-results table { width: 100%; }
+
+/* ----------------------------------------------------------- provenance --- */
+
+.source-badge { margin: 0.15rem 0; display: flex; gap: 0.5rem; align-items: flex-start; }
+.work-crop { border: 1px solid var(--line); background: var(--surface); flex-shrink: 0; }
+.provenance-block { display: flex; flex-direction: column; gap: 0.35rem; margin: 0.5rem 0 1rem; }
+.provenance-row { display: flex; gap: 0.5rem; align-items: flex-start; }
+td.work-sources { min-width: 10rem; }
+.badge.problem { color: var(--bad); border-color: #6b2c2c; }
 
 /* -------------------------------------------------------------- tables --- */
 

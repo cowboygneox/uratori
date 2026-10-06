@@ -110,6 +110,7 @@ from .provenance import (
     PostgresProvenanceStore,
     ProvenanceError,
     ProvenanceRow,
+    decorate_evidence,
     validate_and_build,
 )
 from .runtime import (
@@ -727,7 +728,18 @@ def create_app(
                     "the two reads."
                 ),
             )
-        return answer
+        plan = library.figure(name)
+        if plan is None:
+            return answer
+        return await decorate_evidence(
+            s.pool,
+            s.provenance_store,
+            library,
+            tenant,
+            plan,
+            answer,
+            base=f"/tenants/{tenant}/documents",
+        )
 
     # ----------------------------------------------------------- documents --
     #

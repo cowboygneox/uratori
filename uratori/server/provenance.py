@@ -32,10 +32,6 @@ rendered `anchored: false`, "region asserted, not matched to page text".
 `lang/check.py`'s `_record_field` at request time: a dotted path that does
 not resolve, or crosses a `many` block (a repeating position is not a stable
 place to point a box at), is refused.
-
-The read path -- joining this table back onto a figure's evidence and a
-worksheet's record lines (D3) -- lives in this same module too, added once
-`uratori.results` carries the `Source`/`Box` wire shapes it decorates onto.
 """
 
 from __future__ import annotations
@@ -46,13 +42,19 @@ from dataclasses import dataclass
 from dataclasses import replace as dc_replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
+from urllib.parse import quote
 
 import asyncpg
 
-from ..lang.plan import CompiledFact, CompiledFactField, Library
+from ..lang.ast import Extreme, FieldPick, ListOf
+from ..lang.ast import Sum as LangSum
+from ..lang.plan import CompiledFact, CompiledFactField, FigurePlan, Library
+from ..results import Box as WireBox
+from ..results import Evidence, Source
+from ..store.postgres import PostgresFactStore
 from . import db
 from .contract import ProvenanceCiteIn
-from .documents import document_kinds
+from .documents import document_kinds, parse_page_key
 from .words import Word, WordStore
 
 
@@ -322,6 +324,255 @@ def resolve_field_path(fact: CompiledFact, path: str) -> CompiledFactField | Non
     if found is None or found.type is None:
         return None
     return found
+
+
+def read_field_value(record: Mapping[str, Any], path: str) -> Any:
+    """The raw value at a dotted path, crossing only `one` blocks -- read
+    generically (no number/instant parsing) because this is used only to
+    compare against a provenance row's own attested `value`, which was
+    stored the same way at write time. `None` for a path that does not
+    resolve, same as absent."""
+    node: Any = record
+    for segment in path.split("."):
+        if not isinstance(node, Mapping) or segment not in node:
+            return None
+        node = node[segment]
+    return node
+
+
+# -------------------------------------------------------------- read path --
+
+
+def evidence_field(plan: FigurePlan, library: Library) -> str | None:
+    """The one field this figure's calculation reads off each of its
+    leaf-kind members, when there is a single one to name without touching
+    the engine (D3). Mirrors `engine/serve.py`'s own `_measure_read` for the
+    shapes it already names (a measure-backed `list`/`sum`/`latest`), and
+    adds `FieldPick` (`latest(kind.field over set)`), which that function
+    never had to answer because the evidence panel did not yet need to know
+    *which* field -- only whether to show a live re-read. `None` for a count
+    (reads no field), a rollup (handled before this is ever reached), and
+    anything reading more than one field (arithmetic, a ladder, a
+    duration/moment measure) -- D3's own stated deferral; the general
+    `_members_of` fix for mixed evidence is out of this package's scope.
+    """
+    calc = plan.calculate
+    if isinstance(calc, FieldPick):
+        return calc.field
+    measure_name: str | None = None
+    if isinstance(calc, ListOf):
+        measure_name = calc.measure
+    elif isinstance(calc, LangSum) and calc.measure is not None:
+        measure_name = calc.measure
+    elif isinstance(calc, Extreme):
+        measure_name = calc.measure
+    if measure_name is None:
+        return None
+    measure = library.measures.get(measure_name)
+    if measure is None or measure.shape != "field" or measure.field_path is None:
+        return None
+    return measure.field_path
+
+
+@dataclass(frozen=True)
+class ResolvedPage:
+    page_kind: str
+    document_kind: str
+    document_id: str
+    number: int
+    document_title: str | None
+
+
+async def resolve_page(
+    pool: asyncpg.Pool[Any], tenant: str, library: Library, key: str
+) -> ResolvedPage | None:
+    """The page a provenance row's `page_key` names, or `None` when it is no
+    longer held -- deleted with its document (or, in principle, never
+    written). The caller renders a `Source` with no boxes and a note saying
+    so in that case, the same honesty `EvidenceMember.held` already states
+    for a deleted record -- never a 404 for a citation that still exists as
+    a row, only as a dangling reference.
+
+    Ambiguous on purpose, in one narrow case: two document kinds that share
+    a blob (identical bytes uploaded under both, `document_sha_referenced`'s
+    own scenario) can share a page key too, and this citation shape names
+    only the page, not its kind. `held_page_kind` breaks the tie by sorted
+    kind name, deterministically, and the package report names this as a
+    known limitation rather than a silent one.
+    """
+    parsed = parse_page_key(key)
+    if parsed is None:
+        return None
+    document_id, number = parsed
+    page_to_document = {page: doc for doc, page in document_kinds(library).items()}
+    page_kind = await db.held_page_kind(pool, tenant, list(page_to_document), key)
+    if page_kind is None:
+        return None
+    document_kind = page_to_document[page_kind]
+    doc_row = await db.fact_record(pool, tenant, document_kind, document_id)
+    title = doc_row["value"].get("title") if doc_row is not None else None
+    return ResolvedPage(
+        page_kind=page_kind,
+        document_kind=document_kind,
+        document_id=document_id,
+        number=number,
+        document_title=title if isinstance(title, str) else None,
+    )
+
+
+def page_image_url(resolved: ResolvedPage, base: str | None) -> str | None:
+    """`base` is the surface's own documents root -- the authenticated API's
+    `/tenants/{t}/documents` for `GET /evidence`, or the unauthenticated
+    `/ui/api/tenants/{t}/documents` mirror for the UI's own routes -- so a
+    `<img src>` built from a UI response never needs a bearer token it has
+    nowhere to attach (D3, "Image routes and the UI posture"). `None` when
+    the caller has no documents root to link against -- the UI with
+    `URATORI_UI_DOCUMENTS` off, where every other field of the source still
+    renders, just with nothing to click through to."""
+    if base is None:
+        return None
+    return (
+        f"{base}/{quote(resolved.document_kind, safe='')}"
+        f"/{quote(resolved.document_id, safe='')}"
+        f"/pages/{resolved.number}.png"
+    )
+
+
+def _compare(field: str, current: Any, attested: Any) -> tuple[bool, str | None]:
+    """Whether the record's value at `field` now, read live, still matches
+    what this row attested when it was written. `None`/`None` still agrees
+    -- a field neither side ever set is not a disagreement."""
+    if current == attested:
+        return True, None
+    now = "nothing" if current is None else repr(current)
+    return False, f"this page attested {field} as {attested!r}; the record now holds {now}"
+
+
+async def source_of(
+    pool: asyncpg.Pool[Any],
+    library: Library,
+    tenant: str,
+    row: ProvenanceRow,
+    current_value: Any,
+    *,
+    base: str | None,
+) -> Source:
+    """One provenance row, read for a reader: resolve its page, compare its
+    attested value against the record's value now, and render the one
+    sentence that matters either way -- a disagreement, or that the page
+    behind the citation is gone."""
+    agrees, note = _compare(row.field, current_value, row.value)
+    resolved = await resolve_page(pool, tenant, library, row.page_key)
+    if resolved is None:
+        return Source(
+            field=row.field,
+            page_key=row.page_key,
+            printed=row.printed,
+            anchored=row.anchored,
+            agrees=agrees,
+            note=note or "the cited page is no longer held",
+        )
+    return Source(
+        field=row.field,
+        page_key=row.page_key,
+        page_label=f"page {resolved.number}",
+        document_title=resolved.document_title,
+        page_url=page_image_url(resolved, base),
+        printed=row.printed,
+        boxes=[WireBox(x0=b.x0, y0=b.y0, x1=b.x1, y1=b.y1) for b in row.boxes],
+        anchored=row.anchored,
+        agrees=agrees,
+        note=note,
+    )
+
+
+async def sources_for_record(
+    pool: asyncpg.Pool[Any],
+    store: ProvenanceStore,
+    library: Library,
+    tenant: str,
+    kind: str,
+    key: str,
+    value: Mapping[str, Any],
+    *,
+    base: str | None,
+) -> list[Source]:
+    """Every field of one record a write's `provenance` map ever cited --
+    the record page's "where it came from" block."""
+    rows = await store.for_record(tenant, kind, key)
+    return [
+        await source_of(pool, library, tenant, row, read_field_value(value, row.field), base=base)
+        for row in rows
+    ]
+
+
+async def sources_for_members(
+    pool: asyncpg.Pool[Any],
+    store: ProvenanceStore,
+    library: Library,
+    tenant: str,
+    kind: str,
+    field: str,
+    keys: Sequence[str],
+    *,
+    base: str | None,
+) -> dict[str, list[Source]]:
+    """`{key: [Source]}` for every one of `keys` that holds a provenance row
+    for `field` -- the bulk form `GET /evidence` and the worksheet decorate
+    their member/record lists with, one query for the whole list rather
+    than one per row."""
+    if not keys:
+        return {}
+    rows_by_key = await store.for_many(tenant, kind, keys)
+    current = {
+        r.key: r.value for r in await PostgresFactStore(pool).some(tenant, kind, list(keys))
+    }
+    out: dict[str, list[Source]] = {}
+    for key, rows in rows_by_key.items():
+        row = next((r for r in rows if r.field == field), None)
+        if row is None:
+            continue
+        current_value = read_field_value(current.get(key, {}), field)
+        out[key] = [await source_of(pool, library, tenant, row, current_value, base=base)]
+    return out
+
+
+async def decorate_evidence(
+    pool: asyncpg.Pool[Any],
+    store: ProvenanceStore,
+    library: Library,
+    tenant: str,
+    plan: FigurePlan,
+    evidence: Evidence,
+    *,
+    base: str | None,
+) -> Evidence:
+    """`GET /evidence`'s decoration, shared by the authenticated API route
+    and the UI's own mirror (D3): attach `sources` to every held member,
+    for the one field (if any) `evidence_field` can name without touching
+    the engine. `serve_evidence` itself is untouched -- this only reshapes
+    the answer it already returned."""
+    if evidence.kind is None or not evidence.members:
+        return evidence
+    field = evidence_field(plan, library)
+    if field is None:
+        return evidence
+    keys = [m.key for m in evidence.members if m.held]
+    sources_by_key = await sources_for_members(
+        pool, store, library, tenant, evidence.kind, field, keys, base=base
+    )
+    if not sources_by_key:
+        return evidence
+    return evidence.model_copy(
+        update={
+            "members": [
+                m.model_copy(update={"sources": sources_by_key[m.key]})
+                if m.key in sources_by_key
+                else m
+                for m in evidence.members
+            ]
+        }
+    )
 
 
 # -------------------------------------------------------------- write path --

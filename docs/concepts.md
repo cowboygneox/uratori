@@ -403,6 +403,18 @@ records -- titles and links resolved through the schema's name and url fields
 fetch rather than a field on `Result`, because every row dragging its members
 along would make the common read pay for the rare check.
 
+Where a definition reads exactly one field off its records directly, a
+member's evidence can carry one hop further still: `sources`, a page and the
+words a reader can check a number against by eye (documents-plan-v3, D2/D3).
+This is **server metadata, never fact data** -- the engine stores and joins
+the same citation it always has, and a server with the documents feature
+decorates the answer afterward, outside the engine entirely. A definition
+cannot read a `source`, for the same reason it cannot read a page's text
+([Facts](#facts), above): the engine does not fetch, interpret or write
+provenance any more than it does facts, and a `source` is server metadata
+built from a table the engine has never seen. See [the HTTP
+API](http-api.md#source-and-box).
+
 ### The three absences
 
 `state` is a discriminated value: `ok`, or unavailable with one of exactly

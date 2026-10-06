@@ -124,6 +124,18 @@ def page_key(document_id: str, number: int) -> str:
     return f"{document_id}/p{number:0{PAGE_KEY_WIDTH}d}"
 
 
+def parse_page_key(key: str) -> tuple[str, int] | None:
+    """The inverse of `page_key`: a `(document_id, number)` pair, or `None`
+    for a string that is not one -- a citation naming a page key provenance
+    (D2) has to resolve back to a document and a page number to build a
+    page-image link, and a malformed key must answer nothing rather than a
+    wrong document."""
+    document_id, _, tail = key.rpartition("/p")
+    if not document_id or not tail or not tail.isdigit():
+        return None
+    return document_id, int(tail)
+
+
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 

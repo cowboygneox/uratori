@@ -66,6 +66,7 @@ from ..results import (
     Evidence,
     Ok,
     Result,
+    Source,
     Subject,
     Unavailable,
 )
@@ -74,6 +75,7 @@ from ..store.postgres import PostgresEngineStore, PostgresFactStore
 from ..windows import WindowError, expand_window_args, window_token
 from . import db
 from .documents import document_kinds, page_key, render_page_png
+from .provenance import decorate_evidence, sources_for_members, sources_for_record
 from .runtime import (
     State,
     World,
@@ -607,6 +609,12 @@ class RecordOut(BaseModel):
 
     measured: list[RecordMeasureOut]
 
+    provenance: list[Source] = []
+    """"Where it came from" -- every field of this record a write's
+    `provenance` map cited (documents-plan-v3, D2), server-decorated from
+    `document_provenance`. Empty for a record nothing ever cited, which is
+    most records on a server with no documents feature; never an error."""
+
 
 ABOUT_ROWS = 60
 """Per-entry row cap on the about payload. A courier with years of day rows
@@ -825,6 +833,14 @@ class RecordLineOut(BaseModel):
     display: str | None = None
     role: Literal["counted", "nothing", "removed", "absent", "winner", "listed"]
     note: str | None = None
+    sources: list[Source] | None = None
+    """Where this record's own field (the owning step's `field`) came from
+    (documents-plan-v3, D2/D3) -- set for a line a step actually read a value
+    off (`winner`, `counted`, `listed`), never for one it did not
+    (`nothing`, `removed`, `absent`). Server-decorated after
+    `WorkingOut.model_validate`: the engine's `RecordLine` carries no such
+    field, by design -- a worksheet is a server surface over the engine's
+    answer, not a second place the engine computes provenance."""
 
 
 class StepOut(BaseModel):
@@ -1393,6 +1409,19 @@ def router(frame_ancestors: str, *, edit: bool = False, documents: bool = False)
                     status_code=409, detail=gap.args[0] if gap.args else str(gap)
                 ) from gap
 
+        provenance: list[Source] = []
+        if library is not None:
+            provenance = await sources_for_record(
+                s.pool,
+                s.provenance_store,
+                library,
+                tenant,
+                kind,
+                key,
+                value,
+                base=f"/ui/api/tenants/{tenant}/documents" if documents else None,
+            )
+
         return RecordOut(
             kind=kind,
             key=key,
@@ -1403,6 +1432,7 @@ def router(frame_ancestors: str, *, edit: bool = False, documents: bool = False)
             filed=filed,
             filed_state=filed_state,
             measured=measured,
+            provenance=provenance,
         )
 
     @ui.get(
@@ -2122,7 +2152,18 @@ def router(frame_ancestors: str, *, edit: bool = False, documents: bool = False)
                 status_code=404,
                 detail=f"Nothing is stored for {subject} under {name}",
             )
-        return answer
+        plan = library.figure(name)
+        if plan is None:
+            return answer
+        return await decorate_evidence(
+            s.pool,
+            s.provenance_store,
+            library,
+            tenant,
+            plan,
+            answer,
+            base=f"/ui/api/tenants/{tenant}/documents" if documents else None,
+        )
 
     @ui.get(
         "/ui/api/tenants/{tenant}/working/{figure}",
@@ -2142,9 +2183,51 @@ def router(frame_ancestors: str, *, edit: bool = False, documents: bool = False)
                 status_code=404,
                 detail=f"Nothing is stored for {subject} under {figure}",
             )
-        return WorkingOut.model_validate(answer)
+        out = WorkingOut.model_validate(answer)
+        base = f"/ui/api/tenants/{tenant}/documents" if documents else None
+        if out.root is not None:
+            out.root = await _decorate_step(s, library, tenant, out.root, base=base)
+        if out.band is not None:
+            out.band = await _decorate_step(s, library, tenant, out.band, base=base)
+        return out
 
     return ui
+
+
+async def _decorate_step(
+    s: State, library: Library, tenant: str, step: StepOut, *, base: str | None
+) -> StepOut:
+    """Walk one worksheet's step tree, attaching `sources` to every record
+    line a leaf step actually read a value off (documents-plan-v3, D3):
+    `Step.field` (landed in package 0) says which field; `winner`,
+    `counted` and `listed` are the roles a step marks a line it read with --
+    `nothing`/`removed`/`absent` never get a source, because nothing was
+    read off them. `StepOut`/`RecordLineOut` carry no such field from the
+    engine's own `Step`/`RecordLine` (`model_validate(..., from_attributes=
+    True)` leaves `sources` at its default), so this mutates the already-
+    validated tree in place -- a server layer reshaping the engine's
+    answer, exactly as `decorate_evidence` does for `Evidence`."""
+    if step.field is not None and step.record_kind is not None and step.records:
+        keys = [
+            line.key
+            for line in step.records
+            if line.held and line.role in ("winner", "counted", "listed")
+        ]
+        sources_by_key = await sources_for_members(
+            s.pool, s.provenance_store, library, tenant, step.record_kind, step.field, keys, base=base
+        )
+        if sources_by_key:
+            step.records = [
+                line.model_copy(update={"sources": sources_by_key[line.key]})
+                if line.key in sources_by_key
+                else line
+                for line in step.records
+            ]
+    if step.children:
+        step.children = [
+            await _decorate_step(s, library, tenant, child, base=base) for child in step.children
+        ]
+    return step
 
 
 def _field_at(value: Mapping[str, Any] | None, field: str | None) -> str | None:
