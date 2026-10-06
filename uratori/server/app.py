@@ -100,6 +100,7 @@ from .contract import (
 from .documents import (
     DEFAULT_MAX_UPLOAD_BYTES,
     DocumentKindError,
+    DocumentParseError,
     RenderCache,
     document_id_of,
     document_kinds,
@@ -865,7 +866,16 @@ def create_app(
         # The slow part: parsing the PDF's own text layer and, for any page
         # without one, rendering it and running OCR. A pure function of the
         # bytes, run off the event loop and outside any lock.
-        ingested = await asyncio.to_thread(ingest_pdf, data)
+        try:
+            ingested = await asyncio.to_thread(ingest_pdf, data)
+        except DocumentParseError as refusal:
+            # A clean 4xx naming the file, never a 500 off an unhandled
+            # `pypdfium2.PdfiumError` for a non-PDF or corrupt upload
+            # (review finding F).
+            raise HTTPException(
+                status_code=422,
+                detail=f"{file.filename or 'the uploaded file'} is {refusal}",
+            ) from refusal
 
         document_fields: dict[str, Any] = {
             **host_fields,
@@ -1144,7 +1154,16 @@ def create_app(
                 detail="this document's bytes are missing from blob storage",
             )
 
-        ingested = await asyncio.to_thread(ingest_pdf, data)
+        try:
+            ingested = await asyncio.to_thread(ingest_pdf, data)
+        except DocumentParseError as refusal:
+            # Same boundary rule as the upload route (review finding F):
+            # the stored bytes themselves are what failed to parse this
+            # time, never a 500.
+            raise HTTPException(
+                status_code=422,
+                detail=f"document {document_id!r}'s stored bytes are {refusal}",
+            ) from refusal
         page_records: dict[str, dict[str, Any]] = {}
         page_words: dict[str, list[Word]] = {}
         for number, page in enumerate(ingested.pages, start=1):

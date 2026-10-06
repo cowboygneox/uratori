@@ -354,3 +354,23 @@ async def test_remove_tenant_cascades_documents_and_blobs(docs: DocServer) -> No
 
     after = [p for p in pathlib.Path(docs.blob_dir).rglob("*") if p.is_file()]
     assert after == []
+
+
+async def test_uploading_garbage_bytes_is_a_422_not_a_500(docs: DocServer) -> None:
+    """Finding F (review, security posture section): `ingest_pdf`'s
+    `pdfium.PdfDocument(data)` raised `PdfiumError` uncaught, and the
+    route answered a bare 500 for a non-PDF upload instead of a 4xx
+    naming the file as unreadable."""
+    resp = await _upload(docs.http, os.urandom(10_000), filename="not_a_pdf.bin")
+    assert resp.status_code == 422, resp.text
+    assert "not_a_pdf.bin" in resp.json()["detail"]
+
+
+async def test_uploading_a_truncated_pdf_is_a_422_not_a_500(docs: DocServer) -> None:
+    """Same finding, the other half of the brief: a file that starts as a
+    real PDF but is cut off mid-stream must be refused the same way, not
+    only bytes that never looked like a PDF at all."""
+    truncated = sample_bundle_pdf()[: len(sample_bundle_pdf()) // 2]
+    resp = await _upload(docs.http, truncated, filename="truncated.pdf")
+    assert resp.status_code == 422, resp.text
+    assert "truncated.pdf" in resp.json()["detail"]

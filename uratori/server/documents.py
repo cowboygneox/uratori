@@ -74,6 +74,16 @@ class DocumentKindError(Exception):
     shares it (documents-plan-v3, D1, review finding 6)."""
 
 
+class DocumentParseError(Exception):
+    """The upload's bytes could not be parsed as this kind's document
+    format -- a non-PDF file, one that is corrupt or cut off mid-stream,
+    or a page whose embedded image OCR/PIL cannot read. Caught at the
+    upload boundary (`app.py`'s `upload_document`) and turned into a 422
+    naming the file, never an unhandled `pypdfium2.PdfiumError` (or
+    whatever PIL/pytesseract raise) reaching FastAPI's default 500
+    handler (review finding F)."""
+
+
 def document_kinds(library: Library) -> dict[str, str]:
     """Every document kind in this library, mapped to its one page kind."""
     page_of: dict[str, str] = {}
@@ -428,12 +438,23 @@ def _ingest_page(page: object) -> IngestedPage:
 def ingest_pdf(data: bytes) -> IngestedDocument:
     """Parse a PDF's bytes into its pages' word layers. Pure and
     synchronous -- CPU-bound (rasterising, OCR) -- so every caller runs it
-    through `asyncio.to_thread`, outside any lock."""
+    through `asyncio.to_thread`, outside any lock.
+
+    Raises `DocumentParseError`, never a raw `pypdfium2.PdfiumError` (or
+    whatever PIL/pytesseract raise while parsing one page's image) --
+    the upload boundary is where "this is not a readable PDF" belongs,
+    not an unhandled exception reaching the ASGI app's own 500 handler
+    (review finding F)."""
     import pypdfium2 as pdfium
 
-    doc = pdfium.PdfDocument(data)
+    try:
+        doc = pdfium.PdfDocument(data)
+    except Exception as exc:
+        raise DocumentParseError(f"not a readable PDF: {exc}") from exc
     try:
         pages = tuple(_ingest_page(doc[i]) for i in range(len(doc)))
+    except Exception as exc:
+        raise DocumentParseError(f"could not be parsed as a PDF: {exc}") from exc
     finally:
         doc.close()
     return IngestedDocument(pages=pages)
