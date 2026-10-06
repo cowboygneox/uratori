@@ -114,11 +114,12 @@ init_typed = true
 init_forbid_extra = true
 
 # Neither ships a py.typed marker; both are optional (the `documents` extra)
-# and touched only inside `uratori/server/documents.py`, which already
-# types its own surface precisely and treats these two as untyped at the
-# boundary.
+# and touched inside `uratori/server/documents.py`, which already types its
+# own surface precisely and treats these two as untyped at the boundary, and
+# inside `examples/records/generate.py`, the dev-only synthetic PDF
+# generator that draws the same way `tests/pdf_fixtures.py` does.
 [[tool.mypy.overrides]]
-module = ["pypdfium2", "pytesseract"]
+module = ["pypdfium2", "pytesseract", "reportlab.*"]
 ignore_missing_imports = true
 
 [tool.ruff]
