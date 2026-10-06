@@ -541,13 +541,16 @@ A pass with no new facts:
 curl -s -X POST "$BASE/tenants/t1/runs" -H "$AUTH" -H 'Content-Type: application/json' -d '{}'
 ```
 
-The body is `{"full": bool, "serve": bool}`, both defaulted (`false`,
-`true`). Use it to pick up a settings change (the response's `rebuilt` will
-name the figures that read the moved dial, and `results` carries everything
-the dial re-rendered -- the effort dial re-serves every figure printing an
-effort even though no stored value moved), to recompute
-after loading a changed definition, or -- with `{"full": true}` -- to
-rebuild everything a tenant has from the facts stored.
+The body is `{"full": bool, "serve": bool, "audit": bool | str}`, all
+defaulted (`false`, `true`, `false`). Use it to pick up a settings change
+(the response's `rebuilt` will name the figures that read the moved dial,
+and `results` carries everything the dial re-rendered -- the effort dial
+re-serves every figure printing an effort even though no stored value
+moved), to recompute after loading a changed definition, or -- with
+`{"full": true}` -- to rebuild everything a tenant has from the facts
+stored. `audit` is the re-audit verb (see "`audit`" below): a name or
+`true` discards cached readings and forces `full` so the cleared pages
+answer `unaudited` in this same response.
 
 Returns the same run report as the facts route, with `written` and `deleted`
 zero -- deliberately the same shape, because a host's activity log should not
@@ -867,7 +870,10 @@ host with no documents feature, or a record provenance never named, gets
   "boxes": [{"x0": 0.14, "y0": 0.22, "x1": 0.17, "y1": 0.24}],
   "anchored": true,
   "agrees": true,
-  "note": null
+  "note": null,
+  "audits": [
+    {"auditor": "medical_record_page.vitals_audit", "verdict": "agrees", "seen": 82.0, "note": null}
+  ]
 }
 ```
 
@@ -882,6 +888,7 @@ host with no documents feature, or a record provenance never named, gets
 | `anchored` | `false` means `boxes` came from the write's own fallback, not matched to page text. |
 | `agrees` | Whether the record's value at `field`, read now, still matches what this row attested when it was written. `null` when there is nothing to compare. |
 | `note` | The sentence when it does not agree, or when the page behind the citation is no longer held -- never a box silently vouching for a number the record no longer carries. |
+| `audits` | Every `audit` that verifies this field's extract and has a current finding about this exact (record, field) (documents-plan-v3, D6) -- `auditor`, that finding's own `verdict` (never the page's overall worst-of-its-fields word), `seen` (the reader's parsed value, when it has one) and `note`. Empty when no audit covers this field. |
 
 The worksheet (`docs/ui.md`) carries the same shape on its own record
 lines, by the leaf step's own `field` -- this is one decoration, read from
@@ -1094,6 +1101,62 @@ prunes a retired version's rows the moment the pointer actually moves.
 ```
 
 `404` when `name` names no declared extract.
+
+## `audit`
+
+`audit` declarations (`docs/language.md`, "`audit` -- a second,
+model-backed reader") compile to a plan with no `calculate`: the engine
+stores its values but never computes one. A value enters only through
+`accept`, called by the server's pass (every page a verified extract
+touched this run, or -- on a full pass -- every page in scope) and by the
+worker once a reading lands. With `URATORI_AUDIT_PROVIDER` unset no
+worker runs at all, and every page stays `unaudited` (`docs/setup.md`,
+"Audits and PHI egress").
+
+### `GET /tenants/{tenant}/audits/{name}/findings`
+
+Every page this audit currently disputes (`disagrees` or `missed`), under
+its *current* version, each disputed field's comparison and the page's
+own word layer -- the auditor half of the authoring loop, the direct
+counterpart of `extract`'s own failures route above.
+
+```json
+{
+  "audit": "medical_record_page.vitals_audit",
+  "version": "8132a1d1e7d4",
+  "declaration": "audit medical_record_page.vitals_audit:\n    ...",
+  "verdict_counts": { "agrees": 41, "disagrees": 2, "unaudited": 3 },
+  "unaudited": 3,
+  "findings": [
+    {
+      "page_key": "4166bc71/p0002",
+      "extract": "measurement",
+      "field": "weight_kg",
+      "record": null,
+      "row": 0,
+      "verdict": "disagrees",
+      "seen": null,
+      "extracted": 82.0,
+      "anchored": true,
+      "seen_text": null,
+      "note": "the extract has a value the reader found no trace of",
+      "words": [ …the page's own word layer, in reading order… ]
+    }
+  ]
+}
+```
+
+`404` when `name` names no declared audit.
+
+### The re-audit verb: `POST /tenants/{tenant}/runs {"audit": "<name>" | true}`
+
+`RunIn` gains an `audit` field beside `full`/`serve` (default `false`):
+a name discards that one auditor's readings and findings for the tenant;
+`true` discards every declared auditor's. Either way the request also
+forces a full pass, so every page the readings were just cleared from
+answers `unaudited` immediately in the same response rather than a stale
+verdict surviving until the worker's next sweep produces a fresh reading.
+`422` when `audit` names a string that is not a declared audit.
 
 ## The `Result` envelope
 

@@ -60,6 +60,17 @@ product's end users; a host builds its own screens against the
   page), source pages done, and pages failed, each failure naming the
   record, the field it failed on (absent for "no row matched this page at
   all"), the reason, and a link to the page itself.
+- **An `audit`'s page** (documents-plan-v3, D6) carries its own name --
+  unlike an extract it shares no row with anything -- with `verifies` and
+  the provider model id beside the version, **built from** the page kind
+  it reads and the extracts named in `verifies`. The tenant data is counts
+  per verdict word (`agrees`/`disagrees`/`missed`/`absent`/`unreadable`/
+  `unaudited`) and, for every page currently `disagrees` or `missed`, the
+  disputed field's sentence: the extract, the field, what the reader saw,
+  what the record currently holds, and a link to the page. `unaudited`
+  with `URATORI_AUDIT_PROVIDER` unset is the normal state of a freshly
+  compiled audit, not an error -- the counts say so plainly rather than
+  the page showing an empty table a reader has to interpret.
 - **Facts.** Per kind, what the server holds -- a kind the schema declares
   but nobody has pushed appears at zero, because "nothing collected" is a
   finding. Records page by key, search over key and record text, and each row
@@ -89,7 +100,12 @@ product's end users; a host builds its own screens against the
   route answers instead of vanishing); every leaf figure that
   counts records of this kind says whether a stored value cites this one --
   "did not count it" is stated, not inferred -- with each citing row linking
-  on to *its* record's page; every projection of the kind shows this
+  on to *its* record's page; every `audit` scoped to the kind answers with
+  this record's own current verdict word, and (for a derived record) every
+  auditor's finding naming this exact record lists as "verdicts citing it"
+  -- the D6 counterpart of the figure citation list, read directly off the
+  finding rather than through a reverse-citation walk; every projection of
+  the kind shows this
   record's row exactly as the page serves it, or says why it is not on it;
   and every **bundle** with a member about this kind lists as a tile, each
   such member rendered under its slot by the same blocks its kind gets
@@ -246,6 +262,16 @@ whether it agrees with the record now); there is simply nothing to click
 through to a page image with. The authenticated API's `GET /evidence`
 always links the authenticated page-image route regardless of this
 setting, the same split as everywhere else in this document.
+
+**`audit`'s own surfaces open no new door.** The declaration page's
+findings and a record page's verdicts are text -- a verdict word, what the
+reader saw, what the extract holds -- and link to the document viewer the
+same way an extract's failures do, gated by the same
+`URATORI_UI_DOCUMENTS`. The one place a page's actual pixels leave the
+box at all is the worker's own call to a real provider
+(`URATORI_AUDIT_PROVIDER=claude`), which is server-to-server and has no
+UI surface of its own; see `setup.md`'s "Audits and PHI egress" for that
+boundary.
 
 `/ui/api/*` is the UI's own contract, versioned with the page it serves, and
 may change between releases without notice. Integrate against the
