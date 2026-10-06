@@ -150,12 +150,16 @@ container, `localhost` is the container.
 ```bash
 uv venv --python 3.12 && uv pip install -e ".[server,dev]"
 export TEST_DATABASE_URL="postgres://user:pass@localhost:5432/uratori_test"
-.venv/bin/python -m pytest && .venv/bin/python -m mypy uratori examples/nfl/load.py && .venv/bin/python -m ruff check uratori tests examples
+.venv/bin/python -m pytest && .venv/bin/python -m mypy --explicit-package-bases uratori examples/nfl/load.py examples/records/*.py && .venv/bin/python -m ruff check uratori tests examples
 ```
 
 The Postgres-backed tests fail rather than skip without `TEST_DATABASE_URL`;
 they keep their tables in a schema of their own, so the database can be shared
 with other suites.
+
+`--explicit-package-bases` is there because two examples each have their own
+`load.py`; without it mypy treats same-named scripts in different, unpackaged
+directories as one module and refuses the second.
 
 **A language construct is not landed until every `/ui` surface renders
 everything it carries.** New wire fields, declaration kinds and result kinds
