@@ -72,6 +72,7 @@ function problem(answer, sentence) {
 const view = document.getElementById('view');
 const tabs = document.getElementById('tabs');
 const tenantSelect = document.getElementById('tenant');
+const drawer = document.getElementById('drawer');
 
 let world = null;        // the /ui/api/world payload, fetched once per page load
 let byName = new Map();  // declaration name -> declaration
@@ -163,6 +164,19 @@ function drawTabs() {
 
 window.addEventListener('hashchange', render);
 
+// The main route redraws only when something other than the drawer's own
+// params changed -- opening or closing the drawer must not re-fetch and
+// re-render whatever page it sits over.
+let lastMainKey = null;
+
+function withoutDrawerParams(params) {
+  const copy = new URLSearchParams(params);
+  for (const key of [...copy.keys()]) {
+    if (key.startsWith('drawer_')) copy.delete(key);
+  }
+  return copy;
+}
+
 async function render() {
   drawTabs();
   const hash = location.hash || '#/definitions';
@@ -180,9 +194,9 @@ async function render() {
   // would split it in two -- a record page for half a key.
   const segments = path ? path.split('/').map(safeDecode) : [];
   const argument = segments.length ? segments[0] : null;
-  view.replaceChildren(el('p', { class: 'faint' }, 'loading…'));
 
   if (world === null) {
+    view.replaceChildren(el('p', { class: 'faint' }, 'loading…'));
     const answer = await loadWorld();
     if (!answer.ok) {
       view.replaceChildren(problem(answer, 'This server is not ready to be investigated:'));
@@ -191,18 +205,74 @@ async function render() {
     drawTabs(); // the Editor tab is known only once the world payload is
   }
 
-  // flat(Infinity): a view may return nested arrays of nodes, and a nested
-  // array handed to replaceChildren renders as "[object HTMLDivElement]".
-  // The null filter is for the same reason el() skips nulls: a view may say
-  // "nothing here" with a null, and replaceChildren would print the word.
-  const draw = (nodes) => view.replaceChildren(...nodes.flat(Infinity).filter((n) => n != null));
-  if (route === 'facts') draw(await factsView(segments, params));
-  else if (route === 'documents') draw(await documentsListView(segments[0]));
-  else if (route === 'document') draw(await documentViewerView(segments[0], segments[1], segments[2], params));
-  else if (route === 'activity') draw(await activityView(params));
-  else if (route === 'edit') draw(await editorView(params));
-  else if (route === 'work') draw(await workView(segments[0], segments[1]));
-  else draw(await definitionsView(argument, params));
+  const mainKey = `${route}/${path}?${withoutDrawerParams(params)}`;
+  if (mainKey !== lastMainKey) {
+    lastMainKey = mainKey;
+    view.replaceChildren(el('p', { class: 'faint' }, 'loading…'));
+    // flat(Infinity): a view may return nested arrays of nodes, and a
+    // nested array handed to replaceChildren renders as
+    // "[object HTMLDivElement]". The null filter is for the same reason
+    // el() skips nulls: a view may say "nothing here" with a null, and
+    // replaceChildren would print the word.
+    const draw = (nodes) => view.replaceChildren(...nodes.flat(Infinity).filter((n) => n != null));
+    if (route === 'facts') draw(await factsView(segments, params));
+    else if (route === 'documents') draw(await documentsListView(segments[0]));
+    else if (route === 'document') draw(await documentViewerView(segments[0], segments[1], segments[2], params));
+    else if (route === 'activity') draw(await activityView(params));
+    else if (route === 'edit') draw(await editorView(params));
+    else if (route === 'work') draw(await workView(segments[0], segments[1]));
+    else draw(await definitionsView(argument, params));
+  }
+  renderDrawer(params);
+}
+
+// The document drawer (D5): its state lives entirely in this same hash's
+// `drawer_*` params, read fresh on every render -- opened by any document
+// link that sets them (`drawerHashFromSource`), closed by clearing them.
+function closeDrawerHash() {
+  const [base, query] = (location.hash || '#/').split('?');
+  const params = withoutDrawerParams(new URLSearchParams(query || ''));
+  const tail = params.toString();
+  location.hash = tail ? `${base}?${tail}` : base;
+}
+
+function renderDrawer(params) {
+  const kind = params.get('drawer_kind');
+  const id = params.get('drawer_id');
+  const page = params.get('drawer_page');
+  if (!kind || !id || !page) {
+    drawer.hidden = true;
+    drawer.replaceChildren();
+    return;
+  }
+  drawer.hidden = false;
+  let boxes = [];
+  try {
+    boxes = JSON.parse(params.get('drawer_boxes') || '[]');
+  } catch {
+    boxes = [];
+  }
+  const field = params.get('drawer_field');
+  const printed = params.get('drawer_printed');
+  const title = params.get('drawer_title');
+  const label = params.get('drawer_label');
+  const imgSrc = `${API}/tenants/${encodeURIComponent(tenant())}/documents/${encodeURIComponent(kind)}`
+    + `/${encodeURIComponent(id)}/pages/${encodeURIComponent(page)}.png`;
+  const viewerHref = `#/document/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/${encodeURIComponent(page)}`
+    + `?boxes=${encodeURIComponent(JSON.stringify(boxes))}`;
+  drawer.replaceChildren(
+    el('div', { class: 'drawer-head' },
+      el('div', {},
+        title ? el('div', {}, title) : null,
+        label ? el('div', { class: 'faint' }, label) : null),
+      el('button', { class: 'drawer-close', onclick: closeDrawerHash }, '✕ close')),
+    pageFrame(imgSrc, boxes, label || `page ${page}`),
+    field || printed
+      ? el('div', { class: 'drawer-caption' },
+          field ? el('span', { class: 'badge mono' }, field) : null,
+          printed ? el('span', { class: 'mono' }, `“${printed}”`) : null)
+      : null,
+    el('p', {}, el('a', { class: 'trace', href: viewerHref }, 'full viewer →')));
 }
 
 // -------------------------------------------------------- definitions --
@@ -1245,7 +1315,13 @@ function workValuePlate(working) {
 // the rule the shape earns, and children nested the way the roster's own
 // .tree already draws dependency depth.
 function workingTree(step, opts) {
-  return el('ul', { class: 'tree work' }, workStep(step, opts || { depth: 0 }));
+  // A fresh dedup table per tree, not per call: the root tree and the band
+  // tree each get their own, but every step within ONE tree shares it, so
+  // a figure read twice by the same formula (patient.height, read once for
+  // each side of a squared term) gets its evidence rendered once, not once
+  // per occurrence.
+  const base = { depth: 0, seen: new Map(), ...(opts || {}) };
+  return el('ul', { class: 'tree work' }, workStep(step, base));
 }
 
 function workLabelLink(step) {
@@ -1267,19 +1343,36 @@ function workLabelLink(step) {
 
 const VERDICT_WORD = { matched: 'matched', failed: 'failed', unknown: 'unknown', 'not-reached': '' };
 
+// A literal operand -- the "100" in "patient.height / 100" -- carries no
+// value of its own beyond what the parent's label already spells out, so
+// it is not a row. `label === display` is how the server marks one: every
+// other "number"/"text" step (a spread's "buckets held", a band rung's
+// compared value) gives the two fields different text.
+function isLiteralOperand(step) {
+  return (step.op === 'number' || step.op === 'text') && step.label === step.display;
+}
+
+function slug(text) {
+  return String(text).replace(/[^a-zA-Z0-9]+/g, '-');
+}
+
 function workStep(step, opts) {
-  const depth = opts.depth || 0;
-  const nestHolder = el('div', { class: 'work-nest' });
+  if (step.op === 'set') return setStepRow(step);
   const label = [workLabelLink(step)];
+  const seenKey = step.figure && step.figure_subject ? `${step.figure}@${step.figure_subject}` : null;
+  const anchorId = seenKey ? `work-fig-${slug(seenKey)}` : null;
+  const firstOccurrence = seenKey ? !opts.seen.has(seenKey) : false;
+  if (seenKey && firstOccurrence) opts.seen.set(seenKey, anchorId);
   if (step.figure && step.figure_subject) {
     // The label itself already opens the worksheet; the trace beside it is
-    // the way to the declaration, for whoever wants the text instead.
+    // the way to the declaration, and, where the "work" toggle used to sit,
+    // a plain link on to that figure's own evidence page -- its breakdown
+    // is never inlined here, D3's "keep it simple": a list of the records
+    // behind it is.
     if (step.definition) {
       label.push(' ', el('a', { class: 'trace', href: defHash(step.definition) }, 'definition'));
     }
-    label.push(' ', depth < 6
-      ? workDrillToggle(step, depth, nestHolder)
-      : el('a', { class: 'trace', href: workHash(step.figure, step.figure_subject) }, 'deeper →'));
+    label.push(' ', el('a', { class: 'trace', href: workHash(step.figure, step.figure_subject) }, 'its own evidence →'));
   }
   const verdict = step.verdict
     ? el('span', { class: `work-verdict verdict-${step.verdict}` }, VERDICT_WORD[step.verdict] ?? step.verdict)
@@ -1289,7 +1382,7 @@ function workStep(step, opts) {
   // bare field to open to yet; it is here for a later provenance layer to
   // read off the tree instead of parsing it back out of the label text.
   const fieldBadge = step.field ? el('span', { class: 'badge mono' }, step.field) : null;
-  const row = el('div', { class: 'work-row' },
+  const row = el('div', { class: 'work-row', id: firstOccurrence ? anchorId : undefined },
     el('div', { class: 'work-label' }, label, fieldBadge, verdict),
     el('div', { class: 'work-display' }, step.display ?? '—'));
   const body = [row];
@@ -1297,53 +1390,126 @@ function workStep(step, opts) {
   // Children before records: a sum's working reads "which records" (the
   // set, narrowed step by step) and then "what each contributed" -- the
   // order a reader checks it in, and the order the definition wrote it.
-  if (step.children && step.children.length) {
-    body.push(el('ul', { class: 'tree work' }, step.children.map((child) => workStep(child, { depth }))));
+  // A literal operand is filtered out here, not merely folded -- it is
+  // never a row, on first render or any later one.
+  const visibleChildren = (step.children || []).filter((child) => !isLiteralOperand(child));
+  if (visibleChildren.length) {
+    body.push(el('ul', { class: 'tree work' },
+      visibleChildren.map((child) => workStep(child, opts))));
   }
-  const records = workRecords(step);
-  if (records) body.push(records);
-  body.push(nestHolder);
+  if (seenKey) {
+    // Reads another stored figure: the value is already on the row above;
+    // beneath it, either that figure's own source records (fetched once,
+    // the first time this figure+subject is seen on the page) or, on a
+    // repeat read, a quiet pointer back to the first rendering.
+    body.push(firstOccurrence
+      ? figureSourcesBlock(step.figure, step.figure_subject)
+      : el('p', { class: 'faint work-note' },
+          'same reading as ', el('a', { href: `#${anchorId}` }, 'above'), '.'));
+  } else {
+    const records = workRecords(step);
+    if (records) body.push(records);
+  }
   const classes = [`op-${step.op}`, step.verdict ? `verdict-${step.verdict}` : null].filter(Boolean).join(' ');
   return el('li', { class: `work-step ${classes}` }, body);
 }
 
-// A drill toggle for an operand that is itself a stored value: fetches that
-// figure's own working and nests its root in place, one figure's worksheet
-// opening inside another's, capped so a cyclic-looking chain of figures
-// cannot recurse forever.
-function workDrillToggle(step, depth, nestHolder) {
-  const btn = el('button', {}, '▸ work');
-  btn.addEventListener('click', async () => {
-    if (nestHolder.childNodes.length) { nestHolder.replaceChildren(); btn.textContent = '▸ work'; return; }
-    if (btn.dataset.drilling) return; // guards the double fast-click, like the old partDrill
-    btn.dataset.drilling = '1';
-    btn.textContent = 'loading…';
-    try {
-      const answer = await get(
-        `tenants/${encodeURIComponent(tenant())}/working/${encodeURIComponent(step.figure)}`
-        + `?subject=${encodeURIComponent(step.figure_subject)}`);
-      if (!answer.ok) {
-        nestHolder.replaceChildren(problem(answer, 'Could not show this working:'));
-      } else if (!answer.body.state.ok) {
-        nestHolder.replaceChildren(unavailable(answer.body.state));
-      } else if (!answer.body.root) {
-        nestHolder.replaceChildren(el('p', { class: 'faint' }, 'Not yet computed for this subject.'));
-      } else {
-        nestHolder.replaceChildren(workingTree(answer.body.root, { depth: depth + 1 }));
-      }
-      btn.textContent = '▾ work';
-    } finally {
-      delete btn.dataset.drilling;
+// The flat list of records behind a figure/coord/part operand -- every
+// record, anywhere in that figure's own working, that a citation actually
+// names (`sources` non-empty). D3's "really, just show a list of
+// facts/documents that have the height in them": the nested arithmetic
+// that produced the figure's own value is not drawn here at all, only
+// what to click to go check it against the page it came from -- the
+// "its own evidence →" link beside the row above is where that breakdown
+// lives for whoever wants it.
+function collectSourceRecords(step) {
+  const out = [];
+  const seen = new Set();
+  const walk = (s) => {
+    for (const record of s.records || []) {
+      if (!record.sources || !record.sources.length) continue;
+      const dedupeKey = `${record.key}::${s.field || ''}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      out.push({ record, kind: s.record_kind });
     }
-  });
-  return btn;
+    for (const child of s.children || []) walk(child);
+  };
+  walk(step);
+  return out;
+}
+
+function figureSourcesBlock(figure, subject) {
+  const holder = el('div', { class: 'work-sources-block faint' }, 'loading evidence…');
+  (async () => {
+    const answer = await get(
+      `tenants/${encodeURIComponent(tenant())}/working/${encodeURIComponent(figure)}`
+      + `?subject=${encodeURIComponent(subject)}`);
+    if (!holder.isConnected) return; // the page navigated away before this landed
+    holder.className = 'work-sources-block';
+    if (!answer.ok) { holder.replaceChildren(problem(answer, 'Could not load its evidence:')); return; }
+    const working = answer.body;
+    if (!working.state.ok) { holder.replaceChildren(unavailable(working.state)); return; }
+    if (!working.root) {
+      holder.replaceChildren(el('p', { class: 'faint' }, 'Not yet computed for this subject.'));
+      return;
+    }
+    const records = collectSourceRecords(working.root);
+    if (!records.length) {
+      holder.replaceChildren(el('p', { class: 'faint' }, 'No source records behind this reading.'));
+      return;
+    }
+    holder.replaceChildren(el('table', { class: 'ledger work-records' },
+      records.map(({ record, kind }) => workRecordRow(record, kind))));
+  })();
+  return holder;
+}
+
+// A set step condensed to one row (D4): the expression as declared, the
+// final count, and the records it resolved to -- listed once, whatever
+// the chain of `&`/`-` operators that got there. `measurement.weighed`
+// printing beside its own `by_patient_day` index as two more rows each
+// said the same thing again; this walks the whole set-index/set-op
+// subtree once and keeps only the last-seen role per record (an operator
+// further right in the chain overrides an earlier "counted" with
+// "removed", never the reverse, because that is the order membership was
+// actually narrowed in).
+function setStepRow(step) {
+  const match = /^(\S+) = (.+)$/.exec(step.label);
+  const label = match ? match[2] : step.label;
+  const row = el('div', { class: 'work-row' },
+    el('div', { class: 'work-label mono' }, label),
+    el('div', { class: 'work-display' }, step.display ?? '—'));
+  const records = collectSetRecords(step);
+  const body = [row];
+  if (records.length) {
+    body.push(el('table', { class: 'ledger work-records' },
+      records.map(({ record, kind }) => workRecordRow(record, kind))));
+  }
+  return el('li', { class: 'work-step op-set' }, body);
+}
+
+function collectSetRecords(step) {
+  const map = new Map();
+  const walk = (s) => {
+    if (s.op !== 'set' && s.op !== 'set-index' && s.op !== 'set-op') return;
+    for (const record of s.records || []) {
+      // A removing `set-op` never carries its own `record_kind` -- the
+      // kind is the index's, kept from whichever earlier step first named
+      // this record, so a removed row still links to its own record page.
+      const existing = map.get(record.key);
+      map.set(record.key, { record, kind: s.record_kind || (existing && existing.kind) || null });
+    }
+    for (const child of s.children || []) walk(child);
+  };
+  for (const child of step.children || []) walk(child);
+  return [...map.values()];
 }
 
 // The record ledger under a node: role decides voice (nothing/removed/absent
-// are stated quietly, never dropped), folded behind a disclosure for the
-// shapes where the records are a roster (set/set-index/set-op/count), open
-// by default where they ARE the arithmetic (sum-measure, list, extreme,
-// stat, field-*).
+// are stated quietly, never dropped). Every disclosure here starts open --
+// the evidence page draws fully expanded -- but stays a `<details>` so a
+// reader with a long roster can still fold one closed after looking.
 const OPEN_RECORD_OPS = new Set(['sum-measure', 'list', 'extreme', 'stat', 'field-total', 'field-pick']);
 
 function workRecords(step) {
@@ -1369,7 +1535,7 @@ function workRecords(step) {
         none.length ? null : capLine));
     }
     if (none.length) {
-      parts.push(el('details', { class: 'work-nothing' },
+      parts.push(el('details', { class: 'work-nothing', open: '' },
         el('summary', {}, `${none.length} contributed nothing`),
         el('table', { class: 'ledger work-records' },
           none.map((record) => workRecordRow(record, step.record_kind)), capLine)));
@@ -1383,7 +1549,7 @@ function workRecords(step) {
   // "8 records" under "& work_issue.active — 16 remain" reads as the 16.
   const removed = step.records.every((record) => record.role === 'removed');
   const n = step.records_total || step.records.length;
-  return el('details', {}, el('summary', {}, removed ? `${n} removed` : `${n} records`), table);
+  return el('details', { open: '' }, el('summary', {}, removed ? `${n} removed` : `${n} records`), table);
 }
 
 function workRecordRow(record, kind) {
@@ -1419,16 +1585,48 @@ function workRecordRow(record, kind) {
 // -- this is the one place that renders it, called from the record page's
 // "where it came from" block and the worksheet's record ledger alike.
 
-function viewerLinkFromSource(source) {
-  // `page_url` is already `<documents-root>/<kind>/<id>/pages/<n>.png`,
-  // percent-encoded by the server -- parsed back apart rather than carried
-  // separately, so there is one place that knows the shape of that URL.
-  if (!source.page_url) return null;
-  const match = /\/documents\/([^/]+)\/([^/]+)\/pages\/(\d+)\.png/.exec(source.page_url);
+// `page_url` is already `<documents-root>/<kind>/<id>/pages/<n>.png`,
+// percent-encoded by the server -- parsed back apart rather than carried
+// separately, so there is one place that knows the shape of that URL.
+function parsePageUrl(pageUrl) {
+  if (!pageUrl) return null;
+  const match = /\/documents\/([^/]+)\/([^/]+)\/pages\/(\d+)\.png/.exec(pageUrl);
   if (!match) return null;
   const [, kind, id, page] = match;
-  const boxes = (source.boxes || []).map((b) => [b.x0, b.y0, b.x1, b.y1]);
-  return `#/document/${kind}/${id}/${page}?boxes=${encodeURIComponent(JSON.stringify(boxes))}`;
+  return { kind, id, page };
+}
+
+function tupleBoxes(boxes) {
+  return (boxes || []).map((b) => [b.x0, b.y0, b.x1, b.y1]);
+}
+
+function viewerLinkFromSource(source) {
+  const parsed = parsePageUrl(source.page_url);
+  if (!parsed) return null;
+  return `#/document/${parsed.kind}/${parsed.id}/${parsed.page}`
+    + `?boxes=${encodeURIComponent(JSON.stringify(tupleBoxes(source.boxes)))}`;
+}
+
+// The drawer's own address (D5): the same hash the calling page is
+// already on, with this source's document/page/boxes folded into it as
+// `drawer_*` params -- so the link is addressable and shareable on its
+// own, and opening or closing it never has to touch the route the page
+// itself is drawn from.
+function drawerHashFromSource(source) {
+  const parsed = parsePageUrl(source.page_url);
+  if (!parsed) return null;
+  const [base, query] = (location.hash || '#/').split('?');
+  const params = new URLSearchParams(query || '');
+  params.set('drawer_kind', parsed.kind);
+  params.set('drawer_id', parsed.id);
+  params.set('drawer_page', parsed.page);
+  params.set('drawer_boxes', JSON.stringify(tupleBoxes(source.boxes)));
+  const setOrDrop = (key, value) => (value ? params.set(key, value) : params.delete(key));
+  setOrDrop('drawer_field', source.field);
+  setOrDrop('drawer_printed', source.printed);
+  setOrDrop('drawer_title', source.document_title);
+  setOrDrop('drawer_label', source.page_label);
+  return `${base}?${params.toString()}`;
 }
 
 // A small crop of the page image, clipped client-side to the union of a
@@ -1460,7 +1658,10 @@ function cropThumbnail(pageUrl, boxes, width) {
 function sourceBadges(sources) {
   if (!sources || !sources.length) return null;
   return sources.map((src) => {
-    const link = viewerLinkFromSource(src);
+    // The click target opens the drawer, in place -- the full `#/document`
+    // viewer is still one more link away, inside the drawer itself, for
+    // whoever wants the whole page and its word search.
+    const link = drawerHashFromSource(src);
     const label = src.page_label || src.page_key;
     const head = [];
     if (src.document_title) head.push(el('span', { class: 'faint' }, src.document_title, ' · '));
@@ -1468,6 +1669,7 @@ function sourceBadges(sources) {
       link
         ? el('a', { class: 'trace', href: link }, `${label} →`)
         : el('span', { class: 'faint' }, src.note || 'page not held'));
+    if (src.field) head.push(' ', el('span', { class: 'badge mono' }, src.field));
     if (src.printed) head.push(' ', el('span', { class: 'mono faint' }, `“${src.printed}”`));
     if (!src.anchored) head.push(' ', el('span', { class: 'badge' }, 'unanchored'));
     if (src.agrees === false) head.push(' ', el('span', { class: 'badge problem' }, 'disagrees'));
@@ -1483,7 +1685,8 @@ function sourceBadges(sources) {
           `${audit.auditor}: ${audit.verdict}${seenText}`));
     }
     const crop = link && src.boxes && src.boxes.length ? cropThumbnail(src.page_url, src.boxes, 96) : null;
-    return el('div', { class: 'source-badge' }, el('div', {}, head), crop);
+    return el('div', { class: 'source-badge' }, el('div', {}, head),
+      crop ? el('a', { href: link }, crop) : null);
   });
 }
 
@@ -1518,7 +1721,7 @@ async function workView(figure, subject) {
         'version ', el('span', { class: 'mono' }, working.version),
         ' — the citation this value carries')),
   ];
-  parts.push(el('h2', {}, 'The working'));
+  parts.push(el('h2', {}, 'Evidence'));
   if (!working.state.ok) {
     parts.push(unavailable(working.state));
   } else if (!working.root) {
@@ -2178,6 +2381,20 @@ async function kindListView() {
 // over the words already fetched (no highlights yet; that is D2/D3, once
 // provenance can say which words a value actually came from).
 
+// The page image with every box of a source drawn as an outline over it
+// (D3, D5): shared by the full viewer route and the drawer, so a box drawn
+// one way is drawn the only way. `boxes` is the tuple form -- `[x0, y0,
+// x1, y1]`, page-normalised -- the same shape `?boxes=` already carries.
+function pageFrame(imgSrc, boxes, alt) {
+  const img = el('img', { class: 'page-image', src: imgSrc, alt: alt || 'page' });
+  return el('div', { class: 'page-frame' }, img,
+    (boxes || []).map(([x0, y0, x1, y1]) => el('div', {
+      class: 'page-highlight',
+      style: `left:${x0 * 100}%;top:${y0 * 100}%;`
+        + `width:${(x1 - x0) * 100}%;height:${(y1 - y0) * 100}%;`,
+    })));
+}
+
 async function documentsListView(kind) {
   if (!kind) return [el('h1', {}, 'Documents'), el('p', { class: 'faint' }, 'No kind given.')];
   const answer = await get(`tenants/${encodeURIComponent(tenant())}/documents/${encodeURIComponent(kind)}`);
@@ -2249,11 +2466,7 @@ async function documentViewerView(kind, id, pageArg, params) {
       onclick: () => { location.hash = `${base}/${page + 1}`; },
     }, 'page →')));
 
-  const img = el('img', {
-    class: 'page-image',
-    src: `${API}/tenants/${encodeURIComponent(tenant())}/documents/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/pages/${page}.png`,
-    alt: `page ${page}`,
-  });
+  const imgSrc = `${API}/tenants/${encodeURIComponent(tenant())}/documents/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/pages/${page}.png`;
 
   // `?boxes=` (D3): every box of one `Source` a record page, a worksheet
   // line or the evidence API linked here with -- percentage-positioned
@@ -2269,12 +2482,7 @@ async function documentViewerView(kind, id, pageArg, params) {
       highlightBoxes = [];
     }
   }
-  const overlay = el('div', { class: 'page-frame' }, img,
-    highlightBoxes.map(([x0, y0, x1, y1]) => el('div', {
-      class: 'page-highlight',
-      style: `left:${x0 * 100}%;top:${y0 * 100}%;`
-        + `width:${(x1 - x0) * 100}%;height:${(y1 - y0) * 100}%;`,
-    })));
+  const overlay = pageFrame(imgSrc, highlightBoxes, `page ${page}`);
 
   const results = el('div', { class: 'word-results' });
   const search = el('input', { type: 'search', placeholder: 'search this page’s words…' });

@@ -936,6 +936,38 @@ def test_every_result_kind_has_a_renderer() -> None:
         )
 
 
+def test_a_source_opens_the_drawer_not_just_the_viewer() -> None:
+    """D5: clicking a document/page link anywhere on the page -- the
+    worksheet's evidence, a record's "Where it came from" block -- opens
+    the drawer, a side panel over whatever page is already open, rather
+    than navigating to the full `#/document` viewer. `drawerHashFromSource`
+    is what builds that link: the same page and boxes a `Source` already
+    carries, folded into the *current* hash's own `drawer_*` params so the
+    link is addressable and shareable on its own. `sourceBadges` is the one
+    place every such link is built (the worksheet's record ledger, the
+    record page's provenance block and the evidence panel all call it), so
+    checking it there once covers all three."""
+    source = _app_source_sans_comments()
+    assert re.search(r"function drawerHashFromSource\(", source), (
+        "no function builds the drawer's own hash from a Source"
+    )
+    for param in ("drawer_kind", "drawer_id", "drawer_page", "drawer_boxes"):
+        assert param in source, f"drawerHashFromSource never sets {param}"
+    badges = re.search(r"^function sourceBadges\(sources\) \{\n(?:.*?\n)*?^\}\n", source, re.M)
+    assert badges, "sourceBadges not found"
+    assert "drawerHashFromSource(src)" in badges.group(0), (
+        "sourceBadges still links straight to the full viewer instead of opening the drawer"
+    )
+    # The viewer route and the drawer must draw a source's boxes the one
+    # same way -- not two box-drawing implementations that can drift apart.
+    assert re.search(r"function pageFrame\(", source), (
+        "no shared box-drawing function for the viewer and the drawer to reuse"
+    )
+    assert source.count("pageFrame(") >= 3, (
+        "pageFrame is not reused by both the document viewer and the drawer"
+    )
+
+
 async def test_every_threshold_entry_point_reaches_the_page_as_an_edge(
     pg_dsn: str,
 ) -> None:

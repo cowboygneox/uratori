@@ -82,11 +82,13 @@ product's end users; a host builds its own screens against the
 - **The document viewer.** `#/documents/<kind>` lists one document kind's
   uploads; `#/document/<kind>/<id>/<page>` reads one page -- the rendered
   image beside its word layer, with a substring search over the words
-  already fetched for that page. A link from a record's page, a worksheet
-  line or the evidence panel carries `?boxes=` -- every box of one
-  `Source` (documents-plan-v3, D2/D3), page-normalised `[0,1]` -- drawn as
-  highlights over the image at any render scale, percentage-positioned so
-  no pixel geometry is needed at all. Gated by `URATORI_UI_DOCUMENTS` (see
+  already fetched for that page. The document drawer (below) is the usual
+  way in, but the viewer is still the whole page on its own: a link from a
+  record's page, the worksheet or the drawer's own "full viewer →" link
+  carries `?boxes=` -- every box of one `Source` (documents-plan-v3, D2/D3),
+  page-normalised `[0,1]` -- drawn as highlights over the image at any
+  render scale, percentage-positioned so no pixel geometry is needed at
+  all. Gated by `URATORI_UI_DOCUMENTS` (see
   the posture below) -- unlike every other UI screen, this one serves
   bytes an `<img src>` cannot carry a bearer token alongside, so it needs
   its own grant.
@@ -122,31 +124,52 @@ product's end users; a host builds its own screens against the
   boxes highlighted. Absent when nothing was ever cited, which is most
   records on a server with no documents feature.
 - **A value's worksheet.** `#/work/<figure>/<subject>` shows one stored
-  value's own page -- a school-child's "show your work" rather than a flat
-  roster of records. The title block prints the sentence, the stored value
-  large beside its version, and, when the live re-derivation disagrees, the
-  sentence saying so (a record moved since the pass that wrote the row).
-  Below it, the working: a tree of the calculation as declared, each step
-  its expression on the left and its value on the right, nested exactly as
-  deep as the calculation is. Sets show what a narrowing removed; a sum or
-  extreme shows every record it read, including the ones that carried no
-  measurement and so contributed nothing -- present and stated, never
-  dropped; a ladder shows every rung's verdict in order, matched, failed,
-  unknown or not reached; an operand that is itself a stored value opens its
-  own worksheet in place with a *work* toggle, or links straight to its own
-  page. Every value on the page that cites another figure -- a "computed for
-  this record" row, a "counted into" row, an arithmetic operand -- links
-  here instead of to the figure's general definition page, because the
-  reader followed one number, not the figure's whole population. A leaf
-  step that read a field directly (`field-pick`, `field-total`,
-  `subject-field`) shows, beside each record it actually read, where that
-  field's own value came from: a link to the page, the printed words, and a
-  small crop of the page image clipped client-side to the union of the
-  cited boxes (documents-plan-v3, D3) -- the box a reader checks the number
-  against without leaving the worksheet. Nothing on this page is computed
-  by the browser: the tree, the notes and every display are rendered by the
-  one evaluator the engine itself runs; the crop is a clip of an image the
-  server already rendered, not a calculation.
+  value's own page, under the heading **Evidence** -- a school-child's "show
+  your work" rather than a flat roster of records. The title block prints
+  the sentence, the stored value large beside its version, and, when the
+  live re-derivation disagrees, the sentence saying so (a record moved since
+  the pass that wrote the row). Below it, the evidence: a tree of the
+  calculation as declared, each step its expression on the left and its
+  value on the right, nested exactly as deep as the calculation is, and
+  fully expanded on load -- nothing on this page starts folded. A literal
+  operand (the `100` in `height / 100`) is never its own row; the parent's
+  own expression already says it. A set step -- `by_patient_day:{…} &
+  weighed`, narrowed through one or more `&`/`-` operators -- condenses to
+  one row, the expression as declared on the left, the final count on the
+  right, and the records it resolved to listed once beneath it, whatever
+  the roster still shows; a sum or extreme shows every record it read,
+  including the ones that carried no measurement and so contributed
+  nothing -- present and stated, never dropped; a ladder shows every rung's
+  verdict in order, matched, failed, unknown or not reached. An operand that
+  is itself a stored value -- `patient.height` inside `patient.bmi`'s own
+  arithmetic -- shows that figure's name and current value on its row, the
+  flat list of source records actually behind it underneath (deduplicated:
+  a figure read twice by the same formula shows its evidence once, with a
+  pointer back to it from the second occurrence), and a plain link, "its
+  own evidence →", on to that figure's own worksheet for whoever wants the
+  nested arithmetic too -- it is never inlined here. Every value on the page
+  that cites another figure -- a "computed for this record" row, a "counted
+  into" row, an arithmetic operand -- links here instead of to the figure's
+  general definition page, because the reader followed one number, not the
+  figure's whole population. A leaf step that read a field directly
+  (`field-pick`, `field-total`, `subject-field`) shows, beside each record
+  it actually read, where that field's own value came from: the field name,
+  the printed words, a small crop of the page image clipped client-side to
+  the union of the cited boxes (documents-plan-v3, D3), and a link that
+  opens the document drawer rather than leaving the page. Nothing on this
+  page is computed by the browser: the tree, the notes and every display
+  are rendered by the one evaluator the engine itself runs; the crop is a
+  clip of an image the server already rendered, not a calculation.
+- **The document drawer.** Any document/page link -- on the worksheet, on a
+  record's "Where it came from" block -- opens a side panel over whatever
+  page is already open, rather than navigating away from it: the page image
+  at a readable scale, every box of that source outlined on it, the printed
+  text and the field name as a caption, and a "full viewer →" link on to
+  `#/document/<kind>/<id>/<page>` for the word search the drawer itself does
+  not offer. The drawer's own state lives in the same hash as the page
+  behind it, as `drawer_*` params, so the link is addressable and shareable
+  on its own -- open the link and both the page and the drawer come back;
+  closing it clears those params and leaves the page exactly as it was.
 - **Activity.** One entry per engine pass, newest first, cause before
   effect: what arrived (written/deleted counts, the kinds covered, whether it
   was a full rebuild) and then the movements it caused, each one

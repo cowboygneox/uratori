@@ -503,8 +503,12 @@ table.work-records .role-removed { color: var(--ink-faint); }
 table.work-records .role-absent { color: var(--warm); }
 table.work-records .role-winner { color: var(--accent); }
 
-.work-nest:empty { display: none; }
-.work-nest .tree { margin-top: 0.3rem; }
+/* The flat list of source records fetched for a figure/coord/part operand
+   (D3): quieter than the row above it, and quieter still while it is
+   still loading. */
+.work-sources-block { margin: 0.2rem 0 0.5rem; }
+.work-sources-block.faint { font-style: italic; }
+.work-step .op-set { margin-top: 0.1rem; }
 
 /* A label and a value fit side by side well below the page's own one-column
    break: the pair is what makes a row read as "expression = value", so it
@@ -512,6 +516,52 @@ table.work-records .role-winner { color: var(--accent); }
 @media (max-width: 40rem) {
   .work-row { grid-template-columns: 1fr; row-gap: 0.1rem; }
   .work-display { text-align: left; }
+}
+
+/* ------------------------------------------------------------- drawer --- */
+/* The document drawer (D5): a side panel over whatever page is open,
+   addressable through the same hash the page already lives at (its own
+   `drawer_*` params), so a link to "this worksheet, this box" is one
+   link. It reuses the viewer's own page-frame/highlight drawing -- the
+   same boxes, the same percentage geometry -- just at a width that fits
+   beside the page rather than replacing it. */
+#drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(92vw, 34rem);
+  background: var(--surface);
+  border-left: 1px solid var(--line);
+  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.5);
+  overflow-y: auto;
+  z-index: 30;
+  padding: 1rem 1.25rem 1.5rem;
+}
+#drawer[hidden] { display: none; }
+.drawer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+.drawer-close {
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--ink-dim);
+  border-radius: 4px;
+  line-height: 1;
+  padding: 0.2rem 0.5rem;
+}
+.drawer-close:hover { color: var(--ink); border-color: var(--ink-faint); }
+#drawer .page-frame, #drawer .page-image { max-width: 100%; }
+.drawer-caption {
+  margin: 0.6rem 0;
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  flex-wrap: wrap;
 }
 
 /* ------------------------------------------------------------ activity --- */
