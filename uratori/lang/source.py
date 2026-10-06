@@ -53,21 +53,28 @@ from functools import lru_cache
 from .lex import prose_above
 from .plan import Library
 
-_HEADERS = (
-    r"^fact\s+{name}\s*:",
-    r"^(?:group|filter)\s+{name}\s",
-    r"^measure\s+{name}\s*=",
+_HEADER_BY_KIND = {
+    "fact": r"^fact\s+{name}\s*:",
+    "index": r"^(?:group|filter)\s+{name}\s",
+    "measure": r"^measure\s+{name}\s*=",
     # `bucketed` and `across` are both optional and order-free after the
     # name, so the header pattern has to admit either, both, or neither.
     # Getting this wrong does not fail loudly: the block is simply not found
     # and the definition serves a *blank* formula to the page that exists to
     # show it -- which is how a figure nobody can read reaches a reader.
-    r"^figure\s+{name}(?:\s+(?:bucketed|across\s+\w+))*\s*:",
-    r"^reading\s+{name}\s*\(",
-    r"^projection\s+{name}\s*:",
-    r"^summarise\s+{name}\s+over\s",
-    r"^bundle\s+{name}\s*:",
-)
+    "figure": r"^figure\s+{name}(?:\s+(?:bucketed|across\s+\w+))*\s*:",
+    "reading": r"^reading\s+{name}\s*\(",
+    "projection": r"^projection\s+{name}\s*:",
+    "summary": r"^summarise\s+{name}\s+over\s",
+    "bundle": r"^bundle\s+{name}\s*:",
+    # `extract` is named bare, after the fact it targets (D4) -- the one
+    # case two declaration kinds deliberately share a name, so a lookup
+    # with no `kind` would find whichever header sorts first in the
+    # source and silently serve the wrong one's prose or formula. Every
+    # extract call site passes `kind="extract"`.
+    "extract": r"^extract\s+{name}\s+from\s+\w+\s*:",
+}
+_HEADERS = tuple(_HEADER_BY_KIND.values())
 
 
 @lru_cache(maxsize=8)
@@ -84,16 +91,24 @@ def _lines(source: str) -> tuple[str, ...]:
 _DISPLAY = re.compile(r'^\s*display\s+"')
 
 
-def _locate(library: Library, name: str) -> tuple[tuple[str, ...], int, int] | None:
+def _locate(
+    library: Library, name: str, kind: str | None = None
+) -> tuple[tuple[str, ...], int, int] | None:
     """The lines, and where this declaration's header and body sit.
 
     Returned as one tuple because both public functions need the same
     boundaries, and computing them twice is how the two drift into disagreeing
     about which lines belong to which -- at which point a paragraph is either
     printed under both headings or under neither.
+
+    `kind` disambiguates the one case two declarations may share a name:
+    an `extract` and the `fact` it targets. Every other caller leaves it
+    unset and matches whichever header the name resolves to, exactly as
+    before `extract` existed.
     """
     lines = _lines(library.source)
-    pattern = re.compile("|".join(h.format(name=re.escape(name)) for h in _HEADERS))
+    headers = _HEADERS if kind is None else (_HEADER_BY_KIND[kind],)
+    pattern = re.compile("|".join(h.format(name=re.escape(name)) for h in headers))
 
     at = next((i for i, line in enumerate(lines) if pattern.match(line)), None)
     if at is None:
@@ -115,14 +130,14 @@ def _locate(library: Library, name: str) -> tuple[tuple[str, ...], int, int] | N
     return lines, at, end
 
 
-def declaration_source(library: Library, name: str) -> str | None:
+def declaration_source(library: Library, name: str, kind: str | None = None) -> str | None:
     """The calculation, and nothing else.
 
     The explanation lives above the header, so the block needs only `display`
     taken out. What is left is what the engine actually evaluates, which is
     the thing somebody clicking "the definition, as written" came to check.
     """
-    found = _locate(library, name)
+    found = _locate(library, name, kind)
     if found is None:
         return None
     lines, at, end = found
@@ -151,7 +166,7 @@ def _collapse(lines: list[str]) -> list[str]:
     return out
 
 
-def declaration_prose(library: Library, name: str) -> str:
+def declaration_prose(library: Library, name: str, kind: str | None = None) -> str:
     """What this declaration means, in the author's words.
 
     The `#` comment lines above it, via the same `prose_above` the parser
@@ -163,7 +178,7 @@ def declaration_prose(library: Library, name: str) -> str:
     already a string for every other kind and a second absent-value spelling
     would be a second branch on every screen.
     """
-    found = _locate(library, name)
+    found = _locate(library, name, kind)
     if found is None:
         return ""
     lines, at, _ = found

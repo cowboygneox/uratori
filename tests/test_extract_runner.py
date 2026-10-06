@@ -146,10 +146,39 @@ def test_number_after_cites_only_the_number_and_its_unit() -> None:
     assert row.reproducible is True
 
 
-def test_number_after_with_no_alternative_match_is_a_failure() -> None:
+def test_an_alternative_never_found_is_an_absent_field_not_a_hard_failure() -> None:
+    """A weight-only visit: the field simply never printed, which is an
+    absent fact field like any other, never a failure -- `weight_kg`
+    carries on fine with no `height_cm` beside it."""
+    plan = extract(
+        ExtractField(name="weight_kg", matcher=NumberAfter(("Weight:",), ("kg",))),
+        ExtractField(name="height_cm", matcher=NumberAfter(("Height:",), ("cm",))),
+    )
+    result = run(plan, words(["Weight:", "82", "kg"]))
+    assert not result.failures
+    assert result.records[0].body == {"weight_kg": 82.0}
+
+
+def test_when_every_field_is_absent_there_is_no_record_at_all() -> None:
+    """D4: a page with no identity match produces no `page_identity`
+    record -- never an empty-bodied one."""
     plan = extract(ExtractField(name="patient_id", matcher=NumberAfter(("Weight:",), ())))
     result = run(plan, words(["Height:", "180"]))
-    assert result.failures[0].reason == "no alternative matched"
+    assert not result.records
+    assert result.failures[0].field is None
+    assert "no alternative matched" in result.failures[0].reason
+
+
+def test_a_found_but_broken_match_outranks_a_later_absent_line() -> None:
+    """The label appears twice: once malformed (two declared units, none
+    printed), once simply absent from another line. The break must be
+    reported, not shadowed by the later "not found"."""
+    plan = extract(ExtractField(name="weight_kg", matcher=NumberAfter(("Weight:",), ("kg", "lb"))))
+    result = run(plan, words(["Weight:", "82"], ["Height:", "180"]))
+    assert not result.records
+    assert result.failures[0].reason == (
+        "a number with no printed unit, and more than one unit is declared"
+    )
 
 
 # ------------------------------------------------------------ date after --

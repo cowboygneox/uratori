@@ -139,6 +139,24 @@ async def availability(
                 f"holds @{plan.version}"
             ),
         )
+    stale_extract = await _stale_extract_dependency(store, library, tenant, plan)
+    if stale_extract is not None:
+        # documents-plan-v3, D4.5: a figure whose fact kinds include a
+        # derived kind whose extract pointer is not current would
+        # otherwise silently serve the rows a retired or superseded
+        # extract version produced, until the next pass happens to run.
+        # Named here, in `availability`, the same door `behind-deploy`
+        # already answers through for a figure's own pointer -- an
+        # extract is a server feature with no pointer of its own kind in
+        # this engine's vocabulary, but it shares the generic one.
+        return Unavailable(
+            because="behind-deploy",
+            detail=(
+                f"{plan.name} reads {stale_extract}, which `extract {stale_extract}` "
+                "produces -- its records here were not computed by the extract "
+                "version this build holds; the next pass will re-extract them"
+            ),
+        )
     if not await _any_index_holds(store, library, tenant, plan):
         # **A nought written by walking the roster is not a measured nought.**
         # Every subject gets one, so a board with no connection stores a
@@ -180,6 +198,49 @@ async def _any_index_holds(
         if below is not None and await _any_index_holds(store, library, tenant, below, seen):
             return True
     return False
+
+
+async def _stale_extract_dependency(
+    store: EngineStore,
+    library: Library,
+    tenant: str,
+    plan: FigurePlan,
+    seen: set[str] | None = None,
+) -> str | None:
+    """The name of a derived kind this figure reads whose extract pointer
+    is not current, or `None` -- walked transitively through `reads` and
+    `combines`, the same edges `_any_index_holds` walks, because a rollup
+    or an arithmetic figure (`patient.bmi`) has no indexes of its own and
+    would otherwise never see the extract its *sources* actually read.
+    """
+    seen = seen if seen is not None else set()
+    if plan.name in seen:
+        return None
+    seen.add(plan.name)
+
+    for index_name in plan.indexes:
+        index = library.indexes.get(index_name)
+        if index is None:
+            continue
+        extract_plan = library.extracts.get(index.kind)
+        if extract_plan is None:
+            continue
+        pointer = await store.pointer(tenant, index.kind)
+        if pointer is None or pointer.version != extract_plan.version:
+            return index.kind
+    for source in plan.reads:
+        below = library.figure(source)
+        if below is not None:
+            found = await _stale_extract_dependency(store, library, tenant, below, seen)
+            if found is not None:
+                return found
+    for source, _dimension in plan.combines.values():
+        below = library.figure(source)
+        if below is not None:
+            found = await _stale_extract_dependency(store, library, tenant, below, seen)
+            if found is not None:
+                return found
+    return None
 
 
 async def band_thresholds(

@@ -92,7 +92,32 @@ class Uratori:
         library: Library,
         store: EngineStore,
         facts: FactSource,
+        _extract_pass: bool = False,
     ) -> None:
+        # `_extract_pass` is for `uratori.server` alone. `extract` (and
+        # `audit`, not yet built) are a server feature: derived facts are
+        # written by the server's documents runtime through a pre-pass
+        # (`run_pass`, documents-plan-v3 D4) that always runs before a
+        # pass reaches this facade's `execute`/`run` -- this facade has no
+        # such pass itself, and nothing here calls one.
+        # `uratori.server.runtime.facade_for` is the one construction site
+        # allowed to pass `True`, because the server it belongs to is what
+        # provides that pre-pass categorically, not because any one call to
+        # `facade_for` just ran it -- a `Uratori` built there may be used
+        # only for `verify`/`answer`/delivery between actual passes too.
+        # Every embedding host outside `uratori.server` is refused here, at
+        # construction, rather than left to compile a library that
+        # type-checks and serves a Facts tab that never fills.
+        if library.extracts and not _extract_pass:
+            names = ", ".join(sorted(library.extracts))
+            raise ValueError(
+                f"this library declares `extract`: {names}. `extract` is a server "
+                "feature -- its records are written by uratori's own documents "
+                "runtime, through a pre-pass before every call to `run`/`execute` -- "
+                "and `Uratori` has no such pass. Serve this library through "
+                "`uratori.server`, or drop the `extract` declarations for an "
+                "embedding host that reads only host-written facts."
+            )
         # A fact-taught library carries the world. Completing the schema here,
         # once, is what keeps every consumer below -- the engine freezing
         # labels, evidence resolving links, `verify` checking kinds -- reading

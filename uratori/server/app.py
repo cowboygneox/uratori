@@ -74,6 +74,8 @@ from .contract import (
     DocumentOut,
     DocumentsOut,
     Envelope,
+    ExtractFailureOut,
+    ExtractFailuresOut,
     FactFieldOut,
     FactOut,
     FactsIn,
@@ -105,6 +107,7 @@ from .documents import (
     uploaded_at_now,
     words_sha_of,
 )
+from .extract_pass import ExtractKindError, refuse_extract_kind_writes
 from .hub import Client, Entry
 from .provenance import (
     PostgresProvenanceStore,
@@ -124,6 +127,7 @@ from .runtime import (
     ready,
     record_pass,
     run_out,
+    run_pass,
     state_of,
 )
 from .words import PostgresWordStore, Word
@@ -434,8 +438,11 @@ def create_app(
             )
         try:
             refuse_document_kind_writes(library, body.writes, body.deletes)
+            refuse_extract_kind_writes(library, body.writes, body.deletes)
             facade.verify(body.writes, body.deletes)
         except DocumentKindError as refusal:
+            raise HTTPException(status_code=422, detail=str(refusal)) from refusal
+        except ExtractKindError as refusal:
             raise HTTPException(status_code=422, detail=str(refusal)) from refusal
         except FactError as refusal:
             raise HTTPException(status_code=422, detail=str(refusal)) from refusal
@@ -526,7 +533,10 @@ def create_app(
             # subscribers, and their paint must not depend on which HTTP
             # client happened to trigger the pass.
             serve = body.serve or s.hub.wants_everything(tenant)
-            report = await facade.run(
+            report = await run_pass(
+                s,
+                world,
+                library,
                 tenant,
                 written=moved,
                 deleted={k: list(v) for k, v in body.deletes.items()},
@@ -554,11 +564,10 @@ def create_app(
         """A pass with no new facts: pick up a redeployed
         definition, or (with `full`) rebuild everything from what is stored."""
         world, library = ready(s)
-        facade = facade_for(s, world, library)
         async with s.lock_for(tenant):
             full = body.full or await db.deferred(s.pool, tenant)
             serve = body.serve or s.hub.wants_everything(tenant)
-            report = await facade.run(tenant, full=full, serve=serve)
+            report = await run_pass(s, world, library, tenant, full=full, serve=serve)
             if full:
                 await db.clear_deferred(s.pool, tenant)
             out = run_out(
@@ -570,6 +579,7 @@ def create_app(
                 include_results=body.serve,
             )
             await record_pass(s, tenant, "run", full=full, out=out)
+            facade = facade_for(s, world, library)
             await push_pass(s, tenant, facade, report)
         return out
 
@@ -861,7 +871,7 @@ def create_app(
                 for key, words in page_words.items():
                     await word_rows.put(tenant, page_kind, key, words)
             full = await db.deferred(s.pool, tenant)
-            report = await facade.run(tenant, written=moved, full=full)
+            report = await run_pass(s, world, library, tenant, written=moved, full=full)
             if full:
                 await db.clear_deferred(s.pool, tenant)
             out = run_out(
@@ -1046,7 +1056,7 @@ def create_app(
             # `full=False` stated below.
             deleted = {kind: [document_id], page_kind: page_keys}
             full = await db.deferred(s.pool, tenant)
-            report = await facade.run(tenant, deleted=deleted, full=full)
+            report = await run_pass(s, world, library, tenant, deleted=deleted, full=full)
             if full:
                 await db.clear_deferred(s.pool, tenant)
             out = run_out(report, world, library, written=0, deleted=len(page_keys) + 1)
@@ -1114,7 +1124,7 @@ def create_app(
                     await word_rows.put(tenant, page_kind, key, words)
             moved = {page_kind: changed} if changed else {}
             full = await db.deferred(s.pool, tenant)
-            report = await facade.run(tenant, written=moved, full=full)
+            report = await run_pass(s, world, library, tenant, written=moved, full=full)
             if full:
                 await db.clear_deferred(s.pool, tenant)
             out = run_out(report, world, library, written=len(changed), deleted=0)
@@ -1122,6 +1132,62 @@ def create_app(
             await push_pass(s, tenant, facade, report)
 
         return ReocrOut(pages_changed=len(changed), run=out)
+
+    @app.get(
+        "/tenants/{tenant}/extracts/{name}/failures",
+        response_model=ExtractFailuresOut,
+        dependencies=[auth],
+    )
+    async def get_extract_failures(tenant: str, name: str, s: S) -> ExtractFailuresOut:
+        """Every subject this extract could not read, under its *current*
+        version -- the authoring loop's input: read these back, hand them
+        with each page's word layer to whoever is revising the
+        declaration, and iterate (documents-plan-v3, D4). A version other
+        than this build's own is never served here; a failure under a
+        retired version explains nothing a reader of today's declaration
+        can act on, and `run_pass` prunes those rows the moment the
+        extract's pointer actually moves to the current one."""
+        from ..lang.source import declaration_source
+
+        _world, library = ready(s)
+        plan = library.extracts.get(name)
+        if plan is None:
+            raise HTTPException(status_code=404, detail=f'no extract named "{name}"')
+        _blobs, word_store, _cache = documents_ready(s)
+        rows = await db.extract_failures(s.pool, tenant, name, plan.version)
+        out: list[ExtractFailureOut] = []
+        for row in rows:
+            subject = str(row["subject"])
+            page = subject.split("#r", 1)[0]
+            words = await word_store.words_of(tenant, plan.source, page)
+            out.append(
+                ExtractFailureOut(
+                    subject=subject,
+                    field=row["field"],
+                    reason=str(row["reason"]),
+                    page_key=page,
+                    words=[
+                        WordOut(
+                            id=w.id,
+                            text=w.text,
+                            x0=w.x0,
+                            y0=w.y0,
+                            x1=w.x1,
+                            y1=w.y1,
+                            line=w.line,
+                            source=w.source,
+                            confidence=w.confidence,
+                        )
+                        for w in words
+                    ],
+                )
+            )
+        return ExtractFailuresOut(
+            extract=name,
+            version=plan.version,
+            declaration=declaration_source(library, name, "extract") or "",
+            failures=out,
+        )
 
     # ------------------------------------------------------------ tenants --
 
@@ -1132,7 +1198,9 @@ def create_app(
             # blobs are tenant-namespaced, so every sha256 this tenant's
             # `document` rows hold is a file only this delete can orphan.
             shas = await db.tenant_document_shas(s.pool, tenant)
-            facts, values, documents, provenance = await db.remove_tenant(s.pool, tenant)
+            facts, values, documents, provenance, extract_failures = await db.remove_tenant(
+                s.pool, tenant
+            )
             if s.blob_store is not None:
                 for sha in shas:
                     await s.blob_store.delete(tenant, sha)
@@ -1141,6 +1209,7 @@ def create_app(
             values_removed=values,
             documents_removed=documents,
             provenance_removed=provenance,
+            extract_failures_removed=extract_failures,
         )
 
     # ------------------------------------------------------------- socket --
@@ -1531,10 +1600,16 @@ def _library_out(library: Library) -> LibraryOut:
         # Spelled out rather than **kwargs, so pydantic-mypy's init guard
         # reaches every call site: routed through Any, a misspelled field
         # here was silently dropped at runtime and invisible to the checker.
+        # `kind=` only for `extract`: it is the one declaration kind that
+        # may share a name with another (the `fact` it targets, D4), so a
+        # plain name lookup would silently resolve to whichever header
+        # sorts first in the source. Every other kind passes no kind,
+        # exactly as before `extract` existed.
+        source_kind = "extract" if declaration == "extract" else None
         return DeclarationOut(
             name=name,
-            prose=declaration_prose(library, name),
-            source=declaration_source(library, name) or "",
+            prose=declaration_prose(library, name, source_kind),
+            source=declaration_source(library, name, source_kind) or "",
             declaration=declaration,
             version=version,
             display=display,

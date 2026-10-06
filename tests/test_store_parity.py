@@ -30,7 +30,7 @@ from uratori.server.provenance import (
 from uratori.server.provenance import ProvenanceStore as ProvenanceStoreType
 from uratori.server.words import MemoryWordStore, PostgresWordStore, Word
 from uratori.server.words import WordStore as WordStoreType
-from uratori.store import EngineStore, MemoryEngineStore, Pointer
+from uratori.store import EngineStore, MemoryEngineStore, MemoryFactStore, Pointer
 from uratori.store.postgres import PostgresEngineStore, PostgresFactStore
 
 
@@ -328,6 +328,31 @@ async def test_postgres_fact_upsert_reports_only_what_moved(pg_pool: Any) -> Non
 
     await facts.delete(tenant, "shop_order", ["o1"])
     assert await facts.of_kind(tenant, "shop_order") == []
+
+
+@pytest.mark.parametrize("backend", ["memory", "postgres"])
+async def test_fact_store_upsert_reports_only_what_moved(
+    backend: str, pg_pool: Any
+) -> None:
+    """documents-plan-v3, D4: the extract pre-pass's merge of moved derived
+    keys into `written` reads this same contract off whichever `FactStore`
+    the host is running (a real server always runs Postgres, but the
+    full-vs-warm parity test exercises the engine over the memory pair
+    alone). Minus stamps -- the memory twin has none -- the two must agree."""
+    tenant = str(uuid.uuid4())
+    facts: Any = MemoryFactStore() if backend == "memory" else PostgresFactStore(pg_pool)
+
+    moved = await facts.upsert(tenant, "measurement", {"m1": {"weight_kg": 80.0}})
+    assert moved == ["m1"]
+
+    moved = await facts.upsert(tenant, "measurement", {"m1": {"weight_kg": 80.0}})
+    assert moved == [], "an identical rewrite is not a change"
+
+    moved = await facts.upsert(tenant, "measurement", {"m1": {"weight_kg": 82.0}})
+    assert moved == ["m1"]
+
+    rows = await facts.of_kind(tenant, "measurement")
+    assert [(r.key, r.value) for r in rows] == [("m1", {"weight_kg": 82.0})]
 
 
 async def test_the_server_refuses_a_database_it_did_not_build(pg_dsn: str) -> None:

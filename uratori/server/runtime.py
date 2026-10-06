@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,6 +30,7 @@ from . import db
 from .blobs import BlobStore
 from .contract import RunOut, ShownChange, schema_out
 from .documents import RenderCache
+from .extract_pass import run_extracts
 from .hub import Hub
 from .provenance import PostgresProvenanceStore, ProvenanceStore
 from .words import WordStore
@@ -276,6 +279,74 @@ def known_names(library: Library) -> frozenset[str]:
     )
 
 
+async def run_pass(
+    s: State,
+    world: World,
+    library: Library,
+    tenant: str,
+    *,
+    written: Mapping[str, Sequence[str]] | None = None,
+    deleted: Mapping[str, Sequence[str]] | None = None,
+    full: bool = False,
+    serve: bool = True,
+) -> RunReport:
+    """The one way a pass starts (documents-plan-v3, D4). Every route that
+    moves facts or asks for a bare pass -- the facts route, `POST /runs`,
+    the UI's run button, and the documents upload/delete/reocr routes --
+    calls this instead of `facade.run` directly, so `extract`'s pre-pass
+    (run here, inside the tenant's lock the caller already holds, before
+    the engine ever sees the batch) is never skipped by a route that
+    forgot it.
+
+    Runs every `extract` over the pages that need it, writes what they
+    produce through the verified upsert in its own transaction, then
+    merges the moved and vanished derived keys into `written`/`deleted`
+    before calling `facade.run`. A library that declares no `extract` pays
+    nothing beyond the one dict copy -- this is exactly `facade.run` for
+    every host before this MR.
+    """
+    # `facade.run` treats `written`/`deleted` being *present at all* (even
+    # an empty dict), not merely non-empty, as the sync moment every
+    # projection re-serves on (`is not None`, not truthiness -- a batch
+    # that deduplicated to nothing is still the sync). `or {}` below would
+    # silently collapse "the facts door was used and reported nothing
+    # moved" into "no door was used at all", so the two cases are tracked
+    # separately and only folded back together at the very end.
+    written_opened = written is not None
+    deleted_opened = deleted is not None
+    merged_written = {k: list(v) for k, v in (written or {}).items()}
+    merged_deleted = {k: list(v) for k, v in (deleted or {}).items()}
+    if library.extracts:
+        _blobs, word_store, _cache = documents_ready(s)
+        engine_store = PostgresEngineStore(s.pool)
+        async with s.pool.acquire() as connection, connection.transaction():
+            moved, vanished = await run_extracts(
+                connection,
+                engine_store,
+                word_store,
+                library,
+                tenant,
+                written=merged_written,
+                deleted=merged_deleted,
+                full=full,
+                now_ms=time.time() * 1000.0,
+            )
+        for kind, keys in moved.items():
+            merged_written[kind] = sorted(set(merged_written.get(kind, ())) | set(keys))
+            written_opened = True
+        for kind, keys in vanished.items():
+            merged_deleted[kind] = sorted(set(merged_deleted.get(kind, ())) | set(keys))
+            deleted_opened = True
+    facade = facade_for(s, world, library)
+    return await facade.run(
+        tenant,
+        written=merged_written if written_opened else None,
+        deleted=merged_deleted if deleted_opened else None,
+        full=full,
+        serve=serve,
+    )
+
+
 def facade_for(s: State, world: World, library: Library) -> Uratori:
     # No listener is wired here any more, deliberately: the facade's listener
     # hook carries the default-argument results and nothing else, and a
@@ -288,6 +359,14 @@ def facade_for(s: State, world: World, library: Library) -> Uratori:
         library=library,
         store=PostgresEngineStore(s.pool),
         facts=PostgresFactStore(s.pool),
+        # `facade_for` is the server's one construction site, and the
+        # server as a whole is what provides `run_pass`'s `extract`
+        # pre-pass -- this facade may be built here between passes too
+        # (for `verify`, `answer`, delivery), never only in the instant
+        # after a pre-pass just ran. See `Uratori.__init__` for why that
+        # is what this flag means and why nothing outside this module may
+        # ever pass it.
+        _extract_pass=bool(library.extracts),
     )
 
 

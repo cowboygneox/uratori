@@ -30,6 +30,16 @@ class MemoryFactStore:
     `PostgresFactStore.upsert`), where the old value is only knowable by the
     store. Here the caller just wrote the old value, so reporting it back would
     be an answer to a question the caller can already answer.
+
+    `upsert` is the exception: an engine-level test (and the extract runner's
+    own full-vs-warm parity test, which has no Postgres underneath) still
+    needs the question answered *by the store*, the way a real server's
+    pre-pass asks `PostgresFactStore.upsert` before merging moved keys into
+    `written`. It mirrors that contract -- a key reports moved when its
+    value actually changed -- minus the stamp half: this twin has no
+    `source_stamp` column, so `stamps` is accepted and ignored, exactly as
+    `tests/test_store_parity.py`'s own note about `admitted_keys` says no
+    in-memory `FactStore` has stamp semantics.
     """
 
     def __init__(self) -> None:
@@ -37,6 +47,22 @@ class MemoryFactStore:
 
     def put(self, tenant: str, kind: str, key: str, value: Mapping[str, Any]) -> None:
         self._rows[(tenant, kind, key)] = value
+
+    async def upsert(
+        self,
+        tenant: str,
+        kind: str,
+        records: Mapping[str, Mapping[str, Any]],
+        stamps: Mapping[str, str] | None = None,
+    ) -> list[str]:
+        del stamps  # no stamp semantics in this twin; see the class docstring
+        moved: list[str] = []
+        for key, value in records.items():
+            existing = self._rows.get((tenant, kind, key))
+            if existing != value:
+                moved.append(key)
+            self._rows[(tenant, kind, key)] = value
+        return moved
 
     def drop(self, tenant: str, kind: str, key: str) -> None:
         self._rows.pop((tenant, kind, key), None)

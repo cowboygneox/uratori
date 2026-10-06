@@ -87,6 +87,7 @@ from .runtime import (
     ready,
     record_pass,
     run_out,
+    run_pass,
     state_of,
     taught_schema,
 )
@@ -1099,7 +1100,7 @@ def router(frame_ancestors: str, *, edit: bool = False, documents: bool = False)
         response_model=EditRunOut,
         include_in_schema=False,
     )
-    async def run_pass(tenant: str, body: EditRunIn, request: Request) -> EditRunOut:
+    async def edit_run_pass(tenant: str, body: EditRunIn, request: Request) -> EditRunOut:
         """A pass with no new facts, from the editor: a save leaves every
         tenant honestly behind-deploy until one runs, and without this door
         the editing loop dead-ends at curl. Same lock, same log, same helpers
@@ -1117,18 +1118,18 @@ def router(frame_ancestors: str, *, edit: bool = False, documents: bool = False)
             raise HTTPException(
                 status_code=404, detail=f"No tenant called {tenant} holds any facts here"
             )
-        facade = facade_for(s, world, library)
         async with s.lock_for(tenant):
             # The same debt rule as the API's run door: a bulk import that
             # deferred its pass left this tenant owing a FULL one, and an
             # editor pass that ran incremental over that gap would settle
             # the debt's flag without paying it.
             full = body.full or await db.deferred(s.pool, tenant)
-            report = await facade.run(tenant, full=full)
+            report = await run_pass(s, world, library, tenant, full=full)
             if full:
                 await db.clear_deferred(s.pool, tenant)
             out = run_out(report, world, library, written=0, deleted=0)
             await record_pass(s, tenant, "run", full=full, out=out)
+            facade = facade_for(s, world, library)
             # The editor's pass reaches the socket exactly as the API's does:
             # an editor save that recoloured a board while every subscribed
             # screen kept the old answers would be the freeze this delivery

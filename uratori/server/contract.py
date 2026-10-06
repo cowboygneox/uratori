@@ -407,6 +407,10 @@ class TenantRemoved(BaseModel):
     values_removed: int
     documents_removed: int = 0
     provenance_removed: int = 0
+    extract_failures_removed: int = 0
+    """Rows of `extract_failure` this tenant held -- a derived fact itself
+    is counted under `facts_removed` already; `extract_pointer` carries no
+    count of its own, for the same reason `figure_pointer` never has."""
 
 
 class SubscribeEntry(BaseModel):
@@ -540,3 +544,28 @@ class ReocrOut(BaseModel):
 
     pages_changed: int
     run: RunOut
+
+
+class ExtractFailureOut(BaseModel):
+    """One subject an `extract` could not read (documents-plan-v3, D4):
+    the reason, the field it failed on (`None` for a `many by row`
+    extract's own "no row matched anywhere" failure), and the page's own
+    word layer -- everything the authoring loop needs to say "this
+    template prints `Wt (kg):`, add it" without opening the page by hand.
+    """
+
+    subject: str
+    field: str | None
+    reason: str
+    page_key: str
+    words: list[WordOut] = Field(default_factory=list)
+
+
+class ExtractFailuresOut(BaseModel):
+    extract: str
+    version: str
+    declaration: str
+    """The extract exactly as written -- prose included, so a model
+    revising it has the full declaration beside the failures it caused."""
+
+    failures: list[ExtractFailureOut] = Field(default_factory=list)

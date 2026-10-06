@@ -883,12 +883,31 @@ of the record). A field this extract itself tries to write with a matcher
 line of its own is refused; `page` is read-only, the way `document_id` and
 the rest of a page's own shape fields are.
 
-### Failures, not guesses
+### Failures, not guesses -- and absence is still not an error
 
-A subject the patterns cannot read -- no alternative matched, a number
-with no printed unit when more than one is declared, a date the grammar
-cannot resolve, an identifier carrying `@` -- stores **no record**, and a
-failure naming the field and the reason. Failures are how the authoring
+Two different things can happen to a field, and only one of them is a
+failure.
+
+**An alternative never found anywhere on the page is an absence**, the
+same as any fact field nobody wrote a value for: the field is simply left
+out of the record. A weight-only visit -- `Wt: 82 kg` with no height
+anywhere on the page -- produces a `measurement` row with `weight_kg` set
+and no `height_cm`, exactly as D5's `carried forward` height expects: the
+day's record says nothing about height, which is different from saying
+the height is zero or wrong.
+
+**A field whose alternative *was* found, but what followed could not be
+read, is a failure** -- a number with no printed unit when more than one
+is declared, a date the grammar cannot resolve, an identifier carrying
+`@`, a copy whose upstream extract wrote no record on this page at all.
+This kind aborts the **whole record**, not just the field: a record half
+read from a declaration that promised every field a meaning would be a
+guess about which half mattered. If every field on a non-`many` extract
+comes back absent, the result is the same as D4 states for identity: no
+record at all, not an empty one.
+
+Either way the subject stores **no record**, and a failure naming the
+field and the reason -- never a guess. Failures are how the authoring
 loop closes: read them back, hand them with the page's word layer to
 whoever is revising the declaration, and iterate. They are not raised as
 errors, because one bad page must never take the extraction of every

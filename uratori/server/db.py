@@ -173,6 +173,44 @@ create table if not exists document_provenance (
 -- No separate index for (tenant_id, kind, key): the primary key above is a
 -- composite btree on exactly those three columns plus `field`, so a lookup
 -- by record (every field a record holds) already uses it as a prefix scan.
+
+-- `extract` pointers (documents-plan-v3, D4) are NOT a table of their own:
+-- an extract's name is bare, the same name its target `fact` carries, and
+-- no figure, reading, projection or summary may ever be named bare (every
+-- one of those is dotted) -- so the engine's own generic `figure_pointer`
+-- (`EngineStore.pointer`/`set_pointer`, keyed `(tenant_id, name)`) already
+-- has no collision to worry about. `run_pass` (`uratori/server/
+-- extract_pass.py`) reads and writes an extract's pointer through that
+-- same protocol method a figure's pointer uses, and `availability()`
+-- (`uratori/engine/serve.py`) reads it the same way to answer
+-- `behind-deploy` for a figure over a derived kind with a cold extract.
+-- Retirement needs no `source_kind` of its own either: a retired extract's
+-- derived records are just `fact` rows of kind = the extract's own name,
+-- deleted the ordinary way.
+
+-- A subject the patterns could not read (documents-plan-v3, D4): no record
+-- is written, and this is written instead -- `(extract, version, subject,
+-- field, reason)`, pruned whole for an extract whenever its version moves
+-- (an old failure under a retired version explains nothing a current
+-- reader can act on, and keeping it would double-count a page that now
+-- fails for a different reason). `field` is null for a `many by row`
+-- extract's own anchor failure (no row was ever found to fail on a named
+-- field). Replace-set per (tenant, extract, version, subject): a subject
+-- that starts succeeding is removed by the same statement that would have
+-- rewritten it.
+create table if not exists extract_failure (
+  tenant_id text not null,
+  extract   text not null,
+  version   text not null,
+  subject   text not null,
+  field     text,
+  reason    text not null,
+  at        timestamptz not null default now(),
+  primary key (tenant_id, extract, version, subject)
+);
+
+create index if not exists extract_failure_lookup
+  on extract_failure (tenant_id, extract, version);
 """
 
 
@@ -812,11 +850,14 @@ async def tenant_document_shas(pool: asyncpg.Pool[Any], tenant: str) -> list[str
     return [row["sha256"] for row in rows]
 
 
-async def remove_tenant(pool: asyncpg.Pool[Any], tenant: str) -> tuple[int, int, int, int]:
+async def remove_tenant(pool: asyncpg.Pool[Any], tenant: str) -> tuple[int, int, int, int, int]:
     """Every row a tenant owns, gone. Returns (facts, values, documents,
-    provenance) removed, because a destructive route answering only "ok"
-    would be the least useful true thing it could say. The blobs themselves
-    are not this function's job -- it has no `BlobStore` to delete through --
+    provenance, extract_failures) removed, because a destructive route
+    answering only "ok" would be the least useful true thing it could say.
+    Derived facts are counted under `facts` already (they are ordinary
+    `fact` rows); `extract_pointer` carries no count of its own, for the
+    same reason `figure_pointer` never has. The blobs themselves are not
+    this function's job -- it has no `BlobStore` to delete through --
     so a caller that owns documents calls `tenant_document_shas` first and
     unlinks them after this returns."""
     facts = await pool.fetchval("select count(*) from fact where tenant_id = $1", tenant)
@@ -828,6 +869,9 @@ async def remove_tenant(pool: asyncpg.Pool[Any], tenant: str) -> tuple[int, int,
     )
     provenance = await pool.fetchval(
         "select count(*) from document_provenance where tenant_id = $1", tenant
+    )
+    extract_failure_count = await pool.fetchval(
+        "select count(*) from extract_failure where tenant_id = $1", tenant
     )
     for table, column in (
         ("fact", "tenant_id"),
@@ -841,9 +885,16 @@ async def remove_tenant(pool: asyncpg.Pool[Any], tenant: str) -> tuple[int, int,
         ("document", "tenant_id"),
         ("document_page_words", "tenant_id"),
         ("document_provenance", "tenant_id"),
+        ("extract_failure", "tenant_id"),
     ):
         await pool.execute(f"delete from {table} where {column} = $1", tenant)
-    return int(facts or 0), int(values or 0), int(documents or 0), int(provenance or 0)
+    return (
+        int(facts or 0),
+        int(values or 0),
+        int(documents or 0),
+        int(provenance or 0),
+        int(extract_failure_count or 0),
+    )
 
 
 # --------------------------------------------------------------- documents --
@@ -932,3 +983,185 @@ async def document_sha_referenced(
             sha256,
         )
     )
+
+
+# ----------------------------------------------------------------- extract --
+
+
+async def replace_extract_failures(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    extract: str,
+    version: str,
+    failures: Sequence[tuple[str, str | None, str]],
+) -> None:
+    """Replace-set per (tenant, extract, version): every subject named in
+    `failures` is written (or rewritten, if its reason changed), and every
+    OTHER subject this extract/version previously failed is cleared --
+    exactly the subjects this pass actually looked at and found unreadable,
+    never a wider or narrower set. Deliberately not scoped any finer (a
+    whole page's worth of rows is cheap next to the pass that just read
+    every one of that page's words)."""
+    subjects = [subject for subject, _field, _reason in failures]
+    await conn.execute(
+        "delete from extract_failure where tenant_id = $1 and extract = $2 and version = $3 "
+        "and subject = any($4::text[])",
+        tenant,
+        extract,
+        version,
+        subjects,
+    )
+    for subject, field, reason in failures:
+        await conn.execute(
+            "insert into extract_failure (tenant_id, extract, version, subject, field, reason, at) "
+            "values ($1, $2, $3, $4, $5, $6, now())",
+            tenant,
+            extract,
+            version,
+            subject,
+            field,
+            reason,
+        )
+
+
+async def clear_extract_failures(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    extract: str,
+    version: str,
+    subjects: Sequence[str],
+) -> None:
+    """A page's subjects that produced a record this pass: whatever
+    failures they held under this version are stale, cleared without a
+    replacement row."""
+    if not subjects:
+        return
+    await conn.execute(
+        "delete from extract_failure where tenant_id = $1 and extract = $2 and version = $3 "
+        "and subject = any($4::text[])",
+        tenant,
+        extract,
+        version,
+        list(subjects),
+    )
+
+
+async def clear_extract_failures_for_page(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    extract: str,
+    version: str,
+    page_key: str,
+) -> None:
+    """Every failure this extract/version holds under this one page --
+    its own bare key (a non-`many` extract's anchor failure, or a `many`
+    extract's "no row found" page-level failure) and every `#r...` row key
+    -- gone, called when the page itself is retracted (deleted, or simply
+    no longer there to extract)."""
+    await conn.execute(
+        "delete from extract_failure where tenant_id = $1 and extract = $2 and version = $3 "
+        "and (subject = $4 or subject like $5)",
+        tenant,
+        extract,
+        version,
+        page_key,
+        page_key + "#r%",
+    )
+
+
+async def delete_all_extract_failures(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    extract: str,
+) -> None:
+    """Every failure row this extract holds, under any version -- called
+    when the extract itself is retired."""
+    await conn.execute(
+        "delete from extract_failure where tenant_id = $1 and extract = $2", tenant, extract
+    )
+
+
+async def extract_keys_for_page(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    kind: str,
+    page_key: str,
+    *,
+    many: bool,
+) -> list[str]:
+    """Every key currently stored for this extract's kind that belongs to
+    this one page: the page's own key when `many` is false, or every
+    `<page key>#r...` row key when it is true. `#` is `uratori.documents.
+    extract.ROW_SEPARATOR`, duplicated here as a literal rather than
+    imported -- `uratori.documents.extract` imports this module's own
+    sibling `uratori.server.provenance`, and a reverse import would cycle.
+    """
+    if not many:
+        held = await conn.fetchval(
+            "select 1 from fact where tenant_id = $1 and kind = $2 and key = $3",
+            tenant,
+            kind,
+            page_key,
+        )
+        return [page_key] if held else []
+    rows = await conn.fetch(
+        "select key from fact where tenant_id = $1 and kind = $2 and key like $3",
+        tenant,
+        kind,
+        page_key + "#r%",
+    )
+    return [r["key"] for r in rows]
+
+
+async def prune_extract_failures(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    extract: str,
+    current_version: str,
+) -> None:
+    """Every failure row for this extract under any OTHER version, gone --
+    called once the pointer actually moves to `current_version`. An old
+    version's failure explains nothing a reader of today's declaration can
+    act on, and keeping it would double-count a page that now fails (or
+    succeeds) for a different reason entirely."""
+    await conn.execute(
+        "delete from extract_failure where tenant_id = $1 and extract = $2 and version != $3",
+        tenant,
+        extract,
+        current_version,
+    )
+
+
+async def extract_failures(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    extract: str,
+    version: str,
+) -> list[dict[str, Any]]:
+    rows = await conn.fetch(
+        "select subject, field, reason, at from extract_failure "
+        "where tenant_id = $1 and extract = $2 and version = $3 order by subject",
+        tenant,
+        extract,
+        version,
+    )
+    return [dict(r) for r in rows]
+
+
+async def extract_failure_counts(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    version: str,
+    names: Sequence[str],
+) -> dict[str, int]:
+    if not names:
+        return {}
+    rows = await conn.fetch(
+        "select extract, count(*) as n from extract_failure "
+        "where tenant_id = $1 and version = $2 and extract = any($3::text[]) "
+        "group by extract",
+        tenant,
+        version,
+        list(names),
+    )
+    return {r["extract"]: int(r["n"]) for r in rows}

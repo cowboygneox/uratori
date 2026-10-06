@@ -232,6 +232,21 @@ def run_extract(
                 records=(),
                 failures=(ExtractFailure(subject=page_key, field=field_name, reason=reason),),
             )
+        if not body:
+            # Every field was absent -- nothing on this page matched any of
+            # them, which is "no record" (D4: a page with no identity match
+            # produces no `page_identity` record), never a record with
+            # nothing in it.
+            return PageExtractResult(
+                records=(),
+                failures=(
+                    ExtractFailure(
+                        subject=page_key,
+                        field=None,
+                        reason="no alternative matched for any field",
+                    ),
+                ),
+            )
         return PageExtractResult(
             records=(ExtractedRecord(key=page_key, body=body, provenance=tuple(provenance)),),
             failures=(),
@@ -280,6 +295,28 @@ def run_extract(
     return PageExtractResult(records=tuple(records), failures=tuple(failures))
 
 
+class _Absent:
+    """This field's alternative was never found anywhere on the page --
+    "no visit note mentioned it", not "something is wrong with what is
+    here". An absence, like any fact field's: the record is still written,
+    just without this one, the same as a host write that said nothing
+    about a field it does not know. A weight-only visit producing a
+    `measurement` row with no `height_cm` is this, and it is exactly what
+    lets D5's `carried forward` height do its job.
+
+    Distinct from a hard failure (the alternative *was* found, but what
+    followed could not be read: no number, no printed unit when more than
+    one is declared, an unresolvable date, an identifier carrying `@`) --
+    those abort the whole record, because a half-read record is a guess
+    about which half mattered. A copy with no upstream record is a hard
+    failure too (D4: "filing a measurement under nobody is worse than
+    filing nothing"), never an absence.
+    """
+
+
+_ABSENT = _Absent()
+
+
 def _match_record(
     fields: Sequence[ExtractField],
     *,
@@ -289,10 +326,11 @@ def _match_record(
     derived_provenance_on_page: Mapping[str, Sequence[ProvenanceRow]],
     page_key: str,
 ) -> tuple[dict[str, Value], list[ProvenanceRow], tuple[str, str] | None]:
-    """Every field of one record, short-circuiting on the first failure: a
-    record this extract cannot fully read is not written at all (D4) --
-    there is no declared notion of an optional field, so a half-matched
-    record would be a guess about which half mattered."""
+    """Every field of one record. A field whose alternative was never
+    found is simply left out (`_Absent`); any other failure -- found but
+    unreadable, or a copy with nothing to copy -- aborts the whole record,
+    because that is a guess about which half of it mattered, not a claim
+    the page never made."""
     body: dict[str, Value] = {}
     provenance: list[ProvenanceRow] = []
     for field in fields:
@@ -304,6 +342,8 @@ def _match_record(
             derived_provenance_on_page=derived_provenance_on_page,
             page_key=page_key,
         )
+        if isinstance(outcome, _Absent):
+            continue
         if isinstance(outcome, str):
             return {}, [], (field.name, outcome)
         value, row = outcome
@@ -321,11 +361,13 @@ def _match_field(
     derived_on_page: Mapping[str, Mapping[str, Any]],
     derived_provenance_on_page: Mapping[str, Sequence[ProvenanceRow]],
     page_key: str,
-) -> tuple[Value, ProvenanceRow | None] | str:
+) -> tuple[Value, ProvenanceRow | None] | _Absent | str:
     matcher = field.matcher
 
     if isinstance(matcher, NumberAfter):
         found = _scan_lines(lines, lambda lw: _number_after_on_line(matcher, lw))
+        if found == "no alternative matched":
+            return _ABSENT
         if isinstance(found, str):
             return found
         value, cited, printed = found
@@ -333,6 +375,8 @@ def _match_field(
 
     if isinstance(matcher, DateAfter):
         found = _scan_lines(lines, lambda lw: _date_after_on_line(matcher, lw))
+        if found == "no alternative matched":
+            return _ABSENT
         if isinstance(found, str):
             return found
         value, cited, printed = found
@@ -340,6 +384,8 @@ def _match_field(
 
     if isinstance(matcher, TextAfter):
         found = _scan_lines(lines, lambda lw: _text_after_on_line(matcher, lw))
+        if found == "no alternative matched":
+            return _ABSENT
         if isinstance(found, str):
             return found
         value, cited, printed = found
@@ -456,17 +502,27 @@ def _scan_lines(
     attempt: Callable[[list[Word]], tuple[Value, list[Word], str] | str],
 ) -> tuple[Value, list[Word], str] | str:
     """Try every line in reading order; the first line whose attempt
-    succeeds wins. The last failure reason is reported if none does -- more
-    forgiving than refusing at the first line an alternative merely appears
-    on, which matters on a page where a label repeats (a header and a
-    flowsheet row) and only one occurrence is well-formed."""
-    reason = "no alternative matched"
+    succeeds wins. More forgiving than refusing at the first line an
+    alternative merely appears on, which matters on a page where a label
+    repeats (a header and a flowsheet row) and only one occurrence is
+    well-formed.
+
+    A line where the alternative was found but what followed could not be
+    read outranks a later line where it was not found at all: "no
+    alternative matched" must mean *never found anywhere*, because the
+    caller reads exactly that string to tell an absent field (fine; see
+    `_Absent`) apart from a broken one (a hard failure) -- and a page
+    where the label happens to repeat, broken once and absent elsewhere,
+    must report the break.
+    """
+    broken: str | None = None
     for line_idx in sorted(lines):
         result = attempt(lines[line_idx])
         if not isinstance(result, str):
             return result
-        reason = result
-    return reason
+        if result != "no alternative matched" and broken is None:
+            broken = result
+    return broken if broken is not None else "no alternative matched"
 
 
 def _normalize(token: str) -> str:
