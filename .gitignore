@@ -9,3 +9,7 @@ dist/
 
 # The NFL example downloads season CSVs beside its loader.
 examples/nfl/data/
+
+# generate.py / generate_population.py write their synthetic PDFs here when
+# run directly, for looking at by hand -- load.py never reads this directory.
+examples/records/data/

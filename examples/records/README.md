@@ -16,7 +16,8 @@ anywhere in this directory.
 | `schema.json` | Empty -- the world is declared in `definitions.fig`, same as the NFL example's. |
 | `definitions.fig` | The facts (a document, its pages, the identity and classification extracted from them, a reading of vitals), the extracts that read them, the three figures that turn vitals into a BMI series, and a second reader (`audit`) over every page. |
 | `generate.py` | Writes the synthetic bundle: three PDFs, deterministic, fixed dates. |
-| `load.py` | The host: teaches the engine, pushes the `patient` roster, uploads the bundle, prints the trace below. |
+| `generate_population.py` | Writes a twelve-patient population: one PDF per patient, deterministic, 2023-2025 -- see "Population sample" below. |
+| `load.py` | The host: teaches the engine, pushes the `patient` roster, uploads the bundle, prints the trace below. `--population` loads the twelve-patient bundle instead. |
 | `author.py` | The authoring aid -- reads the failures route and asks Claude to propose the alternatives a declaration is missing. Never run by the server. |
 
 ## Run it
@@ -163,11 +164,135 @@ than rewrites. It never writes a definition or a fact itself, and the
 engine never runs a model at its own run time -- only here, while someone
 is authoring.
 
+## Population sample
+
+`generate.py`'s bundle makes one engine trace legible. `generate_population.py`
+makes the *population* case legible instead: twelve invented patients, each
+their own PDF, uploaded one file per patient -- which is the point, over
+one upload carrying several.
+
+```bash
+python examples/records/load.py --base http://localhost:8080 --population
+```
+
+| # | name | MRN | age | sex | cadence | template(s) | trend | quirk |
+|---|---|---|---|---|---|---|---|---|
+| 1 | Odalys Ferreira | 600001 | 69 | F | frequent (18 monthly) | A | steady loss | rotated page, a plain OCR page that reads fine, an OCR-*degraded* page that fails outright, 2 labs, 1 discharge, **receives patient 10's misfiled page** |
+| 2 | Marcus Oyelaran | 600002 | 64 | M | frequent (18 monthly) | A -> C (visit 13) | steady gain | last 3 visits merged into one flowsheet, 1 lab, 1 discharge, fax cover at front |
+| 3 | Agnes Toumaschat | 600003 | 42 | F | routine (11, ~100d) | B | stable | height measured twice; one rotated page |
+| 4 | Desmond Okoronkwo | 600004 | 77 | M | routine (11, ~95d) | A -> B (visit 6) | steady gain | 1 lab, fax cover at front |
+| 5 | Priya Nandakumar | 600005 | 35 | F | routine (11, ~100d) | C | steady loss | 1 plain OCR page -- Tesseract merges "WEIGHT" into the number and the weight is quietly absent that day |
+| 6 | Lucien Belanger | 600006 | 24 | M | routine (11, ~90d) | A | stable | 1 lab, "Body-Wt:" spelling-miss *extra* page |
+| 7 | Beatrix Olumide | 600007 | 61 | F | routine (11, ~95d) | B | steady gain | **never measures height** -- BMI absent, stated |
+| 8 | Tobias Lindqvist | 600008 | 29 | M | routine (11, ~90d) | C -> A (visit 6) | noisy | height measured twice; 2 visits merged into one flowsheet; 1 discharge |
+| 9 | Soraya Ibarra | 600009 | 19 | F | routine (11, ~85d) | A | steady gain | 1 plain OCR page that also fails ("Wt" survives, "57.4kg" doesn't parse); unitless-weight *failure* page (extra) |
+| 10 | Hugo Castellanos | 600010 | 82 | M | sparse (2) | B | n/a | visit 2's header prints patient 1's MRN -- a misfiled page, not this patient's |
+| 11 | Wren Abimbola | 600011 | 50 | F | sparse (1) | C | n/a | single visit |
+| 12 | Felix Dzhaparidze | 600012 | 31 | M | sparse (1, year 3 only) | A | n/a | single visit, 2025 only |
+
+Three clinic templates cover every spelling and unit `measurement` declares:
+`Wt: <n> kg` / `Ht: <n> cm` (A), `Weight (lb): <n> lb` / `Height: <n> ft <n> in`
+(B), `WEIGHT <n> kg` / `HEIGHT <n> in` (C). Patients 2, 4 and 8 switch
+template mid-chart, the way a real clinic's charting system changeover
+shows up on paper.
+
+Only two of the four roster quirks land on `measurement`'s own failures
+route as an `ExtractFailure` -- the unitless weight and the OCR-degraded
+page, both a value *found but unreadable*. The spelling miss is never
+*found* at all, so it is a quiet absence, same as a weight-only visit's
+missing height; the misfiled page reads and copies cleanly, just under
+the wrong patient -- not a failure, the risk D4's page-level identity
+model accepts in exchange for never trusting a filename. Running this
+bundle against a real Tesseract added a third, unplanned failure of its
+own: patient 9's plain (non-degraded) OCR page fails too, while patient
+5's otherwise-identical plain OCR page fails silently instead. All three
+are pinned in `tests/test_records_population.py` against whatever this
+environment's Tesseract actually produces.
+
+Running `load.py --population` against a fresh tenant prints this (the
+BMI trace is patient 4's: weight read from a `Weight (lb):` page after her
+template switch, height carried forward from her very first, `Wt:`/`Ht:`
+visit two years earlier):
+
+```
+engine dev at http://localhost:8099
+library loaded: 3 extracts, 3 figures
+
+pushing the patient roster (12 patients)
+uploading patient-600001.pdf (20408 bytes) ...
+  -> id 46b89f225cd4703e, 22 page(s), written=1
+uploading patient-600002.pdf (10830 bytes) ...
+  -> id 3125d0850d4c3580, 19 page(s), written=1
+uploading patient-600003.pdf (6432 bytes) ...
+  -> id a246cca74cd4bede, 11 page(s), written=1
+uploading patient-600004.pdf (7749 bytes) ...
+  -> id aeb78d932702dc30, 13 page(s), written=1
+uploading patient-600005.pdf (11693 bytes) ...
+  -> id 6966c19618b282dc, 11 page(s), written=1
+uploading patient-600006.pdf (7638 bytes) ...
+  -> id 065ab99afab19841, 13 page(s), written=1
+uploading patient-600007.pdf (6776 bytes) ...
+  -> id f27c40ab10bed3ad, 11 page(s), written=1
+uploading patient-600008.pdf (6703 bytes) ...
+  -> id 4e6c60da70b040b4, 11 page(s), written=1
+uploading patient-600009.pdf (11731 bytes) ...
+  -> id eaaff19fd56e24d9, 12 page(s), written=1
+uploading patient-600010.pdf (1988 bytes) ...
+  -> id a481907e61941fa6, 2 page(s), written=1
+uploading patient-600011.pdf (1438 bytes) ...
+  -> id fac6dbcf9890189f, 1 page(s), written=1
+uploading patient-600012.pdf (1430 bytes) ...
+  -> id ed7cd4b058da6ab9, 1 page(s), written=1
+
+patient.bmi for 600004 (days with a weight on record):
+  600004@2023-03-01: 28.7
+  ...
+  600004@2024-12-25: 29.7
+  ...
+  600004@2025-10-06: 30.2
+
+evidence for patient.weight?subject=600004@2024-12-25:
+  field weight_kg: page aeb78d932702dc30/p0009, printed '217.1553283 lb', 2 box(es)
+
+evidence for patient.height?subject=600004@2024-12-25:
+  field height_cm: page aeb78d932702dc30/p0002, printed '182 cm', 2 box(es)
+
+failures for measurement:
+  46b89f225cd4703e/p0022 field=measured_at: no alternative matched anywhere on the page
+  eaaff19fd56e24d9/p0007#r1 field=weight_kg: no number followed the matched text
+  eaaff19fd56e24d9/p0012#r1 field=weight_kg: a number with no printed unit, and more than one unit is declared
+
+population (12 patients):
+  mrn      visits pages measured bmi n latest bmi failures
+  600001       19    22       19    19       24.2        1
+  600002       18    19       18    18       29.0        0
+  600003       11    11       11    11       26.3        0
+  600004       11    13       11    11       30.2        0
+  600005       11    11       10    10       23.0        0
+  600006       12    13       11    11       25.8        0
+  600007       11    11       11     0     absent        0
+  600008       11    11       11    11       22.9        0
+  600009       12    12       10    10       23.0        2
+  600010        2     2        1     1       26.4        0
+  600011        1     1        1     1       24.5        0
+  600012        1     1        1     1       22.8        0
+
+loaded. Try:
+  http://localhost:8099/ui/  (tenant "records")
+```
+
+`measured` is weighed days actually on record; `bmi n` is non-null BMI
+days (patient 7's is `0`, `absent`, never `0.0`); `failures` is how many
+of `measurement`'s own failures cite a page from that patient's own
+file -- patient 1's one is the OCR-degraded page, patient 9's two are the
+unitless weight and her own plain OCR page's failure.
+
 ## What is synthetic
 
-Every name, medical record number, date and vitals reading in
-`generate.py` is invented for this example alone. `A_VISIT1_DATE` is
-chosen to sit comfortably inside `carried forward`'s own ten-year
-ceiling (`docs/language.md`, "On-change data") as measured from when this
-was written -- a worked example that outlives that margin needs its dates
+Every name, medical record number, date and vitals reading in either
+`generate.py` or `generate_population.py` is invented for this example
+alone. `A_VISIT1_DATE` and every population visit date are chosen to sit
+comfortably inside `carried forward`'s own ten-year ceiling
+(`docs/language.md`, "On-change data") as measured from when this was
+written -- a worked example that outlives that margin needs its dates
 moved forward, not a different design.

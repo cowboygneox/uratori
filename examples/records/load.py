@@ -30,6 +30,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent))
 import generate  # type: ignore[import-not-found]
+import generate_population  # type: ignore[import-not-found]
 
 HERE = Path(__file__).parent
 Record = dict[str, Any]
@@ -128,11 +129,101 @@ def print_bmi_trace(client: Client, tenant: str, patient: str, day: str) -> None
                 )
 
 
+def run_population(client: Client, tenant: str) -> None:
+    """`--population`: the twelve-patient bundle (`generate_population.py`)
+    instead of `generate.py`'s two-chart one -- one upload per patient,
+    which is the point this mode exists to show. Still ends on
+    `print_bmi_trace` for one chosen patient (600004's own carried-
+    forward story, across her template switch), same as the default
+    mode, plus a population-wide table `examples/records/README.md`
+    pastes."""
+    population = generate_population.build_population()
+
+    print(f"\npushing the patient roster ({len(population.patients)} patients)")
+    client.call(
+        "POST",
+        f"/tenants/{tenant}/facts",
+        {"writes": {"patient": population.patients}},
+    )
+
+    document_ids: dict[str, str] = {}
+    document_pages: dict[str, int] = {}
+    for filename, data in population.documents.items():
+        print(f"uploading {filename} ({len(data)} bytes) ...")
+        upload = client.upload(f"/tenants/{tenant}/documents/medical_record", filename, data)
+        print(f"  -> id {upload['id']}, {upload['pages']} page(s), written={upload['written']}")
+        document_ids[filename] = upload["id"]
+        document_pages[filename] = upload["pages"]
+
+    print_bmi_trace(client, tenant, "600004", "2024-12-25")
+
+    failures = client.call("GET", f"/tenants/{tenant}/extracts/measurement/failures")["failures"]
+    print("\nfailures for measurement:")
+    for failure in failures:
+        print(f"  {failure['subject']} field={failure['field']}: {failure['reason']}")
+
+    print_population_table(client, tenant, document_ids, document_pages)
+
+    print(f"\nloaded. Try:\n  {client.base}/ui/  (tenant \"{tenant}\")")
+
+
+def print_population_table(
+    client: Client,
+    tenant: str,
+    document_ids: dict[str, str],
+    document_pages: dict[str, int],
+) -> None:
+    """Per patient: how many clinical visits the roster declares for them
+    (`generate_population.Visit`s that are not an administrative page --
+    a lab, a discharge summary or a fax cover never reaches `measurement`
+    at all, since `page_class` never classifies one as vitals), how many
+    pages their own file holds, how many of those visits actually landed
+    a weight, their BMI series length and latest value (both "0, absent"
+    rather than a zero for the one patient `patient.height` never carries
+    anything for), and how many of `measurement`'s own failures cite a
+    page from their own file."""
+    weight = client.call("GET", f"/tenants/{tenant}/results/patient.weight")["subjects"]
+    bmi = client.call("GET", f"/tenants/{tenant}/results/patient.bmi")["subjects"]
+    failures = client.call("GET", f"/tenants/{tenant}/extracts/measurement/failures")["failures"]
+
+    print(f"\npopulation ({len(generate_population.ROSTER)} patients):")
+    header = f"  {'mrn':<8} {'visits':>6} {'pages':>5} {'measured':>8} {'bmi n':>5} {'latest bmi':>10} {'failures':>8}"
+    print(header)
+    for patient in generate_population.ROSTER:
+        filename = f"patient-{patient.mrn}.pdf"
+        document_id = document_ids.get(filename, "")
+        pages = document_pages.get(filename, 0)
+        clinical_visits = sum(
+            1 for v in patient.visits if v.kind not in ("lab", "discharge", "fax_cover")
+        )
+        measured = sum(
+            1
+            for s in weight
+            if s["id"].startswith(f"{patient.mrn}@") and s["value"] is not None
+        )
+        bmi_rows = [
+            s for s in bmi if s["id"].startswith(f"{patient.mrn}@") and s["value"] is not None
+        ]
+        bmi_rows.sort(key=lambda s: s["id"])
+        latest = bmi_rows[-1]["display"] if bmi_rows else "absent"
+        own_failures = sum(1 for f in failures if f["page_key"].startswith(f"{document_id}/"))
+        print(
+            f"  {patient.mrn:<8} {clinical_visits:>6} {pages:>5} {measured:>8} "
+            f"{len(bmi_rows):>5} {latest:>10} {own_failures:>8}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default="http://localhost:8080")
     parser.add_argument("--tenant", default="records")
     parser.add_argument("--token", default=os.environ.get("URATORI_TOKEN"))
+    parser.add_argument(
+        "--population",
+        action="store_true",
+        help="load the twelve-patient population (generate_population.py) "
+        "instead of the two-chart bundle (generate.py)",
+    )
     arguments = parser.parse_args()
 
     client = Client(arguments.base, arguments.token)
@@ -145,6 +236,10 @@ def main() -> None:
         f"library loaded: {len(library['extracts'])} extracts, "
         f"{len(library['figures'])} figures"
     )
+
+    if arguments.population:
+        run_population(client, arguments.tenant)
+        return
 
     bundle = generate.build_bundle()
 
