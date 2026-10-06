@@ -50,6 +50,7 @@ def as_json(library: Library) -> dict[str, Any]:
         "projections": [_plain(p) for p in library.projections],
         "summaries": [_plain(p) for p in library.summaries],
         "bundles": [_plain(p) for p in library.bundles],
+        "extracts": {k: _plain(v) for k, v in library.extracts.items()},
         "source": library.source,
     }
 

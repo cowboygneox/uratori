@@ -40,14 +40,19 @@ from .ast import (
     Coord,
     Count,
     CountDecl,
+    DateAfter,
     DaysBetween,
     Decl,
     DeclaredUnit,
     Document,
     DurationMeasure,
+    ExtractDecl,
+    ExtractField,
+    ExtractMatcher,
     Extreme,
     FactDecl,
     FactField,
+    FieldCopy,
     FieldDecl,
     FieldMeasure,
     FigureDecl,
@@ -64,6 +69,7 @@ from .ast import (
     MomentMeasure,
     NamedSet,
     Number,
+    NumberAfter,
     Part,
     Pick,
     ProjectDecl,
@@ -85,11 +91,14 @@ from .ast import (
     Sum,
     SummariseDecl,
     Text,
+    TextAfter,
     Through,
     TotalDecl,
     Truncation,
     ValueDecl,
     WindowedSource,
+    WordLadder,
+    WordRung,
     Zone,
 )
 from .lex import SyntaxError_, Token, lex, prose_above
@@ -144,6 +153,7 @@ _RENDERED: dict[type, str] = {
     ProjectDecl: "projection",
     SummariseDecl: "summary",
     BundleDecl: "bundle",
+    ExtractDecl: "extract",
 }
 
 
@@ -155,9 +165,14 @@ def _explained(decl: Decl, lines: list[str]) -> Decl:
     came to check are not buried in prose. The lexer strips comments, so this
     reads the raw lines; the declaration's own line number says where to look.
 
-    The five rendered kinds are refused without one: each is served to a
+    The six rendered kinds are refused without one: each is served to a
     reader, and an unexplained number on screen is the thing this language
-    exists to prevent. A fact is refused too -- it is the schema a reader
+    exists to prevent. (`extract` joins them for the same reason a fact
+    does, below: its records are served on the Facts tab exactly like a
+    host's own, and a derived kind nobody can read dead-ends the trace a
+    reader is making exactly where a document extract is supposed to
+    explain itself -- "the identifier printed in its header", not a bare
+    field name.) A fact is refused too -- it is the schema a reader
     tracing a number lands on, and a schema nobody can read dead-ends the
     trace exactly where it was meant to bottom out. Its fields may carry a
     run of their own, at the field's indent, attached the same way.
@@ -174,7 +189,9 @@ def _explained(decl: Decl, lines: list[str]) -> Decl:
                 0,
             )
         return replace(decl, doc=prose, fields=_field_docs(decl.fields, lines))
-    if not isinstance(decl, (FigureDecl, ReadingDecl, ProjectDecl, SummariseDecl, BundleDecl)):
+    if not isinstance(
+        decl, (FigureDecl, ReadingDecl, ProjectDecl, SummariseDecl, BundleDecl, ExtractDecl)
+    ):
         return decl
     what = _RENDERED[type(decl)]
     prose = prose_above(lines, decl.line)
@@ -310,7 +327,7 @@ class _Parser:
             if tok.kind != "name":
                 raise self._error(
                     'expected "fact", "group", "filter", "measure", "figure", "reading", '
-                    f'"projection", "summarise" or "bundle", got {self._describe()}'
+                    f'"projection", "summarise", "bundle" or "extract", got {self._describe()}'
                 )
             if tok.value == "fact":
                 doc.decls.append(self._fact())
@@ -328,6 +345,8 @@ class _Parser:
                 doc.decls.append(self._summarise())
             elif tok.value == "bundle":
                 doc.decls.append(self._bundle())
+            elif tok.value == "extract":
+                doc.decls.append(self._extract())
             # The keyword was `project` for one release, which read as an
             # imperative -- "project this record" -- where every other keyword
             # here names the thing being declared. Named rather than silently
@@ -354,7 +373,7 @@ class _Parser:
             else:
                 raise self._error(
                     'expected "fact", "group", "filter", "measure", "figure", "reading", '
-                    f'"projection", "summarise" or "bundle", got {self._describe()}'
+                    f'"projection", "summarise", "bundle" or "extract", got {self._describe()}'
                 )
             self._skip_newlines()
         return doc
@@ -563,6 +582,208 @@ class _Parser:
         if not children:  # pragma: no cover - the lexer yields no empty indent
             raise self._error(f"{word} {name}: declares nothing.", line)
         return FactField(name=name, many=many, children=tuple(children), line=line)
+
+    # ----------------------------------------------------------- extract --
+
+    _DEFAULT_MANY_CEILING = 50
+    """The ceiling `many by row`'s zero-padded row keys pad to when the
+    definition writes no `up to <N>` of its own -- generous for a flowsheet
+    (three rows is typical) and small enough that the padded width
+    (`#r01`..`#r50`) stays readable on a record page."""
+
+    def _extract(self) -> ExtractDecl:
+        line = self._peek().line
+        self._keyword("extract")
+        name = self._name("an extract name, e.g. measurement -- the fact kind it produces")
+        if "." in name:
+            raise self._error(
+                f'"{name}" cannot be an extract name: an extract is named bare, after '
+                "the fact kind it produces, exactly like the fact itself.",
+                line,
+            )
+        if not self._at_word("from"):
+            raise self._error(
+                f'expected "from" after the extract name -- `extract {name} from '
+                f"<page kind>:`, got {self._describe()}"
+            )
+        self._next()
+        source = self._name("the page fact kind this extract reads")
+        self._punct(":")
+        self._end_of_line()
+        self._expect("indent", "an indented block after the extract kind")
+
+        over: SetExpr | None = None
+        many = False
+        many_up_to: int | None = None
+        fields: list[ExtractField] = []
+        seen: set[str] = set()
+
+        while not self._is("dedent") and not self._is("eof"):
+            if self._at_word("over"):
+                over_line = self._peek().line
+                if over is not None:
+                    raise self._error('"over" is written once.', over_line)
+                self._next()
+                over = self._set_expr()
+                self._end_of_line()
+            elif self._at_word("many"):
+                many_line = self._peek().line
+                if many:
+                    raise self._error('"many by row" is written once.', many_line)
+                self._next()
+                self._keyword("by")
+                self._keyword("row")
+                many = True
+                many_up_to = self._DEFAULT_MANY_CEILING
+                if self._at_word("up"):
+                    self._next()
+                    self._keyword("to")
+                    tok = self._peek()
+                    if tok.kind != "number":
+                        raise self._error(
+                            f'expected a number after "up to", got {self._describe()}'
+                        )
+                    many_up_to = int(float(self._next().value))
+                    if many_up_to < 1:
+                        raise self._error(
+                            "a many-by-row ceiling must be at least 1.", many_line
+                        )
+                self._end_of_line()
+            else:
+                fields.append(self._extract_field(seen))
+            self._skip_newlines()
+        self._expect("dedent", "the end of the extract block")
+
+        if not fields:
+            raise self._error(
+                f"extract {name} has no fields, so it would produce records with "
+                "nothing but a key.",
+                line,
+            )
+        return ExtractDecl(
+            name=name,
+            source=source,
+            over=over,
+            many=many,
+            many_up_to=many_up_to,
+            fields=tuple(fields),
+            doc="",
+            line=line,
+        )
+
+    def _extract_field(self, seen: set[str]) -> ExtractField:
+        line = self._peek().line
+        fname = self._name("a field, e.g. weight_kg = number after any of [...]")
+        if fname in seen:
+            raise self._error(f'extract field "{fname}" is declared twice.', line)
+        seen.add(fname)
+        if not self._at_op("="):
+            raise self._error(f'expected "=" after "{fname}", got {self._describe()}')
+        self._next()
+        matcher = self._extract_matcher(fname)
+        return ExtractField(name=fname, matcher=matcher, line=line)
+
+    def _extract_matcher(self, fname: str) -> ExtractMatcher:
+        if self._is("string"):
+            return self._word_ladder()
+        if self._at_word("number"):
+            self._next()
+            self._keyword("after")
+            self._keyword("any")
+            self._keyword("of")
+            alternatives = self._string_list()
+            units: tuple[str, ...] = ()
+            if self._at_word("in"):
+                self._next()
+                units = self._unit_list()
+            self._end_of_line()
+            return NumberAfter(alternatives=alternatives, units=units)
+        if self._at_word("date"):
+            self._next()
+            self._keyword("after")
+            self._keyword("any")
+            self._keyword("of")
+            alternatives = self._string_list()
+            self._end_of_line()
+            return DateAfter(alternatives=alternatives)
+        if self._at_word("text"):
+            self._next()
+            self._keyword("after")
+            self._keyword("any")
+            self._keyword("of")
+            alternatives = self._string_list()
+            self._end_of_line()
+            return TextAfter(alternatives=alternatives)
+        # The one remaining shape: a copy of another extract's field,
+        # `<extract>.<field>` -- the lexer already reads a dotted path as one
+        # name token (`_NAME_PART` includes "."), the same way a figure name
+        # does.
+        line = self._peek().line
+        name = self._name(
+            f'a matcher for "{fname}" -- "number after ...", "date after ...", '
+            '"text after ...", a quoted word (a classification ladder), or '
+            "another extract's field"
+        )
+        if "." not in name:
+            raise self._error(
+                f'"{name}" is not a matcher and not a dotted field: a copy is written '
+                f"`{fname} = <extract>.<field>`.",
+                line,
+            )
+        extract_name, _, field_name = name.partition(".")
+        self._end_of_line()
+        return FieldCopy(extract=extract_name, field=field_name)
+
+    def _word_rung(self) -> WordRung:
+        line = self._peek().line
+        word = self._string("a classification word, e.g. \"vitals\"")
+        self._keyword("if")
+        self._keyword("page")
+        self._keyword("contains")
+        self._keyword("any")
+        self._keyword("of")
+        alternatives = self._string_list("a phrase the page may contain")
+        return WordRung(word=word, alternatives=alternatives, line=line)
+
+    def _word_ladder(self) -> WordLadder:
+        rungs = [self._word_rung()]
+        self._end_of_line()
+        otherwise: str | None = None
+        while True:
+            self._skip_newlines()
+            if self._is("string"):
+                rungs.append(self._word_rung())
+                self._end_of_line()
+                continue
+            if self._at_word("otherwise"):
+                self._next()
+                otherwise = self._string(
+                    "the word this field holds when nothing above matched"
+                )
+                self._end_of_line()
+            break
+        return WordLadder(rungs=tuple(rungs), otherwise=otherwise)
+
+    def _string_list(self, what: str = "a quoted alternative") -> tuple[str, ...]:
+        self._punct("[")
+        items: list[str] = []
+        if not self._at_op("]"):
+            items.append(self._string(what))
+            while self._at_op(","):
+                self._next()
+                items.append(self._string(what))
+        line = self._peek().line
+        self._punct("]")
+        if not items:
+            raise self._error('"any of" needs at least one alternative.', line)
+        return tuple(items)
+
+    def _unit_list(self) -> tuple[str, ...]:
+        units = [self._name("a unit, e.g. kg")]
+        while self._at_word("or"):
+            self._next()
+            units.append(self._name("a unit"))
+        return tuple(units)
 
     # ------------------------------------------------------------- index --
 

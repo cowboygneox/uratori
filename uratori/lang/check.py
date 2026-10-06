@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Literal, NoReturn, assert_never
 
+from ..documents.units import DATE_GRAMMAR_VERSION, MATCHER_VERSION, UNIT_TABLE, UNIT_TABLE_VERSION
 from ..schema import Schema
 from ..windows import (
     WindowSpec,
@@ -43,12 +44,16 @@ from .ast import (
     Condition,
     Coord,
     Count,
+    DateAfter,
     DaysBetween,
     Decl,
     DurationMeasure,
+    ExtractDecl,
+    ExtractField,
     Extreme,
     FactDecl,
     FactField,
+    FieldCopy,
     FieldDecl,
     FieldMeasure,
     FieldPick,
@@ -66,6 +71,7 @@ from .ast import (
     MeasureUnit,
     MomentMeasure,
     Number,
+    NumberAfter,
     Part,
     Pick,
     ProjectDecl,
@@ -82,7 +88,9 @@ from .ast import (
     Sum,
     SummariseDecl,
     Text,
+    TextAfter,
     ValueDecl,
+    WordLadder,
 )
 from .hash import version_of
 from .lex import DefinitionError
@@ -94,6 +102,7 @@ from .plan import (
     CompiledFactField,
     CompiledIndex,
     CompiledMeasure,
+    ExtractPlan,
     FigurePlan,
     Library,
     ProjectPlan,
@@ -150,11 +159,19 @@ class _Checker:
         self.projections: list[ProjectPlan] = []
         self.summaries: list[SummarisePlan] = []
         self.bundles: list[BundlePlan] = []
+        self.extracts: dict[str, ExtractPlan] = {}
         self._names: dict[str, str] = {}
         self._page_of: dict[str, str] = {}
         """document fact kind -> its one page fact kind, filled while facts
         are checked so a second page kind for the same document is refused
         the moment it is seen."""
+        self._extract_sources: dict[str, tuple[str, bool]] = {}
+        """extract target kind -> (source page kind, many), filled by a
+        lightweight pre-scan before indexes are checked -- `_id_spaces`
+        needs to know which kinds are derived (and whether `many`) to
+        verify a `keyed as` claim over one instead of trusting it (D4.3),
+        and the pre-scan runs before the full extract pass below needs
+        `self.indexes` to check `over`."""
 
     # --------------------------------------------------------------- run --
 
@@ -180,11 +197,19 @@ class _Checker:
                     "because pages are where provenance points.",
                     d.line,
                 )
+        # Extracts, lightweight pre-scan: target/source/many only, so
+        # `_id_spaces` below can verify a `keyed as` claim over a derived
+        # kind instead of trusting it (D4.3). The full extract check -- which
+        # needs `self.indexes` to validate `over` -- runs after indexes.
+        for d in self._decls:
+            if isinstance(d, ExtractDecl):
+                self._extract_prescan(d)
         self._world()
         self._id_spaces()
         for d in self._decls:
             if isinstance(d, IndexDecl):
                 self._index(d)
+        self._extracts()
         for d in self._decls:
             if isinstance(d, (DurationMeasure, FieldMeasure, MomentMeasure)):
                 self._measure(d)
@@ -217,6 +242,7 @@ class _Checker:
             source=self._source,
             facts=self.facts,
             bundles=tuple(self.bundles),
+            extracts=self.extracts,
         )
 
     def _claim(self, name: str, what: str, line: int) -> None:
@@ -415,6 +441,27 @@ class _Checker:
                 continue
             word = _decl_word(d.spec)
             self._fact_kind(d.keyed_as, f"{word} {d.name} is keyed as", d.line)
+            # A derived kind's `keyed as` claim is *verified*, not trusted
+            # (D4.3): the extract that produces it already says whose ids
+            # its records use.
+            extract_source = self._extract_sources.get(d.kind)
+            if extract_source is not None:
+                source_kind, many = extract_source
+                if many:
+                    raise CheckError(
+                        f'{word} {d.name} says {d.kind} is keyed as "{d.keyed_as}", but '
+                        f"{d.kind} is produced by a `many by row` extract: its records "
+                        'key "<page key>#r001", not the page\'s own id, so there is no '
+                        "single id space to claim.",
+                        d.line,
+                    )
+                if d.keyed_as != source_kind:
+                    raise CheckError(
+                        f'{word} {d.name} says {d.kind} is keyed as "{d.keyed_as}", but '
+                        f"{d.kind} is produced by an extract whose records are keyed by "
+                        f'their source\'s own id, "{source_kind}" -- not "{d.keyed_as}".',
+                        d.line,
+                    )
             held = claimed.get(d.kind)
             if held is not None and held[0] != d.keyed_as:
                 raise CheckError(
@@ -424,6 +471,336 @@ class _Checker:
                 )
             claimed[d.kind] = (d.keyed_as, d.line)
         self._keyed: dict[str, str] = {k: v[0] for k, v in claimed.items()}
+
+    # ------------------------------------------------------------ extract --
+
+    def _extract_prescan(self, d: ExtractDecl) -> None:
+        """Target, source and `many`, resolved before anything else needs
+        to know which kinds are derived (D4.3's `keyed as` verification,
+        then `over`'s own "non-`many` derived kind of the same source" rule).
+        The full check -- matcher types, `over`, the version hash -- runs
+        later, once `self.indexes` and every other extract's own plan exist.
+        """
+        target = self.facts.get(d.name)
+        if target is None:
+            raise CheckError(
+                f'extract {d.name} names no fact: declare `fact {d.name}: ...` so '
+                "there is a shape for its records to verify against.",
+                d.line,
+            )
+        if target.shape is not None:
+            raise CheckError(
+                f'extract {d.name} targets "{d.name}", which is declared "as '
+                f'{target.shape}" -- a document or page kind is server-authored '
+                "structure, not a pattern read off a page.",
+                d.line,
+            )
+        if d.name in self._extract_sources:
+            raise CheckError(
+                f"fact {d.name} is already produced by another extract. A derived "
+                "kind may not be the target of two extracts.",
+                d.line,
+            )
+        source = self.facts.get(d.source)
+        if source is None:
+            raise CheckError(
+                f'extract {d.name} reads "{d.source}", which is not a fact kind. '
+                f'Those are: {", ".join(sorted(self.facts)) or "none"}.',
+                d.line,
+            )
+        if source.shape != "page":
+            raise CheckError(
+                f'extract {d.name} reads "{d.source}", and {d.source} is not '
+                'declared "as page of" a document kind -- an extract reads one '
+                "page at a time.",
+                d.line,
+            )
+        if d.many and not any(
+            isinstance(f.matcher, (NumberAfter, DateAfter, TextAfter)) for f in d.fields
+        ):
+            raise CheckError(
+                f"extract {d.name} is `many by row`, and no field reads the page's "
+                "own words (`number after`, `date after` or `text after`) to anchor "
+                "a row to a line -- a `many` extract needs at least one.",
+                d.line,
+            )
+        self._extract_sources[d.name] = (d.source, d.many)
+
+    def _extracts(self) -> None:
+        """Every extract, in copy-dependency order -- a field that copies
+        another extract's field needs that extract already fully checked
+        (its fields, for the copied type; its version, for the hash). A
+        cycle in the copy graph is refused rather than silently broken by
+        declaration order."""
+        decls: dict[str, ExtractDecl] = {
+            d.name: d for d in self._decls if isinstance(d, ExtractDecl)
+        }
+        order: list[str] = []
+        done: set[str] = set()
+
+        def visit(name: str, chain: tuple[str, ...]) -> None:
+            if name in done or name not in decls:
+                return
+            if name in chain:
+                path = " -> ".join((*chain, name))
+                raise CheckError(
+                    f"extract {name} copies from itself through {path}: copies "
+                    "form a DAG, and a cycle is refused.",
+                    decls[name].line,
+                )
+            for field in decls[name].fields:
+                if isinstance(field.matcher, FieldCopy):
+                    visit(field.matcher.extract, (*chain, name))
+            done.add(name)
+            order.append(name)
+
+        for name in decls:
+            visit(name, ())
+        for name in order:
+            self._extract(decls[name])
+
+    def _extract(self, d: ExtractDecl) -> None:
+        target = self.facts[d.name]
+        declared = {f.name: f for f in target.fields}
+
+        if d.over is not None:
+            self._check_extract_over(d, d.over)
+
+        if "page" in declared and declared["page"].type != "text":
+            held_type = declared["page"].type
+            raise CheckError(
+                f'fact {d.name} declares "page" as '
+                f'{"a nested record" if held_type is None else held_type}, and the '
+                "built-in `page` field (the source page's own key, set by the "
+                "engine) is text.",
+                d.line,
+            )
+
+        copies: list[str] = []
+        fields_hash: list[object] = []
+        for field in d.fields:
+            if field.name == "page":
+                raise CheckError(
+                    f'extract {d.name} may not write "page": it is a built-in '
+                    "field, set by the engine to the source page's own key, never "
+                    "by a matcher.",
+                    field.line,
+                )
+            decl_field = declared.get(field.name)
+            if decl_field is None:
+                raise CheckError(
+                    f'extract {d.name} writes "{field.name}", which fact {d.name} '
+                    f'does not declare. Declared: '
+                    f'{", ".join(sorted(declared)) or "nothing"}.',
+                    field.line,
+                )
+            if decl_field.type is None:
+                raise CheckError(
+                    f'extract {d.name} writes "{field.name}", and fact {d.name} '
+                    "declares it as a nested record -- an extract may only write "
+                    "scalar fields.",
+                    field.line,
+                )
+            matcher_kind, matcher_hash = self._check_extract_matcher(
+                d, field, decl_field, copies
+            )
+            fields_hash.append(
+                {"name": field.name, "kind": matcher_kind, "matcher": matcher_hash}
+            )
+
+        copy_versions = sorted({self.extracts[c].version for c in copies})
+        version = version_of(
+            {
+                "target": d.name,
+                "source": d.source,
+                "over": _set_hash(d.over) if d.over is not None else None,
+                "many": d.many,
+                "many_up_to": d.many_up_to,
+                "fields": fields_hash,
+                "copies": copy_versions,
+                "matcher_version": MATCHER_VERSION,
+                "unit_table_version": UNIT_TABLE_VERSION,
+                "date_grammar_version": DATE_GRAMMAR_VERSION,
+            }
+        )
+        self.extracts[d.name] = ExtractPlan(
+            name=d.name,
+            source=d.source,
+            over=d.over,
+            many=d.many,
+            many_up_to=d.many_up_to,
+            fields=d.fields,
+            copies=tuple(sorted(set(copies))),
+            doc=d.doc,
+            version=version,
+        )
+
+    def _check_extract_over(self, d: ExtractDecl, expr: SetExpr) -> None:
+        if isinstance(expr, SetOp):
+            self._check_extract_over(d, expr.left)
+            self._check_extract_over(d, expr.right)
+            return
+        if isinstance(expr, SetRef):
+            raise CheckError(
+                f'extract {d.name}\'s `over` names "{expr.name}", which is not a '
+                "group or filter: an extract has no `depends` block to define a "
+                "set in.",
+                expr.line,
+            )
+        if isinstance(expr, SetIndex):
+            if not isinstance(expr.bucket, BucketAll):
+                raise CheckError(
+                    f"extract {d.name}'s `over {expr.index}` is scoped to a "
+                    "subject -- an extract runs per page, not per subject.",
+                    expr.line,
+                )
+            index = self.indexes.get(expr.index)
+            if index is None:
+                raise CheckError(
+                    f'extract {d.name}\'s `over` names "{expr.index}", which is '
+                    "not a declared group or filter.",
+                    expr.line,
+                )
+            if not isinstance(index.spec, (ByPredicate, ByPresence)):
+                raise CheckError(
+                    f"extract {d.name}'s `over {expr.index}` is a group, not a "
+                    "filter: `over` takes declared predicate and presence filters "
+                    "only.",
+                    expr.line,
+                )
+            same_source = index.kind == d.source or self._extract_sources.get(
+                index.kind
+            ) == (d.source, False)
+            if not same_source:
+                raise CheckError(
+                    f'extract {d.name}\'s `over {expr.index}` reads '
+                    f'"{index.kind}", which is neither "{d.source}" nor a '
+                    f"non-`many` extract of it.",
+                    expr.line,
+                )
+            return
+        assert_never(expr)
+
+    def _check_extract_matcher(
+        self,
+        d: ExtractDecl,
+        field: ExtractField,
+        decl_field: CompiledFactField,
+        copies: list[str],
+    ) -> tuple[str, object]:
+        matcher = field.matcher
+        if isinstance(matcher, NumberAfter):
+            if decl_field.type != "number":
+                raise CheckError(
+                    f'extract {d.name}.{field.name} reads a number, and fact '
+                    f'{d.name} declares "{field.name}" as {decl_field.type}.',
+                    field.line,
+                )
+            for unit in matcher.units:
+                if unit not in UNIT_TABLE:
+                    raise CheckError(
+                        f'extract {d.name}.{field.name} reads "{unit}", which is '
+                        f"not a unit this engine converts. Those are: "
+                        f'{", ".join(sorted(UNIT_TABLE))}.',
+                        field.line,
+                    )
+            return "number_after", {
+                "alternatives": list(matcher.alternatives),
+                "units": list(matcher.units),
+            }
+        if isinstance(matcher, DateAfter):
+            if decl_field.type != "moment":
+                raise CheckError(
+                    f'extract {d.name}.{field.name} reads a date, and fact '
+                    f'{d.name} declares "{field.name}" as {decl_field.type}.',
+                    field.line,
+                )
+            return "date_after", {"alternatives": list(matcher.alternatives)}
+        if isinstance(matcher, TextAfter):
+            if decl_field.type != "text":
+                raise CheckError(
+                    f'extract {d.name}.{field.name} reads text, and fact {d.name} '
+                    f'declares "{field.name}" as {decl_field.type}.',
+                    field.line,
+                )
+            return "text_after", {"alternatives": list(matcher.alternatives)}
+        if isinstance(matcher, WordLadder):
+            if decl_field.type != "text":
+                raise CheckError(
+                    f'extract {d.name}.{field.name} answers a word, and fact '
+                    f'{d.name} declares "{field.name}" as {decl_field.type}.',
+                    field.line,
+                )
+            for rung in matcher.rungs:
+                if not rung.alternatives:
+                    raise CheckError(
+                        f'extract {d.name}.{field.name}: "{rung.word}" has no '
+                        "alternatives.",
+                        rung.line,
+                    )
+            return "word_ladder", {
+                "rungs": [
+                    {"word": r.word, "alternatives": list(r.alternatives)}
+                    for r in matcher.rungs
+                ],
+                "otherwise": matcher.otherwise,
+            }
+        if isinstance(matcher, FieldCopy):
+            source = self._extract_sources.get(matcher.extract)
+            if source is None:
+                raise CheckError(
+                    f'extract {d.name}.{field.name} copies "{matcher.extract}", '
+                    "which is not a declared extract.",
+                    field.line,
+                )
+            copied_source, copied_many = source
+            if copied_many:
+                raise CheckError(
+                    f'extract {d.name}.{field.name} copies "{matcher.extract}", a '
+                    "`many by row` extract -- a copy from a `many` extract is "
+                    "refused: which row?",
+                    field.line,
+                )
+            if copied_source != d.source:
+                raise CheckError(
+                    f'extract {d.name}.{field.name} copies "{matcher.extract}", '
+                    f'which reads "{copied_source}", not "{d.source}" -- a copy '
+                    "is only between extracts of the same source page kind.",
+                    field.line,
+                )
+            copied_plan = self.extracts.get(matcher.extract)
+            if copied_plan is None:  # pragma: no cover - the copy DAG prevents this
+                raise CheckError(
+                    f'extract {d.name}.{field.name} copies "{matcher.extract}", '
+                    "which has not been checked yet.",
+                    field.line,
+                )
+            if matcher.field == "page":
+                copied_type: str | None = "text"
+            else:
+                copied_written = {f.name for f in copied_plan.fields}
+                if matcher.field not in copied_written:
+                    raise CheckError(
+                        f'extract {d.name}.{field.name} copies '
+                        f'"{matcher.extract}.{matcher.field}", which '
+                        f"{matcher.extract} does not write. Written there: "
+                        f'{", ".join(sorted(copied_written)) or "nothing"}.',
+                        field.line,
+                    )
+                copied_fact = self.facts[matcher.extract]
+                copied_type = {f.name: f.type for f in copied_fact.fields}.get(
+                    matcher.field
+                )
+            if copied_type != decl_field.type:
+                raise CheckError(
+                    f'extract {d.name}.{field.name} copies '
+                    f'"{matcher.extract}.{matcher.field}" ({copied_type}), and '
+                    f'fact {d.name} declares "{field.name}" as {decl_field.type}.',
+                    field.line,
+                )
+            copies.append(matcher.extract)
+            return "copy", {"extract": matcher.extract, "field": matcher.field}
+        assert_never(matcher)
 
     # -------------------------------------------------------------- index --
 

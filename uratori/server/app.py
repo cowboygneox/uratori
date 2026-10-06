@@ -1482,7 +1482,7 @@ def _library_out(library: Library) -> LibraryOut:
     call (`declaration_prose`/`declaration_source`), so the HTTP door and the
     library door describe one library identically and cannot drift.
     """
-    from ..lang.ast import ByAge, IndexBy
+    from ..lang.ast import ByAge, IndexBy, SetExpr, SetIndex, SetOp, SetRef
     from ..lang.check import _index_fields
     from ..lang.source import declaration_prose, declaration_source
 
@@ -1496,7 +1496,15 @@ def _library_out(library: Library) -> LibraryOut:
         name: str,
         *,
         declaration: Literal[
-            "group", "filter", "measure", "figure", "reading", "projection", "summary", "bundle"
+            "group",
+            "filter",
+            "measure",
+            "figure",
+            "reading",
+            "projection",
+            "summary",
+            "bundle",
+            "extract",
         ],
         version: str | None = None,
         display: str | None = None,
@@ -1508,6 +1516,9 @@ def _library_out(library: Library) -> LibraryOut:
         across: str | None = None,
         banded: bool | None = None,
         over: str | None = None,
+        many: bool | None = None,
+        many_up_to: int | None = None,
+        copies: list[str] | None = None,
         indexes: list[str] | None = None,
         measures: list[str] | None = None,
         reads: list[str] | None = None,
@@ -1535,6 +1546,9 @@ def _library_out(library: Library) -> LibraryOut:
             across=across,
             banded=banded,
             over=over,
+            many=many,
+            many_up_to=many_up_to,
+            copies=copies or [],
             indexes=indexes or [],
             measures=measures or [],
             reads=reads or [],
@@ -1544,6 +1558,18 @@ def _library_out(library: Library) -> LibraryOut:
             through=through or [],
             members=members or [],
         )
+
+    def set_text(expr: SetExpr) -> str:
+        """An extract's `over`, rendered back to the words it was written
+        with -- the manifest's `source` splits formula from display
+        template, and `over` is neither, so it travels on its own field."""
+        if isinstance(expr, SetOp):
+            symbol = {"intersect": "&", "union": "|", "difference": "-"}[expr.op]
+            return f"{set_text(expr.left)} {symbol} {set_text(expr.right)}"
+        if isinstance(expr, SetRef):
+            return expr.name
+        assert isinstance(expr, SetIndex)
+        return expr.index
 
     def measure_unit(shape: str, unit: str | None) -> str | None:
         # A duration or a moment is its own unit; only a field measure
@@ -1586,6 +1612,20 @@ def _library_out(library: Library) -> LibraryOut:
                 page_of=f.page_of,
             )
             for f in library.facts.values()
+        ],
+        extracts=[
+            described(
+                e.name,
+                declaration="extract",
+                version=e.version,
+                kind=e.source,
+                many=e.many,
+                many_up_to=e.many_up_to,
+                copies=list(e.copies),
+                over=set_text(e.over) if e.over is not None else None,
+                fields=[f.name for f in e.fields],
+            )
+            for e in library.extracts.values()
         ],
         figures=[
             described(

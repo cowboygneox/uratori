@@ -67,7 +67,11 @@ class SyntaxError_(DefinitionError):
 # difference, and `calculate` parses a value expression where it can only be
 # subtraction. Nothing parses both, so nothing has to guess -- which is why `-`
 # did not need a second spelling and a dimension did.
-SINGLE = frozenset(":=&|-+*/(){},<>")
+#
+# `[` and `]` arrived with `extract`'s `any of [...]` list literals -- the
+# one construct in the language that needs a bracketed list rather than a
+# bare name, a string or a parenthesised group.
+SINGLE = frozenset(":=&|-+*/(){}[],<>")
 DOUBLE = ("==", "!=", ">=", "<=")
 
 _NAME_START = re.compile(r"[A-Za-z_]")

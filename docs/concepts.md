@@ -59,6 +59,21 @@ fetches nothing and writes nothing itself -- what changed is which code
 plays the host's role for this one kind of record, not what the engine is
 permitted to do.
 
+**Amendment, for `extract` declarations** ([the definition language](language.md),
+"`extract` -- records read off a page"): an extract reads deterministic
+patterns off a document's page -- never a model at run time -- and the
+records it produces are derived facts, written by the server's documents
+runtime through the same verified upsert a host's own provider code uses,
+in the tenant's lock, **before** the pass that reads them. The engine
+itself still writes no facts at all, source or derived: there is no
+cascade inside it that writes a figure's row for a fact to share, and
+nothing about `execute`/`run` changes to accommodate `extract`. An
+embedding host that constructs the engine directly over a library
+containing an `extract` (or an `audit`) is refused at construction --
+this is a server feature, computed by a pre-pass the facade does not
+have, and compiling it silently into a library the engine runs anyway
+would leave every derived kind permanently empty with no error to see.
+
 Facts carry their own names. Aki's record has a `name` field, and the schema
 (next section) says so; when the engine writes a computed value it freezes
 the subject's rendered name alongside it, so a courier renamed next week does

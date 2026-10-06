@@ -81,7 +81,15 @@ class DeclarationOut(BaseModel):
 
     name: str
     declaration: Literal[
-        "group", "filter", "measure", "figure", "reading", "projection", "summary", "bundle"
+        "group",
+        "filter",
+        "measure",
+        "figure",
+        "reading",
+        "projection",
+        "summary",
+        "bundle",
+        "extract",
     ]
     version: str | None = None
     """The content hash, for the kinds that version (a group, filter or
@@ -115,7 +123,23 @@ class DeclarationOut(BaseModel):
     across: str | None = None
     banded: bool | None = None
     over: str | None = None
-    """The projection a summary counts."""
+    """The projection a summary counts, or an extract's `over` set, written
+    exactly as the definition names it -- both are "the set this
+    declaration is scoped to", described as source text rather than parsed
+    back apart."""
+
+    many: bool | None = None
+    """An extract's `many by row` -- one record per matching text row
+    rather than at most one per page."""
+
+    many_up_to: int | None = None
+    """The ceiling `many by row`'s zero-padded row keys pad to. `None`
+    exactly when `many` is not True."""
+
+    copies: list[str] = Field(default_factory=list)
+    """The other extracts this one copies a field from, on the same page --
+    `page_identity` for `measurement` in the documents example. Distinct
+    from `reads`: a copy is between extracts, never between figures."""
 
     indexes: list[str] = Field(default_factory=list)
     measures: list[str] = Field(default_factory=list)
@@ -215,6 +239,12 @@ class LibraryOut(BaseModel):
     facts: list[FactOut] = Field(default_factory=list)
     """The declared world, when the source declares one. Empty for a
     schema-taught deployment -- the kinds live on `GET /schema` there."""
+
+    extracts: list[DeclarationOut] = Field(default_factory=list)
+    """`extract` declarations -- a server feature (documents-plan-v3, D4),
+    empty wherever none are declared, which is every library before this
+    MR. `Uratori.__init__` refuses to run a library this is non-empty for:
+    the manifest can still describe one, the engine never executes one."""
 
     bundles: list[DeclarationOut] = Field(default_factory=list)
     """The composition stratum: each bundle's members in declaration order,

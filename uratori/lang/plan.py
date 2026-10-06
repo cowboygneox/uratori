@@ -16,6 +16,7 @@ from ..windows import WindowSpec
 from .ast import (
     CalcExpr,
     Condition,
+    ExtractField,
     FieldType,
     FigureUnit,
     FlagDecl,
@@ -103,6 +104,38 @@ class CompiledIndex:
     single bucket that narrows (a predicate, presence or age index)."""
 
     label: str | None = None
+
+
+@dataclass(frozen=True)
+class ExtractPlan:
+    """`extract measurement from medical_record_page:` -- deterministic
+    patterns over one page's word layer, producing records of a declared
+    kind. Computed by the server's documents runtime, never by the engine
+    (`uratori.facade.Uratori` refuses construction over a library that
+    carries one): a derived record is to a figure exactly what a host
+    record is, written through the same verified upsert before the pass
+    that reads it.
+
+    Named like the fact it targets -- `name` is the target kind, the same
+    bare name `fact <name>:` declares, never a second identifier.
+    """
+
+    name: str
+    source: str
+    """The page-shaped fact kind this extract reads."""
+
+    over: SetExpr | None
+    many: bool
+    many_up_to: int | None
+    fields: tuple[ExtractField, ...]
+    copies: tuple[str, ...] = ()
+    """Every other extract this one copies a field from, in the order the
+    runner must have already produced them for the same page -- a
+    topological walk of the copy graph the checker ordered and found
+    acyclic. Hashed through `version`, like a rollup hashes its source's."""
+
+    doc: str = ""
+    version: str = ""
 
 
 @dataclass(frozen=True)
@@ -347,6 +380,14 @@ class Library:
     Defaulted so a library built without them is a library with none, which
     is also what keeps every pre-bundle artifact readable."""
 
+    extracts: dict[str, ExtractPlan] = field(default_factory=dict)
+    """`extract` declarations, keyed by the target fact kind they produce --
+    a server feature (`documents-plan-v3`, D4), computed outside the engine.
+    Empty for a library that declares none, which is every library before
+    this MR and every embedding host's: `Uratori.__init__` refuses to
+    construct over a library where this is non-empty, because the engine
+    has no pass that writes a derived fact and must not pretend it does."""
+
     def figure(self, name: str) -> FigurePlan | None:
         for plan in self.figures:
             if plan.name == name:
@@ -376,3 +417,6 @@ class Library:
             if plan.name == name:
                 return plan
         return None
+
+    def extract(self, name: str) -> ExtractPlan | None:
+        return self.extracts.get(name)

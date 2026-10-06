@@ -536,6 +536,130 @@ figure subscribes to and would therefore be a declaration that lies.
 """
 
 
+# ---------------------------------------------------------------- extract --
+
+
+@dataclass(frozen=True)
+class NumberAfter:
+    """`number after any of ["Weight:", "Wt:"] in kg or lb` -- the first
+    number token following any alternative on the same text line, converted
+    by a fixed table when a unit is printed.
+
+    A field whose declared `units` lists more than one requires the printed
+    unit to decide the conversion: "82" beside no unit is not a weight, and
+    reading one anyway would be a guess wearing a number's clothes. A single
+    declared unit needs none printed -- the field's own unit is the answer,
+    and the printed one (if any) merely confirms it or disagrees, which the
+    runner reports rather than silently trusts.
+    """
+
+    alternatives: tuple[str, ...]
+    units: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DateAfter:
+    """`date after any of ["Date:", "DOS"]` -- the first date-shaped token
+    following any alternative on the same line, read by an explicit grammar
+    (ISO, US `MM/DD/YYYY`, `Mon D, YYYY`). An ambiguous reading is a failure,
+    never a guess."""
+
+    alternatives: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class TextAfter:
+    """`text after any of ["MRN:", "Patient ID:"]` -- the first word-shaped
+    token following any alternative on the same line, trimmed. An identifier,
+    not prose: a value containing `@` or a control character is a failure,
+    never a record (D4.6 -- `@` is the composite-key separator the bucketer
+    refuses, and an unchecked misread would raise in every pass)."""
+
+    alternatives: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class WordRung:
+    """One rung of a classification ladder: `"vitals" if page contains any
+    of ["VITAL SIGNS", "Vitals", "Wt:"]`."""
+
+    word: str
+    alternatives: tuple[str, ...]
+    line: int = 0
+
+
+@dataclass(frozen=True)
+class WordLadder:
+    """A ladder of `if page contains any of [...]` tests, first match wins.
+    `otherwise` is optional -- a page matching no rung simply fails this
+    field, which is the honest answer for a page nobody has taught the
+    extract to classify yet, rather than a guessed default."""
+
+    rungs: tuple[WordRung, ...]
+    otherwise: str | None = None
+
+
+@dataclass(frozen=True)
+class FieldCopy:
+    """`patient_id = page_identity.patient_id` -- this field's value is
+    another extract's field, on the same page. Copies are the one thing an
+    extract's fields may read besides the page's own words, and they form a
+    graph the checker orders: a cycle is refused, and a copy from a `many`
+    extract is refused (which row?)."""
+
+    extract: str
+    field: str
+
+
+ExtractMatcher: TypeAlias = NumberAfter | DateAfter | TextAfter | WordLadder | FieldCopy
+"""How one field of an extract's target record is read. Closed, like every
+other union here -- a new matcher kind (a section-scoped reader, a
+model-backed one) is a new arm here and in `evaluate`/`check`, never a string
+tag the runner switches on."""
+
+
+@dataclass(frozen=True)
+class ExtractField:
+    name: str
+    matcher: ExtractMatcher
+    line: int = 0
+
+
+@dataclass(frozen=True)
+class ExtractDecl:
+    """`extract measurement from medical_record_page:` -- records read off
+    one page, by deterministic pattern, never a scalar and never a model at
+    run time.
+
+    Named bare, after the `fact` kind it produces -- the same name, not a
+    second one: a derived record is to a figure exactly what a host record
+    is, so it is cited as `measurement`, not as some other identifier the
+    extract carries. A fact of that name must already be declared; this
+    declaration is refused if none is, or if another extract already
+    targets it (a derived kind is the target of exactly one extract).
+    """
+
+    name: str
+    """The target fact kind -- bare, shared with `fact <name>:` above it."""
+
+    source: str
+    """The page-shaped fact kind this reads -- `as page of <document kind>`."""
+
+    over: SetExpr | None
+    """`over <set>` -- declared predicate/presence filters only, over the
+    source kind or a non-`many` derived kind of the same source. `None` when
+    every page of the source kind is in scope."""
+
+    many: bool
+    many_up_to: int | None
+    """`many by row [up to N]` -- the ceiling `many`'s zero-padded row keys
+    are padded to. `None` exactly when `many` is False."""
+
+    fields: tuple[ExtractField, ...]
+    doc: str = ""
+    line: int = 0
+
+
 # -------------------------------------------------------------- measure --
 
 MeasureUnit: TypeAlias = Literal["effort", "count", "amount"]
@@ -1989,6 +2113,7 @@ Decl: TypeAlias = (
     | ProjectDecl
     | SummariseDecl
     | BundleDecl
+    | ExtractDecl
 )
 
 

@@ -183,7 +183,7 @@ a real constraint on naming, better stated than discovered.
 
 ---
 
-## Nine declarations
+## Ten declarations
 
 | | Answers | Stores |
 |---|---|---|
@@ -196,6 +196,7 @@ a real constraint on naming, better stated than discovered.
 | `projection` | one row per record | nothing |
 | `summarise` | one row about a whole population | nothing |
 | `bundle` | which answers travel together in one request | nothing -- it composes |
+| `extract` | records read off a page, by deterministic pattern | ordinary facts, of a declared kind |
 
 Only a **figure** stores anything, and that single fact decides which
 constructs may read a clock: a stored value computed from `now` is stale the
@@ -719,6 +720,197 @@ and leaving the clause off, which is the quietest possible way to lose it.
 
 `keyed as` is deliberately **not** in the version hash: it decides what the
 checker permits, not what the arithmetic produces.
+
+---
+
+## `extract` -- records read off a page
+
+A document is a fact (`as document` / `as page of`, above); an `extract`
+*calculates* records from one, by deterministic
+pattern, the way a figure calculates a value -- never a model at run time.
+Where a model earns its keep is at *authoring* time: reading a sample of a
+bundle's pages and listing every spelling of "weight" it sees is exactly
+the kind of judgement a person or a model brings to writing the
+declaration below, once. The engine then runs only what is written, the
+same patterns, the same way, on every page, for ever.
+
+```
+# A patient's uploaded records, one file at a time.
+fact medical_record as document:
+    name title
+    source as text
+
+# One page of one.
+fact medical_record_page as page of medical_record
+
+# Who a page says it is about: the identifier printed in its header.
+fact page_identity:
+    patient_id as text
+
+# Read once, from the printed identifier; every other extract below trusts it.
+extract page_identity from medical_record_page:
+    patient_id = text after any of ["MRN:", "Patient ID:"]
+
+# What kind of page this is.
+fact page_class:
+    type as text
+
+# A page is "vitals" if it says so anywhere on it.
+extract page_class from medical_record_page:
+    type = "vitals" if page contains any of ["VITAL SIGNS", "Vitals", "Wt:"]
+
+filter page_class.vitals keyed as medical_record_page where type == "vitals"
+
+# One set of vitals read off one page.
+fact measurement:
+    patient_id as text
+    page as text
+    measured_at as moment
+    weight_kg as number
+    height_cm as number
+
+# Vitals read off one page: as many rows as the page carries.
+extract measurement from medical_record_page:
+    over page_class.vitals
+    many by row up to 20
+    patient_id  = page_identity.patient_id
+    measured_at = date after any of ["Date:", "Visit date", "DOS"]
+    weight_kg   = number after any of ["Weight:", "Wt:", "Wt", "WEIGHT"] in kg or lb
+    height_cm   = number after any of ["Height:", "Ht:", "Ht", "HEIGHT"] in cm or in or ft_in
+```
+
+(The language has no line continuation -- every field is one line, even a
+long one; the worked prose above wraps for the page, the source does not.)
+
+An extract is named **bare, after the fact kind it produces** -- `extract
+measurement from medical_record_page:` targets a `fact measurement:`
+declared elsewhere in the source, the same name, not a second identifier. A
+derived record is to a figure exactly what a host record is: it is cited
+as `measurement`, grouped, filtered and read like any other fact, and shown
+on the Facts tab beside records a host pushed. Declaring the target fact is
+required -- `extract <name>` with no matching `fact <name>:` is refused --
+and a derived kind may be the target of **exactly one** extract.
+
+### The source, and `over`
+
+`from medical_record_page` names the page-shaped fact kind an extract reads
+one page of (`as page of`, above) -- an extract reads one page at a time,
+never a whole document. `over <set>` narrows which pages: a **declared
+predicate or presence filter** (`== "vitals"`, `is set`), combined with
+`&`, `|`, `-`, over the source kind itself or over a non-`many` extract of
+the *same* source -- never a group, and never `older than`, because the
+runner evaluates `over` fresh on one page's own records, before anything
+has landed, and a bucket diff does not exist yet to read. `over
+page_class.vitals` above is exactly this: `page_class` is itself an extract
+over `medical_record_page`, so a page is classified and then, in the same
+pass, gated into (or out of) `measurement`.
+
+### The matchers
+
+- **`number after any of [...]`**, optionally followed by **`in <unit> or
+  <unit>...`**: the first number token following any alternative, on the
+  same text line, converted by a fixed table (`lb` -> `kg`, `in`/`ft_in` ->
+  `cm`). A field whose declared `units` lists more than one requires a
+  printed unit to decide the conversion -- "82" beside no unit is not a
+  weight, and reading one anyway would be a guess wearing a number's
+  clothes; that page is a failure, not a guess. A single declared unit
+  needs none printed -- the field's own unit is the answer.
+- **`date after any of [...]`**: the first date-shaped token following any
+  alternative, on the same line, by an explicit grammar (ISO `2024-03-02`,
+  US `03/04/2024`, `Mar 4, 2024`). A day/month reading the grammar cannot
+  resolve (`03/04/2024` with nothing to disambiguate) is a failure, never
+  a guess at which one is meant.
+- **`text after any of [...]`**: the first word-shaped token following any
+  alternative, trimmed. An identifier, not prose: a value carrying `@`
+  (the composite-key separator the bucketer itself refuses) or a control
+  character is a failure, never a record -- unchecked, one OCR misread
+  would raise in every pass for the tenant.
+- **`"<word>" if page contains any of [...]`**, chained into a ladder (one
+  rung per line, `otherwise "<word>"` optional): first match wins, searched
+  over the whole page rather than one line -- this is what `page_class`
+  above is. A page matching no rung and no `otherwise` simply fails this
+  field; the honest answer for a page nobody has taught the extract to
+  classify yet is "not read", never a guessed default.
+- **`<field> = <other extract>.<field>`**: a copy of another extract's
+  field, read off the *same page*. Copies are the one thing an extract may
+  read besides the page's own words. They form a graph the checker orders
+  -- a cycle is refused, and a copy from a `many` extract is refused
+  (which row?) -- and an extract hashes the versions of every extract it
+  copies from, the way a rollup hashes its source's, so a changed identity
+  matcher re-extracts everything that copies it. `patient_id` is not
+  declared with its own matcher anywhere in `measurement` above; it is
+  read once, by `page_identity`, and carried by every extract that trusts
+  it.
+
+Every matcher's alternatives and (for `number after`) units are hashed
+into the extract's version, along with a `MATCHER_VERSION` constant (the
+tokenisation, line grouping and reading order behind all of them) and the
+versions of the fixed conversion table and date grammar -- so "the same
+version over the same word layer produces the same records, byte for
+byte" is actually true, and a change to *how* a line is read forks a
+version exactly as a change to *what* it looks for does. The `#` prose
+above the declaration is never hashed, like everywhere else.
+
+### `many by row`, and keys
+
+Without `many`, an extract produces **at most one record per page**, from
+the first match of its first `after`-matched field -- and that record is
+keyed by the **page's own key**, so a group or filter over it may declare
+`keyed as <page kind>`, verified by the checker against the extract that
+actually produced it (refused if the claim is wrong, or if the extract is
+`many`: a `many` extract's rows are not keyed by the page's own id, so
+there is no single id space to share). `page_identity` and `page_class`
+above are both this shape.
+
+`many by row` fans a page into **one record per text row** that matches
+its anchor field -- the first declared field whose matcher reads the
+page's own words (`measured_at` above; a copy or a classification ladder
+can never be the anchor). Every other `after` field is then read *on that
+same line*, which is what makes a three-row flowsheet with a date, a
+weight and a height packed onto each line produce three distinct records
+rather than one. Produced keys are `<page key>#r001`, zero-padded to the
+declared ceiling's width (`up to 20` above pads to `#r01`), because a
+reading that breaks same-instant ties on the key as a string must see row
+2 sort after row 1 and before row 10. `many by row` with no `up to <N>`
+defaults to a ceiling of 20.
+
+### The built-in `page` field
+
+Every extract's target fact may declare a field named `page` -- `page as
+text` -- and every record this extract produces carries it, set by the
+**engine**, never by a matcher: the source page's own key (`page = source`
+of the record). A field this extract itself tries to write with a matcher
+line of its own is refused; `page` is read-only, the way `document_id` and
+the rest of a page's own shape fields are.
+
+### Failures, not guesses
+
+A subject the patterns cannot read -- no alternative matched, a number
+with no printed unit when more than one is declared, a date the grammar
+cannot resolve, an identifier carrying `@` -- stores **no record**, and a
+failure naming the field and the reason. Failures are how the authoring
+loop closes: read them back, hand them with the page's word layer to
+whoever is revising the declaration, and iterate. They are not raised as
+errors, because one bad page must never take the extraction of every
+other page down with it.
+
+### Recomputed like a figure, written like a fact
+
+A page is re-extracted when its own record moves (which includes a
+rebuilt word layer: `words_sha` is part of the page's shape), when a
+record it copies from moved on the same page, or when the extract's own
+pointer is behind the deployed definitions. The produced records are
+written through the same verified boundary a host's own facts pass
+through, before the pass that reads them -- `concepts.md` has the full
+account of who writes what. A fact kind an `extract` produces may not be
+written or deleted directly through the facts route (422, naming the
+extract), the same refusal `as document` / `as page of` kinds carry: a
+derived record's only writer is the extract that computes it.
+
+This is a **server feature**. An embedding host that constructs the
+engine directly over a library containing an `extract` is refused at
+construction, with a sentence saying why, rather than compiling a
+definition the engine has no pass that will ever run.
 
 ---
 
