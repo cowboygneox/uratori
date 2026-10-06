@@ -90,6 +90,7 @@ class DeclarationOut(BaseModel):
         "summary",
         "bundle",
         "extract",
+        "audit",
     ]
     version: str | None = None
     """The content hash, for the kinds that version (a group, filter or
@@ -140,6 +141,13 @@ class DeclarationOut(BaseModel):
     """The other extracts this one copies a field from, on the same page --
     `page_identity` for `measurement` in the documents example. Distinct
     from `reads`: a copy is between extracts, never between figures."""
+
+    verifies: list[str] = Field(default_factory=list)
+    """An audit's `verifies` -- the extracts its reading is judged against.
+    Empty for every other kind."""
+
+    model: str | None = None
+    """An audit's provider model id. `None` for every other kind."""
 
     indexes: list[str] = Field(default_factory=list)
     measures: list[str] = Field(default_factory=list)
@@ -245,6 +253,12 @@ class LibraryOut(BaseModel):
     empty wherever none are declared, which is every library before this
     MR. `Uratori.__init__` refuses to run a library this is non-empty for:
     the manifest can still describe one, the engine never executes one."""
+
+    audits: list[DeclarationOut] = Field(default_factory=list)
+    """`audit` declarations -- a server feature (documents-plan-v3, D6),
+    empty wherever none are declared. `Uratori.__init__` refuses to run a
+    library this is non-empty for, exactly as it does for `extracts`: the
+    manifest can still describe one, the engine never computes one."""
 
     bundles: list[DeclarationOut] = Field(default_factory=list)
     """The composition stratum: each bundle's members in declaration order,

@@ -933,6 +933,212 @@ definition the engine has no pass that will ever run.
 
 ---
 
+## `audit` -- a second, model-backed reader
+
+A matcher can report "no alternative matched"; it cannot say whether the
+page *should* have matched, and a matched value can be the wrong number
+in the right place. An `audit` closes that recall gap with a second
+reader -- a model, read **blind**: told which fields the extracts it
+`verifies` declare (name, type, unit, the `#` prose), never what the
+extract found and never its alternatives.
+
+```
+# A patient's uploaded records, one file at a time.
+fact medical_record as document:
+    name title
+    source as text
+
+# One page of one.
+fact medical_record_page as page of medical_record
+
+# Who a page says it is about: the identifier printed in its header.
+fact page_identity:
+    patient_id as text
+
+# Read once, from the printed identifier.
+extract page_identity from medical_record_page:
+    patient_id = text after any of ["MRN:", "Patient ID:"]
+
+# One set of vitals read off one page.
+fact measurement:
+    patient_id as text
+    page as text
+    measured_at as moment
+    weight_kg as number
+    height_cm as number
+
+# Vitals read off one page.
+extract measurement from medical_record_page:
+    patient_id  = page_identity.patient_id
+    measured_at = date after any of ["Date:", "Visit date", "DOS"]
+    weight_kg   = number after any of ["Weight:", "Wt:", "Wt", "WEIGHT"] in kg or lb
+    height_cm   = number after any of ["Height:", "Ht:", "Ht", "HEIGHT"] in cm or in or ft_in
+
+# A second reader over the vitals on each page.
+audit medical_record_page.vitals_audit:
+    verifies page_identity, measurement
+    model "claude-opus-5-5"
+    read:
+        document = medical_record.title
+    context "Weights on this clinic's flowsheets are in pounds unless marked. This is {document}."
+    display "{medical_record_page} {value}"
+```
+
+Named like a figure -- `<page kind>.<name>`, claimed in the one namespace
+every rendered declaration shares -- never like an extract, which
+deliberately borrows the name of the fact it produces: an audit produces
+no fact at all.
+
+### The reading is taken once; the verdict is judged every pass
+
+This split is the whole of why a model may run once per page while the
+answer is never stale. For each page in `verifies`' scope, once per
+*auditor version*, the model answers, per verified field, the word ids it
+read the value from, "not on this page", or "cannot read". That reading is
+stored -- prompt as sent, raw response, parsed answer, the word layer's own
+`words_sha` -- and re-taken only for a new page, a new auditor version, or
+a rebuilt word layer.
+
+The **verdict** is pure code, run every pass a page's derived rows move:
+each reader answer is parsed from the words it cited by the same matcher
+code an extract uses, and compared against the extract's current record.
+The stored word is one of:
+
+| word | means |
+|---|---|
+| `agrees` | the reader found the same value the extract did |
+| `disagrees` | the reader found a different value, or found no trace of one the extract has |
+| `missed` | the reader found a value no record carries |
+| `absent` | neither the reader nor the extract found one |
+| `unreadable` | the reader said it could not read the field |
+| `unaudited` | no reading exists yet for this page at this auditor version |
+
+A page's value is the worst of its fields'
+(`disagrees > missed > unreadable > absent > agrees`). `unaudited` is a
+stated word, never a missing row -- the roster stays complete, and a page
+nobody has read yet is visibly unread rather than silently `agrees`. When
+an extract's declaration changes, every verdict re-judges against the
+*same cached readings* at no model cost; the readings are the authoring
+loop's regression oracle.
+
+### `verifies`, and what a reading may see
+
+`verifies <extract>[, <extract>, ...]` names one or more extracts, all
+reading the same page kind this audit is scoped to -- the common source
+every `read:` binding and the default prompt draw on. An audit scoped to
+a kind that is not declared `as page of` a document is refused: an
+auditor reads one page at a time.
+
+### `read:` -- the one thing a template may say more than the default
+
+The default prompt is built from the verified fields alone (name, type,
+unit, `#` prose) and the page. `context "..."` appends a sentence to it;
+`prompt "..."` replaces it outright -- the two are mutually exclusive.
+Both may interpolate `{name}` only for a name a `read:` block binds, the
+same rule a `flag`'s template follows: an unbound placeholder is refused
+at compile time rather than printing the word `undefined` in front of a
+reader.
+
+A `read:` line, `<name> = <target>`, binds exactly one of three things:
+
+- **Another extract's field on the same page** -- `mrn =
+  page_identity.patient_id` -- for any extract over this page kind
+  **other than** the ones this audit itself `verifies` (a blind reader may
+  not be shown the answer it is being checked against).
+- **A field of the page's own document** -- `document =
+  medical_record.title` above.
+- **Another auditor's verdict on the same page** -- `other =
+  medical_record_page.vitals_audit_sonnet`, naming the other audit by its
+  full name. Two auditors may not read each other, even indirectly -- a
+  cycle is refused -- and in practice a page is read for an audit only
+  after every auditor it reads has a reading on that page.
+
+A figure read (`{patient.height}`) is deliberately not one of the three:
+a page carries no bucket of its own for a reading to anchor a coordinate
+on. That is a follow-up, not this grammar.
+
+### Hashed, and what is deliberately not
+
+The version hashes the template text (`context`/`prompt`, whichever is
+written), the names a `read:` block binds and what each resolves to, the
+model id, and the verified fields' names, types and units. **Not**
+hashed: the *versions* of what a binding reads. Hashing the prose is a
+deliberate exception to "prose does not fork a version" -- here the
+prose is the program, since it is what the model is sent -- but a
+redefined figure, extract or document fact must not force a full
+re-audit just because something it reads moved underneath it; only a
+rewritten template, a different model, or a verified field's own shape
+changing does that.
+
+### Reading a verdict back
+
+A verdict is a word, so the only thing a figure may do with it is compare
+it for equality in a `when` clause -- arithmetic on a word, and a ladder
+that answers a number from one, both stay refused:
+
+```
+# A patient's uploaded records, one file at a time.
+fact medical_record as document:
+    name title
+    source as text
+
+# One page of one.
+fact medical_record_page as page of medical_record
+
+# One set of vitals read off one page.
+fact measurement:
+    patient_id as text
+    page as text
+    measured_at as moment
+    weight_kg as number
+
+# Vitals read off one page.
+extract measurement from medical_record_page:
+    patient_id  = text after any of ["MRN:"]
+    measured_at = date after any of ["Date:"]
+    weight_kg   = number after any of ["Weight:"] in kg
+
+# The first reader.
+audit medical_record_page.vitals_audit:
+    verifies measurement
+    model "claude-opus-5-5"
+    display "{medical_record_page} {value}"
+
+# A second model, over the same extract.
+audit medical_record_page.vitals_audit_sonnet:
+    verifies measurement
+    model "claude-sonnet-5"
+    display "{medical_record_page} {value}"
+
+# A page both second readers agree with.
+figure medical_record_page.vitals_checked:
+    display "{medical_record_page} {value}"
+    calculate:
+        when medical_record_page.vitals_audit != "agrees" then "disputed"
+        when medical_record_page.vitals_audit_sonnet != "agrees" then "disputed"
+        otherwise "clean"
+```
+
+Two auditors combine as two rungs, because there is no `and`. A
+projection may `read:` a verdict the same way it reads a figure, and a
+`summarise` may count it (`count disputed where verdict == "disagrees"`).
+
+### Stored like a figure, computed entirely outside the calculation
+
+An `audit` compiles to a plan with a scope, a version, and unit `level` --
+and no `calculate` at all. The engine never evaluates one: excluded from
+the ordinary recompute, its rows enter only through `accept`, called by
+the server's pass and worker once `judge` has a verdict. A page that is
+deleted takes its audit rows with it on the next pass, exactly as a
+figure's departed subjects do.
+
+This is a **server feature**, like `extract`: an embedding host
+constructing the engine directly over a library containing an `audit` is
+refused at construction, rather than compiling a definition nothing will
+ever write a value for.
+
+---
+
 ## `measure` -- a quantity on one record
 
 ```

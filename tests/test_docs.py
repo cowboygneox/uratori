@@ -37,7 +37,7 @@ DOCUMENTS_GUIDE = ROOT / "docs" / "documents.md"
 FIXTURE = ROOT / "docs" / "language.fixture.fig"
 
 DECLARES = re.compile(
-    r"^(?:fact|group|filter|measure|figure|reading|projection|summarise|bundle|extract)"
+    r"^(?:fact|group|filter|measure|figure|reading|projection|summarise|bundle|extract|audit)"
     r"\s+([a-z_][a-z0-9_.]*)",
     re.M,
 )
@@ -45,7 +45,7 @@ WORLD = Schema(kinds=frozenset())
 
 _BOUNDARY = re.compile(
     r"\n\s*\n(?=#|fact |group |filter |measure |figure |reading |projection "
-    r"|summarise |bundle |extract )"
+    r"|summarise |bundle |extract |audit )"
 )
 
 

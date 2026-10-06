@@ -1574,6 +1574,7 @@ def _library_out(library: Library) -> LibraryOut:
             "summary",
             "bundle",
             "extract",
+            "audit",
         ],
         version: str | None = None,
         display: str | None = None,
@@ -1588,6 +1589,8 @@ def _library_out(library: Library) -> LibraryOut:
         many: bool | None = None,
         many_up_to: int | None = None,
         copies: list[str] | None = None,
+        verifies: list[str] | None = None,
+        model: str | None = None,
         indexes: list[str] | None = None,
         measures: list[str] | None = None,
         reads: list[str] | None = None,
@@ -1600,12 +1603,15 @@ def _library_out(library: Library) -> LibraryOut:
         # Spelled out rather than **kwargs, so pydantic-mypy's init guard
         # reaches every call site: routed through Any, a misspelled field
         # here was silently dropped at runtime and invisible to the checker.
-        # `kind=` only for `extract`: it is the one declaration kind that
-        # may share a name with another (the `fact` it targets, D4), so a
-        # plain name lookup would silently resolve to whichever header
-        # sorts first in the source. Every other kind passes no kind,
-        # exactly as before `extract` existed.
-        source_kind = "extract" if declaration == "extract" else None
+        # `kind=` for `extract` and `audit`: `extract` is the one declaration
+        # kind that may share a name with another (the `fact` it targets,
+        # D4), so a plain name lookup would silently resolve to whichever
+        # header sorts first in the source; `audit` never collides (its own
+        # namespace, D6), but passing it costs nothing and keeps one rule
+        # ("the kinds `_HEADER_BY_KIND` knows, pass their own name") rather
+        # than two. Every other kind passes no kind, exactly as before
+        # `extract` existed.
+        source_kind = declaration if declaration in ("extract", "audit") else None
         return DeclarationOut(
             name=name,
             prose=declaration_prose(library, name, source_kind),
@@ -1624,6 +1630,8 @@ def _library_out(library: Library) -> LibraryOut:
             many=many,
             many_up_to=many_up_to,
             copies=copies or [],
+            verifies=verifies or [],
+            model=model,
             indexes=indexes or [],
             measures=measures or [],
             reads=reads or [],
@@ -1701,6 +1709,20 @@ def _library_out(library: Library) -> LibraryOut:
                 fields=[f.name for f in e.fields],
             )
             for e in library.extracts.values()
+        ],
+        audits=[
+            described(
+                a.name,
+                declaration="audit",
+                version=a.version,
+                display=a.display,
+                unit="level",
+                kind=a.scope,
+                verifies=list(a.verifies),
+                model=a.model,
+                fields=[r.name for r in a.reads],
+            )
+            for a in library.audits.values()
         ],
         figures=[
             described(

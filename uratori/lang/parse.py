@@ -23,6 +23,8 @@ from .ast import (
     AbsenceTest,
     Arith,
     ArithOperator,
+    AuditDecl,
+    AuditReadDecl,
     BucketAll,
     BucketScope,
     BucketStat,
@@ -154,6 +156,7 @@ _RENDERED: dict[type, str] = {
     SummariseDecl: "summary",
     BundleDecl: "bundle",
     ExtractDecl: "extract",
+    AuditDecl: "audit",
 }
 
 
@@ -190,7 +193,16 @@ def _explained(decl: Decl, lines: list[str]) -> Decl:
             )
         return replace(decl, doc=prose, fields=_field_docs(decl.fields, lines))
     if not isinstance(
-        decl, (FigureDecl, ReadingDecl, ProjectDecl, SummariseDecl, BundleDecl, ExtractDecl)
+        decl,
+        (
+            FigureDecl,
+            ReadingDecl,
+            ProjectDecl,
+            SummariseDecl,
+            BundleDecl,
+            ExtractDecl,
+            AuditDecl,
+        ),
     ):
         return decl
     what = _RENDERED[type(decl)]
@@ -327,7 +339,8 @@ class _Parser:
             if tok.kind != "name":
                 raise self._error(
                     'expected "fact", "group", "filter", "measure", "figure", "reading", '
-                    f'"projection", "summarise", "bundle" or "extract", got {self._describe()}'
+                    '"projection", "summarise", "bundle", "extract" or "audit", got '
+                    f"{self._describe()}"
                 )
             if tok.value == "fact":
                 doc.decls.append(self._fact())
@@ -347,6 +360,8 @@ class _Parser:
                 doc.decls.append(self._bundle())
             elif tok.value == "extract":
                 doc.decls.append(self._extract())
+            elif tok.value == "audit":
+                doc.decls.append(self._audit())
             # The keyword was `project` for one release, which read as an
             # imperative -- "project this record" -- where every other keyword
             # here names the thing being declared. Named rather than silently
@@ -373,7 +388,8 @@ class _Parser:
             else:
                 raise self._error(
                     'expected "fact", "group", "filter", "measure", "figure", "reading", '
-                    f'"projection", "summarise", "bundle" or "extract", got {self._describe()}'
+                    '"projection", "summarise", "bundle", "extract" or "audit", got '
+                    f"{self._describe()}"
                 )
             self._skip_newlines()
         return doc
@@ -784,6 +800,127 @@ class _Parser:
             self._next()
             units.append(self._name("a unit"))
         return tuple(units)
+
+    # -------------------------------------------------------------- audit --
+
+    def _audit(self) -> AuditDecl:
+        line = self._peek().line
+        self._keyword("audit")
+        name = self._name("an audit name, e.g. medical_record_page.vitals_audit")
+        self._prefix_of(name, "an audit", line)
+        self._punct(":")
+        self._end_of_line()
+        self._expect("indent", "an indented block after the audit name")
+
+        verifies: list[str] = []
+        model = ""
+        reads: tuple[AuditReadDecl, ...] = ()
+        context: str | None = None
+        prompt: str | None = None
+        display = ""
+        seen: set[str] = set()
+
+        while not self._is("dedent") and not self._is("eof"):
+            word = self._peek().value
+            if word == "verifies":
+                self._once(seen, "verifies", name)
+                self._next()
+                verifies.append(self._name("an extract name, e.g. measurement"))
+                while self._at_op(","):
+                    self._next()
+                    verifies.append(self._name("an extract name"))
+                self._end_of_line()
+            elif word == "model":
+                self._once(seen, "model", name)
+                self._next()
+                model = self._string('the model id, e.g. "claude-opus-5-5"')
+                self._end_of_line()
+            elif word == "read":
+                self._once(seen, "read", name)
+                reads = self._audit_read_block()
+            elif word == "context":
+                self._once(seen, "context", name)
+                self._next()
+                context = self._string("the text to append to the default prompt")
+                self._end_of_line()
+            elif word == "prompt":
+                self._once(seen, "prompt", name)
+                self._next()
+                prompt = self._string("the text that replaces the default prompt")
+                self._end_of_line()
+            elif word == "display":
+                self._once(seen, "display", name)
+                self._next()
+                display = self._string("the display template")
+                self._end_of_line()
+            else:
+                raise self._error(
+                    'expected "verifies", "model", "read", "context", "prompt" or '
+                    f'"display", got {self._describe()}'
+                )
+            self._skip_newlines()
+        self._expect("dedent", "the end of the audit block")
+
+        if not verifies:
+            raise self._error(
+                f"audit {name} verifies nothing: name at least one extract -- "
+                f"`verifies <extract>`.",
+                line,
+            )
+        if not model:
+            raise self._error(
+                f'audit {name} has no model. Write `model "<model id>"`.', line
+            )
+        if context is not None and prompt is not None:
+            raise self._error(
+                f"audit {name} writes both `context` and `prompt`. `context` appends "
+                "to the default prompt; `prompt` replaces it outright -- write one.",
+                line,
+            )
+        if not display:
+            raise self._error(
+                f"audit {name} has no display template. Every verdict is rendered "
+                "somewhere, and an unexplained word on screen is the thing this "
+                "language exists to prevent.",
+                line,
+            )
+        return AuditDecl(
+            name=name,
+            verifies=tuple(verifies),
+            model=model,
+            reads=reads,
+            context=context,
+            prompt=prompt,
+            display=display,
+            doc="",
+            line=line,
+        )
+
+    def _audit_read_block(self) -> tuple[AuditReadDecl, ...]:
+        self._keyword("read")
+        self._punct(":")
+        self._end_of_line()
+        self._expect("indent", "an indented block after read")
+        out: list[AuditReadDecl] = []
+        seen: set[str] = set()
+        while not self._is("dedent") and not self._is("eof"):
+            line = self._peek().line
+            rname = self._name("a name for what this binds")
+            if rname in seen:
+                raise self._error(f'"{rname}" is bound twice in this read block.', line)
+            seen.add(rname)
+            if not self._at_op("="):
+                raise self._error(f'expected "=" after "{rname}", got {self._describe()}')
+            self._next()
+            target = self._name(
+                "a dotted field this audit may read -- <extract>.<field>, "
+                "<document kind>.<field>, or another auditor's full name"
+            )
+            out.append(AuditReadDecl(name=rname, target=target, line=line))
+            self._end_of_line()
+            self._skip_newlines()
+        self._expect("dedent", "the end of the read block")
+        return tuple(out)
 
     # ------------------------------------------------------------- index --
 

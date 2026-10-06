@@ -660,6 +660,62 @@ class ExtractDecl:
     line: int = 0
 
 
+# ---------------------------------------------------------------- audit --
+
+
+@dataclass(frozen=True)
+class AuditReadDecl:
+    """One line of an `audit`'s `read:` block: `document = medical_record.title`.
+
+    Unresolved at parse time -- `target` is a dotted name the checker
+    resolves to exactly one of three shapes (`documents-plan-v3` D6.5): a
+    field of another extract over the same page, a field of the page's
+    document kind, or (the target spelled as a full auditor name) another
+    auditor's verdict on the same page. One grammar production for all
+    three because the lexer already reads a dotted path as a single name
+    token, the same way `extract`'s `FieldCopy` does."""
+
+    name: str
+    target: str
+    line: int = 0
+
+
+@dataclass(frozen=True)
+class AuditDecl:
+    """`audit medical_record_page.vitals_audit:` -- a second, model-backed
+    reader over a page, split into a blind reading (taken once per page per
+    version, by a worker) and a verdict (judged every pass, by code). See
+    `documents-plan-v3` D6.
+
+    Named like a figure -- `<page kind>.<name>`, its own name, claimed in
+    the one namespace every rendered declaration shares -- never like an
+    extract, which borrows the name of the fact it produces: an audit
+    produces no fact at all.
+    """
+
+    name: str
+    verifies: tuple[str, ...]
+    """The extracts (named by their target fact kind) this audit's reading
+    is judged against. At least one, all reading the same page kind this
+    audit is scoped to."""
+
+    model: str
+    """The provider's model id, e.g. `"claude-opus-5-5"` -- opaque to the
+    language, read by the worker alone."""
+
+    reads: tuple[AuditReadDecl, ...] = ()
+    context: str | None = None
+    """Appends to the default prompt (built from the verified fields)."""
+
+    prompt: str | None = None
+    """Replaces the default prompt outright. Mutually exclusive with
+    `context`."""
+
+    display: str = ""
+    doc: str = ""
+    line: int = 0
+
+
 # -------------------------------------------------------------- measure --
 
 MeasureUnit: TypeAlias = Literal["effort", "count", "amount"]
@@ -2114,6 +2170,7 @@ Decl: TypeAlias = (
     | SummariseDecl
     | BundleDecl
     | ExtractDecl
+    | AuditDecl
 )
 
 

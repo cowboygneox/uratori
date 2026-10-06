@@ -73,6 +73,7 @@ _HEADER_BY_KIND = {
     # source and silently serve the wrong one's prose or formula. Every
     # extract call site passes `kind="extract"`.
     "extract": r"^extract\s+{name}\s+from\s+\w+\s*:",
+    "audit": r"^audit\s+{name}\s*:",
 }
 _HEADERS = tuple(_HEADER_BY_KIND.values())
 

@@ -30,6 +30,8 @@ from ..windows import (
 from .ast import (
     SECONDS_PER,
     Arith,
+    AuditDecl,
+    AuditReadDecl,
     BucketAll,
     BucketScope,
     BucketStat,
@@ -96,6 +98,8 @@ from .hash import version_of
 from .lex import DefinitionError
 from .parse import parse
 from .plan import (
+    AuditPlan,
+    AuditReadBinding,
     BundleMemberPlan,
     BundlePlan,
     CompiledFact,
@@ -160,6 +164,7 @@ class _Checker:
         self.summaries: list[SummarisePlan] = []
         self.bundles: list[BundlePlan] = []
         self.extracts: dict[str, ExtractPlan] = {}
+        self.audits: dict[str, AuditPlan] = {}
         self._names: dict[str, str] = {}
         self._page_of: dict[str, str] = {}
         """document fact kind -> its one page fact kind, filled while facts
@@ -210,6 +215,12 @@ class _Checker:
             if isinstance(d, IndexDecl):
                 self._index(d)
         self._extracts()
+        # Audits after extracts (a `verifies`/`read:` target must already be
+        # checked) and in their own dependency order -- a `read:` binding may
+        # name another auditor's verdict, and that auditor must be fully
+        # checked first for the same reason a copying extract needs its
+        # source checked first.
+        self._audits()
         for d in self._decls:
             if isinstance(d, (DurationMeasure, FieldMeasure, MomentMeasure)):
                 self._measure(d)
@@ -243,6 +254,7 @@ class _Checker:
             facts=self.facts,
             bundles=tuple(self.bundles),
             extracts=self.extracts,
+            audits=self.audits,
         )
 
     def _claim(self, name: str, what: str, line: int) -> None:
@@ -802,6 +814,215 @@ class _Checker:
             return "copy", {"extract": matcher.extract, "field": matcher.field}
         assert_never(matcher)
 
+    # --------------------------------------------------------------- audit --
+
+    def _audits(self) -> None:
+        """Every audit, in verdict-dependency order -- a `read:` binding may
+        name another auditor's verdict, and that auditor must be fully
+        checked first (its scope, for the same-page-kind rule; its name, so
+        `_resolve_audit_read` can find it in `self.audits`). A cycle in that
+        graph is refused rather than silently broken by declaration order,
+        the same shape `_extracts`'s copy DAG takes."""
+        decls: dict[str, AuditDecl] = {
+            d.name: d for d in self._decls if isinstance(d, AuditDecl)
+        }
+        order: list[str] = []
+        done: set[str] = set()
+
+        def visit(name: str, chain: tuple[str, ...]) -> None:
+            if name in done or name not in decls:
+                return
+            if name in chain:
+                path = " -> ".join((*chain, name))
+                raise CheckError(
+                    f"audit {name} reads its own verdict through {path}: an "
+                    "auditor may not read, even indirectly, an auditor that "
+                    "reads it.",
+                    decls[name].line,
+                )
+            for r in decls[name].reads:
+                visit(r.target, (*chain, name))
+            done.add(name)
+            order.append(name)
+
+        for name in decls:
+            visit(name, ())
+        for name in order:
+            self._audit(decls[name])
+
+    def _audit(self, d: AuditDecl) -> None:
+        self._claim(d.name, "audit", d.line)
+        scope = d.name.split(".", 1)[0]
+        self._fact_kind(scope, f"audit {d.name} is scoped to", d.line)
+        source_fact = self.facts.get(scope)
+        if source_fact is None or source_fact.shape != "page":
+            raise CheckError(
+                f"audit {d.name} is scoped to {scope}, which is not declared `as "
+                "page of` a document kind. An audit reads one page at a time.",
+                d.line,
+            )
+        doc_kind = next(
+            (dk for dk, pk in self._page_of.items() if pk == scope), None
+        )
+
+        seen_verifies: set[str] = set()
+        verified_fields: list[dict[str, object]] = []
+        for ex_name in d.verifies:
+            if ex_name in seen_verifies:
+                raise CheckError(f"audit {d.name} verifies {ex_name} twice.", d.line)
+            seen_verifies.add(ex_name)
+            extract = self.extracts.get(ex_name)
+            if extract is None:
+                raise CheckError(
+                    f'audit {d.name} verifies "{ex_name}", which is not a declared '
+                    f'extract. Declared: {", ".join(sorted(self.extracts)) or "none"}.',
+                    d.line,
+                )
+            if extract.source != scope:
+                raise CheckError(
+                    f"audit {d.name} verifies {ex_name}, which reads {extract.source} "
+                    f"rather than {scope} -- an audit and the extracts it verifies "
+                    "must read the same page kind.",
+                    d.line,
+                )
+            target = self.facts[ex_name]
+            declared_types = {f.name: f.type for f in target.fields}
+            for ef in extract.fields:
+                units = ef.matcher.units if isinstance(ef.matcher, NumberAfter) else ()
+                verified_fields.append(
+                    {
+                        "extract": ex_name,
+                        "name": ef.name,
+                        "type": declared_types.get(ef.name),
+                        "units": list(units),
+                    }
+                )
+
+        bound: dict[str, str] = {}
+        read_bindings: list[AuditReadBinding] = []
+        for r in d.reads:
+            if r.name in bound:
+                raise CheckError(
+                    f'audit {d.name}\'s read block binds "{r.name}" twice.', r.line
+                )
+            binding = self._resolve_audit_read(d, scope, doc_kind, seen_verifies, r)
+            bound[r.name] = binding.kind
+            read_bindings.append(binding)
+
+        for label, template in (("context", d.context), ("prompt", d.prompt)):
+            if template is None:
+                continue
+            for ref in _placeholders(template):
+                if ref not in bound:
+                    raise CheckError(
+                        f"audit {d.name}'s {label} interpolates {{{ref}}}, which its "
+                        "`read:` block does not bind. A placeholder naming nothing "
+                        "would print the word undefined in front of a reader.",
+                        d.line,
+                    )
+
+        version = version_of(
+            {
+                "scope": scope,
+                "verifies": sorted(d.verifies),
+                "verified_fields": sorted(
+                    verified_fields, key=lambda f: (f["extract"], f["name"])
+                ),
+                "model": d.model,
+                "reads": sorted(
+                    (
+                        {"name": b.name, "kind": b.kind, "source": b.source, "field": b.field}
+                        for b in read_bindings
+                    ),
+                    key=lambda b: b["name"],
+                ),
+                "context": d.context,
+                "prompt": d.prompt,
+            }
+        )
+        self.audits[d.name] = AuditPlan(
+            name=d.name,
+            scope=scope,
+            verifies=tuple(sorted(d.verifies)),
+            model=d.model,
+            reads=tuple(read_bindings),
+            context=d.context,
+            prompt=d.prompt,
+            doc=d.doc,
+            display=d.display,
+            version=version,
+        )
+
+    def _resolve_audit_read(
+        self,
+        d: AuditDecl,
+        scope: str,
+        doc_kind: str | None,
+        verifies: set[str],
+        r: AuditReadDecl,
+    ) -> AuditReadBinding:
+        target = r.target
+        if target in self.audits:
+            other = self.audits[target]
+            if other.scope != scope:
+                raise CheckError(
+                    f"audit {d.name} reads {target}'s verdict, and it audits "
+                    f"{other.scope} rather than {scope} -- a template may only read "
+                    "another auditor's verdict on the same page kind.",
+                    r.line,
+                )
+            return AuditReadBinding(name=r.name, kind="verdict", source=target, field=None)
+
+        prefix, _, field = target.partition(".")
+        if not field:
+            raise CheckError(
+                f'audit {d.name}\'s read block binds "{r.name}" to "{target}", which '
+                "names neither a declared auditor nor a dotted field "
+                "(`<extract>.<field>` or `<document kind>.<field>`).",
+                r.line,
+            )
+        if prefix in self.extracts:
+            if prefix in verifies:
+                raise CheckError(
+                    f"audit {d.name} reads {target} in its `read:` block, but "
+                    f"{prefix} is one of the extracts it verifies -- a blind reader "
+                    "may not be shown the answer it is being checked against.",
+                    r.line,
+                )
+            extract = self.extracts[prefix]
+            if extract.source != scope:
+                raise CheckError(
+                    f"audit {d.name} reads {target}, and {prefix} reads "
+                    f"{extract.source} rather than {scope} -- a template may only "
+                    "read another extract over the same page.",
+                    r.line,
+                )
+            fact = self.facts[prefix]
+            if not any(f.name == field for f in fact.fields):
+                raise CheckError(
+                    f'audit {d.name} reads {target}, and {prefix} declares no field '
+                    f'"{field}". Declared: '
+                    f'{", ".join(sorted(f.name for f in fact.fields)) or "none"}.',
+                    r.line,
+                )
+            return AuditReadBinding(name=r.name, kind="extract_field", source=prefix, field=field)
+        if prefix == doc_kind and doc_kind is not None:
+            fact = self.facts[doc_kind]
+            if not any(f.name == field for f in fact.fields):
+                raise CheckError(
+                    f'audit {d.name} reads {target}, and {doc_kind} declares no field '
+                    f'"{field}". Declared: '
+                    f'{", ".join(sorted(f.name for f in fact.fields)) or "none"}.',
+                    r.line,
+                )
+            return AuditReadBinding(name=r.name, kind="document_field", source=doc_kind, field=field)
+        raise CheckError(
+            f'audit {d.name}\'s read block binds "{r.name}" to "{target}", which names '
+            f'neither a declared auditor, nor a field of an extract over {scope}, nor '
+            f'a field of {doc_kind or "its document kind"}.',
+            r.line,
+        )
+
     # -------------------------------------------------------------- index --
 
     def _index(self, d: IndexDecl) -> None:
@@ -1317,7 +1538,13 @@ class _Checker:
         depth = 0
         for source_name in reads:
             source = _find(self.figures, source_name)
-            assert source is not None  # resolved above, or by `_combines`
+            if source is None:
+                # An `audit`'s verdict (`bind_audit`, above) -- depth 0: it is
+                # not built on any other figure's stored value within the
+                # engine's own cascade, so it contributes none of its own to
+                # this figure's depth, the same as a bare fact field would.
+                assert source_name in self.audits  # resolved by `bind_audit`
+                continue
             depth = max(depth, source.depth + 1)
 
         band, band_reads, band_fields = self._check_band(d, unit, kind, scope, grain)
@@ -2082,6 +2309,24 @@ class _Checker:
         relate.
         """
 
+        def bind_audit(name: str, line: int) -> None:
+            """Register an `audit`'s verdict as a combine binding -- the one
+            other thing a bare dotted name in a calculation may mean, beside
+            a figure. Checked before `bind` even looks at `self.figures`,
+            because `self._claim`'s shared namespace already guarantees the
+            two can never collide: a name in `self.audits` is never also a
+            figure."""
+            source = self.audits[name]
+            if source.scope != scope:
+                raise CheckError(
+                    f"figure {d.name} reads {name}, which audits {source.scope} "
+                    f"rather than {scope}. Different scopes are different id "
+                    "spaces, so every lookup would miss and every subject would "
+                    "read nothing.",
+                    line,
+                )
+            combines.setdefault(name, (name, None))
+
         def bind(name: str, line: int) -> None:
             source = _find(self.figures, name)
             if source is None:
@@ -2178,6 +2423,15 @@ class _Checker:
                 bind_across(e.measure, e.line or d.line)
                 return e
             if isinstance(e, Setting):
+                if e.path in self.audits:
+                    # An audit's verdict -- the one other thing this dotted
+                    # name may mean. Checked first: `_subject_field` would
+                    # otherwise treat `medical_record_page.vitals_audit` as a
+                    # field read on `medical_record_page` and refuse it as
+                    # "not a field of medical_record_page", a confusing
+                    # answer for a name that is in fact a declared audit.
+                    bind_audit(e.path, e.line or d.line)
+                    return Part(name=e.path, line=e.line)
                 if _find(self.figures, e.path) is None:
                     field = self._subject_field(
                         f"figure {d.name}", e.path, scope, e.line or d.line
@@ -2500,7 +2754,19 @@ class _Checker:
                     e.line,
                 )
             source = _find(self.figures, combines[e.name][0])
-            assert source is not None
+            if source is None:
+                # Not a figure -- the one other thing a combine binding may
+                # name is an `audit` (`bind_audit`, above). Always `level`,
+                # never grained: a page carries no sequence of its own.
+                audit = self.audits[combines[e.name][0]]
+                if in_rung:
+                    return "text"
+                raise CheckError(
+                    f"figure {d.name} reads {audit.name}, which stores a word rather than "
+                    "a number. Arithmetic and comparison need a number; compare it in a "
+                    "when clause instead.",
+                    e.line,
+                )
             if source.grain is not None:
                 raise CheckError(
                     f'figure {d.name} reads "{e.name}" bare, and it is one value per '
