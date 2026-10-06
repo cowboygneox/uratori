@@ -252,6 +252,29 @@ async def run_worker_sweep(s: State, world: World, library: Library, provider: A
                 try:
                     if await read_one_page(s, world, library, audit, tenant, page_key, provider):
                         read += 1
+                        await db.clear_audit_read_failure(
+                            s.pool, tenant, audit.name, audit.version, page_key
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # Isolated to this one page (review finding D/F4): a
+                    # provider outage, a bad response, a bug -- none of it
+                    # may abort every other page's turn, for every other
+                    # tenant, for the rest of this sweep. Recorded against
+                    # the page so the declaration page can show a reason,
+                    # the lease is released below either way, and the next
+                    # sweep (or the next poll) simply tries again.
+                    log.warning(
+                        "audit worker failed to read %s/%s/%s: %s",
+                        tenant,
+                        audit.name,
+                        page_key,
+                        exc,
+                    )
+                    await db.record_audit_read_failure(
+                        s.pool, tenant, audit.name, audit.version, page_key, str(exc)
+                    )
                 finally:
                     await db.release_audit_lease(s.pool, tenant, audit.name, audit.version, page_key)
     return read

@@ -868,6 +868,14 @@ async function auditStatusSection(declaration) {
         ? [' (', el('span', { class: 'badge' }, `${status.unaudited} unaudited`), ')']
         : null),
   ];
+  const failedPages = Object.keys(status.read_failures || {});
+  if (failedPages.length) {
+    blocks.push(el('p', { class: 'dim' },
+      el('span', { class: 'badge problem' }, `${failedPages.length} could not be read`), ' — ',
+      failedPages
+        .map((page) => `${page}: ${status.read_failures[page]}`)
+        .join('; ')));
+  }
   if (status.findings.length) {
     blocks.push(el('table', { class: 'ledger' },
       el('tr', {},

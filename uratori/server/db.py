@@ -291,6 +291,21 @@ create table if not exists audit_lease (
 );
 
 create index if not exists audit_lease_expiry on audit_lease (expires_at);
+
+-- One row per (tenant, audit, version, page) the worker last failed to
+-- read -- a provider exception or timeout, isolated to the one page it
+-- happened on (review finding D/F4) rather than left to abort the whole
+-- sweep. Replace-one-row: a later successful read deletes it, so this
+-- table only ever holds a page's *current* failure, never a history.
+create table if not exists audit_read_failure (
+  tenant_id text not null,
+  audit     text not null,
+  version   text not null,
+  page_key  text not null,
+  reason    text not null,
+  at        timestamptz not null default now(),
+  primary key (tenant_id, audit, version, page_key)
+);
 """
 
 
@@ -994,6 +1009,7 @@ async def remove_tenant(
         ("audit_reading", "tenant_id"),
         ("audit_finding", "tenant_id"),
         ("audit_lease", "tenant_id"),
+        ("audit_read_failure", "tenant_id"),
     ):
         await pool.execute(f"delete from {table} where {column} = $1", tenant)
     return (
@@ -1586,6 +1602,55 @@ async def release_audit_lease(
         version,
         page_key,
     )
+
+
+async def record_audit_read_failure(
+    pool: asyncpg.Pool[Any], tenant: str, audit: str, version: str, page_key: str, reason: str
+) -> None:
+    """A provider call for this page raised or timed out -- recorded
+    against the page's reading attempt, never left to abort every other
+    page's turn in the sweep (review finding D/F4). Upsert: the latest
+    attempt's reason is the one that matters."""
+    await pool.execute(
+        "insert into audit_read_failure (tenant_id, audit, version, page_key, reason, at) "
+        "values ($1, $2, $3, $4, $5, now()) "
+        "on conflict (tenant_id, audit, version, page_key) do update set "
+        "reason = excluded.reason, at = excluded.at",
+        tenant,
+        audit,
+        version,
+        page_key,
+        reason,
+    )
+
+
+async def clear_audit_read_failure(
+    pool: asyncpg.Pool[Any], tenant: str, audit: str, version: str, page_key: str
+) -> None:
+    await pool.execute(
+        "delete from audit_read_failure where tenant_id = $1 and audit = $2 and version = $3 "
+        "and page_key = $4",
+        tenant,
+        audit,
+        version,
+        page_key,
+    )
+
+
+async def audit_read_failures(
+    pool: asyncpg.Pool[Any], tenant: str, audit: str, version: str
+) -> dict[str, str]:
+    """Every page this audit's current version last failed to read, with
+    the reason -- the declaration page's own "could not read" list,
+    beside its unaudited backlog."""
+    rows = await pool.fetch(
+        "select page_key, reason from audit_read_failure "
+        "where tenant_id = $1 and audit = $2 and version = $3",
+        tenant,
+        audit,
+        version,
+    )
+    return {str(r["page_key"]): str(r["reason"]) for r in rows}
 
 
 async def audit_verdict_counts(

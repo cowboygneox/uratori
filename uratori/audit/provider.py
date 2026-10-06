@@ -31,6 +31,17 @@ class FieldToRead:
     prose: str
 
 
+class AuditProviderError(Exception):
+    """A provider call failed in a way the worker records against the one
+    page it happened on, rather than an unhandled exception that would
+    abort every other page's turn in the sweep (review finding D/F4). A
+    provider's own `read_page` should raise this (wrapping whatever its
+    SDK or transport raised) instead of letting that raw exception
+    propagate; `uratori.server.audit_worker.run_worker_sweep` catches any
+    exception per page regardless, but a provider that raises this gives
+    the worker a reason worth recording, not just a bare traceback."""
+
+
 @dataclass(frozen=True)
 class AuditProviderReading:
     """What a provider call produced: the raw response (stored verbatim,

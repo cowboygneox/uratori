@@ -129,6 +129,22 @@ async def _upload(http: httpx.AsyncClient, weight_kg: str) -> str:
     return next(iter(pages))
 
 
+async def _upload_another(http: httpx.AsyncClient, weight_kg: str) -> str:
+    """Like `_upload`, but for a tenant that already holds a page -- tracks
+    the diff rather than asserting a total of one."""
+    before = set(await _fact_rows(http, "medical_record_page"))
+    pdf = vitals_pdf(weight_kg)
+    up = await http.post(
+        "/tenants/t1/documents/medical_record",
+        files={"file": ("chart.pdf", pdf, "application/pdf")},
+    )
+    assert up.status_code == 200, up.text
+    after = set(await _fact_rows(http, "medical_record_page"))
+    new_pages = after - before
+    assert len(new_pages) == 1
+    return next(iter(new_pages))
+
+
 async def _audit_value(state: State, page_key: str, audit_version: str) -> object:
     row = await state.pool.fetchrow(
         "select value from figure_value where tenant_id = 't1' and name = $1 "
@@ -257,3 +273,54 @@ async def test_the_reaudit_verb_refuses_an_unknown_audit_name(worker_server: Wor
     http = worker_server.http
     run = await http.post("/tenants/t1/runs", json={"audit": "not_a_real_audit"})
     assert run.status_code == 422, run.text
+
+
+class _OneBadPageProvider:
+    """Raises on one page, reads every other page normally -- finding D
+    (review F4)'s isolation test. Stands in for a real provider raising
+    `anthropic.APIError`/a timeout/a bug on exactly one page, which must
+    not abort every other tenant's and page's turn in the sweep."""
+
+    def __init__(self, fail_page_key: str) -> None:
+        self._fail_page_key = fail_page_key
+        self._fake = FakeAuditProvider()
+
+    async def read_page(self, **kwargs: object) -> object:
+        if kwargs["page_key"] == self._fail_page_key:
+            raise RuntimeError("simulated provider outage")
+        return await self._fake.read_page(**kwargs)  # type: ignore[arg-type]
+
+
+async def test_one_pages_provider_failure_does_not_abort_the_sweep(
+    worker_server: WorkerServer,
+) -> None:
+    """Finding D (review F4): `run_worker_sweep` had a per-page `try/
+    finally` that only released the lease -- nothing caught an exception,
+    so a provider failure on one page propagated out of the whole sweep
+    and every other page, for every other tenant, never got its turn."""
+    http = worker_server.http
+    failing_page = await _upload(http, "82")
+    other_page = await _upload_another(http, "90")
+    audit_version = await _audit_version(http)
+
+    provider = _OneBadPageProvider(failing_page)
+    read = await run_worker_sweep(
+        worker_server.state, worker_server.world, worker_server.world.library, provider
+    )
+
+    assert read == 1
+    assert await _audit_value(worker_server.state, other_page, audit_version) == "agrees"
+    # The failing page's lease was released and it stays `unaudited` --
+    # not silently dropped, not crashing the sweep for the page beside it.
+    assert await _audit_value(worker_server.state, failing_page, audit_version) == "unaudited"
+
+    failures = await db.audit_read_failures(
+        worker_server.state.pool, "t1", "medical_record_page.vitals_audit", audit_version
+    )
+    assert failing_page in failures
+    assert "simulated provider outage" in failures[failing_page]
+
+    leases = await worker_server.state.pool.fetch(
+        "select page_key from audit_lease where tenant_id = 't1'"
+    )
+    assert list(leases) == []

@@ -712,6 +712,11 @@ class AuditStatusOut(BaseModel):
     verdict_counts: dict[str, int] = {}
     unaudited: int = 0
     findings: list[AuditFindingUiOut] = []
+    read_failures: dict[str, str] = {}
+    """Every page the worker's last attempt under this version failed to
+    read, by reason -- a provider outage or a bug isolated to that one
+    page, never a reason the whole backlog goes quiet about (review
+    finding D/F4)."""
 
 
 class FiledOut(BaseModel):
@@ -2373,12 +2378,14 @@ def router(frame_ancestors: str, *, edit: bool = False, documents: bool = False)
                         page_number=resolved.number if resolved else None,
                     )
                 )
+        read_failures = await db.audit_read_failures(s.pool, tenant, name, plan.version)
         return AuditStatusOut(
             audit=name,
             version=plan.version,
             verdict_counts=counts,
             unaudited=counts.get("unaudited", 0),
             findings=findings,
+            read_failures=read_failures,
         )
 
     # ----------------------------------------------------------- activity --

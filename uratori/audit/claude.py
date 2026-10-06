@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, cast
 
 from ..server.words import Word
 from .judge import FieldReading
-from .provider import AuditProviderReading, FieldToRead
+from .provider import AuditProviderError, AuditProviderReading, FieldToRead
 
 if TYPE_CHECKING:
     # Type-checking only: `anthropic` stays an optional, lazily-imported
@@ -37,6 +37,12 @@ if TYPE_CHECKING:
     from anthropic.types import MessageParam
 
 DEFAULT_MAX_TOKENS = 4096
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 60.0
+"""A page is a bounded, low-effort read (module docstring); a request
+with no timeout at all can hang the one worker task reading it far past
+the lease TTL (review finding D/F4) -- this bounds it and lets the
+except below turn the timeout into a recorded failure rather than a
+wedged task."""
 
 _FENCE = re.compile(r"```(?:json)?\s*\n(.*?)```", re.S)
 
@@ -78,12 +84,22 @@ class ClaudeAuditProvider:
         # plain dicts rather than its own TypedDicts -- `cast` here, not a
         # hand-typed reconstruction of `MessageParam`'s content union,
         # which the SDK itself validates at the wire boundary regardless.
-        response = await self._client.messages.create(
-            model=model,
-            max_tokens=self._max_tokens,
-            output_config={"effort": "low"},
-            messages=cast("Iterable[MessageParam]", [{"role": "user", "content": content}]),
-        )
+        #
+        # Wrapped (review finding D/F4): an SDK error (rate limit, auth,
+        # connection) or a timeout must become a failure the worker can
+        # record against this one page, never an unhandled exception that
+        # propagates out of `read_page` and aborts every other page's
+        # turn in the sweep.
+        try:
+            response = await self._client.messages.create(
+                model=model,
+                max_tokens=self._max_tokens,
+                output_config={"effort": "low"},
+                messages=cast("Iterable[MessageParam]", [{"role": "user", "content": content}]),
+                timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            raise AuditProviderError(f"the Claude API call failed: {exc}") from exc
         text = "".join(block.text for block in response.content if block.type == "text")
         return AuditProviderReading(response=text, fields=_parse(text, fields))
 
