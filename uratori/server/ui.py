@@ -134,6 +134,7 @@ DeclarationKind = Literal[
     "summary",
     "bundle",
     "extract",
+    "audit",
 ]
 
 DependencyType = Literal[
@@ -146,6 +147,7 @@ DependencyType = Literal[
     "projection",
     "summary",
     "extract",
+    "audit",
 ]
 
 
@@ -240,6 +242,11 @@ class DeclarationOut(BaseModel):
     """Only for an extract: its target record's fields, each with the
     matcher that reads it -- the table the declaration page draws beside
     the source text."""
+
+    verifies: list[str] = []
+    model: str | None = None
+    """Only for an audit: the extracts it verifies, and the provider model
+    id (documents-plan-v3, D6)."""
 
 
 class WorldOut(BaseModel):
@@ -677,6 +684,36 @@ class ExtractStatusOut(BaseModel):
     failures: list[ExtractFailureUiOut] = []
 
 
+class AuditFindingUiOut(BaseModel):
+    """One disputed field, for the declaration page's own sentence list
+    (documents-plan-v3, D6) -- the unauthenticated twin of `app.py`'s
+    `AuditFindingOut`, with the page resolved to a document viewer link
+    instead of the word layer."""
+
+    page_key: str
+    extract: str
+    field: str
+    verdict: str
+    seen: Any = None
+    extracted: Any = None
+    note: str | None = None
+    document_kind: str | None = None
+    document_id: str | None = None
+    page_number: int | None = None
+
+
+class AuditStatusOut(BaseModel):
+    """The audit declaration page's own tenant data: how many pages hold
+    each verdict word, and the sentence for each `disagrees`/`missed`
+    (documents-plan-v3, D6)."""
+
+    audit: str
+    version: str
+    verdict_counts: dict[str, int] = {}
+    unaudited: int = 0
+    findings: list[AuditFindingUiOut] = []
+
+
 class FiledOut(BaseModel):
     """One grouping's verdict on one record: where it filed it, or that it
     did not take it -- "not a member" is a finding a verification surface
@@ -845,6 +882,41 @@ class CitedFigureOut(BaseModel):
     citation route serves the rest of."""
 
 
+class AboutAuditOut(BaseModel):
+    """One audit scoped to this record's kind, narrowed to this record --
+    its current verdict word (documents-plan-v3, D6). An audit is to this
+    record page what a figure is to `AboutFigureOut`, but it has no
+    `Result` to reuse (it carries no `calculate`, so `serve_figure` has
+    nothing to evaluate): the entry is the one stored word the engine's
+    own value store holds for it, read directly."""
+
+    audit: str
+    verdict: str | None
+    label: str | None = None
+
+
+class CitedAuditOut(BaseModel):
+    """One auditor's finding naming this exact derived record -- "the
+    verdicts citing it" (documents-plan-v3, D6). Read straight off
+    `audit_finding` by its `record` column, never through the figure
+    citation index: a finding already names the record it is about, so
+    there is no reverse-citation walk to make."""
+
+    audit: str
+    page_key: str
+    page_kind: str | None = None
+    """The page's own fact kind -- the auditor's `scope`, never this
+    record's own `kind`: `page_key` names a record of a different kind
+    (the page `extract` read this derived record from), so the record
+    page's "verdicts citing it" link needs a kind to look it up under."""
+
+    field: str
+    verdict: str
+    seen: Any = None
+    extracted: Any = None
+    note: str | None = None
+
+
 class AboutPageOut(BaseModel):
     """This record's row on one projection of its kind, exactly as the page
     serves it. `present: false` under an Ok state is a verdict the definition
@@ -877,6 +949,14 @@ class AboutOut(BaseModel):
     cited: list[CitedFigureOut]
     pages: list[AboutPageOut]
     tiles: list[AboutTileOut]
+
+    audits: list[AboutAuditOut] = []
+    """Every audit scoped to this record's kind, narrowed to this record
+    -- the page record page's "every auditor's verdict" (D6)."""
+
+    cited_audits: list[CitedAuditOut] = []
+    """Every auditor's finding naming this exact record -- the derived
+    record page's "verdicts citing it" (D6)."""
 
 
 class ComputedPageOut(BaseModel):
@@ -1573,6 +1653,8 @@ def router(frame_ancestors: str, *, edit: bool = False, documents: bool = False)
                 cited=[],
                 pages=[],
                 tiles=[],
+                audits=[],
+                cited_audits=[],
             )
 
         store = PostgresEngineStore(s.pool)
@@ -1582,6 +1664,37 @@ def router(frame_ancestors: str, *, edit: bool = False, documents: bool = False)
         # hoursPerDay dial) must be the 409 that names the dial, never a
         # 500 that takes the whole upward half of the page with it.
         try:
+            audits: list[AboutAuditOut] = []
+            for audit in library.audits.values():
+                if audit.scope != kind:
+                    continue
+                stored_audit = await store.value(tenant, audit.name, audit.version, key)
+                audits.append(
+                    AboutAuditOut(
+                        audit=audit.name,
+                        verdict=cast("str | None", stored_audit.value)
+                        if stored_audit is not None
+                        else None,
+                        label=stored_audit.label if stored_audit is not None else None,
+                    )
+                )
+            cited_audit_rows = await db.audit_findings_citing(s.pool, tenant, key)
+            cited_audits = []
+            for r in cited_audit_rows:
+                citing_audit = library.audit(r["audit"])
+                cited_audits.append(
+                    CitedAuditOut(
+                        audit=r["audit"],
+                        page_key=r["page_key"],
+                        page_kind=citing_audit.scope if citing_audit is not None else None,
+                        field=r["field"],
+                        verdict=r["verdict"],
+                        seen=r["seen"],
+                        extracted=r["extracted"],
+                        note=r["note"],
+                    )
+                )
+
             figures: list[AboutFigureOut] = []
             for plan in library.figures:
                 if plan.scope != kind:
@@ -1806,6 +1919,8 @@ def router(frame_ancestors: str, *, edit: bool = False, documents: bool = False)
             cited=cited,
             pages=pages,
             tiles=tiles,
+            audits=audits,
+            cited_audits=cited_audits,
         )
 
     @ui.get(
@@ -2206,6 +2321,57 @@ def router(frame_ancestors: str, *, edit: bool = False, documents: bool = False)
             pages_done=pages_done,
             pages_failed=len(pages_failed),
             failures=failures,
+        )
+
+    # -------------------------------------------------------------- audits --
+
+    @ui.get(
+        "/ui/api/tenants/{tenant}/audits/{name}/status",
+        response_model=AuditStatusOut,
+        include_in_schema=False,
+    )
+    async def audit_status(tenant: str, name: str, request: Request) -> AuditStatusOut:
+        """The audit declaration page's own tenant data: counts per
+        verdict, the `unaudited` backlog, and each `disagrees`/`missed`
+        page as a sentence (documents-plan-v3, D6). The unauthenticated
+        twin of `app.py`'s `GET /tenants/{t}/audits/{name}/findings`, for
+        the same reason `extract_status` is `extract_failures`'s."""
+        s = _state(request)
+        _world, library = ready(s)
+        plan = library.audits.get(name)
+        if plan is None:
+            raise HTTPException(status_code=404, detail=f'no audit named "{name}"')
+        counts = await db.audit_verdict_counts(s.pool, tenant, name, plan.version)
+        disputed = await db.audit_disputed_pages(
+            s.pool, tenant, name, plan.version, ["disagrees", "missed"]
+        )
+        findings: list[AuditFindingUiOut] = []
+        for disputed_page in sorted(disputed):
+            resolved = await resolve_page(s.pool, tenant, library, disputed_page)
+            rows = await db.audit_findings_for_page(s.pool, tenant, name, disputed_page)
+            for row in rows:
+                if row["verdict"] not in ("disagrees", "missed"):
+                    continue
+                findings.append(
+                    AuditFindingUiOut(
+                        page_key=disputed_page,
+                        extract=row["extract"],
+                        field=row["field"],
+                        verdict=row["verdict"],
+                        seen=row["seen"],
+                        extracted=row["extracted"],
+                        note=row["note"],
+                        document_kind=resolved.document_kind if resolved else None,
+                        document_id=resolved.document_id if resolved else None,
+                        page_number=resolved.number if resolved else None,
+                    )
+                )
+        return AuditStatusOut(
+            audit=name,
+            version=plan.version,
+            verdict_counts=counts,
+            unaudited=counts.get("unaudited", 0),
+            findings=findings,
         )
 
     # ----------------------------------------------------------- activity --
@@ -2703,6 +2869,30 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
                 many=extract.many,
                 many_up_to=extract.many_up_to,
                 extract_fields=_extract_field_rows(extract.fields),
+                rests_on=_dedup(edges),
+            )
+        )
+
+    # Audits right after extracts, for the same reason: an audit verifies
+    # one or more extracts, so a reader who just read an extract's page is
+    # reading the next entry for "who checks this". Named like a figure --
+    # own namespace, no collision -- but `kind="audit"` is still passed to
+    # the source/prose lookup for the one rule every kind that can collide
+    # with something follows uniformly (`lang/source.py`).
+    for name, audit in library.audits.items():
+        edges = [Dependency(type="fact", name=audit.scope)]
+        edges += [Dependency(type="extract", name=v) for v in audit.verifies]
+        out.append(
+            DeclarationOut(
+                name=name,
+                kind="audit",
+                version=audit.version,
+                doc=declaration_prose(library, name, "audit"),
+                source=declaration_source(library, name, "audit"),
+                unit="level",
+                fact_kind=audit.scope,
+                verifies=list(audit.verifies),
+                model=audit.model,
                 rests_on=_dedup(edges),
             )
         )

@@ -4658,6 +4658,127 @@ async def test_the_extract_declaration_page_carries_fields_edges_and_failures(
         assert missing.status_code == 404
 
 
+async def test_the_audit_declaration_page_carries_counts_and_findings(
+    pg_dsn: str, tmp_path: Path
+) -> None:
+    """The declaration page for an `audit` (documents-plan-v3, D6): the
+    world payload enumerates it with `verifies`/`model`, its own tenant
+    route answers verdict counts and the `unaudited` backlog, and the
+    record pages on either side of a verdict carry it: the page record's
+    "Audited as" and the derived record's "Verdicts citing it".
+
+    Built directly on `create_app` rather than this file's shared `serve`
+    helper: pinning the record-page side needs a disagreeing verdict, and
+    the only honest way to one is the real worker with the fake provider
+    (`uratori.audit.fake.FakeAuditProvider`) -- which needs `app.state.
+    uratori`, not just the HTTP surface `serve` hands back."""
+    from uratori.audit.fake import FakeAnswer, FakeAuditProvider
+    from uratori.server.audit_worker import run_worker_sweep
+
+    from .test_audit_server import SOURCE, WORLD, vitals_pdf
+
+    name = f"uratori_ui_audit_{os.urandom(4).hex()}"
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await connection.execute(f"create schema {name}")
+    finally:
+        await connection.close()
+
+    app = create_app(
+        dsn=pg_dsn, pg_schema=name, version="test", blob_dir=str(tmp_path / "blobs")
+    )
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://uratori") as http:
+            put = await http.put("/schema", json=WORLD.to_document())
+            assert put.status_code == 200, put.text
+            put = await http.put("/definitions", json={"source": SOURCE})
+            assert put.status_code == 200, put.text
+
+            world = (await http.get("/ui/api/world")).json()
+            declarations = world["declarations"]
+            [audit] = [d for d in declarations if d["kind"] == "audit"]
+            assert audit["name"] == "medical_record_page.vitals_audit"
+            assert audit["model"] == "fake-v1"
+            assert audit["verifies"] == ["measurement"]
+            rests = {(e["type"], e["name"]) for e in audit["rests_on"]}
+            assert ("fact", "medical_record_page") in rests
+            assert ("extract", "measurement") in rests
+
+            up = await http.post(
+                "/tenants/t1/documents/medical_record",
+                files={"file": ("chart.pdf", vitals_pdf("82"), "application/pdf")},
+            )
+            assert up.status_code == 200, up.text
+            document_id = up.json()["id"]
+            page_key = f"{document_id}/p0001"
+
+            # No reading yet: the page is `unaudited`, and the status route
+            # says so rather than showing an empty verdict table.
+            status = (
+                await http.get(
+                    "/ui/api/tenants/t1/audits/medical_record_page.vitals_audit/status"
+                )
+            ).json()
+            assert status["unaudited"] == 1
+            assert status["verdict_counts"].get("unaudited") == 1
+            assert status["findings"] == []
+
+            # The fake provider, told to report the weight as "not on this
+            # page" -- a genuine disagreement with the extract's "82" --
+            # run through the real worker, so the record-page side is
+            # pinned against the actual read-judge-accept path (5d), not a
+            # hand-built row.
+            state = app.state.uratori
+            assert state.world is not None
+            provider = FakeAuditProvider(
+                focus={(page_key, "measurement", "weight_kg"): [FakeAnswer(status="not_on_page")]}
+            )
+            read = await run_worker_sweep(state, state.world, state.world.library, provider)
+            assert read == 1
+
+            about_page = await http.get(f"/ui/api/tenants/t1/about/medical_record_page/{page_key}")
+            assert about_page.status_code == 200, about_page.text
+            [entry] = about_page.json()["audits"]
+            assert entry["audit"] == "medical_record_page.vitals_audit"
+            assert entry["verdict"] == "disagrees"
+
+            measurements = (
+                await http.get("/ui/api/tenants/t1/facts/measurement")
+            ).json()["records"]
+            [measurement_key] = [row["key"] for row in measurements]
+            about_measurement = await http.get(
+                f"/ui/api/tenants/t1/about/measurement/{measurement_key}"
+            )
+            assert about_measurement.status_code == 200, about_measurement.text
+            [citing] = about_measurement.json()["cited_audits"]
+            assert citing["audit"] == "medical_record_page.vitals_audit"
+            assert citing["verdict"] == "disagrees"
+            assert citing["page_key"] == page_key
+            assert citing["page_kind"] == "medical_record_page"
+
+            status = (
+                await http.get(
+                    "/ui/api/tenants/t1/audits/medical_record_page.vitals_audit/status"
+                )
+            ).json()
+            assert status["verdict_counts"].get("disagrees") == 1
+            [finding] = status["findings"]
+            assert finding["page_key"] == page_key
+            assert finding["document_kind"] == "medical_record"
+            assert finding["document_id"] == document_id
+            assert finding["page_number"] == 1
+
+            missing = await http.get("/ui/api/tenants/t1/audits/no_such_audit/status")
+            assert missing.status_code == 404
+
+    connection = await asyncpg.connect(pg_dsn)
+    try:
+        await connection.execute(f"drop schema {name} cascade")
+    finally:
+        await connection.close()
+
+
 async def test_used_by_and_deep_links_are_qualified_by_kind_for_a_colliding_name(
     pg_dsn: str, tmp_path: Path
 ) -> None:

@@ -207,7 +207,7 @@ async function render() {
 
 // -------------------------------------------------------- definitions --
 
-const KIND_ORDER = ['bundle', 'figure', 'reading', 'projection', 'summary', 'group', 'filter', 'measure', 'fact', 'extract'];
+const KIND_ORDER = ['bundle', 'figure', 'reading', 'projection', 'summary', 'group', 'filter', 'measure', 'fact', 'extract', 'audit'];
 
 function namespaceOf(name) {
   const dot = name.indexOf('.');
@@ -434,6 +434,11 @@ async function declarationPane(declaration, name, params) {
         declaration.many
           ? el('span', { class: 'badge' }, `many — up to ${declaration.many_up_to}`)
           : null,
+        // An audit's provider model and the extracts it verifies.
+        declaration.model ? el('span', { class: 'badge' }, declaration.model) : null,
+        (declaration.verifies || []).length
+          ? el('span', { class: 'faint' }, `verifies ${declaration.verifies.join(', ')}`)
+          : null,
         world.editable
           // `kind` rides along so the editor jumps to the right header: an
           // extract and the fact it targets both match `at=<name>` (review
@@ -585,6 +590,10 @@ async function declarationPane(declaration, name, params) {
     parts.push(el('h2', {}, 'Extracted records — tenant ',
       el('span', { class: 'verbatim' }, tenant() || '?')));
     parts.push(await extractStatusSection(declaration));
+  } else if (declaration.kind === 'audit') {
+    parts.push(el('h2', {}, 'Verdicts — tenant ',
+      el('span', { class: 'verbatim' }, tenant() || '?')));
+    parts.push(await auditStatusSection(declaration));
   } else {
     // The tenant id rides in a verbatim span: the label style uppercases,
     // and a case-mangled identifier on this page would be a small lie.
@@ -830,6 +839,56 @@ async function extractStatusSection(declaration) {
             : el('span', { class: 'mono' }, f.page_key))))));
   } else {
     blocks.push(el('p', { class: 'faint' }, 'No failures at this version.'));
+  }
+  return el('div', {}, blocks);
+}
+
+// An audit's own declaration-page data: counts per verdict word, the
+// `unaudited` backlog, and each disputed page as a sentence
+// (documents-plan-v3, D6) -- URATORI_AUDIT_PROVIDER unset leaves every
+// page `unaudited`, and this is the page that says so plainly rather than
+// a reader having to infer it from an empty verdict list.
+async function auditStatusSection(declaration) {
+  if (!tenant()) return el('p', { class: 'faint' }, 'No tenant to ask.');
+  const answer = await get(
+    `tenants/${encodeURIComponent(tenant())}/audits/${encodeURIComponent(declaration.name)}/status`);
+  if (!answer.ok) return problem(answer, 'Could not read the audit’s status:');
+  const status = answer.body;
+  const counts = status.verdict_counts || {};
+  const order = ['agrees', 'disagrees', 'missed', 'absent', 'unreadable', 'unaudited'];
+  const blocks = [
+    el('p', { class: 'dim' },
+      el('span', { class: 'mono' }, status.audit), ' @ ',
+      el('span', { class: 'mono' }, status.version), ' — ',
+      order
+        .filter((word) => counts[word])
+        .map((word) => `${counts[word]} ${word}`)
+        .join(', ') || 'no pages read yet',
+      status.unaudited
+        ? [' (', el('span', { class: 'badge' }, `${status.unaudited} unaudited`), ')']
+        : null),
+  ];
+  if (status.findings.length) {
+    blocks.push(el('table', { class: 'ledger' },
+      el('tr', {},
+        el('th', {}, 'page'), el('th', {}, 'extract'), el('th', {}, 'field'),
+        el('th', {}, 'verdict'), el('th', {}, 'seen'), el('th', {}, 'extracted')),
+      status.findings.map((f) => el('tr', {},
+        el('td', {},
+          f.document_kind
+            ? el('a', {
+                class: 'mono',
+                href: `#/document/${encodeURIComponent(f.document_kind)}`
+                  + `/${encodeURIComponent(f.document_id)}/${f.page_number}`,
+              }, `page ${f.page_number}`)
+            : el('span', { class: 'mono' }, f.page_key)),
+        el('td', { class: 'mono' }, f.extract),
+        el('td', { class: 'mono' }, f.field),
+        el('td', {}, el('span', { class: 'badge problem' }, f.verdict)),
+        el('td', { class: 'mono' }, f.seen ?? el('span', { class: 'faint' }, '—')),
+        el('td', { class: 'mono' }, f.extracted ?? el('span', { class: 'faint' }, '—'))))));
+  } else {
+    blocks.push(el('p', { class: 'faint' }, 'No disputed pages at this version.'));
   }
   return el('div', {}, blocks);
 }
@@ -1728,6 +1787,28 @@ async function recordView(kind, key) {
   // The upward half: what the library made of this record. Three verdicts,
   // each stated when empty — a section silently missing would read as
   // "nothing derives from this", which is a claim only the server may make.
+  // Every auditor's verdict on this record (documents-plan-v3, D6) --
+  // only non-empty for a page-kind record, since an audit is scoped to
+  // the page kind it reads. Placed ahead of "Computed", the way a second
+  // reader's say belongs beside the first reader's work rather than
+  // after a column of unrelated figures.
+  if (aboutAnswer.ok && aboutAnswer.body.state.ok && (aboutAnswer.body.audits || []).length) {
+    parts.push(el('h2', {}, 'Audited as — tenant ',
+      el('span', { class: 'verbatim' }, tenant() || '?')));
+    parts.push(el('table', { class: 'ledger' },
+      el('tr', {}, el('th', {}, 'audit'), el('th', {}, 'verdict')),
+      aboutAnswer.body.audits.map((entry) => el('tr', {},
+        el('td', {}, el('a', {
+          class: 'mono', href: defHash(entry.audit, { kind: 'audit' }),
+        }, entry.audit)),
+        el('td', {},
+          entry.verdict
+            ? el('span', {
+                class: `badge${entry.verdict === 'agrees' ? '' : ' problem'}`,
+              }, entry.verdict)
+            : el('span', { class: 'faint' }, 'not yet computed'))))));
+  }
+
   parts.push(el('h2', {}, 'Computed for this record — tenant ',
     el('span', { class: 'verbatim' }, tenant() || '?')));
   if (!aboutAnswer.ok) {
@@ -1915,6 +1996,34 @@ async function recordView(kind, key) {
         idle.map((entry, i) => [i ? ', ' : null,
           el('a', { class: 'mono', href: defHash(entry.figure) }, entry.figure)])));
     }
+  }
+
+  // Every auditor's finding naming this exact derived record
+  // (documents-plan-v3, D6) -- "verdicts citing it", the counterpart of
+  // "Counted into" for a second reader's say rather than a figure's.
+  if (aboutAnswer.ok && aboutAnswer.body.state.ok && (aboutAnswer.body.cited_audits || []).length) {
+    parts.push(el('h2', {}, 'Verdicts citing it — tenant ',
+      el('span', { class: 'verbatim' }, tenant() || '?')));
+    parts.push(el('table', { class: 'ledger' },
+      el('tr', {}, el('th', {}, 'audit'), el('th', {}, 'field'), el('th', {}, 'verdict'),
+        el('th', {}, 'seen'), el('th', {}, 'extracted'), el('th', {}, 'page')),
+      aboutAnswer.body.cited_audits.map((entry) => el('tr', {},
+        el('td', {}, el('a', {
+          class: 'mono', href: defHash(entry.audit, { kind: 'audit' }),
+        }, entry.audit)),
+        el('td', { class: 'mono' }, entry.field),
+        el('td', {},
+          el('span', {
+            class: `badge${entry.verdict === 'agrees' ? '' : ' problem'}`,
+          }, entry.verdict)),
+        el('td', { class: 'mono' }, entry.seen ?? el('span', { class: 'faint' }, '—')),
+        el('td', { class: 'mono' }, entry.extracted ?? el('span', { class: 'faint' }, '—')),
+        el('td', {},
+          entry.page_kind
+            ? el('a', {
+                class: 'mono', href: recordHash(entry.page_kind, entry.page_key),
+              }, entry.page_key)
+            : el('span', { class: 'mono' }, entry.page_key))))));
   }
 
   parts.push(el('h2', {}, 'On the pages — tenant ',
@@ -2424,7 +2533,7 @@ async function activityView(params) {
 // declared names) DO arrive from the server, on /ui/api/source.
 const FIG_DECLS = [
   'fact', 'group', 'filter', 'measure', 'figure', 'reading', 'projection', 'summarise',
-  'bundle', 'extract',
+  'bundle', 'extract', 'audit',
 ];
 const FIG_SECTIONS = {
   fact: ['name', 'url', 'one', 'many'],
@@ -2432,6 +2541,7 @@ const FIG_SECTIONS = {
   reading: ['display', 'band', 'depends', 'requires', 'calculate'],
   projection: ['from', 'field', 'read', 'value', 'flag', 'omit', 'sort', 'limit'],
   summarise: ['count', 'total', 'value', 'flag'],
+  audit: ['verifies', 'model', 'read', 'context', 'prompt', 'display'],
 };
 const FIG_UNITS = ['share', 'days', 'effort', 'count', 'duration', 'decimal'];
 const FIG_FACT_TYPES = ['text', 'number', 'flag', 'moment'];
