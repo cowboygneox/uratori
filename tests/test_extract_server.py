@@ -36,7 +36,7 @@ import httpx
 import pytest
 
 from uratori import Schema
-from uratori.server import create_app
+from uratori.server import create_app, db
 
 WORLD = Schema(kinds=frozenset())
 
@@ -120,6 +120,18 @@ figure patient.bmi bucketed:
         patient.weight:{bucket} / ((patient.height:{bucket} / 100) * (patient.height:{bucket} / 100))
 """
 
+SOURCE_WITH_AUDIT = (
+    SOURCE
+    + """
+# A second reader over the vitals on each page -- for the evidence-surface
+# staleness test below (review finding C, residual on Source.audits).
+audit medical_record_page.vitals_audit:
+    verifies measurement
+    model "fake-v1"
+    display "{medical_record_page} {value}"
+"""
+)
+
 
 def vitals_pdf(rows: list[tuple[str, str, str | None]]) -> bytes:
     """One page per row: `MRN:`, `VITAL SIGNS`, `Date:`, `Wt:` and
@@ -147,9 +159,13 @@ def vitals_pdf(rows: list[tuple[str, str, str | None]]) -> bytes:
 @dataclass
 class ExtractServer:
     http: httpx.AsyncClient
+    pg_dsn: str
+    schema: str
 
 
-async def _make_server(pg_dsn: str, tmp_path: Path) -> AsyncIterator[ExtractServer]:
+async def _make_server(
+    pg_dsn: str, tmp_path: Path, *, source: str = SOURCE
+) -> AsyncIterator[ExtractServer]:
     name = f"uratori_extract_{os.urandom(4).hex()}"
     connection = await asyncpg.connect(pg_dsn)
     try:
@@ -169,9 +185,9 @@ async def _make_server(pg_dsn: str, tmp_path: Path) -> AsyncIterator[ExtractServ
         async with httpx.AsyncClient(transport=transport, base_url="http://uratori") as http:
             put = await http.put("/schema", json=WORLD.to_document())
             assert put.status_code == 200, put.text
-            put = await http.put("/definitions", json={"source": SOURCE})
+            put = await http.put("/definitions", json={"source": source})
             assert put.status_code == 200, put.text
-            yield ExtractServer(http=http)
+            yield ExtractServer(http=http, pg_dsn=pg_dsn, schema=name)
 
     connection = await asyncpg.connect(pg_dsn)
     try:
@@ -183,6 +199,14 @@ async def _make_server(pg_dsn: str, tmp_path: Path) -> AsyncIterator[ExtractServ
 @pytest.fixture
 async def extract_server(pg_dsn: str, tmp_path: Path) -> AsyncIterator[ExtractServer]:
     async for server in _make_server(pg_dsn, tmp_path):
+        yield server
+
+
+@pytest.fixture
+async def extract_server_with_audit(
+    pg_dsn: str, tmp_path: Path
+) -> AsyncIterator[ExtractServer]:
+    async for server in _make_server(pg_dsn, tmp_path, source=SOURCE_WITH_AUDIT):
         yield server
 
 
@@ -524,3 +548,97 @@ async def test_retiring_an_extract_deletes_its_rows_at_the_next_pass(
     # page_identity and page_class are untouched -- only the retired
     # extract's own kind is swept.
     assert await _fact_rows(http, "page_identity")
+
+
+async def test_a_redefined_audits_stale_finding_does_not_render_on_the_evidence_surface(
+    extract_server_with_audit: ExtractServer,
+) -> None:
+    """Residual of review finding C: `provenance.py::audits_for_field`
+    feeds `Source.audits` (the evidence route's per-field citation), and
+    reads `db.audit_findings_citing` by record alone, exactly like
+    `ui.py`'s `cited_audits` did before finding C's fix -- the identical
+    staleness bug on a second surface. Redefine the audit and a weight
+    cell's evidence must stop showing the previous version's `disagrees`
+    finding as current, the moment the redefinition takes effect, not
+    only once an operator happens to run a full pass."""
+    http = extract_server_with_audit.http
+    await _upload_and_identify_patient(http)
+
+    bmi_day2 = "004412@2024-06-01"
+    weight_evidence = await http.get(
+        "/tenants/t1/evidence/patient.weight", params={"subject": bmi_day2}
+    )
+    assert weight_evidence.status_code == 200, weight_evidence.text
+    [w_member] = weight_evidence.json()["members"]
+    record_key = w_member["key"]
+    [source] = w_member["sources"]
+    page_key = source["page_key"]
+
+    defs = await http.get("/definitions")
+    [audit] = defs.json()["audits"]
+    old_version = audit["version"]
+
+    rows = await _fact_rows(http, "medical_record_page")
+    words_sha = str(rows[page_key]["words_sha"])
+
+    connection = await asyncpg.connect(
+        extract_server_with_audit.pg_dsn,
+        server_settings={"search_path": extract_server_with_audit.schema},
+    )
+    try:
+        await db.replace_audit_reading(
+            connection,
+            "t1",
+            "medical_record_page.vitals_audit",
+            old_version,
+            page_key,
+            words_sha=words_sha,
+            prompt="read the weight",
+            model="fake-v1",
+            response="...",
+            parsed=[
+                {
+                    "extract": "measurement",
+                    "field": "weight_kg",
+                    "row": 0,
+                    "status": "not_on_page",
+                    "words": [],
+                    "box": None,
+                    "seen_text": None,
+                    "anchored": True,
+                }
+            ],
+        )
+    finally:
+        await connection.close()
+
+    run = await http.post("/tenants/t1/runs", json={"full": True})
+    assert run.status_code == 200, run.text
+
+    # Sanity: the stale-version check below is meaningful only if the
+    # evidence surface actually shows the finding while it is current.
+    weight_evidence = await http.get(
+        "/tenants/t1/evidence/patient.weight", params={"subject": bmi_day2}
+    )
+    [w_member] = weight_evidence.json()["members"]
+    assert w_member["key"] == record_key
+    [source] = w_member["sources"]
+    assert [a["verdict"] for a in source["audits"]] == ["disagrees"]
+
+    redefined = SOURCE_WITH_AUDIT.replace('model "fake-v1"', 'model "fake-v2"')
+    put = await http.put("/definitions", json={"source": redefined})
+    assert put.status_code == 200, put.text
+    [new_audit] = put.json()["audits"]
+    assert new_audit["version"] != old_version
+
+    # A warm pass: no reading exists yet for the new version, so nothing
+    # has re-judged this page under it at all.
+    run = await http.post("/tenants/t1/runs", json={})
+    assert run.status_code == 200, run.text
+
+    weight_evidence = await http.get(
+        "/tenants/t1/evidence/patient.weight", params={"subject": bmi_day2}
+    )
+    [w_member] = weight_evidence.json()["members"]
+    [source] = w_member["sources"]
+    assert source["audits"] == []

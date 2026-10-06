@@ -469,7 +469,7 @@ async def source_of(
     caller with no record key in hand."""
     agrees, note = _compare(row.field, current_value, row.value)
     audits = (
-        await audits_for_field(pool, tenant, record_key, row.field)
+        await audits_for_field(pool, library, tenant, record_key, row.field)
         if record_key is not None
         else []
     )
@@ -500,18 +500,32 @@ async def source_of(
 
 
 async def audits_for_field(
-    pool: asyncpg.Pool[Any], tenant: str, record_key: str, field: str
+    pool: asyncpg.Pool[Any], library: Library, tenant: str, record_key: str, field: str
 ) -> list[SourceAudit]:
     """Every auditor with a current finding naming this exact (record,
     field) -- `Source.audits` (documents-plan-v3, D6). Each finding's own
     `verdict` is the field-level comparison `judge` made, which is also
-    what a `Source` wants beside the box it already draws."""
+    what a `Source` wants beside the box it already draws.
+
+    Scoped to each auditor's *current* version exactly as `ui.py`'s
+    `cited_audits` is (review finding C): `db.audit_findings_citing`'s
+    rows are rewritten wholesale only once a reading lands under a
+    redefined audit's new version, so a row from the version just
+    replaced can still be sitting there when nothing has judged the page
+    under the new one yet. A stale version's finding must not render as
+    current on this surface either."""
     rows = await db.audit_findings_citing(pool, tenant, record_key)
-    return [
-        SourceAudit(auditor=r["audit"], verdict=r["verdict"], seen=r["seen"], note=r["note"])
-        for r in rows
-        if r["field"] == field
-    ]
+    out = []
+    for r in rows:
+        if r["field"] != field:
+            continue
+        citing_audit = library.audit(r["audit"])
+        if citing_audit is None or citing_audit.version != r["version"]:
+            continue
+        out.append(
+            SourceAudit(auditor=r["audit"], verdict=r["verdict"], seen=r["seen"], note=r["note"])
+        )
+    return out
 
 
 async def sources_for_record(
