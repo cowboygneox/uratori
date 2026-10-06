@@ -116,6 +116,40 @@ def test_number_after_converts_lb_to_kg() -> None:
     assert abs(value - 180 * 0.45359237) < 1e-9
 
 
+def test_number_after_a_single_declared_unit_fails_on_a_different_printed_one() -> None:
+    """Review finding 1 (pkg2/3 review): `in kg` declared, "180 lb" printed --
+    the matcher's own docstring (`lang/ast.py` `NumberAfter`) says a printed
+    unit "confirms it or disagrees, which the runner reports rather than
+    silently trusts". A real, recognized unit that disagrees with the one
+    declared field must be a failure row, never 180 silently kept as if it
+    were already kilograms."""
+    plan = extract(ExtractField(name="patient_id", matcher=NumberAfter(("Wt:",), ("kg",))))
+    result = run(plan, words(["Wt:", "180", "lb"]))
+    assert not result.records
+    assert result.failures[0].field == "patient_id"
+    assert "lb" in result.failures[0].reason
+    assert "kg" in result.failures[0].reason
+
+
+def test_number_after_a_single_declared_unit_still_needs_no_printed_one() -> None:
+    """The unaffected half of the same fix: no unit printed at all, one
+    declared -- the field's own unit is still the answer (D4: a missing
+    printed unit is a failure only when more than one unit is declared)."""
+    plan = extract(ExtractField(name="patient_id", matcher=NumberAfter(("Weight:",), ("kg",))))
+    result = run(plan, words(["Weight:", "82"]))
+    assert not result.failures
+    assert result.records[0].body["patient_id"] == 82.0
+
+
+def test_number_after_a_single_declared_unit_accepts_the_matching_printed_one() -> None:
+    """And the third case: the printed unit agrees with the one declared --
+    still converts (trivially, by its own factor), still no failure."""
+    plan = extract(ExtractField(name="patient_id", matcher=NumberAfter(("Wt:",), ("kg",))))
+    result = run(plan, words(["Wt:", "82", "kg"]))
+    assert not result.failures
+    assert result.records[0].body["patient_id"] == 82.0
+
+
 def test_number_after_with_more_than_one_unit_and_none_printed_is_a_failure() -> None:
     plan = extract(ExtractField(name="patient_id", matcher=NumberAfter(("Weight:",), ("kg", "lb"))))
     result = run(plan, words(["Weight:", "82"]))

@@ -552,7 +552,7 @@ def _find_on_line(line_words: list[Word], alternatives: Sequence[str]) -> int | 
 
 def _read_number(
     line_words: list[Word], start: int, units: Sequence[str]
-) -> tuple[float, str | None, list[Word]] | None:
+) -> tuple[float, str | None, list[Word]] | str | None:
     for i in range(start, len(line_words)):
         text = line_words[i].text.rstrip(",;")
         if not _NUMBER_RE.match(text):
@@ -572,16 +572,28 @@ def _read_number(
             ):
                 total_cm = number * _CM_PER_FOOT + float(inch_text) * _CM_PER_INCH
                 return total_cm, "ft_in", line_words[i : i + 4]
-        printed_unit: str | None = None
         cited = [line_words[i]]
-        if i + 1 < len(line_words):
+        # A field with no declared unit at all checks nothing about what
+        # follows the number -- there is no declaration to agree or
+        # disagree with it (`not matcher.units` at the call site).
+        if units and i + 1 < len(line_words):
             maybe_unit = line_words[i + 1].text.rstrip(".,").lower()
-            if maybe_unit in units and maybe_unit in UNIT_TABLE:
-                printed_unit = maybe_unit
-                cited = [line_words[i], line_words[i + 1]]
-        if printed_unit is not None:
-            _dim, factor = UNIT_TABLE[printed_unit]
-            return number * factor, printed_unit, cited
+            if maybe_unit in UNIT_TABLE:
+                if maybe_unit not in units:
+                    # A real, recognized unit that is not the one(s)
+                    # declared: confirmed review finding 1 -- this was
+                    # previously treated as "no unit printed" and silently
+                    # coerced into the field's single declared unit. The
+                    # matcher's own contract (`lang/ast.py` `NumberAfter`)
+                    # says a printed unit "confirms it or disagrees, which
+                    # the runner reports rather than silently trusts".
+                    return (
+                        f"printed unit {maybe_unit!r} does not match the "
+                        f"declared unit{'s' if len(units) > 1 else ''} "
+                        f"({', '.join(units)})"
+                    )
+                _dim, factor = UNIT_TABLE[maybe_unit]
+                return number * factor, maybe_unit, [line_words[i], line_words[i + 1]]
         return number, None, cited
     return None
 
@@ -593,6 +605,8 @@ def _number_after_on_line(matcher: NumberAfter, line_words: list[Word]) -> tuple
     found = _read_number(line_words, pos, matcher.units)
     if found is None:
         return "no number followed the matched text"
+    if isinstance(found, str):
+        return found
     value, printed_unit, cited = found
     if len(matcher.units) > 1 and printed_unit is None:
         return "a number with no printed unit, and more than one unit is declared"
