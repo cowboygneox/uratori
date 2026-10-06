@@ -149,7 +149,7 @@ container, `localhost` is the container.
 ## Development
 
 ```bash
-uv venv --python 3.12 && uv pip install -e ".[server,dev]"
+uv venv --python 3.12 && uv pip install -e ".[server,documents,audit,dev]"
 export TEST_DATABASE_URL="postgres://user:pass@localhost:5432/uratori_test"
 .venv/bin/python -m pytest && .venv/bin/python -m mypy --explicit-package-bases uratori examples/nfl/load.py examples/records/*.py && .venv/bin/python -m ruff check uratori tests examples
 ```

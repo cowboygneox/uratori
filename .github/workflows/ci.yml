@@ -56,9 +56,15 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: python -m pip install -e ".[server,dev]"
+      # The documents tests OCR an image-only page, so the binary the
+      # `documents` extra shells out to has to be on the runner too; the
+      # Dockerfile installs the same package for the same reason.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tesseract-ocr
+      - run: python -m pip install -e ".[server,documents,audit,dev]"
       - run: ruff check uratori tests examples
-      - run: mypy uratori examples/nfl/load.py
+      # `--explicit-package-bases` because two unpackaged `load.py` scripts
+      # (nfl, records) would otherwise be one mypy module -- see README.
+      - run: mypy --explicit-package-bases uratori examples/nfl/load.py examples/records/*.py
       - run: pytest
 
   image:
