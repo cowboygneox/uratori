@@ -74,11 +74,11 @@ library loaded: 3 extracts, 3 figures
 
 pushing the patient roster (2 patients)
 uploading chart_a.pdf (9810 bytes) ...
-  -> id 3fef7db82dd17092, 8 page(s), written=1
+  -> id af49ca08103e9694, 8 page(s), written=1
 uploading chart_b.pdf (1956 bytes) ...
-  -> id ebc0ffdca82b8baa, 2 page(s), written=1
+  -> id 8f374f880e25ae71, 2 page(s), written=1
 uploading misfiled.pdf (1403 bytes) ...
-  -> id 518c90f4d8623d75, 1 page(s), written=1
+  -> id 1d27c6e09380c623, 1 page(s), written=1
 
 patient.bmi for 778123 (days with a weight on record):
   778123@2018-11-01: 23.6
@@ -96,14 +96,14 @@ evidence for patient.bmi?subject=778123@2020-02-15:
   part: patient.height
 
 evidence for patient.weight?subject=778123@2020-02-15:
-  field weight_kg: page 3fef7db82dd17092/p0002, printed '74 kg', 2 box(es)
+  field weight_kg: page af49ca08103e9694/p0002, printed '74 kg', 2 box(es)
 
 evidence for patient.height?subject=778123@2020-02-15:
-  field height_cm: page 3fef7db82dd17092/p0001, printed '5 ft 9 in', 4 box(es)
+  field height_cm: page af49ca08103e9694/p0001, printed '5 ft 9 in', 4 box(es)
 
 failures for measurement:
-  3fef7db82dd17092/p0008#r1 field=weight_kg: a number with no printed unit, and more than one unit is declared
-  518c90f4d8623d75/p0001#r1 field=patient_id: no page_identity record on this page
+  1d27c6e09380c623/p0001#r1 field=patient_id: no page_identity record on this page
+  af49ca08103e9694/p0008#r1 field=weight_kg: a number with no printed unit, and more than one unit is declared
 
 loaded. Try:
   http://localhost:8080/ui/  (tenant "records")

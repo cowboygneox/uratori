@@ -357,3 +357,29 @@ async def test_the_audit_runs_under_the_fake_provider_and_disputes_two_pages(
     assert by_page_field.get((miss_page, "weight_kg")) == "missed"
     assert body["verdict_counts"].get("disagrees", 0) >= 1
     assert body["verdict_counts"].get("missed", 0) >= 1
+
+
+def test_the_bundle_is_byte_stable_across_runs() -> None:
+    """Finding H (whole-review, section 3): `generate.py`'s module
+    docstring already claims "`build_bundle()` returns byte-identical
+    PDFs on every call", but reportlab's `Canvas` stamps the real
+    wall-clock `CreationDate`/`ModDate` into every PDF it writes unless
+    told `invariant=1` -- so the claim held only *within* one process's
+    use of one `datetime.now()` call, never across two actual runs of
+    `generate.py` (which is exactly how the README's own pasted
+    `document_id`s were produced and then failed to reproduce). A real
+    time gap between the two calls here is what makes a timestamp-based
+    regression visible rather than coincidentally passing because both
+    calls landed in the same wall-clock second."""
+    import hashlib
+    import time
+
+    first = generate.build_bundle()
+    time.sleep(1.1)
+    second = generate.build_bundle()
+
+    assert set(first.documents) == set(second.documents)
+    for filename in first.documents:
+        first_sha = hashlib.sha256(first.documents[filename]).hexdigest()
+        second_sha = hashlib.sha256(second.documents[filename]).hexdigest()
+        assert first_sha == second_sha, f"{filename} is not byte-stable across runs"

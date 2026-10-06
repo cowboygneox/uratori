@@ -28,6 +28,7 @@ in-process instead; neither touches a file on disk.
 from __future__ import annotations
 
 import io
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -166,7 +167,15 @@ def _chart_a_bytes() -> bytes:
     from reportlab.pdfgen import canvas
 
     buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=letter)
+    # `invariant=1`: reportlab otherwise stamps the real wall-clock
+    # `CreationDate`/`ModDate` (and a random-looking file id) into every
+    # PDF it writes, which is the one thing that kept this file's own
+    # "byte-identical on every call" claim true only within a single
+    # process's one `datetime.now()` call, never across two actual runs
+    # of `generate.py` -- exactly how the README's pasted `document_id`s
+    # (content-derived, D1) stopped matching a fresh run (whole-review,
+    # section 3). Every `canvas.Canvas(...)` in this file takes it.
+    c = canvas.Canvas(buf, pagesize=letter, invariant=1)
 
     # 1: the only height this chart ever carries, printed in pounds and
     # inches -- the carried-forward value every later day on this
@@ -202,6 +211,29 @@ def _chart_a_bytes() -> bytes:
     return buf.getvalue()
 
 
+_PDF_ID_PAIR = re.compile(rb"/ID\[<([0-9A-Fa-f]+)><([0-9A-Fa-f]+)>\]")
+"""`pdfium.PdfDocument.save` stamps its own second, run-to-run-random file
+id into the trailer's `/ID` array on every re-save (the first id, derived
+from the source document, stays stable) -- `invariant=1` on reportlab's
+own `Canvas` (above) does not reach this second save at all, since it
+runs after reportlab is done. Confirmed by generating twice a second
+apart: everything but this one hex string matched byte for byte. Caught
+and neutralised in `_rotate_page`, below (review finding H)."""
+
+
+def _stabilize_pdf_id(data: bytes) -> bytes:
+    """Replace each `/ID` pair's second (random) id with a fixed,
+    same-length placeholder, so the file's byte length and every xref
+    offset after it are untouched -- only the cosmetic id itself changes,
+    never anything a reader or `pdfium` parses as content."""
+
+    def _fixed(m: re.Match[bytes]) -> bytes:
+        first, second = m.group(1), m.group(2)
+        return b"/ID[<" + first + b"><" + b"0" * len(second) + b">]"
+
+    return _PDF_ID_PAIR.sub(_fixed, data)
+
+
 def _rotate_page(pdf_bytes: bytes, page_index: int, degrees: int) -> bytes:
     """Set one page's `/Rotate` after the fact -- reportlab draws upright
     content; a scanner's own rotation is a page attribute, not a drawing,
@@ -216,7 +248,7 @@ def _rotate_page(pdf_bytes: bytes, page_index: int, degrees: int) -> bytes:
         doc.save(out)
     finally:
         doc.close()
-    return out.getvalue()
+    return _stabilize_pdf_id(out.getvalue())
 
 
 def _chart_b_bytes() -> bytes:
@@ -224,7 +256,7 @@ def _chart_b_bytes() -> bytes:
     from reportlab.pdfgen import canvas
 
     buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=letter)
+    c = canvas.Canvas(buf, pagesize=letter, invariant=1)
     _vitals_page(
         c,
         PATIENT_B,
@@ -246,7 +278,7 @@ def _misfiled_bytes() -> bytes:
     from reportlab.pdfgen import canvas
 
     buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=letter)
+    c = canvas.Canvas(buf, pagesize=letter, invariant=1)
     _vitals_page(c, None, f"Date: {MISFILED_DATE}  Wt: {MISFILED_WEIGHT_KG:g} kg")
     c.save()
     return buf.getvalue()
