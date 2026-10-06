@@ -426,6 +426,13 @@ class TenantRemoved(BaseModel):
     is counted under `facts_removed` already; `extract_pointer` carries no
     count of its own, for the same reason `figure_pointer` never has."""
 
+    audit_readings_removed: int = 0
+    """Rows of `audit_reading` this tenant held -- an audit's own *values*
+    are counted under `values_removed` already (D6: `accept` saves through
+    the same store a figure's recompute does); `audit_finding` carries no
+    count of its own, for the same reason `extract_failure`'s own detail
+    never did."""
+
 
 class SubscribeEntry(BaseModel):
     """One named calculation a client wants to fetch and follow: a standing

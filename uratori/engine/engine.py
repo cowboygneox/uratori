@@ -79,8 +79,15 @@ class Engine:
         # Not `not lib.figures`: a projection's `from` reads index buckets with
         # no figure anywhere near them, so a library of indexes and projections
         # alone still has indexing work to do -- returning early would serve
-        # every such projection an empty page for ever.
-        if not lib.figures and not lib.indexes:
+        # every such projection an empty page for ever. Not `not lib.audits`
+        # either, for the same shape of reason one level along: a library of
+        # audits alone (no figure reads one, no index exists) still has a
+        # deletion walk to run -- `_remove_departed`'s own audit loop, below
+        # -- and returning here before it ever runs is a page's verdict that
+        # outlives the page for ever, caught by `tests/test_audit_server.py`'s
+        # delete case (EV: this guard swallowed the whole pass, `changed: 0`,
+        # on a world with no figure or index at all).
+        if not lib.figures and not lib.indexes and not lib.audits:
             return Outcome(changes=(), covered=frozenset(), reindexed=(), rebuilt=())
 
         pending = await self._pending(tenant)

@@ -137,7 +137,12 @@ class VerifiedField:
     reading's cited words into a comparable value -- the same three things
     the model itself is told (D6: "name, type, units")."""
 
-    type: Literal["text", "number", "flag", "moment"] | None
+    type: str | None
+    """`text | number | flag | moment`, or `None` for a nested block (never
+    legal on a verified field, but the fact schema's own type is a plain
+    `str | None` -- `CompiledFactField.type` -- so this matches it rather
+    than asserting a narrower literal the compiler already guarantees."""
+
     units: tuple[str, ...] = ()
 
 

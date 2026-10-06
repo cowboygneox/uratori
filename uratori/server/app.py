@@ -1198,9 +1198,14 @@ def create_app(
             # blobs are tenant-namespaced, so every sha256 this tenant's
             # `document` rows hold is a file only this delete can orphan.
             shas = await db.tenant_document_shas(s.pool, tenant)
-            facts, values, documents, provenance, extract_failures = await db.remove_tenant(
-                s.pool, tenant
-            )
+            (
+                facts,
+                values,
+                documents,
+                provenance,
+                extract_failures,
+                audit_readings,
+            ) = await db.remove_tenant(s.pool, tenant)
             if s.blob_store is not None:
                 for sha in shas:
                     await s.blob_store.delete(tenant, sha)
@@ -1210,6 +1215,7 @@ def create_app(
             documents_removed=documents,
             provenance_removed=provenance,
             extract_failures_removed=extract_failures,
+            audit_readings_removed=audit_readings,
         )
 
     # ------------------------------------------------------------- socket --

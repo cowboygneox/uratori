@@ -27,6 +27,7 @@ from ..lang.plan import Library
 from ..schema import Schema
 from ..store.postgres import PostgresEngineStore, PostgresFactStore
 from . import db
+from .audit_pass import run_audits
 from .blobs import BlobStore
 from .contract import RunOut, ShownChange, schema_out
 from .documents import RenderCache
@@ -316,6 +317,8 @@ async def run_pass(
     deleted_opened = deleted is not None
     merged_written = {k: list(v) for k, v in (written or {}).items()}
     merged_deleted = {k: list(v) for k, v in (deleted or {}).items()}
+    extract_moved: Mapping[str, Sequence[str]] = {}
+    extract_vanished: Mapping[str, Sequence[str]] = {}
     if library.extracts:
         _blobs, word_store, _cache = documents_ready(s)
         engine_store = PostgresEngineStore(s.pool)
@@ -331,6 +334,8 @@ async def run_pass(
                 full=full,
                 now_ms=time.time() * 1000.0,
             )
+        extract_moved = moved
+        extract_vanished = vanished
         for kind, keys in moved.items():
             merged_written[kind] = sorted(set(merged_written.get(kind, ())) | set(keys))
             written_opened = True
@@ -338,13 +343,45 @@ async def run_pass(
             merged_deleted[kind] = sorted(set(merged_deleted.get(kind, ())) | set(keys))
             deleted_opened = True
     facade = facade_for(s, world, library)
-    return await facade.run(
+    report = await facade.run(
         tenant,
         written=merged_written if written_opened else None,
         deleted=merged_deleted if deleted_opened else None,
         full=full,
         serve=serve,
     )
+    if library.audits:
+        # After `facade.run`, deliberately: a verdict judged against the
+        # derived rows `run_extracts` just wrote but the engine has not yet
+        # cascaded would be judging a figure's-eye view of the page that is
+        # about to change again on this very pass (`documents-plan-v3`
+        # D6). `extract_moved`/`extract_vanished` are this pass's own
+        # signal for "whose derived rows moved" -- the warm path's -- and a
+        # `full` pass widens every audit to its whole page roster inside
+        # `run_audits` itself, the same escalation `facade.execute` already
+        # makes for a figure.
+        _blobs, word_store, _cache = documents_ready(s)
+        audit_report = await run_audits(
+            s.pool,
+            word_store,
+            PostgresFactStore(s.pool),
+            library,
+            tenant,
+            facade,
+            moved=extract_moved,
+            vanished=extract_vanished,
+            full=full,
+        )
+        if audit_report is not None:
+            report = RunReport(
+                outcome=dataclasses.replace(
+                    report.outcome,
+                    changes=report.outcome.changes + audit_report.outcome.changes,
+                ),
+                results=report.results + audit_report.results,
+                moved=report.moved | audit_report.moved,
+            )
+    return report
 
 
 def facade_for(s: State, world: World, library: Library) -> Uratori:

@@ -28,7 +28,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import asyncpg
@@ -211,6 +211,66 @@ create table if not exists extract_failure (
 
 create index if not exists extract_failure_lookup
   on extract_failure (tenant_id, extract, version);
+
+-- An `audit`'s reading (documents-plan-v3, D6): the model's blind pass
+-- over one page, taken once per (tenant, audit, version, page) and
+-- re-taken only for a new page, a new auditor version, or a rebuilt word
+-- layer (`words_sha` moved -- carried here, not joined against the page's
+-- own current one, so a stale reading is a fact this table can state
+-- rather than something every reader has to join to notice). `parsed` is
+-- `uratori.audit.judge.FieldReading`s as JSON, in the shape
+-- `uratori.server.audit_pass._dump_fields` writes and
+-- `_load_fields` reads back -- the prompt and response are kept verbatim
+-- beside it, because a reviewer asking "what did the model actually see
+-- and say" must never be answered with a derived summary.
+create table if not exists audit_reading (
+  tenant_id text not null,
+  audit     text not null,
+  version   text not null,
+  page_key  text not null,
+  words_sha text not null,
+  prompt    text not null,
+  model     text not null,
+  response  text not null,
+  parsed    jsonb not null,
+  at        timestamptz not null default now(),
+  primary key (tenant_id, audit, version, page_key)
+);
+
+create index if not exists audit_reading_lookup
+  on audit_reading (tenant_id, audit, version);
+
+-- One row per (extract, field, row) a verdict was judged from -- the
+-- server-facing detail behind a page's single stored verdict word
+-- (documents-plan-v3 D6's `AuditFinding`). Replace-set per (tenant, audit,
+-- page): rewritten whole whenever the verdict is re-judged, which is
+-- every pass the page's derived rows move and every time its reading
+-- lands.
+create table if not exists audit_finding (
+  tenant_id text not null,
+  audit     text not null,
+  page_key  text not null,
+  extract   text not null,
+  field     text not null,
+  row_index int not null,
+  record    text,
+  verdict   text not null,
+  seen      jsonb,
+  extracted jsonb,
+  word_ids  int[] not null default '{}',
+  boxes     jsonb not null default '[]',
+  anchored  boolean not null default true,
+  seen_text text,
+  note      text,
+  at        timestamptz not null default now(),
+  primary key (tenant_id, audit, page_key, extract, field, row_index)
+);
+
+create index if not exists audit_finding_lookup
+  on audit_finding (tenant_id, audit, page_key);
+
+create index if not exists audit_finding_by_record
+  on audit_finding (tenant_id, record) where record is not null;
 """
 
 
@@ -867,15 +927,20 @@ async def tenant_document_shas(pool: asyncpg.Pool[Any], tenant: str) -> list[str
     return [row["sha256"] for row in rows]
 
 
-async def remove_tenant(pool: asyncpg.Pool[Any], tenant: str) -> tuple[int, int, int, int, int]:
+async def remove_tenant(
+    pool: asyncpg.Pool[Any], tenant: str
+) -> tuple[int, int, int, int, int, int]:
     """Every row a tenant owns, gone. Returns (facts, values, documents,
-    provenance, extract_failures) removed, because a destructive route
-    answering only "ok" would be the least useful true thing it could say.
-    Derived facts are counted under `facts` already (they are ordinary
-    `fact` rows); `extract_pointer` carries no count of its own, for the
-    same reason `figure_pointer` never has. The blobs themselves are not
-    this function's job -- it has no `BlobStore` to delete through --
-    so a caller that owns documents calls `tenant_document_shas` first and
+    provenance, extract_failures, audit_readings) removed, because a
+    destructive route answering only "ok" would be the least useful true
+    thing it could say. Derived facts are counted under `facts` already
+    (they are ordinary `fact` rows); an audit's own *values* are counted
+    under `values` the same way (`figure_value`, D6: `accept` saves through
+    the same `EngineStore.save` a figure's recompute does); `audit_finding`
+    carries no count of its own, for the same reason `extract_failure`'s
+    own detail rows inside it never did. The blobs themselves are not this
+    function's job -- it has no `BlobStore` to delete through -- so a
+    caller that owns documents calls `tenant_document_shas` first and
     unlinks them after this returns."""
     facts = await pool.fetchval("select count(*) from fact where tenant_id = $1", tenant)
     values = await pool.fetchval(
@@ -890,6 +955,9 @@ async def remove_tenant(pool: asyncpg.Pool[Any], tenant: str) -> tuple[int, int,
     extract_failure_count = await pool.fetchval(
         "select count(*) from extract_failure where tenant_id = $1", tenant
     )
+    audit_reading_count = await pool.fetchval(
+        "select count(*) from audit_reading where tenant_id = $1", tenant
+    )
     for table, column in (
         ("fact", "tenant_id"),
         ("figure_pointer", "tenant_id"),
@@ -903,6 +971,8 @@ async def remove_tenant(pool: asyncpg.Pool[Any], tenant: str) -> tuple[int, int,
         ("document_page_words", "tenant_id"),
         ("document_provenance", "tenant_id"),
         ("extract_failure", "tenant_id"),
+        ("audit_reading", "tenant_id"),
+        ("audit_finding", "tenant_id"),
     ):
         await pool.execute(f"delete from {table} where {column} = $1", tenant)
     return (
@@ -911,6 +981,7 @@ async def remove_tenant(pool: asyncpg.Pool[Any], tenant: str) -> tuple[int, int,
         int(documents or 0),
         int(provenance or 0),
         int(extract_failure_count or 0),
+        int(audit_reading_count or 0),
     )
 
 
@@ -1182,3 +1253,216 @@ async def extract_failure_counts(
         list(names),
     )
     return {r["extract"]: int(r["n"]) for r in rows}
+
+
+# ------------------------------------------------------------------ audit --
+
+
+async def replace_audit_reading(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    audit: str,
+    version: str,
+    page_key: str,
+    *,
+    words_sha: str,
+    prompt: str,
+    model: str,
+    response: str,
+    parsed: Any,
+) -> None:
+    """One reading, written whole -- there is nothing to merge: a new
+    reading for this (tenant, audit, version, page) replaces the old one
+    outright, because the old one answered a question (what does this page
+    say) that only has one honest answer at a time."""
+    await conn.execute(
+        "insert into audit_reading "
+        "(tenant_id, audit, version, page_key, words_sha, prompt, model, response, parsed, at) "
+        "values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now()) "
+        "on conflict (tenant_id, audit, version, page_key) do update set "
+        "words_sha = excluded.words_sha, prompt = excluded.prompt, model = excluded.model, "
+        "response = excluded.response, parsed = excluded.parsed, at = excluded.at",
+        tenant,
+        audit,
+        version,
+        page_key,
+        words_sha,
+        prompt,
+        model,
+        response,
+        json.dumps(parsed),
+    )
+
+
+async def audit_reading(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    audit: str,
+    version: str,
+    page_key: str,
+) -> dict[str, Any] | None:
+    row = await conn.fetchrow(
+        "select words_sha, prompt, model, response, parsed, at from audit_reading "
+        "where tenant_id = $1 and audit = $2 and version = $3 and page_key = $4",
+        tenant,
+        audit,
+        version,
+        page_key,
+    )
+    if row is None:
+        return None
+    out = dict(row)
+    out["parsed"] = json.loads(out["parsed"])
+    return out
+
+
+async def pages_with_readings(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    audit: str,
+    version: str,
+) -> set[str]:
+    """Every page this audit already has a current-version reading for --
+    the worker's own "what is left to do" query is the complement of this
+    against the pages in scope (`documents-plan-v3` D6's worker boundary,
+    5d)."""
+    rows = await conn.fetch(
+        "select page_key from audit_reading where tenant_id = $1 and audit = $2 and version = $3",
+        tenant,
+        audit,
+        version,
+    )
+    return {r["page_key"] for r in rows}
+
+
+async def prune_audit_readings(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    audit: str,
+    current_version: str,
+) -> None:
+    """Every reading (and the findings judged from it) for this audit under
+    any OTHER version, gone -- called once the pointer moves to
+    `current_version`, the same moment `prune_extract_failures` acts on."""
+    await conn.execute(
+        "delete from audit_reading where tenant_id = $1 and audit = $2 and version != $3",
+        tenant,
+        audit,
+        current_version,
+    )
+
+
+async def delete_audit_readings_for_pages(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    page_keys: Sequence[str],
+) -> None:
+    """Every reading, under any audit or version, for pages that are gone
+    -- called alongside a page's own deletion, never on its own."""
+    if not page_keys:
+        return
+    await conn.execute(
+        "delete from audit_reading where tenant_id = $1 and page_key = any($2::text[])",
+        tenant,
+        list(page_keys),
+    )
+    await conn.execute(
+        "delete from audit_finding where tenant_id = $1 and page_key = any($2::text[])",
+        tenant,
+        list(page_keys),
+    )
+
+
+async def replace_audit_findings(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    audit: str,
+    page_key: str,
+    findings: Sequence[Mapping[str, Any]],
+) -> None:
+    """Replace-set per (tenant, audit, page): every finding this verdict
+    was just judged from, and nothing this page's last judging left behind
+    -- a verdict rewritten from a changed extract or a changed reading must
+    not go on showing a finding that explained the previous one."""
+    await conn.execute(
+        "delete from audit_finding where tenant_id = $1 and audit = $2 and page_key = $3",
+        tenant,
+        audit,
+        page_key,
+    )
+    if not findings:
+        return
+    await conn.executemany(
+        "insert into audit_finding "
+        "(tenant_id, audit, page_key, extract, field, row_index, record, verdict, seen, "
+        "extracted, word_ids, boxes, anchored, seen_text, note, at) "
+        "values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())",
+        [
+            (
+                tenant,
+                audit,
+                page_key,
+                f["extract"],
+                f["field"],
+                f["row"],
+                f["record"],
+                f["verdict"],
+                json.dumps(f["seen"]),
+                json.dumps(f["extracted"]),
+                list(f["words"]),
+                json.dumps(f["boxes"]),
+                f["anchored"],
+                f["seen_text"],
+                f["note"],
+            )
+            for f in findings
+        ],
+    )
+
+
+async def audit_findings_for_page(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    audit: str,
+    page_key: str,
+) -> list[dict[str, Any]]:
+    rows = await conn.fetch(
+        "select extract, field, row_index, record, verdict, seen, extracted, word_ids, "
+        "boxes, anchored, seen_text, note, at from audit_finding "
+        "where tenant_id = $1 and audit = $2 and page_key = $3 order by extract, field, row_index",
+        tenant,
+        audit,
+        page_key,
+    )
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["seen"] = json.loads(d["seen"]) if d["seen"] is not None else None
+        d["extracted"] = json.loads(d["extracted"]) if d["extracted"] is not None else None
+        d["boxes"] = json.loads(d["boxes"])
+        out.append(d)
+    return out
+
+
+async def audit_findings_citing(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    record: str,
+) -> list[dict[str, Any]]:
+    """Every finding that names this record -- the derived record page's
+    "verdicts citing it" (documents-plan-v3 D6's surfaces, 5e)."""
+    rows = await conn.fetch(
+        "select audit, page_key, extract, field, row_index, verdict, seen, extracted, "
+        "word_ids, boxes, anchored, seen_text, note, at from audit_finding "
+        "where tenant_id = $1 and record = $2 order by audit, field",
+        tenant,
+        record,
+    )
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["seen"] = json.loads(d["seen"]) if d["seen"] is not None else None
+        d["extracted"] = json.loads(d["extracted"]) if d["extracted"] is not None else None
+        d["boxes"] = json.loads(d["boxes"])
+        out.append(d)
+    return out
