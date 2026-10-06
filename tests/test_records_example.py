@@ -28,6 +28,7 @@ import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import asyncpg
 import httpx
@@ -69,6 +70,7 @@ def test_the_example_compiles_under_its_own_schema() -> None:
 @dataclass
 class RecordsServer:
     http: httpx.AsyncClient
+    state: Any
 
 
 async def _make_server(pg_dsn: str, tmp_path: Path) -> AsyncIterator[RecordsServer]:
@@ -95,7 +97,7 @@ async def _make_server(pg_dsn: str, tmp_path: Path) -> AsyncIterator[RecordsServ
                 "/definitions", json={"source": (EXAMPLE / "definitions.fig").read_text()}
             )
             assert put.status_code == 200, put.text
-            yield RecordsServer(http=http)
+            yield RecordsServer(http=http, state=app.state.uratori)
 
     connection = await asyncpg.connect(pg_dsn)
     try:
@@ -281,3 +283,77 @@ async def test_a_warm_pass_leaves_the_same_derived_rows(records_server: RecordsS
     assert full.status_code == 200, full.text
     after_full = await http.get("/tenants/t1/results/patient.bmi")
     assert {s["id"]: s["value"] for s in after_full.json()["subjects"]} == before_rows
+
+
+async def test_the_audit_runs_under_the_fake_provider_and_disputes_two_pages(
+    records_server: RecordsServer,
+) -> None:
+    """The example's `audit` (documents-plan-v3, D6), run under
+    `uratori.audit.fake.FakeAuditProvider` -- no network, no model, the
+    same posture `URATORI_AUDIT_PROVIDER=fake` gives a real deployment
+    that wants to exercise the worker without a provider. Two pages are
+    forced, via the fake's own `focus` override, into the two verdicts a
+    reader actually has to act on: a genuine `disagrees` (the reader
+    says the weight it is told about is not on a page that plainly
+    carries one) and a genuine `missed` (the reader reports a value on
+    the one page the extract's own matcher could not read -- the
+    deliberate no-printed-unit failure the failures route already
+    names)."""
+    from uratori.audit.fake import FakeAnswer, FakeAuditProvider
+    from uratori.server.audit_worker import run_worker_sweep
+
+    http = records_server.http
+    await _load_bundle(http)
+
+    # The disagreeing page: patient A's second visit, a plain-text
+    # relabelling the evidence test above already walks to a real page
+    # and a real "74" -- so forcing the reader to say "not on this page"
+    # is forcing a genuine disagreement, not a coincidence of the fake's
+    # own crude scan.
+    disagree_subject = f"{generate.PATIENT_A}@{generate.A_VISIT2_DATE}"
+    weight_evidence = await http.get(
+        "/tenants/t1/evidence/patient.weight", params={"subject": disagree_subject}
+    )
+    assert weight_evidence.status_code == 200, weight_evidence.text
+    disagree_page = weight_evidence.json()["members"][0]["sources"][0]["page_key"]
+
+    # The missed page: the deliberate "weight with no printed unit"
+    # failure -- the extract stores no `weight_kg` for it at all, so a
+    # reader claiming it found one is a genuine miss, not a
+    # disagreement with a number that exists.
+    failures = await http.get("/tenants/t1/extracts/measurement/failures")
+    assert failures.status_code == 200, failures.text
+    [no_unit_failure] = [
+        r for r in failures.json()["failures"] if r["field"] == "weight_kg"
+    ]
+    miss_page = no_unit_failure["page_key"]
+
+    state = records_server.state
+    assert state.world is not None
+    provider = FakeAuditProvider(
+        focus={
+            (disagree_page, "measurement", "weight_kg"): [FakeAnswer(status="not_on_page")],
+            (miss_page, "measurement", "weight_kg"): [
+                FakeAnswer(status="seen", seen_text="not a real weight", anchored=False)
+            ],
+        }
+    )
+    read = await run_worker_sweep(state, state.world, state.world.library, provider)
+    assert read > 0
+
+    findings = await http.get(
+        "/tenants/t1/audits/medical_record_page.vitals_audit/findings"
+    )
+    assert findings.status_code == 200, findings.text
+    body = findings.json()
+    # Keyed by (page, field): other verified fields on these same pages
+    # (measured_at, patient_id, height_cm) are read too, under the fake's
+    # default scan, and may dispute for reasons that have nothing to do
+    # with the one field this test forced -- the page's overall verdict
+    # is deliberately the worst of all of them, so asserting on the one
+    # forced field is what actually pins this test's own claim.
+    by_page_field = {(f["page_key"], f["field"]): f["verdict"] for f in body["findings"]}
+    assert by_page_field.get((disagree_page, "weight_kg")) == "disagrees"
+    assert by_page_field.get((miss_page, "weight_kg")) == "missed"
+    assert body["verdict_counts"].get("disagrees", 0) >= 1
+    assert body["verdict_counts"].get("missed", 0) >= 1

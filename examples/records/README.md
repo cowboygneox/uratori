@@ -14,7 +14,7 @@ anywhere in this directory.
 | | |
 |---|---|
 | `schema.json` | Empty -- the world is declared in `definitions.fig`, same as the NFL example's. |
-| `definitions.fig` | The facts (a document, its pages, the identity and classification extracted from them, a reading of vitals), the two extracts that read them, and the three figures that turn vitals into a BMI series. |
+| `definitions.fig` | The facts (a document, its pages, the identity and classification extracted from them, a reading of vitals), the extracts that read them, the three figures that turn vitals into a BMI series, and a second reader (`audit`) over every page. |
 | `generate.py` | Writes the synthetic bundle: three PDFs, deterministic, fixed dates. |
 | `load.py` | The host: teaches the engine, pushes the `patient` roster, uploads the bundle, prints the trace below. |
 | `author.py` | The authoring aid -- reads the failures route and asks Claude to propose the alternatives a declaration is missing. Never run by the server. |
@@ -121,6 +121,25 @@ on today's page.
 The two failures are the bundle's own deliberate ones, named exactly as
 the failures route states them: a weight with no printed unit, and a
 page with no identifier at all.
+
+## The audit
+
+`definitions.fig` also declares a second reader over every page
+(documents-plan-v3, D6): `audit medical_record_page.vitals_audit`,
+verifying `page_identity` and `measurement`. It compiles and serves with
+no provider configured at all -- every page simply stays `unaudited`,
+stated plainly on the declaration page and at `GET /tenants/{t}/audits/
+medical_record_page.vitals_audit/findings`, never a silent gap. Setting
+`URATORI_AUDIT_PROVIDER=fake` starts the worker under
+`uratori.audit.fake.FakeAuditProvider` -- no network, no model, a
+deterministic scan of the same word layer the extract already read --
+and `claude` is the real second reader, behind the `audit` extra; see
+`docs/setup.md`'s "Audits and PHI egress" before pointing it at bytes
+that matter. `tests/test_records_example.py` runs the fake provider over
+this bundle and forces two genuine disputes: a page the reader is told
+has no weight although `measurement` plainly has one (`disagrees`), and
+the bundle's own no-printed-unit failure page, where a reader claiming a
+weight is a `missed` because no record exists to agree or disagree with.
 
 ## The authoring loop
 

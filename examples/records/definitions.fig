@@ -108,3 +108,17 @@ figure patient.bmi bucketed:
     unit decimal
     calculate:
         patient.weight:{bucket} / ((patient.height:{bucket} / 100) * (patient.height:{bucket} / 100))
+
+# A second reader over the vitals each page prints (documents-plan-v3,
+# D6) -- told which fields `measurement` declares (name, type, unit,
+# this comment), never its alternatives or its current value. Run under
+# the fake provider in this example and its tests
+# (`URATORI_AUDIT_PROVIDER=fake`); a real deployment sets it to "claude"
+# and reads `docs/setup.md`'s "Audits and PHI egress" first.
+audit medical_record_page.vitals_audit:
+    verifies page_identity, measurement
+    model "claude-opus-5-5"
+    read:
+        document = medical_record.title
+    context "This chart's pages may print weight in pounds or kilograms, and height in centimetres, inches, or feet and inches. This is {document}."
+    display "{medical_record_page} {value}"
