@@ -1562,6 +1562,29 @@ async def unread_pages(
     ]
 
 
+async def read_page_keys(
+    pool: asyncpg.Pool[Any], tenant: str, audit: str, version: str, page_keys: Sequence[str]
+) -> set[str]:
+    """Which of these pages already hold a reading at this auditor's
+    *current* version -- D6's cross-auditor read-ordering rule ("a page
+    is read for X only once every auditor X binds via `read:` has read
+    it"), enforced in the work-list itself rather than only softened to a
+    placeholder at prompt-build time (review finding E/F5). Distinct from
+    `unread_pages`, which answers a different question (this audit's own
+    backlog) for this audit's own sweep."""
+    if not page_keys:
+        return set()
+    rows = await pool.fetch(
+        "select page_key from audit_reading where tenant_id = $1 and audit = $2 "
+        "and version = $3 and page_key = any($4::text[])",
+        tenant,
+        audit,
+        version,
+        list(page_keys),
+    )
+    return {str(r["page_key"]) for r in rows}
+
+
 async def claim_audit_lease(
     pool: asyncpg.Pool[Any],
     tenant: str,

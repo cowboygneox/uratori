@@ -51,6 +51,21 @@ audit medical_record_page.vitals_audit:
     display "{medical_record_page} {value}"
 """
 
+SOURCE_TWO_AUDITS = (
+    SOURCE
+    + """
+# A third reader, checking what the second one said -- a `read:` binding
+# to another auditor's verdict, D6's cross-auditor read-ordering rule.
+audit medical_record_page.vitals_audit_sonnet:
+    verifies measurement
+    model "fake-sonnet"
+    read:
+        other = medical_record_page.vitals_audit
+    context "A different reader already said {other}."
+    display "{medical_record_page} {value}"
+"""
+)
+
 
 def vitals_pdf(weight_kg: str) -> bytes:
     from reportlab.lib.pagesizes import letter
@@ -72,7 +87,9 @@ class WorkerServer:
     world: World
 
 
-async def _make_server(pg_dsn: str, tmp_path: Path) -> AsyncIterator[WorkerServer]:
+async def _make_server(
+    pg_dsn: str, tmp_path: Path, *, source: str = SOURCE
+) -> AsyncIterator[WorkerServer]:
     name = f"uratori_worker_{os.urandom(4).hex()}"
     connection = await asyncpg.connect(pg_dsn)
     try:
@@ -92,7 +109,7 @@ async def _make_server(pg_dsn: str, tmp_path: Path) -> AsyncIterator[WorkerServe
         async with httpx.AsyncClient(transport=transport, base_url="http://uratori") as http:
             put = await http.put("/schema", json=WORLD.to_document())
             assert put.status_code == 200, put.text
-            put = await http.put("/definitions", json={"source": SOURCE})
+            put = await http.put("/definitions", json={"source": source})
             assert put.status_code == 200, put.text
             state = app.state.uratori
             assert state.world is not None
@@ -108,6 +125,12 @@ async def _make_server(pg_dsn: str, tmp_path: Path) -> AsyncIterator[WorkerServe
 @pytest.fixture
 async def worker_server(pg_dsn: str, tmp_path: Path) -> AsyncIterator[WorkerServer]:
     async for server in _make_server(pg_dsn, tmp_path):
+        yield server
+
+
+@pytest.fixture
+async def two_audit_worker_server(pg_dsn: str, tmp_path: Path) -> AsyncIterator[WorkerServer]:
+    async for server in _make_server(pg_dsn, tmp_path, source=SOURCE_TWO_AUDITS):
         yield server
 
 
@@ -163,6 +186,14 @@ async def _audit_value(state: State, page_key: str, audit_version: str) -> objec
 async def _audit_version(http: httpx.AsyncClient) -> str:
     defs = await http.get("/definitions")
     return str(defs.json()["audits"][0]["version"])
+
+
+async def _audit_version_named(http: httpx.AsyncClient, name: str) -> str:
+    defs = await http.get("/definitions")
+    for audit in defs.json()["audits"]:
+        if audit["name"] == name:
+            return str(audit["version"])
+    raise AssertionError(f"no audit named {name!r}: {defs.json()['audits']}")
 
 
 async def test_the_worker_reads_a_page_and_agrees(worker_server: WorkerServer) -> None:
@@ -324,3 +355,71 @@ async def test_one_pages_provider_failure_does_not_abort_the_sweep(
         "select page_key from audit_lease where tenant_id = 't1'"
     )
     assert list(leases) == []
+
+
+class _FailsOneAuditorProvider:
+    """Raises whenever this particular auditor's own model reads, and
+    delegates to the fake provider for every other -- lets a test fail
+    exactly one auditor's attempt (so it stores no reading) while a
+    dependent auditor, if attempted, would succeed, which is exactly
+    what makes finding E's bug observable: a dependent auditor attempted
+    anyway would get a *stored* reading, not a failure of its own."""
+
+    def __init__(self, fail_model: str) -> None:
+        self._fail_model = fail_model
+        self._fake = FakeAuditProvider()
+
+    async def read_page(self, **kwargs: object) -> object:
+        if kwargs["model"] == self._fail_model:
+            raise RuntimeError("simulated outage for this one auditor")
+        return await self._fake.read_page(**kwargs)  # type: ignore[arg-type]
+
+
+async def test_a_dependent_auditor_waits_for_its_bindings_own_reading(
+    two_audit_worker_server: WorkerServer,
+) -> None:
+    """Finding E (review F5): D6 says "a page is read for X only once
+    every auditor X binds via `read:` has read it." `resolve_bindings`
+    only ever softened a missing dependency to the placeholder string
+    `"unaudited"` baked into X's own prompt -- it never deferred the
+    page. Forcing `vitals_audit`'s own reading to fail (finding D's own
+    mechanism: no stored `audit_reading` row results) must keep
+    `vitals_audit_sonnet`, which reads `vitals_audit`'s verdict, out of
+    the work list for that page in the very same sweep, rather than
+    reading it anyway with a permanently poisoned prompt."""
+    http = two_audit_worker_server.http
+    page_key = await _upload(http, "82")
+    base_version = await _audit_version_named(http, "medical_record_page.vitals_audit")
+    dependent_version = await _audit_version_named(
+        http, "medical_record_page.vitals_audit_sonnet"
+    )
+
+    provider = _FailsOneAuditorProvider(fail_model="fake-v1")
+
+    await run_worker_sweep(
+        two_audit_worker_server.state,
+        two_audit_worker_server.world,
+        two_audit_worker_server.world.library,
+        provider,
+    )
+
+    # The base auditor's own attempt failed: no reading landed for it.
+    base_reading = await db.audit_reading(
+        two_audit_worker_server.state.pool,
+        "t1",
+        "medical_record_page.vitals_audit",
+        base_version,
+        page_key,
+    )
+    assert base_reading is None
+
+    # The dependent auditor must not have read the page either -- it is
+    # excluded from this sweep's work list until the base auditor has.
+    dependent_reading = await db.audit_reading(
+        two_audit_worker_server.state.pool,
+        "t1",
+        "medical_record_page.vitals_audit_sonnet",
+        dependent_version,
+        page_key,
+    )
+    assert dependent_reading is None

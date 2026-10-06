@@ -19,7 +19,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Sequence
 from typing import Any
+
+import asyncpg
 
 from ..audit.fake import FakeAuditProvider
 from ..audit.judge import AuditReading, judge
@@ -227,6 +230,44 @@ async def read_one_page(
     return True
 
 
+async def _pages_with_dependencies_read(
+    pool: asyncpg.Pool[Any], tenant: str, library: Library, audit: AuditPlan, pages: Sequence[str]
+) -> list[str]:
+    """D6's cross-auditor read-ordering rule, enforced in the work list
+    itself: "a page is read for X only once every auditor X binds via
+    `read:` has read it; a cycle is refused." The checker already refuses
+    a cycle (`uratori.lang.check._audits`); what was missing is the
+    ordering half (review finding E/F5) -- `resolve_bindings`'s `verdict`
+    branch only ever *softened* a missing dependency to the placeholder
+    string `"unaudited"` in the prompt it builds, never deferred the page.
+    Within one process that mostly went unnoticed (`library.audits.values()`
+    visits auditors in declaration order, so a dependency is normally
+    swept first for the same tenant in the same call), but it gave no
+    coordination at all across a restart or a second replica: two workers
+    could process X and Y for the same page in either order and bake that
+    placeholder into X's stored reading permanently, since a reading is
+    never retaken just because this happened.
+
+    Checked here against `audit_reading` rather than `figure_value`: a
+    *verdict* can exist (e.g. `unaudited`, written by the pass for a page
+    with no reading yet) without a *reading* ever having been taken, and
+    it is the reading D6 means by "has read it"."""
+    remaining = list(pages)
+    checked: set[str] = set()
+    for binding in audit.reads:
+        if binding.kind != "verdict" or binding.source in checked:
+            continue
+        checked.add(binding.source)
+        other = library.audit(binding.source)
+        if other is None:  # pragma: no cover - checker refuses a dangling read: binding
+            continue
+        ready = await db.read_page_keys(pool, tenant, other.name, other.version, remaining)
+        remaining = [p for p in remaining if p in ready]
+        if not remaining:
+            break
+    return remaining
+
+
 async def run_worker_sweep(s: State, world: World, library: Library, provider: AuditProvider) -> int:
     """One pass over every tenant's unread pages, for every declared
     audit. Returns the count actually read, so the caller's loop can back
@@ -243,6 +284,8 @@ async def run_worker_sweep(s: State, world: World, library: Library, provider: A
                 for r in await facts.of_kind(tenant, audit.scope)
             ]
             todo = await db.unread_pages(s.pool, tenant, audit.name, audit.version, candidates)
+            if todo:
+                todo = await _pages_with_dependencies_read(s.pool, tenant, library, audit, todo)
             for page_key in todo:
                 claimed = await db.claim_audit_lease(
                     s.pool, tenant, audit.name, audit.version, page_key, ttl_seconds=LEASE_TTL_SECONDS
