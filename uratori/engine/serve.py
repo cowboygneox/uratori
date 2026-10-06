@@ -33,6 +33,7 @@ from ..lang.ast import (
 )
 from ..lang.ast import Sum as LangSum
 from ..lang.plan import (
+    AuditPlan,
     BundlePlan,
     FigurePlan,
     Library,
@@ -686,6 +687,18 @@ def _citing_spaces(plan: FigurePlan, library: Library) -> set[str]:
     for name in names:
         _spaces_of(plan.sets.get(name), plan.sets, library, spaces, seen)
     return spaces
+
+
+def _audit_citing_spaces(plan: AuditPlan) -> set[str]:
+    """`_citing_spaces`'s counterpart for an `audit`: every fact kind its
+    stored members may be keys of.
+
+    An audit has no `calculate`/`sets` to resolve the way a figure's does --
+    its members (D6) are the derived records the verdict judged, plus the
+    page itself for a `missed`/`absent` verdict with nothing to judge -- so
+    the spaces are simply the page kind and every extract it `verifies`,
+    read straight off the plan rather than walked."""
+    return {plan.scope, *plan.verifies}
 
 
 def _measure_read(calc: Any) -> str | None:

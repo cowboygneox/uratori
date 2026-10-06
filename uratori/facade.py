@@ -48,7 +48,7 @@ from .engine.serve import (
 )
 from .engine.working import Working
 from .engine.working import build as build_working
-from .lang.plan import BundlePlan, Library
+from .lang.plan import BundlePlan, Library, Value
 from .lang.source import declaration_source
 from .results import BundleResult, Evidence, Result
 from .schema import Schema
@@ -117,6 +117,15 @@ class Uratori:
                 "and `Uratori` has no such pass. Serve this library through "
                 "`uratori.server`, or drop the `extract` declarations for an "
                 "embedding host that reads only host-written facts."
+            )
+        if library.audits and not _extract_pass:
+            names = ", ".join(sorted(library.audits))
+            raise ValueError(
+                f"this library declares `audit`: {names}. `audit` is a server "
+                "feature -- its values are written by uratori's own audit worker "
+                "through `accept`, never through `run`/`execute` -- and nothing "
+                "here runs a worker. Serve this library through `uratori.server`, "
+                "or drop the `audit` declarations for an embedding host."
             )
         # A fact-taught library carries the world. Completing the schema here,
         # once, is what keeps every consumer below -- the engine freezing
@@ -221,6 +230,52 @@ class Uratori:
             full=full or escalate,
             at_ms=at_ms,
         )
+
+    async def accept(
+        self,
+        tenant: str,
+        name: str,
+        subject: str,
+        value: Value,
+        members: Sequence[str],
+        label: str,
+        *,
+        trailing: Sequence[int | str | WindowSpec] = DEFAULT_TRAILING,
+        serve: bool = True,
+    ) -> RunReport:
+        """Save one `audit` verdict, and cascade it exactly as `run` cascades
+        an ordinary pass: served, delivered to listeners, and settled against
+        the serve stamps.
+
+        There is no `execute` to call first -- nothing here came from a fact
+        write, so none of `execute`'s full-pass escalations apply. The
+        server's audit pass and worker call this instead of `run` whenever
+        `judge` produces a verdict (`documents-plan-v3` D6); an embedding
+        host never does, because `__init__` refuses to construct over a
+        library that declares `audit` at all unless it is the server.
+        """
+        outcome = await self._engine.accept(tenant, name, subject, value, members, label)
+        touched = {change.figure for change in outcome.changes}
+        stamps = self._serve_stamps()
+        held = await self._store.pointers(tenant)
+        refreshed = self._refreshed(stamps, held)
+        projections = self._reached(outcome.reindexed, touched, stamps, held)
+        moved = self._moved(touched, refreshed, projections)
+        if serve:
+            results = await self._serve(
+                tenant,
+                touched=touched,
+                refreshed=refreshed,
+                projections=projections,
+                trailing=trailing,
+                wrote=frozenset(),
+            )
+        else:
+            results = ()
+        if serve and (outcome.changes or results):
+            await self._notify(tenant, outcome, results)
+        await self._settle_serve_stamps(tenant, stamps, held)
+        return RunReport(outcome=outcome, results=results, moved=moved)
 
     def _through_kinds(self) -> frozenset[str]:
         """Every kind a grouping resolves *through* rather than buckets.

@@ -2386,8 +2386,19 @@ class _Checker:
         sets: dict[str, SetExpr],
         combines: dict[str, tuple[str, str | None]],
         scope: str,
+        in_rung: bool = False,
     ) -> _Kind:
-        """What this calculation produces, checking every rule on the way down."""
+        """What this calculation produces, checking every rule on the way down.
+
+        `in_rung` is true only for a ladder rung's own `left`/`right` -- never
+        for its `then`/`otherwise` branches, and never threaded through Arith
+        or Pick. It is the one place a `level`-unit figure (a word, read bare
+        through `combine`) may be read at all: `audit` plans and banded
+        figures both store a word, and the only thing a definition may do
+        with one is compare it for equality (`_compare` answers every other
+        operator with "unknown", the same fate a text literal has there --
+        there is deliberately no separate compile-time operator refusal,
+        matching that existing precedent)."""
         if isinstance(e, Count):
             self._require_set(d.name, e.set, sets, e.line)
             return "number"
@@ -2502,10 +2513,12 @@ class _Checker:
                     e.line,
                 )
             if source.unit == "level":
+                if in_rung:
+                    return "text"
                 raise CheckError(
                     f"figure {d.name} reads {source.name}, which stores a word rather than a "
-                    "number. Arithmetic and comparison need a number; band the figure "
-                    "underneath instead.",
+                    "number. Arithmetic and comparison need a number; compare it in a when "
+                    "clause instead.",
                     e.line,
                 )
             return "moment" if source.unit == "moment" else "number"
@@ -2738,13 +2751,13 @@ class _Checker:
     ) -> _Kind:
         results: list[_Kind] = []
         for rung in e.rungs:
-            left = self._calc_kind(rung.left, d, sets, combines, scope)
+            left = self._calc_kind(rung.left, d, sets, combines, scope, in_rung=True)
             if left == "list":
                 raise CheckError(
                     "a when clause compares one value, and this side is a list.", rung.line
                 )
             if rung.right is not None:
-                right = self._calc_kind(rung.right, d, sets, combines, scope)
+                right = self._calc_kind(rung.right, d, sets, combines, scope, in_rung=True)
                 if (left == "text" or right == "text") and left != right:
                     raise CheckError(
                         "a when clause compares like with like, and this rung compares a "

@@ -16,7 +16,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ..lang.ast import ByAge, Zone
-from ..lang.plan import CompiledIndex, FigurePlan, Library
+from ..lang.plan import AuditPlan, CompiledIndex, FigurePlan, Library, Value
 from ..lang.source import declaration_source
 from ..schema import Schema
 from ..store import EngineStore, FactSource
@@ -374,6 +374,98 @@ class Engine:
             reindexed=reindexed,
             rebuilt=rebuilt,
             carried=tuple(sorted(carried)),
+        )
+
+    # ------------------------------------------------------------- accept --
+
+    async def accept(
+        self,
+        tenant: str,
+        name: str,
+        subject: str,
+        value: Value,
+        members: Sequence[str],
+        label: str,
+    ) -> Outcome:
+        """Save one externally-computed value and cascade it like a pass would.
+
+        The one door an `audit` plan's value comes in through (`Uratori.accept`
+        on the facade): the server's pass and worker call this after `judge`
+        decides a verdict, never the other way round. The plan named must be
+        an `audit` -- there is no `calculate` for any other kind of plan to
+        skip, and a figure's value only ever comes from `_recompute_one`.
+
+        Nothing here is backfilled, gap-swept, or re-visited by a cold pass:
+        an audit has no `calculate`, so there is nothing for `_backfill` to
+        recompute it *from*, and `_pending` never names it. What *does* react
+        is every figure that reads it -- a page's `when ... == "disagrees"`
+        ladder is as stale as a carried bucket the moment the audit it reads
+        moves, so this reuses the exact mechanism `run()` uses after a carry
+        lands (`_reader_keys` + `_recompute`), not a parallel one.
+        """
+        plan = self._library.audit(name)
+        if plan is None:
+            raise KeyError(
+                f"accept: {name!r} is not a declared audit -- only a value an `audit` "
+                "plan owns may be written outside the engine's own recompute."
+            )
+        held = await self._store.value(tenant, name, plan.version, subject)
+        members_t = tuple(members)
+        changes: list[Change] = []
+
+        if value is None:
+            if held is not None:
+                await self._store.remove(tenant, name, plan.version, subject)
+                changes.append(
+                    Change(
+                        figure=name,
+                        subject=subject,
+                        kind="removed",
+                        before=held.value,
+                        after=None,
+                        label=label,
+                        display=plan.display,
+                    )
+                )
+        elif not (
+            held is not None
+            and same_value(held.value, value)
+            and held.members == members_t
+            and held.label == label
+        ):
+            # Same unchanged-recompute rule `_recompute_one` holds: a save that
+            # changes nothing writes nothing and reports nothing, so a page
+            # re-judged to the same verdict on every pass does not fill the
+            # change stream with no-op movements.
+            await self._store.save(tenant, name, plan.version, subject, value, members_t, label)
+            if held is None or not same_value(held.value, value):
+                changes.append(
+                    Change(
+                        figure=name,
+                        subject=subject,
+                        kind="moved",
+                        before=held.value if held is not None else None,
+                        after=value,
+                        label=label,
+                        display=plan.display,
+                    )
+                )
+
+        downstream: dict[str, set[str]] = {}
+        held_buckets: dict[str, tuple[dict[str, list[str]], dict[str, list[str]]]] = {}
+        for other in self._library.figures:
+            if name not in other.reads:
+                continue
+            for key in await self._reader_keys(tenant, other, plan, subject, held_buckets):
+                downstream.setdefault(key, set()).add(other.name)
+        if downstream:
+            changes.extend(await self._recompute(tenant, downstream))
+
+        return Outcome(
+            changes=tuple(changes),
+            covered=frozenset({plan.scope}),
+            reindexed=(),
+            rebuilt=(),
         )
 
     # -------------------------------------------------------------- pending --
@@ -737,11 +829,16 @@ class Engine:
         self,
         tenant: str,
         reader: FigurePlan,
-        writer: FigurePlan,
+        writer: FigurePlan | AuditPlan,
         subject: str,
         held: dict[str, tuple[dict[str, list[str]], dict[str, list[str]]]],
     ) -> list[str]:
         """Which of a reader's own subjects a writer's moved subject makes stale.
+
+        `writer` is an `AuditPlan` when called from `Engine.accept`: only
+        `.grain` is read below, and an audit's is always `None` -- one value
+        per page, never bucketed -- so the same logic that resolves a
+        figure's downstream readers resolves an audit's.
 
         **In the reader's subject space, never the writer's**, and the four
         shapes are genuinely different questions rather than one with cases.
@@ -1065,6 +1162,32 @@ class Engine:
                         display=plan.display,
                     )
                 )
+
+        # `audit` plans never reach `_backfill`/`_recompute` (D6: they carry
+        # no `calculate`, and nothing writes one but `accept`), but a page's
+        # verdict must not outlive its page -- so they do reach the deletion
+        # walk. Simpler than a figure's own loop above: an audit is never
+        # `across`, never `grain`'d, never carried, so "departed" is only
+        # ever "the page itself is gone".
+        for audit in self._library.audits.values():
+            if only is not None and audit.name not in only:
+                continue
+            alive = {row.key for row in await self._facts.of_kind(tenant, audit.scope)}
+            for stored in await self._store.values(tenant, audit.name, audit.version):
+                if stored.subject in alive:
+                    continue
+                await self._store.remove(tenant, audit.name, audit.version, stored.subject)
+                changes.append(
+                    Change(
+                        figure=audit.name,
+                        subject=stored.subject,
+                        kind="removed",
+                        before=stored.value,
+                        after=None,
+                        label=stored.label,
+                        display=audit.display,
+                    )
+                )
         return changes
 
     # ------------------------------------------------------------- backfill --
@@ -1164,13 +1287,21 @@ class Engine:
                     row.key: row.value for row in await facts.of_kind(tenant, kind)
                 }
 
-        parts: dict[str, dict[str, list[tuple[str, float]]]] = {}
+        parts: dict[str, dict[str, list[tuple[str, float | str]]]] = {}
         for source, _ in plan.combines.values():
             source_plan = library.figure(source)
-            if source_plan is None:
+            # A `level`-unit source may be an ordinary banded figure, or (this
+            # MR) an `audit` -- stored outside the figure table entirely, so
+            # its version has to come from `library.audit` instead.
+            if source_plan is not None:
+                source_version: str | None = source_plan.version
+            else:
+                source_audit = library.audit(source)
+                source_version = source_audit.version if source_audit is not None else None
+            if source_version is None:
                 continue
-            table: dict[str, list[tuple[str, float]]] = {}
-            for stored in await store.values(tenant, source, source_plan.version):
+            table: dict[str, list[tuple[str, float | str]]] = {}
+            for stored in await store.values(tenant, source, source_version):
                 if isinstance(stored.value, (int, float)):
                     # Filed under the subject's base *and* -- for a sequenced
                     # source -- under its full coordinate. A bare read looks
@@ -1184,6 +1315,19 @@ class Engine:
                     if SEPARATOR in stored.subject:
                         table.setdefault(stored.subject, []).append(
                             (stored.subject, float(stored.value))
+                        )
+                elif isinstance(stored.value, str):
+                    # A word -- a band, or an audit's verdict. The checker
+                    # refuses everything that would reach it with one except a
+                    # ladder-rung comparison, so carrying it through here (and
+                    # not coercing or dropping it) is what makes that
+                    # comparison see the word instead of a silent absence.
+                    table.setdefault(subject_of(stored.subject), []).append(
+                        (stored.subject, stored.value)
+                    )
+                    if SEPARATOR in stored.subject:
+                        table.setdefault(stored.subject, []).append(
+                            (stored.subject, stored.value)
                         )
                 elif stored.value is None:
                     # **A null part is skipped, not treated as corrupt.** A share

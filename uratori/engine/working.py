@@ -145,11 +145,17 @@ class Working:
 
 def _live_version(library: Library, name: str) -> str:
     below = library.figure(name)
-    return below.version if below is not None else ""
+    if below is not None:
+        return below.version
+    # A `combine` binding may name an `audit` (a `level`-unit source, read
+    # bare in a ladder rung) rather than a figure -- it is stored under its
+    # own version exactly the same way, just outside `library.figures`.
+    audit = library.audit(name)
+    return audit.version if audit is not None else ""
 
 
 def _file_part(
-    parts: dict[str, dict[str, list[tuple[str, float]]]],
+    parts: dict[str, dict[str, list[tuple[str, float | str]]]],
     source: str,
     stored: StoredValue | None,
 ) -> None:
@@ -169,12 +175,21 @@ def _file_part(
     row twice under one key is indistinguishable, downstream, from the
     store genuinely disagreeing with the plan -- which `evaluate._scalar`
     exists to catch and abort on -- so an honest repeat read must never
-    reach it as a second entry."""
+    reach it as a second entry.
+
+    **A word is filed too, not dropped.** A `level`-unit source (a band, or
+    an `audit`) stores a word, and the one thing a calculation may do with
+    one -- compare it in a ladder rung -- needs it to arrive here exactly as
+    `Engine._readers` carries it, or the worksheet would show a working that
+    resolves to "unknown" for a figure the pass itself computed."""
     if stored is None or stored.value is None:
         return
-    if not isinstance(stored.value, (int, float)):
+    if not isinstance(stored.value, (int, float, str)):
         return
-    entry = (stored.subject, float(stored.value))
+    entry: tuple[str, float | str] = (
+        stored.subject,
+        float(stored.value) if isinstance(stored.value, (int, float)) else stored.value,
+    )
     table = parts.setdefault(source, {})
     base_rows = table.setdefault(subject_of(stored.subject), [])
     if entry not in base_rows:
@@ -239,7 +254,7 @@ async def _prefetch_calc(
     plan: FigurePlan,
     subject: str,
     resolved: dict[str, frozenset[str]],
-    parts: dict[str, dict[str, list[tuple[str, float]]]],
+    parts: dict[str, dict[str, list[tuple[str, float | str]]]],
     records_needed: dict[str, set[str]],
     span_counts: dict[tuple[str, str], int],
     e: CalcExpr,
@@ -337,7 +352,7 @@ class _Ctx:
     subject_name: str
     resolved: dict[str, frozenset[str]]
     records: dict[str, dict[str, Mapping[str, Any]]]
-    parts: dict[str, dict[str, list[tuple[str, float]]]]
+    parts: dict[str, dict[str, list[tuple[str, float | str]]]]
     span_counts: dict[tuple[str, str], int]
     trace: dict[int, object]
     bucket_cache: dict[tuple[str, str | None], frozenset[str]]
@@ -1176,7 +1191,7 @@ async def build(
     for name, expr in plan.sets.items():
         resolved[name] = await _resolve_prefetch(store, library, tenant, expr, subject, resolved, bucket_cache)
 
-    parts: dict[str, dict[str, list[tuple[str, float]]]] = {}
+    parts: dict[str, dict[str, list[tuple[str, float | str]]]] = {}
     records_needed: dict[str, set[str]] = {}
     span_counts: dict[tuple[str, str], int] = {}
     await _prefetch_calc(store, library, tenant, plan, subject, resolved, parts, records_needed, span_counts, plan.calculate)

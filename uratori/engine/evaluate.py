@@ -103,9 +103,16 @@ class Parts:
     was computed -- which is true, and looks like a bug. The alternative is
     copying the values onto the total when it is written, which would agree with
     a number that had stopped being right.
+
+    **A value may be a word** (`float | str`), never a list: a `level`-unit
+    source (a band, or an auditor's verdict) stores a word, and a bare
+    `combine` read of one is legal only as a ladder-rung operand -- the
+    checker refuses everything else that would reach arithmetic with one.
+    Dropping a word here instead of carrying it is what made such a source
+    silently answer absent everywhere it was read.
     """
 
-    values: tuple[float, ...]
+    values: tuple[float | str, ...]
     subjects: tuple[str, ...]
 
 
@@ -335,7 +342,16 @@ def _eval_body(
                     total += got
             return total
         parts = readers.parts(*_source_of(plan, e.set), subject)
-        return float(sum(parts.values))
+        total = 0.0
+        for v in parts.values:
+            if isinstance(v, str):
+                raise ValueError(
+                    f"sum({e.set}) resolved to a word part. The checker refuses a "
+                    "`level`-unit figure as a sum's source, so reaching here means the "
+                    "stored values disagree with the plan."
+                )
+            total += v
+        return total
 
     if isinstance(e, Spread):
         # This subject's own value, shared evenly across the buckets it

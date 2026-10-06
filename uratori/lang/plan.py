@@ -139,6 +139,75 @@ class ExtractPlan:
 
 
 @dataclass(frozen=True)
+class AuditReadBinding:
+    """One name a `read:` block binds for the audit's prompt template --
+    `document = medical_record.title`. The template (`context`/`prompt`) may
+    interpolate only names a `read:` block binds, the flag grammar's own
+    rule; each binding is one of three shapes, closed because a page carries
+    no bucket of its own for a figure read to anchor on (`documents-plan-v3`
+    D6.5)."""
+
+    name: str
+    kind: Literal["extract_field", "document_field", "verdict"]
+    source: str
+    """The extract name or document fact kind `name` is read off, or --
+    for `kind == "verdict"` -- the other auditor's name."""
+
+    field: str | None = None
+    """The field read off `source`; `None` for `kind == "verdict"`."""
+
+
+@dataclass(frozen=True)
+class AuditPlan:
+    """`audit <page kind>.<name>:` -- a second, model-backed reader over a
+    page, split into a blind *reading* (taken once per page per version) and
+    a *verdict* (judged every pass from the reading and the current derived
+    rows).
+
+    Stored like a figure -- its values live at `(tenant, name, version,
+    subject)`, gated by a pointer the same way -- but computed entirely
+    outside the engine: no `calculate`, and no entry in `Library.figures`.
+    The engine excludes it from `_backfill`/`_recompute`, includes it in
+    `_remove_departed`'s per-subject deletion walk, and accepts a value for
+    one through `Engine.accept` alone -- the server's pass and worker are
+    the only callers. See `documents-plan-v3` D6.
+    """
+
+    name: str
+    scope: str
+    """The page kind this audit is scoped to -- the common source of every
+    extract it `verifies`."""
+
+    verifies: tuple[str, ...]
+    """The extracts (named by their target fact kind) this audit's reading is
+    judged against."""
+
+    model: str
+    reads: tuple[AuditReadBinding, ...] = ()
+    context: str | None = None
+    """Appends to the default prompt (built from the verified fields)."""
+
+    prompt: str | None = None
+    """Replaces the default prompt outright. `context` and `prompt` are
+    mutually exclusive, checked at compile time."""
+
+    doc: str = ""
+    display: str = ""
+    version: str = ""
+    """Hashes the template text, the bound names, the model id, and the
+    verified fields' names/types/units -- never the versions of what a
+    binding reads (D6.5): a redefined figure or extract is not a new
+    auditor, and the reading stores the prompt as it was sent."""
+
+    grain: None = None
+    """Always `None` -- an audit is never bucketed, it is one value per page.
+    Present so `Engine._reader_keys` can take an `AuditPlan` as a `writer`
+    exactly as it takes a `FigurePlan`: that function reads only `.grain`
+    off the writer side, and this is what lets it be shared rather than
+    duplicated for `Engine.accept`."""
+
+
+@dataclass(frozen=True)
 class CompiledMeasure:
     name: str
     kind: str
@@ -388,6 +457,11 @@ class Library:
     construct over a library where this is non-empty, because the engine
     has no pass that writes a derived fact and must not pretend it does."""
 
+    audits: dict[str, AuditPlan] = field(default_factory=dict)
+    """`audit` declarations, keyed by their own name (D6) -- a server/worker
+    feature, like `extracts`: `Uratori.__init__` refuses to construct over a
+    library where this is non-empty unless told it is the trusted server."""
+
     def figure(self, name: str) -> FigurePlan | None:
         for plan in self.figures:
             if plan.name == name:
@@ -420,3 +494,6 @@ class Library:
 
     def extract(self, name: str) -> ExtractPlan | None:
         return self.extracts.get(name)
+
+    def audit(self, name: str) -> AuditPlan | None:
+        return self.audits.get(name)
