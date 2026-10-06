@@ -33,7 +33,7 @@ and a generated mirror is the only kind that can fail loudly when it drifts.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import BaseModel, Field
 
@@ -367,6 +367,21 @@ class Box(BaseModel):
     y1: float
 
 
+class SourceAudit(BaseModel):
+    """One auditor's finding about the exact field a `Source` cites
+    (documents-plan-v3, D6): `verdict` is that one field's own comparison
+    (`judge`'s per-field result -- `agrees`/`disagrees`/`missed`/`absent`/
+    `unreadable`), never the page's overall worst-of-its-fields word, which
+    is the auditor's own stored value and belongs on the page record, not
+    repeated here. A field no auditor verifies, or with no current
+    finding, has no entry -- never a row stating "unaudited" per field."""
+
+    auditor: str
+    verdict: str
+    seen: Any = None
+    note: str | None = None
+
+
 class Source(BaseModel):
     """One field's provenance, read for a reader to check by eye.
 
@@ -397,6 +412,13 @@ class Source(BaseModel):
     anchored: bool = True
     agrees: bool | None = None
     note: str | None = None
+
+    audits: list[SourceAudit] = Field(default_factory=list)
+    """Every auditor that verifies this field's extract and has a current
+    finding about it (documents-plan-v3, D6) -- a second reader's own say
+    about the exact number this `Source` already cites. Empty when no
+    audit covers this field, which is every field before this MR and most
+    of them after."""
 
 
 class EvidenceMember(BaseModel):

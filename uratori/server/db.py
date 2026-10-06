@@ -1574,6 +1574,49 @@ async def release_audit_lease(
     )
 
 
+async def audit_verdict_counts(
+    pool: asyncpg.Pool[Any], tenant: str, audit: str, version: str
+) -> dict[str, int]:
+    """How many pages hold each verdict word, under this audit's *current*
+    version -- the declaration page's own counts (documents-plan-v3 D6's
+    surfaces, 5e). Read off `figure_value`, the same table `accept` writes
+    through: an audit's value is to the engine exactly what a figure's is,
+    so there is no second count to keep in step."""
+    rows = await pool.fetch(
+        "select value, count(*) as n from figure_value "
+        "where tenant_id = $1 and name = $2 and version = $3 group by value",
+        tenant,
+        audit,
+        version,
+    )
+    out: dict[str, int] = {}
+    for r in rows:
+        value = r["value"]
+        word = json.loads(value) if isinstance(value, str) else value
+        if isinstance(word, str):
+            out[word] = int(r["n"])
+    return out
+
+
+async def audit_disputed_pages(
+    pool: asyncpg.Pool[Any], tenant: str, audit: str, version: str, verdicts: Sequence[str]
+) -> list[str]:
+    """Every page currently holding one of `verdicts` (typically
+    `("disagrees", "missed")`) under this audit's current version -- the
+    findings route drives off this, rather than off `audit_finding`
+    directly, so a page re-defined out from under a lingering pre-version
+    finding row never surfaces as a false positive."""
+    rows = await pool.fetch(
+        "select subject_id from figure_value "
+        "where tenant_id = $1 and name = $2 and version = $3 and value = any($4::jsonb[])",
+        tenant,
+        audit,
+        version,
+        [json.dumps(v) for v in verdicts],
+    )
+    return [r["subject_id"] for r in rows]
+
+
 async def discard_audit_readings(
     pool: asyncpg.Pool[Any], tenant: str, audit: str
 ) -> None:

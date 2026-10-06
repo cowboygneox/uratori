@@ -50,7 +50,7 @@ from ..lang.ast import Extreme, FieldPick, ListOf
 from ..lang.ast import Sum as LangSum
 from ..lang.plan import CompiledFact, CompiledFactField, FigurePlan, Library
 from ..results import Box as WireBox
-from ..results import Evidence, Source
+from ..results import Evidence, Source, SourceAudit
 from ..store.postgres import PostgresFactStore
 from . import db
 from .contract import ProvenanceCiteIn
@@ -456,12 +456,23 @@ async def source_of(
     current_value: Any,
     *,
     base: str | None,
+    record_key: str | None = None,
 ) -> Source:
     """One provenance row, read for a reader: resolve its page, compare its
     attested value against the record's value now, and render the one
     sentence that matters either way -- a disagreement, or that the page
-    behind the citation is gone."""
+    behind the citation is gone.
+
+    `record_key` (the record this field belongs to -- not `row.page_key`,
+    which is where the field was *read from*) is what `audits_for_field`
+    looks a second reader's finding up by; `None` skips that lookup for a
+    caller with no record key in hand."""
     agrees, note = _compare(row.field, current_value, row.value)
+    audits = (
+        await audits_for_field(pool, tenant, record_key, row.field)
+        if record_key is not None
+        else []
+    )
     resolved = await resolve_page(pool, tenant, library, row.page_key)
     if resolved is None:
         return Source(
@@ -471,6 +482,7 @@ async def source_of(
             anchored=row.anchored,
             agrees=agrees,
             note=note or "the cited page is no longer held",
+            audits=audits,
         )
     return Source(
         field=row.field,
@@ -483,7 +495,23 @@ async def source_of(
         anchored=row.anchored,
         agrees=agrees,
         note=note,
+        audits=audits,
     )
+
+
+async def audits_for_field(
+    pool: asyncpg.Pool[Any], tenant: str, record_key: str, field: str
+) -> list[SourceAudit]:
+    """Every auditor with a current finding naming this exact (record,
+    field) -- `Source.audits` (documents-plan-v3, D6). Each finding's own
+    `verdict` is the field-level comparison `judge` made, which is also
+    what a `Source` wants beside the box it already draws."""
+    rows = await db.audit_findings_citing(pool, tenant, record_key)
+    return [
+        SourceAudit(auditor=r["audit"], verdict=r["verdict"], seen=r["seen"], note=r["note"])
+        for r in rows
+        if r["field"] == field
+    ]
 
 
 async def sources_for_record(
@@ -501,7 +529,10 @@ async def sources_for_record(
     the record page's "where it came from" block."""
     rows = await store.for_record(tenant, kind, key)
     return [
-        await source_of(pool, library, tenant, row, read_field_value(value, row.field), base=base)
+        await source_of(
+            pool, library, tenant, row, read_field_value(value, row.field), base=base,
+            record_key=key,
+        )
         for row in rows
     ]
 
@@ -533,7 +564,11 @@ async def sources_for_members(
         if row is None:
             continue
         current_value = read_field_value(current.get(key, {}), field)
-        out[key] = [await source_of(pool, library, tenant, row, current_value, base=base)]
+        out[key] = [
+            await source_of(
+                pool, library, tenant, row, current_value, base=base, record_key=key
+            )
+        ]
     return out
 
 

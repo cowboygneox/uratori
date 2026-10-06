@@ -129,6 +129,7 @@ async def _fact_rows(http: httpx.AsyncClient, kind: str) -> dict[str, dict]:
 
 async def _upload(http: httpx.AsyncClient, weight_kg: str) -> tuple[str, str]:
     pdf = vitals_pdf(weight_kg)
+    before = set(await _fact_rows(http, "medical_record_page"))
     up = await http.post(
         "/tenants/t1/documents/medical_record",
         files={"file": ("chart.pdf", pdf, "application/pdf")},
@@ -136,8 +137,9 @@ async def _upload(http: httpx.AsyncClient, weight_kg: str) -> tuple[str, str]:
     assert up.status_code == 200, up.text
     document_id = str(up.json()["id"])
     pages = await _fact_rows(http, "medical_record_page")
-    assert len(pages) == 1
-    page_key = next(iter(pages))
+    new_pages = set(pages) - before
+    assert len(new_pages) == 1
+    page_key = next(iter(new_pages))
     return document_id, page_key
 
 
@@ -280,6 +282,39 @@ async def test_a_disagreeing_reading_judges_disagrees(audit_server: AuditServer)
     assert run.status_code == 200, run.text
 
     assert await _audit_value(audit_server, page_key) == "disagrees"
+
+
+async def test_the_findings_route_serves_disputed_pages_only(audit_server: AuditServer) -> None:
+    http = audit_server.http
+    _document_id, agreeing_page = await _upload(http, "82")
+    word_id = await _word_id(http, _document_id, "82")
+    words_sha = await _words_sha(http, "medical_record_page", agreeing_page)
+    await _insert_reading(
+        audit_server, page_key=agreeing_page, words_sha=words_sha, status="seen",
+        words=[word_id], seen_text="82",
+    )
+
+    _document_id_2, disputed_page = await _upload(http, "90")
+    words_sha_2 = await _words_sha(http, "medical_record_page", disputed_page)
+    await _insert_reading(
+        audit_server, page_key=disputed_page, words_sha=words_sha_2, status="not_on_page",
+    )
+
+    run = await http.post("/tenants/t1/runs", json={"full": True})
+    assert run.status_code == 200, run.text
+    assert await _audit_value(audit_server, agreeing_page) == "agrees"
+    assert await _audit_value(audit_server, disputed_page) == "disagrees"
+
+    findings = await http.get(
+        "/tenants/t1/audits/medical_record_page.vitals_audit/findings"
+    )
+    assert findings.status_code == 200, findings.text
+    body = findings.json()
+    assert body["audit"] == "medical_record_page.vitals_audit"
+    assert body["verdict_counts"].get("agrees") == 1
+    assert body["verdict_counts"].get("disagrees") == 1
+    pages = {f["page_key"] for f in body["findings"]}
+    assert pages == {disputed_page}
 
 
 async def test_deleting_the_page_removes_its_audit_value(audit_server: AuditServer) -> None:

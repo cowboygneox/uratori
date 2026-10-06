@@ -70,6 +70,8 @@ from .blobs import BlobStore, FilesystemBlobStore
 from .contract import (
     Ack,
     AnyResult,
+    AuditFindingOut,
+    AuditFindingsOut,
     DeclarationOut,
     DefinitionsIn,
     DeleteDocumentOut,
@@ -1232,6 +1234,78 @@ def create_app(
             version=plan.version,
             declaration=declaration_source(library, name, "extract") or "",
             failures=out,
+        )
+
+    @app.get(
+        "/tenants/{tenant}/audits/{name}/findings",
+        response_model=AuditFindingsOut,
+        dependencies=[auth],
+    )
+    async def get_audit_findings(tenant: str, name: str, s: S) -> AuditFindingsOut:
+        """Every page this audit currently disputes (`disagrees` or
+        `missed`), under its *current* version, with each disputed field's
+        finding and the page's own word layer -- `ExtractFailuresOut`'s
+        twin for the auditor half of the authoring loop
+        (documents-plan-v3, D6). Driven off `figure_value` (the audit's
+        own stored verdicts), not off `audit_finding` directly, so a page
+        re-defined out from under a lingering pre-version finding row
+        never surfaces as a false positive."""
+        from ..lang.source import declaration_source
+
+        _world, library = ready(s)
+        plan = library.audits.get(name)
+        if plan is None:
+            raise HTTPException(status_code=404, detail=f'no audit named "{name}"')
+        _blobs, word_store, _cache = documents_ready(s)
+        counts = await db.audit_verdict_counts(s.pool, tenant, name, plan.version)
+        disputed = await db.audit_disputed_pages(
+            s.pool, tenant, name, plan.version, ["disagrees", "missed"]
+        )
+        out: list[AuditFindingOut] = []
+        for disputed_page in sorted(disputed):
+            rows = await db.audit_findings_for_page(s.pool, tenant, name, disputed_page)
+            words = await word_store.words_of(tenant, plan.scope, disputed_page)
+            words_by_id = {w.id: w for w in words}
+            for row in rows:
+                if row["verdict"] not in ("disagrees", "missed"):
+                    continue
+                cited = [words_by_id[i] for i in row["word_ids"] if i in words_by_id]
+                out.append(
+                    AuditFindingOut(
+                        page_key=disputed_page,
+                        extract=row["extract"],
+                        field=row["field"],
+                        record=row["record"],
+                        row=row["row_index"],
+                        verdict=row["verdict"],
+                        seen=row["seen"],
+                        extracted=row["extracted"],
+                        anchored=row["anchored"],
+                        seen_text=row["seen_text"],
+                        note=row["note"],
+                        words=[
+                            WordOut(
+                                id=w.id,
+                                text=w.text,
+                                x0=w.x0,
+                                y0=w.y0,
+                                x1=w.x1,
+                                y1=w.y1,
+                                line=w.line,
+                                source=w.source,
+                                confidence=w.confidence,
+                            )
+                            for w in cited
+                        ],
+                    )
+                )
+        return AuditFindingsOut(
+            audit=name,
+            version=plan.version,
+            declaration=declaration_source(library, name, "audit") or "",
+            verdict_counts=counts,
+            unaudited=counts.get("unaudited", 0),
+            findings=out,
         )
 
     # ------------------------------------------------------------ tenants --

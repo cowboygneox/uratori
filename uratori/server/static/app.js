@@ -1405,6 +1405,16 @@ function sourceBadges(sources) {
     if (!src.anchored) head.push(' ', el('span', { class: 'badge' }, 'unanchored'));
     if (src.agrees === false) head.push(' ', el('span', { class: 'badge problem' }, 'disagrees'));
     if (src.note && src.agrees !== false && link) head.push(' ', el('span', { class: 'faint' }, src.note));
+    for (const audit of src.audits || []) {
+      const problemWord = audit.verdict !== 'agrees';
+      const seenText = audit.seen === null || audit.seen === undefined ? '' : ` saw ${audit.seen}`;
+      head.push(
+        ' ',
+        el(
+          'span',
+          { class: problemWord ? 'badge problem' : 'badge', title: audit.note || '' },
+          `${audit.auditor}: ${audit.verdict}${seenText}`));
+    }
     const crop = link && src.boxes && src.boxes.length ? cropThumbnail(src.page_url, src.boxes, 96) : null;
     return el('div', { class: 'source-badge' }, el('div', {}, head), crop);
   });

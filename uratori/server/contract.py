@@ -597,3 +597,36 @@ class ExtractFailuresOut(BaseModel):
     revising it has the full declaration beside the failures it caused."""
 
     failures: list[ExtractFailureOut] = Field(default_factory=list)
+
+
+class AuditFindingOut(BaseModel):
+    """One (extract, field, row) comparison behind a disputed page's
+    verdict (documents-plan-v3, D6) -- the server-facing detail the
+    declaration page and the record pages decorate a verdict with."""
+
+    page_key: str
+    extract: str
+    field: str
+    record: str | None
+    row: int
+    verdict: str
+    seen: Any = None
+    extracted: Any = None
+    anchored: bool = True
+    seen_text: str | None = None
+    note: str | None = None
+    words: list[WordOut] = Field(default_factory=list)
+
+
+class AuditFindingsOut(BaseModel):
+    """`GET /tenants/{t}/audits/{name}/findings` -- every page currently
+    `disagrees` or `missed`, each with its disputed fields' findings and
+    the page's own word layer, the `ExtractFailuresOut` shape's twin for
+    the other half of the authoring loop."""
+
+    audit: str
+    version: str
+    declaration: str
+    verdict_counts: dict[str, int] = Field(default_factory=dict)
+    unaudited: int = 0
+    findings: list[AuditFindingOut] = Field(default_factory=list)
