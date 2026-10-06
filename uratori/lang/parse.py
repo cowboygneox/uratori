@@ -164,7 +164,7 @@ def _explained(decl: Decl, lines: list[str]) -> Decl:
     """Attach the `#` comment run above a declaration as its doc.
 
     The comments are the customer-facing explanation -- one spelling for all
-    nine declaration kinds, kept out of the block so the directives a reviewer
+    ten declaration kinds, kept out of the block so the directives a reviewer
     came to check are not buried in prose. The lexer strips comments, so this
     reads the raw lines; the declaration's own line number says where to look.
 

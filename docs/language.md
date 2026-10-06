@@ -169,7 +169,7 @@ The pieces:
   definition bound above; nothing else can produce either shape, so a typo is
   reported with the list of what was actually bound.
 
-**One namespace covers all nine declaration kinds.** Two definitions sharing a
+**One namespace covers all ten declaration kinds.** Two definitions sharing a
 name would make a citation ambiguous, so the checker refuses the second
 whatever kind it is.
 
@@ -2958,7 +2958,7 @@ The ones most worth recognising, in the checker's own words:
 - *"...needs a prefix: a figure is named `<fact kind>.<what>`..."* -- every
   declaration carries its kind, because a citation is `name@version`.
 - *"...is already a figure. A reading needs its own name..."* -- one
-  namespace across all nine kinds.
+  namespace across all ten kinds.
 - *"there is no group or filter called ... Declared: ..."* / *"...is not a
   set defined in depends. Defined: ..."* -- a typo, answered with what was
   actually bound.

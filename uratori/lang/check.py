@@ -258,7 +258,7 @@ class _Checker:
         )
 
     def _claim(self, name: str, what: str, line: int) -> None:
-        """One namespace for all nine declaration kinds -- facts, groups, filters
+        """One namespace for all ten declaration kinds -- facts, groups, filters
         and measures included, not just the rendered ones.
 
         A citation is `name@version`, so two declarations sharing a name would
