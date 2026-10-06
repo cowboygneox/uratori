@@ -412,3 +412,44 @@ async def test_redefining_an_audit_gives_every_page_a_row_on_the_next_warm_pass(
         await connection.close()
     assert row is not None, "no row for the redefined audit's version after a warm pass"
     assert json.loads(row["value"]) == "unaudited"
+
+
+async def test_a_redefined_audits_stale_finding_does_not_render_as_current(
+    audit_server: AuditServer,
+) -> None:
+    """Finding C (review F3): `AboutOut.cited_audits` (`db.audit_findings_
+    citing`) read every `audit_finding` row naming this record with no
+    version check at all. Redefine the audit and the record's "verdicts
+    citing it" section kept showing the previous version's `disagrees`
+    finding as if it were live, with no way for a reader to know the
+    audit has since moved and not yet re-read this page."""
+    http = audit_server.http
+    _document_id, page_key = await _upload(http, "82")
+    words_sha = await _words_sha(http, "medical_record_page", page_key)
+    await _insert_reading(
+        audit_server, page_key=page_key, words_sha=words_sha, status="not_on_page",
+    )
+    run = await http.post("/tenants/t1/runs", json={"full": True})
+    assert run.status_code == 200, run.text
+    assert await _audit_value(audit_server, page_key) == "disagrees"
+
+    # Sanity: the stale-version check below is meaningful only if the
+    # record page actually shows the finding while it is current.
+    about = await http.get(f"/ui/api/tenants/t1/about/measurement/{page_key}")
+    assert about.status_code == 200, about.text
+    assert len(about.json()["cited_audits"]) == 1
+
+    redefined = SOURCE.replace('model "fake-v1"', 'model "fake-v2"')
+    put = await http.put("/definitions", json={"source": redefined})
+    assert put.status_code == 200, put.text
+    new_version = put.json()["audits"][0]["version"]
+    assert new_version != audit_server.audit_version
+
+    # A warm pass: no reading exists yet for the new version, so nothing
+    # has re-judged this page under the new version at all.
+    run = await http.post("/tenants/t1/runs", json={})
+    assert run.status_code == 200, run.text
+
+    about = await http.get(f"/ui/api/tenants/t1/about/measurement/{page_key}")
+    assert about.status_code == 200, about.text
+    assert about.json()["cited_audits"] == []

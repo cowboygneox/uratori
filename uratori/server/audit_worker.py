@@ -214,7 +214,12 @@ async def read_one_page(
             words_by_id,
         )
         await db.replace_audit_findings(
-            s.pool, tenant, audit.name, page_key, [dump_finding(f) for f in findings]
+            s.pool,
+            tenant,
+            audit.name,
+            audit.version,
+            page_key,
+            [dump_finding(f) for f in findings],
         )
         facade = facade_for(s, world, library)
         report = await facade.accept(tenant, audit.name, page_key, verdict, members, page_key)

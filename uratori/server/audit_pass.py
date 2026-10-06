@@ -217,7 +217,12 @@ async def run_audits(
                 current_rows = rows_by_page.get(page_key, {})
                 value, members, findings = judge(reading, current_rows, verified_fields, words_by_id)
                 await db.replace_audit_findings(
-                    pool, tenant, audit.name, page_key, [dump_finding(f) for f in findings]
+                    pool,
+                    tenant,
+                    audit.name,
+                    audit.version,
+                    page_key,
+                    [dump_finding(f) for f in findings],
                 )
             report = await facade.accept(tenant, audit.name, page_key, value, members, label)
             changes.extend(report.outcome.changes)

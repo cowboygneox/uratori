@@ -1682,6 +1682,13 @@ def router(frame_ancestors: str, *, edit: bool = False, documents: bool = False)
             cited_audits = []
             for r in cited_audit_rows:
                 citing_audit = library.audit(r["audit"])
+                if citing_audit is None or citing_audit.version != r["version"]:
+                    # The auditor was redefined (or retired) since this
+                    # finding was written and no reading has landed under
+                    # the new version yet to rewrite it -- a stale
+                    # version's finding must not render as current
+                    # (review finding C/F3).
+                    continue
                 cited_audits.append(
                     CitedAuditOut(
                         audit=r["audit"],

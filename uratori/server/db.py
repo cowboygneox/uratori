@@ -249,6 +249,7 @@ create index if not exists audit_reading_lookup
 create table if not exists audit_finding (
   tenant_id text not null,
   audit     text not null,
+  version   text not null,
   page_key  text not null,
   extract   text not null,
   field     text not null,
@@ -1402,13 +1403,19 @@ async def replace_audit_findings(
     conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
     tenant: str,
     audit: str,
+    version: str,
     page_key: str,
     findings: Sequence[Mapping[str, Any]],
 ) -> None:
     """Replace-set per (tenant, audit, page): every finding this verdict
     was just judged from, and nothing this page's last judging left behind
     -- a verdict rewritten from a changed extract or a changed reading must
-    not go on showing a finding that explained the previous one."""
+    not go on showing a finding that explained the previous one. The
+    delete is version-agnostic (every prior version's rows for this page
+    go too) -- `version` is written on each surviving row so a *reader*
+    (`audit_findings_citing`) can tell a stale row from a current one in
+    the window between a redefinition and this page's next judging,
+    without waiting for that judging to land (review finding C/F3)."""
     await conn.execute(
         "delete from audit_finding where tenant_id = $1 and audit = $2 and page_key = $3",
         tenant,
@@ -1419,13 +1426,14 @@ async def replace_audit_findings(
         return
     await conn.executemany(
         "insert into audit_finding "
-        "(tenant_id, audit, page_key, extract, field, row_index, record, verdict, seen, "
-        "extracted, word_ids, boxes, anchored, seen_text, note, at) "
-        "values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())",
+        "(tenant_id, audit, version, page_key, extract, field, row_index, record, verdict, "
+        "seen, extracted, word_ids, boxes, anchored, seen_text, note, at) "
+        "values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())",
         [
             (
                 tenant,
                 audit,
+                version,
                 page_key,
                 f["extract"],
                 f["field"],
@@ -1475,10 +1483,16 @@ async def audit_findings_citing(
     record: str,
 ) -> list[dict[str, Any]]:
     """Every finding that names this record -- the derived record page's
-    "verdicts citing it" (documents-plan-v3 D6's surfaces, 5e)."""
+    "verdicts citing it" (documents-plan-v3 D6's surfaces, 5e). Carries
+    each row's own `version`: a redefined audit's rows for this page are
+    rewritten wholesale only once a reading lands under the new version
+    (`replace_audit_findings`), so a caller must compare `version` against
+    the audit's *current* version itself before treating a row as live
+    (review finding C/F3) -- this function does not know which version is
+    current, only the library the caller already has does."""
     rows = await conn.fetch(
-        "select audit, page_key, extract, field, row_index, verdict, seen, extracted, "
-        "word_ids, boxes, anchored, seen_text, note, at from audit_finding "
+        "select audit, version, page_key, extract, field, row_index, verdict, seen, "
+        "extracted, word_ids, boxes, anchored, seen_text, note, at from audit_finding "
         "where tenant_id = $1 and record = $2 order by audit, field",
         tenant,
         record,
