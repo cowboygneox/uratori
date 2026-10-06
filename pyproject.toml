@@ -122,6 +122,17 @@ init_forbid_extra = true
 module = ["pypdfium2", "pytesseract", "reportlab.*"]
 ignore_missing_imports = true
 
+# `anthropic` ships its own types, but is not a dependency of this project
+# at any tier -- `examples/records/author.py` is a development tool, never
+# run by the server (documents-plan-v3, D4), and imports it lazily, inside
+# the one function that calls out to it, for whoever runs the script to
+# install themselves. Treated as untyped here only because it is absent
+# from this checked environment by design, not because its own types are
+# missing.
+[[tool.mypy.overrides]]
+module = ["anthropic"]
+ignore_missing_imports = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
