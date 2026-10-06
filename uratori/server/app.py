@@ -28,16 +28,31 @@ Design decisions a reader should not have to rediscover:
 """
 
 
+import asyncio
 import hmac
+import json
 import logging
 import os
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date
-from typing import Annotated, Literal, cast
+from pathlib import Path
+from typing import Annotated, Any, Literal, cast
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 
 from ..facade import DEFAULT_TRAILING
 from ..lang.check import compile_source
@@ -49,30 +64,53 @@ from ..verify import FactError
 from ..windows import WindowError, WindowSpec, expand_window_args
 from . import db
 from . import ui as builtin_ui
+from .blobs import BlobStore, FilesystemBlobStore
 from .contract import (
     Ack,
     AnyResult,
     DeclarationOut,
     DefinitionsIn,
+    DeleteDocumentOut,
+    DocumentOut,
+    DocumentsOut,
     Envelope,
     FactFieldOut,
     FactOut,
     FactsIn,
     Health,
     LibraryOut,
+    PageWordsOut,
+    ReocrOut,
     RunIn,
     RunOut,
     SchemaIn,
     Subscribe,
     SubscribeEntry,
     TenantRemoved,
+    UploadOut,
+    WordOut,
     schema_out,
+)
+from .documents import (
+    DEFAULT_MAX_UPLOAD_BYTES,
+    DocumentKindError,
+    RenderCache,
+    document_id_of,
+    document_kinds,
+    ingest_pdf,
+    page_key,
+    refuse_document_kind_writes,
+    render_page_png,
+    sha256_hex,
+    uploaded_at_now,
+    words_sha_of,
 )
 from .hub import Client, Entry
 from .runtime import (
     State,
     World,
     compile_for_teach,
+    documents_ready,
     facade_for,
     known_names,
     push_pass,
@@ -81,8 +119,34 @@ from .runtime import (
     run_out,
     state_of,
 )
+from .words import PostgresWordStore, Word
 
 log = logging.getLogger("uratori.server")
+
+
+async def _document_out(
+    blob_store: BlobStore, tenant: str, kind: str, document_id: str, value: dict[str, Any]
+) -> DocumentOut:
+    """One document fact, decorated with whether its blob is actually on
+    disk -- a row whose file is missing renders `held: false` with a
+    reason, never a 500."""
+    sha = str(value.get("sha256") or "")
+    held = True
+    reason: str | None = None
+    if not sha or not await blob_store.exists(tenant, sha):
+        held = False
+        reason = "this document's bytes are missing from blob storage"
+    return DocumentOut(
+        kind=kind,
+        id=document_id,
+        title=cast('str | None', value.get("title")),
+        mime=str(value.get("mime") or ""),
+        sha256=sha,
+        pages=int(value.get("pages") or 0),
+        uploaded_at=cast('str | None', value.get("uploaded_at")),
+        held=held,
+        reason=reason,
+    )
 
 
 def create_app(
@@ -93,7 +157,9 @@ def create_app(
     pg_schema: str | None = None,
     ui: bool | None = None,
     ui_edit: bool | None = None,
+    ui_documents: bool | None = None,
     frame_ancestors: str | None = None,
+    blob_dir: str | None = None,
 ) -> FastAPI:
     """Build the service. Parameters override the environment, for tests and
     for embedding; production reads DATABASE_URL / URATORI_TOKEN / APP_VERSION,
@@ -117,6 +183,17 @@ def create_app(
         # a security-relevant flag that silently does nothing is a surprise
         # deferred to the worst moment.
         raise RuntimeError("URATORI_UI_EDIT is granted but the UI itself is off")
+    resolved_ui_documents = (
+        ui_documents
+        if ui_documents is not None
+        else _ui_documents_default(os.environ.get("URATORI_UI_DOCUMENTS"), resolved_token, resolved_ui)
+    )
+    if resolved_ui_documents and not resolved_ui:
+        raise RuntimeError("URATORI_UI_DOCUMENTS is granted but the UI itself is off")
+    resolved_blob_dir = blob_dir or os.environ.get("URATORI_BLOB_DIR")
+    resolved_max_upload = int(
+        os.environ.get("URATORI_DOCUMENT_MAX_BYTES", str(DEFAULT_MAX_UPLOAD_BYTES))
+    )
     resolved_ancestors = (
         frame_ancestors or os.environ.get("URATORI_UI_FRAME_ANCESTORS") or "'self'"
     )
@@ -134,7 +211,22 @@ def create_app(
             )
         pool = await db.open_server_pool(resolved_dsn, pg_schema=pg_schema)
         await db.ensure_schema(pool)
-        state = State(pool, resolved_token, resolved_version)
+        blob_store = FilesystemBlobStore(resolved_blob_dir) if resolved_blob_dir else None
+        render_cache = (
+            RenderCache(Path(resolved_blob_dir) / ".render-cache")
+            if resolved_blob_dir
+            else None
+        )
+        state = State(
+            pool,
+            resolved_token,
+            resolved_version,
+            blob_store=blob_store,
+            word_store=PostgresWordStore(pool) if resolved_blob_dir else None,
+            render_cache=render_cache,
+            blob_dir=resolved_blob_dir,
+            max_upload_bytes=resolved_max_upload,
+        )
         held = await db.load_world(pool)
         if held is not None:
             document, source = held
@@ -334,7 +426,10 @@ def create_app(
                 'close the import with POST /tenants/{tenant}/runs {"full": true}.',
             )
         try:
+            refuse_document_kind_writes(library, body.writes, body.deletes)
             facade.verify(body.writes, body.deletes)
+        except DocumentKindError as refusal:
+            raise HTTPException(status_code=422, detail=str(refusal)) from refusal
         except FactError as refusal:
             raise HTTPException(status_code=422, detail=str(refusal)) from refusal
         async with s.lock_for(tenant):
@@ -592,13 +687,384 @@ def create_app(
             )
         return answer
 
+    # ----------------------------------------------------------- documents --
+    #
+    # `fact <kind> as document:` / `fact <kind> as page of <kind>`
+    # (docs/documents.md, D1). This is the one provider for document and
+    # page kinds -- the facts route above refuses a direct write or delete
+    # against either (`refuse_document_kind_writes`). Parsing, rendering and
+    # OCR run outside `s.lock_for(tenant)`; only the database write of facts
+    # and the word layer takes the lock.
+
+    def _document_kind_or_404(library: Library, kind: str) -> str:
+        kinds = document_kinds(library)
+        page_kind = kinds.get(kind)
+        if page_kind is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f'"{kind}" is not a document kind. Those are: '
+                f'{", ".join(sorted(kinds)) or "none"}.',
+            )
+        return page_kind
+
+    @app.post(
+        "/tenants/{tenant}/documents/{kind}", response_model=UploadOut, dependencies=[auth]
+    )
+    async def upload_document(
+        tenant: str,
+        kind: str,
+        s: S,
+        file: Annotated[UploadFile, File()],
+        record: Annotated[str | None, Form()] = None,
+    ) -> UploadOut:
+        """Upload one file. `record` is an optional JSON object of host
+        fields beside the shape's own, verified against the kind's
+        declaration exactly as the facts route verifies a write. A re-upload
+        of bytes already held under this kind is `written: 0` -- the
+        document id is content-derived, so it is the same upload, not a
+        second record of the same file."""
+        world, library = ready(s)
+        page_kind = _document_kind_or_404(library, kind)
+        blob_store, _words, _cache = documents_ready(s)
+
+        data = await file.read()
+        if len(data) > s.max_upload_bytes:
+            raise HTTPException(
+                status_code=422,
+                detail=f"the upload is {len(data)} bytes, over the "
+                f"{s.max_upload_bytes}-byte limit (URATORI_DOCUMENT_MAX_BYTES).",
+            )
+        host_fields: dict[str, Any] = {}
+        if record is not None:
+            try:
+                parsed = json.loads(record)
+            except json.JSONDecodeError as refusal:
+                raise HTTPException(
+                    status_code=422, detail=f"record is not valid JSON: {refusal}"
+                ) from refusal
+            if not isinstance(parsed, dict):
+                raise HTTPException(status_code=422, detail="record must be a JSON object")
+            host_fields = parsed
+
+        sha = sha256_hex(data)
+        document_id = document_id_of(sha)
+        existing = await db.document_by_sha(s.pool, tenant, kind, sha)
+        if existing is not None:
+            held = await db.fact_record(s.pool, tenant, kind, existing)
+            pages = int(held["value"].get("pages") or 0) if held is not None else 0
+            empty = RunOut(
+                written=0, deleted=0, changed=0, rebuilt=[], covered=[], shown=[], results=[]
+            )
+            return UploadOut(id=existing, written=0, pages=pages, run=empty)
+
+        # The slow part: parsing the PDF's own text layer and, for any page
+        # without one, rendering it and running OCR. A pure function of the
+        # bytes, run off the event loop and outside any lock.
+        ingested = await asyncio.to_thread(ingest_pdf, data)
+
+        document_fields: dict[str, Any] = {
+            **host_fields,
+            "title": host_fields.get("title") or file.filename or document_id,
+            "mime": file.content_type or "application/pdf",
+            "sha256": sha,
+            "pages": len(ingested.pages),
+            "uploaded_at": uploaded_at_now(),
+        }
+        page_records: dict[str, dict[str, Any]] = {}
+        page_words: dict[str, list[Word]] = {}
+        for number, page in enumerate(ingested.pages, start=1):
+            key = page_key(document_id, number)
+            page_records[key] = {
+                "document_id": document_id,
+                "number": number,
+                "text_source": page.text_source,
+                "words_sha": words_sha_of(page.words),
+            }
+            page_words[key] = list(page.words)
+
+        writes = {kind: {document_id: document_fields}, page_kind: page_records}
+        facade = facade_for(s, world, library)
+        try:
+            facade.verify(writes, None)
+        except FactError as refusal:
+            raise HTTPException(status_code=422, detail=str(refusal)) from refusal
+
+        # Bytes land first, then the DB rows in one transaction (D1): a
+        # crash between the two leaves an unreferenced file, swept by
+        # tenant removal or an explicit admin sweep, never silently served.
+        await blob_store.put(tenant, data)
+
+        async with s.lock_for(tenant):
+            async with s.pool.acquire() as connection, connection.transaction():
+                await db.record_document(connection, tenant, kind, document_id, sha)
+                facts = PostgresFactStore(connection)
+                moved: dict[str, list[str]] = {}
+                for write_kind, records in writes.items():
+                    changed = await facts.upsert(tenant, write_kind, records)
+                    if changed:
+                        moved[write_kind] = changed
+                word_rows = PostgresWordStore(connection)
+                for key, words in page_words.items():
+                    await word_rows.put(tenant, page_kind, key, words)
+            full = await db.deferred(s.pool, tenant)
+            report = await facade.run(tenant, written=moved, full=full)
+            if full:
+                await db.clear_deferred(s.pool, tenant)
+            out = run_out(
+                report, world, library, written=sum(len(v) for v in moved.values()), deleted=0
+            )
+            await record_pass(s, tenant, "documents", full=full, out=out)
+            await push_pass(s, tenant, facade, report)
+
+        return UploadOut(id=document_id, written=1, pages=len(ingested.pages), run=out)
+
+    @app.get(
+        "/tenants/{tenant}/documents/{kind}", response_model=DocumentsOut, dependencies=[auth]
+    )
+    async def list_documents(
+        tenant: str,
+        kind: str,
+        s: S,
+        after: Annotated[str | None, Query()] = None,
+        q: Annotated[str | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    ) -> DocumentsOut:
+        _world, library = ready(s)
+        _document_kind_or_404(library, kind)
+        blob_store, _words, _cache = documents_ready(s)
+        rows, more, total = await db.page_facts(
+            s.pool, tenant, kind, after=after, q=q, limit=limit
+        )
+        documents = [
+            await _document_out(blob_store, tenant, kind, row["key"], row["value"])
+            for row in rows
+        ]
+        return DocumentsOut(documents=documents, more=more, total=total)
+
+    @app.get(
+        "/tenants/{tenant}/documents/{kind}/{document_id}",
+        response_model=DocumentOut,
+        dependencies=[auth],
+    )
+    async def get_document(tenant: str, kind: str, document_id: str, s: S) -> DocumentOut:
+        _world, library = ready(s)
+        _document_kind_or_404(library, kind)
+        blob_store, _words, _cache = documents_ready(s)
+        row = await db.fact_record(s.pool, tenant, kind, document_id)
+        if row is None:
+            raise HTTPException(
+                status_code=404, detail=f"no document {document_id!r} of kind {kind!r}"
+            )
+        return await _document_out(blob_store, tenant, kind, document_id, row["value"])
+
+    @app.get(
+        "/tenants/{tenant}/documents/{kind}/{document_id}/pages/{number}.png",
+        dependencies=[auth],
+    )
+    async def get_page_png(
+        tenant: str,
+        kind: str,
+        document_id: str,
+        number: int,
+        s: S,
+        scale: Annotated[float, Query(gt=0, le=10)] = 1.5,
+    ) -> Response:
+        _world, library = ready(s)
+        _document_kind_or_404(library, kind)
+        blob_store, _words, render_cache = documents_ready(s)
+        row = await db.fact_record(s.pool, tenant, kind, document_id)
+        if row is None:
+            raise HTTPException(
+                status_code=404, detail=f"no document {document_id!r} of kind {kind!r}"
+            )
+        pages = int(row["value"].get("pages") or 0)
+        if not 1 <= number <= pages:
+            raise HTTPException(
+                status_code=404, detail=f"document {document_id!r} has {pages} page(s)"
+            )
+        sha = str(row["value"]["sha256"])
+        cached = await asyncio.to_thread(render_cache.get, tenant, sha, number, scale)
+        if cached is not None:
+            return Response(content=cached, media_type="image/png")
+        data = await blob_store.open(tenant, sha)
+        if data is None:
+            # Never a 500: a row whose file is missing on disk is a stated
+            # gap, not an opaque failure.
+            raise HTTPException(
+                status_code=404,
+                detail="this document's bytes are missing from blob storage",
+            )
+        png = await asyncio.to_thread(render_page_png, data, number, scale)
+        await asyncio.to_thread(render_cache.put, tenant, sha, number, scale, png)
+        return Response(content=png, media_type="image/png")
+
+    @app.get(
+        "/tenants/{tenant}/documents/{kind}/{document_id}/pages/{number}/words",
+        response_model=PageWordsOut,
+        dependencies=[auth],
+    )
+    async def get_page_words(
+        tenant: str, kind: str, document_id: str, number: int, s: S
+    ) -> PageWordsOut:
+        _world, library = ready(s)
+        page_kind = _document_kind_or_404(library, kind)
+        _blobs, word_store, _cache = documents_ready(s)
+        key = page_key(document_id, number)
+        words = await word_store.words_of(tenant, page_kind, key)
+        return PageWordsOut(
+            words=[
+                WordOut(
+                    id=w.id,
+                    text=w.text,
+                    x0=w.x0,
+                    y0=w.y0,
+                    x1=w.x1,
+                    y1=w.y1,
+                    line=w.line,
+                    source=w.source,
+                    confidence=w.confidence,
+                )
+                for w in words
+            ]
+        )
+
+    @app.delete(
+        "/tenants/{tenant}/documents/{kind}/{document_id}",
+        response_model=DeleteDocumentOut,
+        dependencies=[auth],
+    )
+    async def delete_document(
+        tenant: str, kind: str, document_id: str, s: S
+    ) -> DeleteDocumentOut:
+        world, library = ready(s)
+        page_kind = _document_kind_or_404(library, kind)
+        blob_store, _words, _cache = documents_ready(s)
+        facade = facade_for(s, world, library)
+
+        async with s.lock_for(tenant):
+            row = await db.fact_record(s.pool, tenant, kind, document_id)
+            if row is None:
+                raise HTTPException(
+                    status_code=404, detail=f"no document {document_id!r} of kind {kind!r}"
+                )
+            pages = int(row["value"].get("pages") or 0)
+            sha = str(row["value"]["sha256"])
+            page_keys = [page_key(document_id, n) for n in range(1, pages + 1)]
+
+            async with s.pool.acquire() as connection, connection.transaction():
+                facts = PostgresFactStore(connection)
+                await facts.delete(tenant, page_kind, page_keys)
+                await facts.delete(tenant, kind, [document_id])
+                await PostgresWordStore(connection).delete(tenant, page_kind, page_keys)
+                await db.delete_documents(connection, tenant, kind, [document_id])
+
+            # Rows before the file (D1): a reader racing this delete sees
+            # the fact gone before the bytes are, never the other way.
+            await blob_store.delete(tenant, sha)
+
+            # A warm pass with the deleted keys, named here as the intent --
+            # `engine.py`'s `_remove_departed` already handles a deletion
+            # without a full rebuild. NOTE (deviation, see the package
+            # report): `Uratori.execute` (`facade.py`) currently escalates
+            # to a full pass whenever `deleted` is non-empty, a pre-existing
+            # cross-cutting safety rule outside this package's scope to
+            # change, so this delete runs full today regardless of the
+            # `full=False` stated below.
+            deleted = {kind: [document_id], page_kind: page_keys}
+            full = await db.deferred(s.pool, tenant)
+            report = await facade.run(tenant, deleted=deleted, full=full)
+            if full:
+                await db.clear_deferred(s.pool, tenant)
+            out = run_out(report, world, library, written=0, deleted=len(page_keys) + 1)
+            await record_pass(s, tenant, "documents", full=full, out=out)
+            await push_pass(s, tenant, facade, report)
+
+        return DeleteDocumentOut(ok=True, run=out)
+
+    @app.post(
+        "/tenants/{tenant}/documents/{kind}/{document_id}/reocr",
+        response_model=ReocrOut,
+        dependencies=[auth],
+    )
+    async def reocr_document(
+        tenant: str, kind: str, document_id: str, s: S
+    ) -> ReocrOut:
+        """Re-run word extraction (text layer, then OCR where there is none)
+        against the stored bytes -- the operator verb for "re-ingest under a
+        better renderer or OCR pass". A page whose word layer actually
+        changes gets a new `words_sha`, which is a page-fact change every
+        extract downstream notices; a page whose layer comes back identical
+        moves nothing."""
+        world, library = ready(s)
+        page_kind = _document_kind_or_404(library, kind)
+        blob_store, _words, _cache = documents_ready(s)
+        facade = facade_for(s, world, library)
+
+        row = await db.fact_record(s.pool, tenant, kind, document_id)
+        if row is None:
+            raise HTTPException(
+                status_code=404, detail=f"no document {document_id!r} of kind {kind!r}"
+            )
+        sha = str(row["value"]["sha256"])
+        data = await blob_store.open(tenant, sha)
+        if data is None:
+            raise HTTPException(
+                status_code=404,
+                detail="this document's bytes are missing from blob storage",
+            )
+
+        ingested = await asyncio.to_thread(ingest_pdf, data)
+        page_records: dict[str, dict[str, Any]] = {}
+        page_words: dict[str, list[Word]] = {}
+        for number, page in enumerate(ingested.pages, start=1):
+            key = page_key(document_id, number)
+            page_records[key] = {
+                "document_id": document_id,
+                "number": number,
+                "text_source": page.text_source,
+                "words_sha": words_sha_of(page.words),
+            }
+            page_words[key] = list(page.words)
+
+        try:
+            facade.verify({page_kind: page_records}, None)
+        except FactError as refusal:
+            raise HTTPException(status_code=422, detail=str(refusal)) from refusal
+
+        async with s.lock_for(tenant):
+            async with s.pool.acquire() as connection, connection.transaction():
+                facts = PostgresFactStore(connection)
+                changed = await facts.upsert(tenant, page_kind, page_records)
+                word_rows = PostgresWordStore(connection)
+                for key, words in page_words.items():
+                    await word_rows.put(tenant, page_kind, key, words)
+            moved = {page_kind: changed} if changed else {}
+            full = await db.deferred(s.pool, tenant)
+            report = await facade.run(tenant, written=moved, full=full)
+            if full:
+                await db.clear_deferred(s.pool, tenant)
+            out = run_out(report, world, library, written=len(changed), deleted=0)
+            await record_pass(s, tenant, "documents", full=full, out=out)
+            await push_pass(s, tenant, facade, report)
+
+        return ReocrOut(pages_changed=len(changed), run=out)
+
     # ------------------------------------------------------------ tenants --
 
     @app.delete("/tenants/{tenant}", response_model=TenantRemoved, dependencies=[auth])
     async def delete_tenant(tenant: str, s: S) -> TenantRemoved:
         async with s.lock_for(tenant):
-            facts, values = await db.remove_tenant(s.pool, tenant)
-        return TenantRemoved(facts_removed=facts, values_removed=values)
+            # Read before `remove_tenant` deletes the rows that name them:
+            # blobs are tenant-namespaced, so every sha256 this tenant's
+            # `document` rows hold is a file only this delete can orphan.
+            shas = await db.tenant_document_shas(s.pool, tenant)
+            facts, values, documents = await db.remove_tenant(s.pool, tenant)
+            if s.blob_store is not None:
+                for sha in shas:
+                    await s.blob_store.delete(tenant, sha)
+        return TenantRemoved(
+            facts_removed=facts, values_removed=values, documents_removed=documents
+        )
 
     # ------------------------------------------------------------- socket --
 
@@ -777,7 +1243,11 @@ def create_app(
             await s.hub.leave(client)
 
     if resolved_ui:
-        app.include_router(builtin_ui.router(resolved_ancestors, edit=resolved_edit))
+        app.include_router(
+            builtin_ui.router(
+                resolved_ancestors, edit=resolved_edit, documents=resolved_ui_documents
+            )
+        )
 
     return app
 
@@ -825,6 +1295,30 @@ def _edit_default(env: str | None, token: str | None, ui: bool) -> bool:
     if value in {"0", "false", "off", "no"}:
         return False
     raise RuntimeError(f"URATORI_UI_EDIT={env!r} is neither a yes nor a no")
+
+
+def _ui_documents_default(env: str | None, token: str | None, ui: bool) -> bool:
+    """Whether the built-in UI's document viewer (page images, word
+    layers) is granted when the caller did not say.
+
+    The same shape as `_edit_default`, for the same reason: this is a
+    sub-grant of the UI, not a sibling of it, so its default must follow
+    the UI's own resolved value rather than the token alone -- `_ui_default`
+    on its own could default `True` while `URATORI_UI` was explicitly
+    turned off, the exact contradiction `_edit_default` already avoids.
+    Default is on only where the UI is on AND the API itself is open (an
+    `<img src>` cannot carry a bearer token, so page images beside a token
+    stay behind the authenticated API only); `URATORI_UI_DOCUMENTS`
+    overrides in either direction, and junk refuses to boot.
+    """
+    if env is None or env.strip() == "":
+        return ui and token is None
+    value = env.strip().lower()
+    if value in {"1", "true", "on", "yes"}:
+        return True
+    if value in {"0", "false", "off", "no"}:
+        return False
+    raise RuntimeError(f"URATORI_UI_DOCUMENTS={env!r} is neither a yes nor a no")
 
 
 def _parse(raw: str) -> Subscribe | None:

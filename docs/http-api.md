@@ -381,6 +381,13 @@ figure by the closing run, not before.
 Passes are serialised per tenant: two concurrent posts for one tenant queue,
 posts for different tenants overlap.
 
+**A document or page kind refuses both.** A write or a delete naming a kind
+declared `as document` or `as page of` (D1, see [Documents](#documents)
+below) is a `422` whole, naming the documents routes instead -- those kinds
+move only through `POST`/`GET`/`DELETE /tenants/{tenant}/documents/{kind}`,
+which keep a document's bytes, its pages, its word layer and its facts in
+step.
+
 **A batch is verified before anything lands.** A *write* against a kind the
 world does not declare is a `422` in either mode -- new behaviour from the
 release that added fact declarations; such writes previously stored rows
@@ -799,7 +806,7 @@ curl -s -X DELETE "$BASE/tenants/t1" -H "$AUTH"
 ```
 
 ```json
-{"facts_removed": 4, "values_removed": 2}
+{"facts_removed": 4, "values_removed": 2, "documents_removed": 1}
 ```
 
 The counts are the response because "ok" is the least useful true thing a
@@ -807,6 +814,147 @@ destructive route can say: a caller expecting thousands and told 4 has just
 learned it deleted the wrong tenant, while an `{"ok": true}` would have let it
 find out later. Deletion is not soft; the tenant's next `GET .../results`
 serves `never-computed` absences, exactly like a tenant that never existed.
+
+`documents_removed` counts the tenant's `document`-kind rows ([Documents](documents.md),
+D1); the pages, word layers and provenance that belong to them go with them.
+This is also the one route that removes bytes: the tenant's blobs are
+tenant-namespaced (`<tenant>/<sha[:2]>/<sha>`), so this delete unlinks every
+file only this tenant referenced, read off the database before the rows are
+gone and removed from disk after.
+
+## Documents
+
+`fact <kind> as document:` / `fact <kind> as page of <kind>` ([the language
+guide](language.md), [Documents](documents.md), D1) declare a document kind
+and its one page kind. These routes are the **only** way records of either
+kind move -- `POST /tenants/{tenant}/facts` refuses a direct write or a
+delete against one (`422`, naming these routes instead), because a
+document's bytes, its pages, its word layer and its facts move together or
+not at all.
+
+### The coordinate frame, stated once
+
+Every word box on every route below is **page-normalised `[0,1]`, in the
+rendered frame**: the page's own CropBox applied, its own `/Rotate` applied,
+origin top-left, `y` increasing downward. "Rendered" is the operative word --
+it is the frame `GET .../pages/{n}.png` actually draws, at any `scale`, so a
+box computed once is correct against that image at every zoom a client
+chooses, and against a later render of the same page under a newer
+renderer version (the pixels may differ at the edges; the normalised frame
+does not move). This is a wire **contract**, not an implementation detail:
+a client that draws a box multiplies `x0`/`x1` by the image's pixel width and
+`y0`/`y1` by its pixel height, nothing else.
+
+### `POST /tenants/{tenant}/documents/{kind}`
+
+Upload one file. Multipart: the file, plus an optional `record` part --a
+JSON object of host fields beside the shape's own (`title, mime, sha256,
+pages, uploaded_at`), verified against the kind's declaration exactly as a
+facts-route write is.
+
+```bash
+curl -s -X POST "$BASE/tenants/t1/documents/medical_record" -H "$AUTH" \
+  -F file=@chart.pdf \
+  -F 'record={"source": "clinic-fax-queue"};type=application/json'
+```
+
+```json
+{"id": "73cbe5044c5d8357", "written": 1, "pages": 3, "run": { …a run report, as POST .../facts answers… }}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | The document's fact key -- the first 16 hex characters of the file's sha256. Content-derived, so re-uploading identical bytes is idempotent by construction: it finds the same id and answers `written: 0`, never a second record of the same file. |
+| `written` | `1` for a genuinely new document, `0` for a dedupe. |
+| `pages` | How many pages the file has. |
+| `run` | The same run report shape `POST .../facts` answers -- the document and page facts it just wrote may have moved figures over those kinds. |
+
+Parsing happens before anything is stored: the file's text layer is read
+page by page, and a page with none is rendered and read with Tesseract OCR
+(`docs/setup.md` -- this runs locally, no network call). All of it runs
+outside the tenant's pass lock; only the database write of the facts and the
+word layer takes it. `422` for a file over `URATORI_DOCUMENT_MAX_BYTES`, for
+a `record` that fails verification, or for a kind that is not a document
+kind (`404`, naming the declared ones). `409` without `URATORI_BLOB_DIR` set.
+
+### `GET /tenants/{tenant}/documents/{kind}`
+
+Every document of one kind, keyset-paged exactly like `GET .../facts/{kind}`
+(`after`, `q`, `limit`):
+
+```json
+{
+  "documents": [
+    {"kind": "medical_record", "id": "73cbe5044c5d8357", "title": "chart.pdf",
+     "mime": "application/pdf", "sha256": "73cbe5044c5d8357…", "pages": 3,
+     "uploaded_at": "2026-10-05T12:00:00+00:00", "held": true, "reason": null}
+  ],
+  "more": false,
+  "total": 1
+}
+```
+
+`held: false` with a `reason` is a document whose fact exists but whose blob
+is missing from disk -- stated, never a `500`.
+
+### `GET /tenants/{tenant}/documents/{kind}/{id}`
+
+One document, the same shape as a row above.
+
+### `GET /tenants/{tenant}/documents/{kind}/{id}/pages/{n}.png?scale=`
+
+The page rendered to PNG, `scale` canvas units per pixel (default `1.5`;
+multiply by 72 for DPI). Rendered into a bounded on-disk LRU keyed by
+`(sha256, page, scale, renderer version)`, beside the blobs -- a repeat
+request at the same scale never re-parses the file. `404` for a page number
+outside the document, or if the blob is missing on disk (never a `500`).
+
+### `GET /tenants/{tenant}/documents/{kind}/{id}/pages/{n}/words`
+
+The page's word layer, in reading order:
+
+```json
+{
+  "words": [
+    {"id": 0, "text": "Weight:", "x0": 0.118, "y0": 0.105, "x1": 0.182, "y1": 0.119,
+     "line": 0, "source": "pdf", "confidence": null},
+    {"id": 1, "text": "82", "x0": 0.190, "y0": 0.105, "x1": 0.210, "y1": 0.116,
+     "line": 0, "source": "pdf", "confidence": null}
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | Reading-order index on this page -- what a citation names (`{"page": "<page key>", "words": [0, 1]}`, D2). |
+| `x0, y0, x1, y1` | The box, in the coordinate frame stated above. |
+| `line` | Which text line this word sits on, 0-based. For a PDF's own text layer, a deterministic clustering over the rendered frame (there is no structural "line" in PDF content); for an OCR'd page, Tesseract's own `line_num`. |
+| `source` | `"pdf"` (read from the file's own text layer) or `"ocr"` (no text layer; read from the rendered image). |
+| `confidence` | Tesseract's word confidence, 0–100, for an OCR'd word; `null` for a `"pdf"` word -- it was read, not guessed. |
+
+### `DELETE /tenants/{tenant}/documents/{kind}/{id}`
+
+Removes the document's fact, every page fact, the word layer and the blob,
+in that order (rows before the file: a reader racing the delete sees the
+fact gone before the bytes are, never the other way), then runs a pass over
+the deleted keys.
+
+```json
+{"ok": true, "run": { …a run report… }}
+```
+
+### `POST /tenants/{tenant}/documents/{kind}/{id}/reocr`
+
+The operator verb for "re-ingest under a better renderer or OCR pass":
+re-runs word extraction against the stored bytes for every page. A page
+whose word layer actually changes gets a new `words_sha` on its page fact
+(D1) -- a fact change, so every extract downstream notices -- and `run`
+reflects whatever that moved; a page whose layer comes back identical moves
+nothing.
+
+```json
+{"pages_changed": 0, "run": { …a run report… }}
+```
 
 ## The `Result` envelope
 

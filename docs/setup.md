@@ -85,6 +85,29 @@ config files.
 | `URATORI_UI` | follows the token | Mounts the [built-in investigation UI](ui.md) at `/ui/`. Unset, the UI is on exactly when `URATORI_TOKEN` is unset -- the UI is unauthenticated by design, so a token'd API does not silently carry an open window. `on`/`off` (also `true`/`false`, `1`/`0`, `yes`/`no`) overrides in either direction; anything else refuses to boot. |
 | `URATORI_UI_EDIT` | on only for an open server | Grants [editing definitions from the UI](ui.md#editing-definitions). Unset, editing is on exactly when the UI is on AND `URATORI_TOKEN` is unset -- an open server already accepts an unauthenticated `PUT /definitions`, so its UI editing grants nothing new, while beside a token it would hand "redefine every figure" to anyone who can reach the port. Same spellings as `URATORI_UI`; junk refuses to boot, and so does granting it while the UI itself is off. |
 | `URATORI_UI_FRAME_ANCESTORS` | `'self'` | Who may iframe the UI, pasted verbatim into its `Content-Security-Policy: frame-ancestors` header. Set it to the embedding application's origin to allow embedding; see [the UI's own page](ui.md) for the proxy alternative. |
+| `URATORI_BLOB_DIR` | unset | Where uploaded files live, content-addressed and tenant-namespaced ([Documents](documents.md), D1). Required the moment a document-shaped fact (`fact <kind> as document:`) is declared -- a clear 409 names this variable otherwise. Local disk, mounted as a persistent volume ([docker-compose.yml](../docker-compose.yml) gives it one); never Postgres, so the database stays small and a page render never pulls a file through it. |
+| `URATORI_DOCUMENT_MAX_BYTES` | `52428800` (50 MB) | The largest file `POST /tenants/{t}/documents/{kind}` accepts; a larger upload is a 422, not a slow 500. |
+| `URATORI_UI_DOCUMENTS` | follows `URATORI_UI` AND the token | Grants the built-in UI's document viewer (page images, word-layer search) at `/ui/api/.../documents/...`. Unset, it is on exactly when the UI itself is on AND `URATORI_TOKEN` is unset -- an `<img src>` cannot carry a bearer token, so page images stay behind the authenticated API alone wherever a token protects it. Same spellings and the same "junk refuses to boot" rule as `URATORI_UI_EDIT`; the authenticated API always serves the same routes to hosts, regardless of this setting. |
+
+## Documents and OCR
+
+The `documents` extra (`.[server,documents]`; the published image installs
+it) adds `pypdfium2` for rendering pages and reading a PDF's own text
+layer, and `pytesseract` plus the `tesseract-ocr` apt package for the pages
+that have none (scans, faxes -- the common case in a multi-year bundle, not
+the edge). Both run **in-process, on this machine, synchronously with the
+upload** -- there is no queue, no worker, and no network call either makes:
+OCR is Tesseract's own binary, invoked locally, and nothing about a page's
+pixels or text leaves the container. Rendering, text extraction and OCR all
+run outside the tenant's pass lock (a multi-hundred-page upload must not
+stall every other write to that tenant), but still inside the same request;
+a very large bundle's upload call is correspondingly slow, and
+`URATORI_DOCUMENT_MAX_BYTES` is the backstop against an upload nobody meant
+to be that large.
+
+See [Documents](documents.md) for the shape (`as document` / `as page of`)
+and [the HTTP API](http-api.md) for the upload, read, render and delete
+routes.
 
 ## The database
 
@@ -123,6 +146,15 @@ definitions source is stored and recompiled at boot (a build whose compiler
 refuses the stored source boots unready rather than crashing; see
 [Upgrading](#upgrading)). There is nothing in the
 container worth backing up.
+
+**If `URATORI_BLOB_DIR` is set, back that up too.** Uploaded files live on
+disk, deliberately outside Postgres ([Documents](documents.md), D1) --
+`pg_dump` alone no longer captures a document-shaped fact's bytes, only its
+metadata. Back up the volume behind `URATORI_BLOB_DIR` the same way you
+back up the database, and restore both together: a database restored to a
+point where a document existed, beside a blob directory that does not yet
+(or no longer) hold its bytes, is a fact whose page renders `held: false`
+until the two are back in step.
 
 ## The auth token
 

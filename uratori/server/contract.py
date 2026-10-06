@@ -350,6 +350,7 @@ class Ack(BaseModel):
 class TenantRemoved(BaseModel):
     facts_removed: int
     values_removed: int
+    documents_removed: int = 0
 
 
 class SubscribeEntry(BaseModel):
@@ -402,3 +403,84 @@ class Envelope(BaseModel):
     result: AnyResult | None = None
     name: str | None = None
     message: str | None = None
+
+
+# ----------------------------------------------------------- documents --
+#
+# `fact <kind> as document:` / `fact <kind> as page of <kind>`
+# (docs/documents.md, D1). The routes below are the one provider for these
+# kinds -- the facts route refuses a direct write or delete against either.
+
+
+class DocumentOut(BaseModel):
+    """One uploaded document, as the fact plus the server's own bookkeeping
+    about its bytes."""
+
+    kind: str
+    id: str
+    title: str | None = None
+    mime: str
+    sha256: str
+    pages: int
+    uploaded_at: str | None = None
+
+    held: bool = True
+    """False when the document's fact exists but its blob is missing on
+    disk -- rendered this way rather than a 500, so a reader sees a stated
+    gap instead of an opaque failure."""
+
+    reason: str | None = None
+    """Why `held` is false, when it is."""
+
+
+class DocumentsOut(BaseModel):
+    documents: list[DocumentOut] = Field(default_factory=list)
+    more: bool = False
+    total: int = 0
+
+
+class UploadOut(BaseModel):
+    """What `POST /tenants/{t}/documents/{kind}` answers: the document's id,
+    whether this upload actually wrote anything new (sha256 dedupe makes a
+    re-upload of the same bytes `written: 0`), and its page count."""
+
+    id: str
+    written: int
+    pages: int
+    run: RunOut
+
+
+class WordOut(BaseModel):
+    """One word of a page's word layer -- `GET
+    /tenants/{t}/documents/{kind}/{id}/pages/{n}/words`. The box is
+    page-normalised `[0,1]` in the rendered frame: CropBox and `/Rotate`
+    applied, origin top-left, y down (`docs/http-api.md`'s coordinate
+    contract) -- correct at any render scale."""
+
+    id: int
+    text: str
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    line: int
+    source: Literal["pdf", "ocr"]
+    confidence: float | None = None
+
+
+class PageWordsOut(BaseModel):
+    words: list[WordOut] = Field(default_factory=list)
+
+
+class DeleteDocumentOut(BaseModel):
+    ok: bool
+    run: RunOut
+
+
+class ReocrOut(BaseModel):
+    """`POST /tenants/{t}/documents/{kind}/{id}/reocr`: every page's word
+    layer is rebuilt from the stored bytes, and a page whose `words_sha`
+    moves is a page fact that moves too -- `pages_changed` counts them."""
+
+    pages_changed: int
+    run: RunOut

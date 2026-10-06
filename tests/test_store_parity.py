@@ -10,12 +10,18 @@ holding properties production never has.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
+from pathlib import Path
 from typing import Any
 
 import asyncpg
 import pytest
 
+from uratori.server.blobs import BlobStore as BlobStoreType
+from uratori.server.blobs import FilesystemBlobStore, MemoryBlobStore
+from uratori.server.words import MemoryWordStore, PostgresWordStore, Word
+from uratori.server.words import WordStore as WordStoreType
 from uratori.store import EngineStore, MemoryEngineStore, Pointer
 from uratori.store.postgres import PostgresEngineStore, PostgresFactStore
 
@@ -492,3 +498,138 @@ async def test_values_under_treats_the_prefix_as_text_not_a_pattern(
     assert [v.subject for v in await s.values_under(tenant, "fig", "v1", "a\\b@")] == [
         "a\\b@2026-01-01"
     ]
+
+
+# --------------------------------------------------------------- documents --
+#
+# `BlobStore` and `WordStore` (`uratori/server/blobs.py`, `uratori/server/
+# words.py`, documents-plan-v3 D1): the server-only stores behind documents.
+# Same parity discipline as the pair above -- a method only one
+# implementation could express is a method the protocol should not have.
+
+
+@pytest.fixture(params=["memory", "filesystem"])
+def blob_store(request: pytest.FixtureRequest, tmp_path: Path) -> BlobStoreType:
+    if request.param == "memory":
+        return MemoryBlobStore()
+    return FilesystemBlobStore(tmp_path / "blobs")
+
+
+async def test_a_blob_is_retrievable_by_its_own_hash(blob_store: BlobStoreType) -> None:
+    sha = await blob_store.put("t1", b"hello world")
+    assert sha == hashlib.sha256(b"hello world").hexdigest()
+    assert await blob_store.exists("t1", sha) is True
+    assert await blob_store.open("t1", sha) == b"hello world"
+
+
+async def test_putting_the_same_bytes_twice_is_a_no_op(blob_store: BlobStoreType) -> None:
+    first = await blob_store.put("t1", b"same bytes")
+    second = await blob_store.put("t1", b"same bytes")
+    assert first == second
+    assert await blob_store.open("t1", first) == b"same bytes"
+
+
+async def test_blobs_are_tenant_namespaced(blob_store: BlobStoreType) -> None:
+    """The same bytes, uploaded by two tenants, are two independent blobs:
+    deleting one tenant's copy must not affect the other's, which is the
+    whole reason the path (or key) is tenant-namespaced rather than shared
+    content-addressed storage."""
+    sha_a = await blob_store.put("tenant-a", b"shared content")
+    sha_b = await blob_store.put("tenant-b", b"shared content")
+    assert sha_a == sha_b
+    await blob_store.delete("tenant-a", sha_a)
+    assert await blob_store.exists("tenant-a", sha_a) is False
+    assert await blob_store.exists("tenant-b", sha_b) is True
+    assert await blob_store.open("tenant-b", sha_b) == b"shared content"
+
+
+async def test_deleting_a_missing_blob_is_not_an_error(blob_store: BlobStoreType) -> None:
+    await blob_store.delete("t1", "0" * 64)  # must not raise
+    assert await blob_store.exists("t1", "0" * 64) is False
+
+
+async def test_opening_a_missing_blob_answers_none_not_an_error(
+    blob_store: BlobStoreType,
+) -> None:
+    assert await blob_store.open("t1", "f" * 64) is None
+
+
+@pytest.fixture(params=["memory", "postgres"])
+def word_store(
+    request: pytest.FixtureRequest, pg_pool: asyncpg.Pool[Any]
+) -> WordStoreType:
+    if request.param == "memory":
+        return MemoryWordStore()
+    return PostgresWordStore(pg_pool)
+
+
+def _word(id: int, text: str) -> Word:
+    return Word(
+        id=id,
+        text=text,
+        x0=0.1 * id,
+        y0=0.2,
+        x1=0.1 * id + 0.05,
+        y1=0.25,
+        line=0,
+        block=0,
+        source="pdf",
+        confidence=None,
+    )
+
+
+async def test_a_pages_words_round_trip_in_reading_order(word_store: WordStoreType) -> None:
+    tenant = str(uuid.uuid4())
+    words = [_word(0, "Weight:"), _word(1, "82"), _word(2, "kg")]
+    await word_store.put(tenant, "medical_record_page", "d1/p0001", words)
+    assert await word_store.words_of(tenant, "medical_record_page", "d1/p0001") == words
+
+
+async def test_put_is_a_replace_set_not_a_merge(word_store: WordStoreType) -> None:
+    """A re-extraction (or a re-OCR) replaces a page's whole word layer --
+    the layer is the output of one deterministic pass, never patched."""
+    tenant = str(uuid.uuid4())
+    await word_store.put(
+        tenant, "medical_record_page", "d1/p0001", [_word(0, "old"), _word(1, "stale")]
+    )
+    await word_store.put(tenant, "medical_record_page", "d1/p0001", [_word(0, "new")])
+    held = await word_store.words_of(tenant, "medical_record_page", "d1/p0001")
+    assert [w.text for w in held] == ["new"]
+
+
+async def test_an_ocr_word_carries_its_confidence(word_store: WordStoreType) -> None:
+    tenant = str(uuid.uuid4())
+    ocr_word = Word(
+        id=0, text="82", x0=0.1, y0=0.2, x1=0.15, y1=0.25, line=3, block=1,
+        source="ocr", confidence=87.5,
+    )
+    await word_store.put(tenant, "medical_record_page", "d1/p0002", [ocr_word])
+    held = await word_store.words_of(tenant, "medical_record_page", "d1/p0002")
+    assert held == [ocr_word]
+
+
+async def test_deleting_a_page_removes_only_that_page(word_store: WordStoreType) -> None:
+    tenant = str(uuid.uuid4())
+    await word_store.put(tenant, "medical_record_page", "d1/p0001", [_word(0, "a")])
+    await word_store.put(tenant, "medical_record_page", "d1/p0002", [_word(0, "b")])
+    await word_store.delete(tenant, "medical_record_page", ["d1/p0001"])
+    assert await word_store.words_of(tenant, "medical_record_page", "d1/p0001") == []
+    assert [w.text for w in await word_store.words_of(tenant, "medical_record_page", "d1/p0002")] == [
+        "b"
+    ]
+
+
+async def test_words_are_tenant_and_kind_scoped(word_store: WordStoreType) -> None:
+    """Two tenants (or two page kinds of the same host) using the same page
+    key must not see each other's words -- the store is keyed generically
+    by `(tenant, kind, key)`, never by key alone."""
+    await word_store.put("tenant-a", "medical_record_page", "d1/p0001", [_word(0, "a-word")])
+    await word_store.put("tenant-b", "medical_record_page", "d1/p0001", [_word(0, "b-word")])
+    await word_store.put("tenant-a", "invoice_page", "d1/p0001", [_word(0, "invoice-word")])
+
+    a = await word_store.words_of("tenant-a", "medical_record_page", "d1/p0001")
+    b = await word_store.words_of("tenant-b", "medical_record_page", "d1/p0001")
+    other_kind = await word_store.words_of("tenant-a", "invoice_page", "d1/p0001")
+    assert [w.text for w in a] == ["a-word"]
+    assert [w.text for w in b] == ["b-word"]
+    assert [w.text for w in other_kind] == ["invoice-word"]

@@ -36,6 +36,21 @@ server = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
 ]
+documents = [
+    # Document-shaped facts (`as document` / `as page of`, docs/documents.md):
+    # rendering pages and reading their text layer, and OCR for the pages that
+    # have none. pypdfium2 (BSD/Apache-2.0, ships Google's PDFium binary) --
+    # never PyMuPDF, which is AGPL-3.0 and incompatible with distributing
+    # under this project's BUSL. pytesseract is a thin wrapper around the
+    # `tesseract` binary (Apache-2.0), installed separately (apt `tesseract-ocr`
+    # in the image; `brew install tesseract` locally).
+    "pypdfium2>=4.30",
+    "pytesseract>=0.3.13",
+    # FastAPI's Form/File parameters (the upload route is multipart: the
+    # file plus an optional `record` JSON object of host fields) need this
+    # at import time, not just at request time.
+    "python-multipart>=0.0.12",
+]
 dev = [
     "pytest>=8.3",
     # 0.26 introduced `asyncio_default_test_loop_scope`, which the pytest
@@ -60,6 +75,11 @@ dev = [
     # the strict checker has nothing to say about the Postgres store -- which is
     # where a typo becomes a silently empty result.
     "asyncpg-stubs>=0.30",
+    # Dev-only: generates the tiny PDF fixtures `tests/` and `examples/records/`
+    # build in-process (a text page, a `/Rotate 90` page, an image-only page
+    # for OCR) rather than committing binary files. BSD -- fpdf2 was
+    # considered and passed over (LGPL-3.0-only).
+    "reportlab>=4.2",
 ]
 
 [project.urls]
@@ -92,6 +112,14 @@ plugins = ["pydantic.mypy"]
 [tool.pydantic-mypy]
 init_typed = true
 init_forbid_extra = true
+
+# Neither ships a py.typed marker; both are optional (the `documents` extra)
+# and touched only inside `uratori/server/documents.py`, which already
+# types its own surface precisely and treats these two as untyped at the
+# boundary.
+[[tool.mypy.overrides]]
+module = ["pypdfium2", "pytesseract"]
+ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 100

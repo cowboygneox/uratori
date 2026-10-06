@@ -25,8 +25,11 @@ from ..lang.plan import Library
 from ..schema import Schema
 from ..store.postgres import PostgresEngineStore, PostgresFactStore
 from . import db
+from .blobs import BlobStore
 from .contract import RunOut, ShownChange, schema_out
+from .documents import RenderCache
 from .hub import Hub
+from .words import WordStore
 
 log = logging.getLogger("uratori.server")
 
@@ -50,7 +53,18 @@ class State:
     """Typed app state -- `app.state` is `Any`, and `Any` is how a renamed
     attribute becomes a request-time AttributeError instead of a mypy error."""
 
-    def __init__(self, pool: asyncpg.Pool[Any], token: str | None, version: str) -> None:
+    def __init__(
+        self,
+        pool: asyncpg.Pool[Any],
+        token: str | None,
+        version: str,
+        *,
+        blob_store: BlobStore | None = None,
+        word_store: WordStore | None = None,
+        render_cache: RenderCache | None = None,
+        blob_dir: str | None = None,
+        max_upload_bytes: int = 50 * 1024 * 1024,
+    ) -> None:
         self.pool = pool
         self.token = token
         self.version = version
@@ -58,6 +72,14 @@ class State:
         self.hub = Hub()
         self.locks: dict[str, asyncio.Lock] = {}
         self.teach = asyncio.Lock()
+        self.blob_store = blob_store
+        self.word_store = word_store
+        self.render_cache = render_cache
+        self.blob_dir = blob_dir
+        """Set only to say whether `URATORI_BLOB_DIR` was configured --
+        `blob_store`/`render_cache` are `None` exactly when this is, and the
+        documents routes 409 naming the variable when they are."""
+        self.max_upload_bytes = max_upload_bytes
         """Serialises every write to the world (schema, definitions, the
         editor's save). The check-then-write in each of those awaits the
         database between reading `self.world` and swapping it, and two
@@ -98,6 +120,23 @@ def ready(s: State) -> tuple[World, Library]:
             )
         raise HTTPException(status_code=409, detail="No definitions have been loaded yet")
     return s.world, s.world.library
+
+
+def documents_ready(s: State) -> tuple[BlobStore, WordStore, RenderCache]:
+    """The document runtime, or the 409 that names the missing variable.
+
+    `URATORI_BLOB_DIR` is required the moment any document kind is declared
+    -- a document-shaped fact with nowhere to put its bytes is a
+    configuration gap, not a 500 the first time somebody uploads something.
+    """
+    if s.blob_store is None or s.word_store is None or s.render_cache is None:
+        raise HTTPException(
+            status_code=409,
+            detail="URATORI_BLOB_DIR is not set. A document-shaped fact (`as "
+            "document` / `as page of`) needs somewhere to put its bytes; set it "
+            "to a writable directory and restart.",
+        )
+    return s.blob_store, s.word_store, s.render_cache
 
 
 def taught_schema(world: World) -> Schema:

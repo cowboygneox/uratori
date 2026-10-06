@@ -179,6 +179,8 @@ async function render() {
   // "nothing here" with a null, and replaceChildren would print the word.
   const draw = (nodes) => view.replaceChildren(...nodes.flat(Infinity).filter((n) => n != null));
   if (route === 'facts') draw(await factsView(segments, params));
+  else if (route === 'documents') draw(await documentsListView(segments[0]));
+  else if (route === 'document') draw(await documentViewerView(segments[0], segments[1], segments[2]));
   else if (route === 'activity') draw(await activityView(params));
   else if (route === 'edit') draw(await editorView(params));
   else if (route === 'work') draw(await workView(segments[0], segments[1]));
@@ -1797,18 +1799,152 @@ async function kindListView() {
       'What the server actually holds, per kind — the bottom of every trace. ',
       'A kind at zero is a finding: declared in the schema, never collected.'),
     el('table', {},
-      el('tr', {}, el('th', {}, 'kind'), el('th', {}, 'records')),
+      el('tr', {}, el('th', {}, 'kind'), el('th', {}, 'records'), el('th', {})),
       answer.body.kinds.map((entry) => el('tr', {},
         el('td', {}, el('a', {
           class: 'mono', href: `#/facts/${encodeURIComponent(entry.kind)}`,
-        }, entry.kind)),
+        }, entry.kind),
+          // `shape` names a document or page kind (D1): a badge here is the
+          // one place the Facts tab says so, since the raw table beside it
+          // reads a page or document fact's body no differently than any
+          // other kind's.
+          entry.shape ? ' ' : null,
+          entry.shape ? el('span', { class: `badge ${entry.shape}` }, entry.shape) : null),
         // A kind at zero is a finding, so it must not be the dimmest thing
         // on the page -- the warm ink is the same voice the unversioned
         // stamps use: look here, something structural.
         el('td', { class: entry.records ? 'mono' : 'mono finding' },
           String(entry.records),
-          entry.records ? '' : el('span', { class: 'faint' }, ' — nothing collected'))))),
+          entry.records ? '' : el('span', { class: 'faint' }, ' — nothing collected')),
+        el('td', {},
+          // Only a document kind gets a browser link; a page kind's own
+          // records are read through the document that owns them.
+          entry.shape === 'document'
+            ? el('a', { href: `#/documents/${encodeURIComponent(entry.kind)}` }, 'browse pages →')
+            : null)))),
   ];
+}
+
+// ------------------------------------------------------------ documents --
+//
+// The page viewer (D1, D3): `#/documents/<kind>` browses one document
+// kind's uploads, `#/document/<kind>/<id>/<page>` reads one page -- the
+// rendered PNG and its word layer, with a client-side substring search
+// over the words already fetched (no highlights yet; that is D2/D3, once
+// provenance can say which words a value actually came from).
+
+async function documentsListView(kind) {
+  if (!kind) return [el('h1', {}, 'Documents'), el('p', { class: 'faint' }, 'No kind given.')];
+  const answer = await get(`tenants/${encodeURIComponent(tenant())}/documents/${encodeURIComponent(kind)}`);
+  if (!answer.ok) return [problem(answer, 'Could not list documents:')];
+  const page = answer.body;
+  return [
+    el('nav', { class: 'crumbs' },
+      el('a', { href: '#/facts' }, 'Facts'), ' / ',
+      el('a', { class: 'mono', href: `#/facts/${encodeURIComponent(kind)}` }, kind), ' / ',
+      'documents'),
+    el('h1', {}, 'Documents — ', el('span', { class: 'mono' }, kind)),
+    el('p', { class: 'faint' },
+      // page_kind rendered here: which page kind's pages this document
+      // kind's rows belong to -- the one correlation the fact layer itself
+      // carries (D1).
+      'pages are ', el('span', { class: 'mono' }, page.page_kind)),
+    page.documents.length
+      ? el('table', {},
+          el('tr', {}, el('th', {}, 'title'), el('th', {}, 'pages'), el('th', {})),
+          page.documents.map((doc) => el('tr', {},
+            el('td', {}, doc.title || el('span', { class: 'faint' }, doc.id)),
+            el('td', { class: 'mono' }, String(doc.pages)),
+            el('td', {},
+              doc.held
+                ? el('a', { href: `#/document/${encodeURIComponent(kind)}/${encodeURIComponent(doc.id)}/1` }, 'view →')
+                : el('span', { class: 'finding' }, 'bytes missing')))))
+      : el('p', { class: 'faint' }, 'Nothing uploaded yet.'),
+  ];
+}
+
+async function documentViewerView(kind, id, pageArg) {
+  if (!kind || !id) return [el('h1', {}, 'Document'), el('p', { class: 'faint' }, 'No document given.')];
+  const detailAnswer = await get(
+    `tenants/${encodeURIComponent(tenant())}/documents/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`);
+  if (!detailAnswer.ok) return [problem(detailAnswer, 'Could not read this document:')];
+  const detail = detailAnswer.body;
+  const page = Math.max(1, Math.min(detail.pages.length, Number(pageArg) || 1));
+  const current = detail.pages.find((p) => p.number === page);
+
+  const base = `#/document/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`;
+  const parts = [
+    el('nav', { class: 'crumbs' },
+      el('a', { href: '#/facts' }, 'Facts'), ' / ',
+      el('a', { class: 'mono', href: `#/facts/${encodeURIComponent(kind)}` }, kind), ' / ',
+      el('a', { href: `#/documents/${encodeURIComponent(kind)}` }, 'documents'), ' / ',
+      el('span', { class: 'mono' }, id)),
+    el('h1', {}, detail.title || el('span', { class: 'mono' }, id)),
+  ];
+
+  if (!detail.held) {
+    parts.push(el('div', { class: 'notice problem' },
+      detail.reason || 'this document’s bytes are missing from blob storage'));
+    return parts;
+  }
+
+  parts.push(el('div', { class: 'controls' },
+    el('button', {
+      disabled: page <= 1 ? 'disabled' : undefined,
+      onclick: () => { location.hash = `${base}/${page - 1}`; },
+    }, '← page'),
+    el('span', { class: 'faint' },
+      // number + text_source rendered here: which page this is and how its
+      // text was found -- a real text layer or OCR, the thing a reviewer
+      // checking a box against the words needs to know first.
+      `page ${page} of ${detail.pages.length}`,
+      current ? ` · ${current.text_source}` : ''),
+    el('button', {
+      disabled: page >= detail.pages.length ? 'disabled' : undefined,
+      onclick: () => { location.hash = `${base}/${page + 1}`; },
+    }, 'page →')));
+
+  const img = el('img', {
+    class: 'page-image',
+    src: `${API}/tenants/${encodeURIComponent(tenant())}/documents/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/pages/${page}.png`,
+    alt: `page ${page}`,
+  });
+
+  const results = el('div', { class: 'word-results' });
+  const search = el('input', { type: 'search', placeholder: 'search this page’s words…' });
+  let words = [];
+
+  const fillWords = (filter) => {
+    results.replaceChildren();
+    const matches = filter
+      ? words.filter((w) => w.text.toLowerCase().includes(filter.toLowerCase()))
+      : words;
+    if (!matches.length) {
+      results.append(el('p', { class: 'faint' }, filter ? 'No match on this page.' : 'No words on this page.'));
+      return;
+    }
+    results.append(el('table', {},
+      el('tr', {}, el('th', {}, 'word'), el('th', {}, 'line'), el('th', {}, 'source'), el('th', {}, 'box')),
+      matches.map((w) => el('tr', {},
+        el('td', { class: 'mono' }, w.text),
+        el('td', { class: 'mono faint' }, String(w.line)),
+        el('td', {}, el('span', { class: `badge ${w.source}` }, w.source)),
+        // The box itself -- x0/y0/x1/y1, page-normalised [0,1] in the
+        // rendered frame -- is not drawn yet (no highlights this MR), but
+        // it is what a reviewer would check the word against, so it is
+        // printed rather than hidden.
+        el('td', { class: 'mono faint' },
+          `${w.x0.toFixed(3)},${w.y0.toFixed(3)} – ${w.x1.toFixed(3)},${w.y1.toFixed(3)}`)))));
+  };
+  search.addEventListener('input', (event) => fillWords(event.target.value));
+
+  const wordsAnswer = await get(
+    `tenants/${encodeURIComponent(tenant())}/documents/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/pages/${page}/words`);
+  words = wordsAnswer.ok ? wordsAnswer.body.words : [];
+  fillWords('');
+
+  parts.push(el('div', { class: 'document-viewer' }, img, el('div', { class: 'word-panel' }, search, results)));
+  return parts;
 }
 
 function factsHash(kind, q, after, trail) {

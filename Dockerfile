@@ -19,9 +19,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # so editing the engine does not reinstall pydantic and uvicorn. README and
 # LICENSE ride along because the manifest names them: hatchling refuses to
 # build metadata for files it cannot see.
-COPY pyproject.toml README.md LICENSE ./
+COPY pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md ./
 COPY uratori/__init__.py ./uratori/__init__.py
-RUN pip install --prefix=/install ".[server]"
+# `documents`: document-shaped facts (`as document` / `as page of`,
+# docs/documents.md) -- pypdfium2 for rendering and text extraction,
+# pytesseract + the `tesseract-ocr` apt package below for pages with no
+# text layer, python-multipart for the upload route's multipart body.
+# pypdfium2 bundles a PDFium build under its own licence; see
+# THIRD_PARTY_NOTICES.md, which this image carries alongside LICENSE.
+RUN pip install --prefix=/install ".[server,documents]"
 
 COPY uratori/ ./uratori/
 
@@ -47,12 +53,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     APP_VERSION=${APP_VERSION}
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tini curl \
+ && apt-get install -y --no-install-recommends tini curl tesseract-ocr \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd -g 1001 uratori \
  && useradd -u 1001 -g 1001 -M -s /usr/sbin/nologin uratori
 
 COPY --from=build /install /usr/local
+COPY THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
 
 EXPOSE 8080
 

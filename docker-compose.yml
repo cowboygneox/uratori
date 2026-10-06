@@ -31,11 +31,20 @@ services:
     build: .
     environment:
       DATABASE_URL: postgres://uratori:uratori@postgres:5432/uratori
+      # Required the moment a document-shaped fact (`as document` / `as
+      # page of`, docs/documents.md) is declared -- a clear 409 names this
+      # variable otherwise. Local disk, never Postgres: every backup stops
+      # carrying every uploaded PDF, and page rendering never pulls a file
+      # through the database.
+      URATORI_BLOB_DIR: /data/blobs
     ports:
       - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
+    volumes:
+      - uratori-blobs:/data/blobs
 
 volumes:
   uratori-data:
+  uratori-blobs:

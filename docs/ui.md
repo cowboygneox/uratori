@@ -45,7 +45,19 @@ product's end users; a host builds its own screens against the
 - **Facts.** Per kind, what the server holds -- a kind the schema declares
   but nobody has pushed appears at zero, because "nothing collected" is a
   finding. Records page by key, search over key and record text, and each row
-  expands to the whole stored JSON.
+  expands to the whole stored JSON. A document kind (`as document`,
+  [Documents](documents.md)) carries a `document` badge and a "browse
+  pages" link beside its name -- its own records are the raw metadata
+  (title, mime, sha256, pages, uploaded at), which a bare JSON dump states
+  but does not usefully *read*.
+- **The document viewer.** `#/documents/<kind>` lists one document kind's
+  uploads; `#/document/<kind>/<id>/<page>` reads one page -- the rendered
+  image beside its word layer, with a substring search over the words
+  already fetched for that page (no highlights yet: drawing a box on the
+  image from a citation is D2/D3, once a stored value actually names which
+  words it came from). Gated by `URATORI_UI_DOCUMENTS` (see the posture
+  below) -- unlike every other UI screen, this one serves bytes an `<img
+  src>` cannot carry a bearer token alongside, so it needs its own grant.
 - **A record's page walks both directions.** Downward: the stored document,
   where every grouping filed it, what every measure reads off it. Upward,
   which is where a verification usually starts: every figure scoped to the
@@ -176,6 +188,22 @@ Be clear-eyed about what the read split already grants: the UI serves
 list, and the stored records themselves have no API equivalent at all. Anyone
 who can reach the port can read everything, so "behind the firewall" has to
 be true, not aspirational.
+
+**The document viewer is a third, separate grant.** `URATORI_UI_DOCUMENTS`
+follows the same spellings and the same refuse-garbage rule, and gates page
+images and word layers specifically (`/ui/api/.../documents/...`), never
+the authenticated API's equivalent routes, which serve hosts regardless of
+this setting. It exists apart from `URATORI_UI_EDIT` because the reason is
+different: an `<img src>` cannot carry a bearer token, so the moment a
+token protects the API, serving page images on the unauthenticated UI would
+be a second, wide-open door into exactly the data the token exists to
+guard -- a scanned medical record's page is a posture change on its own,
+not a detail of "the UI is on". Default follows the same rule as
+`URATORI_UI_EDIT` (on only where the UI is on AND the API itself is open);
+setup.md's table has it beside `URATORI_BLOB_DIR`. Where the document
+viewer is wanted beside a token, grant it explicitly and treat it the way
+you would treat the editor: for a deployment whose UI sits behind its own
+authenticating proxy, not for one relying on the API's own token.
 
 `/ui/api/*` is the UI's own contract, versioned with the page it serves, and
 may change between releases without notice. Integrate against the

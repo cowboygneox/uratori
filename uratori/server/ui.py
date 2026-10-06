@@ -33,13 +33,14 @@ Decisions a reader should not have to rediscover:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict
 
@@ -72,10 +73,12 @@ from ..schema import Schema
 from ..store.postgres import PostgresEngineStore, PostgresFactStore
 from ..windows import WindowError, expand_window_args, window_token
 from . import db
+from .documents import document_kinds, page_key, render_page_png
 from .runtime import (
     State,
     World,
     compile_for_teach,
+    documents_ready,
     facade_for,
     known_names,
     push_pass,
@@ -339,6 +342,11 @@ class KindCount(BaseModel):
     kind: str
     records: int
 
+    shape: Literal["document", "page"] | None = None
+    """`as document` / `as page of <kind>` (D1) -- which document-shaped
+    kind this is, when it is one, so the Facts tab can offer the page
+    viewer instead of (or beside) the raw record table."""
+
 
 class FactKindsOut(BaseModel):
     kinds: list[KindCount]
@@ -360,6 +368,54 @@ class FactPageOut(BaseModel):
     records: list[FactRecordOut]
     more: bool
     total: int
+
+
+class DocumentSummaryOut(BaseModel):
+    """One row of a document kind's browser (`#/documents/<kind>`)."""
+
+    id: str
+    title: str | None = None
+    pages: int
+    held: bool = True
+
+
+class DocumentsUiOut(BaseModel):
+    kind: str
+    page_kind: str
+    documents: list[DocumentSummaryOut]
+
+
+class PageSummaryOut(BaseModel):
+    number: int
+    text_source: Literal["pdf", "ocr", "none"]
+
+
+class DocumentDetailOut(BaseModel):
+    """The page viewer's landing data: enough to draw the page picker and
+    the first image without a second round trip."""
+
+    kind: str
+    page_kind: str
+    id: str
+    title: str | None = None
+    pages: list[PageSummaryOut]
+    held: bool = True
+    reason: str | None = None
+
+
+class PageWordUiOut(BaseModel):
+    id: int
+    text: str
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    line: int
+    source: Literal["pdf", "ocr"]
+
+
+class PageWordsUiOut(BaseModel):
+    words: list[PageWordUiOut]
 
 
 class RunOutLog(BaseModel):
@@ -827,7 +883,7 @@ class WorkingOut(BaseModel):
     band: StepOut | None
 
 
-def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
+def router(frame_ancestors: str, *, edit: bool = False, documents: bool = False) -> APIRouter:
     ui = APIRouter()
 
     def _state(request: Request) -> State:
@@ -848,6 +904,25 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
                     "This deployment does not grant editing from the UI. "
                     "Set URATORI_UI_EDIT=on (an explicit operator choice) to enable it; "
                     "the default grants editing only where the API itself is open."
+                ),
+            )
+
+    def _documents_granted() -> None:
+        """`/ui/api` is unauthenticated by design (`docs/ui.md`, Security
+        posture); an `<img src>` cannot carry a bearer token, so page
+        images and word layers are served here only with an explicit
+        operator grant -- a page of someone's medical record is a posture
+        change, not a feature detail. The authenticated API (`app.py`)
+        serves the same routes to hosts unconditionally."""
+        if not documents:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "This deployment does not grant the document viewer from the "
+                    "unauthenticated UI. Set URATORI_UI_DOCUMENTS=on (an explicit "
+                    "operator choice); the default follows URATORI_UI's own rule "
+                    "(off once URATORI_TOKEN protects the API). The authenticated "
+                    "API serves the same routes to hosts regardless."
                 ),
             )
 
@@ -1064,8 +1139,16 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             raise HTTPException(status_code=409, detail="No schema has been declared yet")
         counts = await db.fact_kind_counts(s.pool, tenant)
         names = sorted(set(taught_schema(s.world).kinds) | set(counts))
+        facts = s.world.library.facts if s.world.library is not None else {}
         return FactKindsOut(
-            kinds=[KindCount(kind=name, records=counts.get(name, 0)) for name in names]
+            kinds=[
+                KindCount(
+                    kind=name,
+                    records=counts.get(name, 0),
+                    shape=facts[name].shape if name in facts else None,
+                )
+                for name in names
+            ]
         )
 
     @ui.get("/ui/api/tenants/{tenant}/facts/{kind}", response_model=FactPageOut, include_in_schema=False)
@@ -1097,6 +1180,139 @@ def router(frame_ancestors: str, *, edit: bool = False) -> APIRouter:
             ],
             more=more,
             total=total,
+        )
+
+    # ----------------------------------------------------------- documents --
+    #
+    # `URATORI_UI_DOCUMENTS` gates every route below: page images and word
+    # layers are a posture change on an unauthenticated surface (D3), never
+    # mounted by default beside a token. The authenticated API (`app.py`)
+    # serves the same shapes to hosts unconditionally.
+
+    def _page_kind_or_404(s: State, kind: str) -> str:
+        if s.world is None or s.world.library is None:
+            raise HTTPException(status_code=409, detail="No definitions have been loaded yet")
+        page_kind = document_kinds(s.world.library).get(kind)
+        if page_kind is None:
+            raise HTTPException(status_code=404, detail=f'"{kind}" is not a document kind.')
+        return page_kind
+
+    @ui.get(
+        "/ui/api/tenants/{tenant}/documents/{kind}",
+        response_model=DocumentsUiOut,
+        include_in_schema=False,
+    )
+    async def ui_documents_list(tenant: str, kind: str, request: Request) -> DocumentsUiOut:
+        _documents_granted()
+        s = _state(request)
+        page_kind = _page_kind_or_404(s, kind)
+        blob_store, _words, _cache = documents_ready(s)
+        rows, _more, _total = await db.page_facts(s.pool, tenant, kind, after=None, q=None, limit=500)
+        documents = []
+        for row in rows:
+            value = row["value"]
+            sha = str(value.get("sha256") or "")
+            held = bool(sha) and await blob_store.exists(tenant, sha)
+            documents.append(
+                DocumentSummaryOut(
+                    id=row["key"],
+                    title=value.get("title"),
+                    pages=int(value.get("pages") or 0),
+                    held=held,
+                )
+            )
+        return DocumentsUiOut(kind=kind, page_kind=page_kind, documents=documents)
+
+    @ui.get(
+        "/ui/api/tenants/{tenant}/documents/{kind}/{document_id}",
+        response_model=DocumentDetailOut,
+        include_in_schema=False,
+    )
+    async def ui_document_detail(
+        tenant: str, kind: str, document_id: str, request: Request
+    ) -> DocumentDetailOut:
+        _documents_granted()
+        s = _state(request)
+        page_kind = _page_kind_or_404(s, kind)
+        blob_store, _words, _cache = documents_ready(s)
+        row = await db.fact_record(s.pool, tenant, kind, document_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"no document {document_id!r}")
+        value = row["value"]
+        total_pages = int(value.get("pages") or 0)
+        pages = []
+        for number in range(1, total_pages + 1):
+            page_row = await db.fact_record(s.pool, tenant, page_kind, page_key(document_id, number))
+            raw_source = page_row["value"].get("text_source") if page_row else "none"
+            text_source = cast(
+                'Literal["pdf", "ocr", "none"]', raw_source if raw_source else "none"
+            )
+            pages.append(PageSummaryOut(number=number, text_source=text_source))
+        sha = str(value.get("sha256") or "")
+        held = bool(sha) and await blob_store.exists(tenant, sha)
+        return DocumentDetailOut(
+            kind=kind,
+            page_kind=page_kind,
+            id=document_id,
+            title=value.get("title"),
+            pages=pages,
+            held=held,
+            reason=None if held else "this document's bytes are missing from blob storage",
+        )
+
+    @ui.get(
+        "/ui/api/tenants/{tenant}/documents/{kind}/{document_id}/pages/{number}.png",
+        include_in_schema=False,
+    )
+    async def ui_page_png(
+        tenant: str,
+        kind: str,
+        document_id: str,
+        number: int,
+        request: Request,
+        scale: Annotated[float, Query(gt=0, le=10)] = 1.5,
+    ) -> Response:
+        _documents_granted()
+        s = _state(request)
+        _page_kind_or_404(s, kind)
+        blob_store, _words, render_cache = documents_ready(s)
+        row = await db.fact_record(s.pool, tenant, kind, document_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"no document {document_id!r}")
+        sha = str(row["value"].get("sha256") or "")
+        cached = await asyncio.to_thread(render_cache.get, tenant, sha, number, scale)
+        if cached is not None:
+            return Response(content=cached, media_type="image/png")
+        data = await blob_store.open(tenant, sha)
+        if data is None:
+            raise HTTPException(
+                status_code=404, detail="this document's bytes are missing from blob storage"
+            )
+        png = await asyncio.to_thread(render_page_png, data, number, scale)
+        await asyncio.to_thread(render_cache.put, tenant, sha, number, scale, png)
+        return Response(content=png, media_type="image/png")
+
+    @ui.get(
+        "/ui/api/tenants/{tenant}/documents/{kind}/{document_id}/pages/{number}/words",
+        response_model=PageWordsUiOut,
+        include_in_schema=False,
+    )
+    async def ui_page_words(
+        tenant: str, kind: str, document_id: str, number: int, request: Request
+    ) -> PageWordsUiOut:
+        _documents_granted()
+        s = _state(request)
+        page_kind = _page_kind_or_404(s, kind)
+        _blobs, word_store, _cache = documents_ready(s)
+        words = await word_store.words_of(tenant, page_kind, page_key(document_id, number))
+        return PageWordsUiOut(
+            words=[
+                PageWordUiOut(
+                    id=w.id, text=w.text, x0=w.x0, y0=w.y0, x1=w.x1, y1=w.y1,
+                    line=w.line, source=w.source,
+                )
+                for w in words
+            ]
         )
 
     @ui.get(

@@ -228,6 +228,30 @@ h2.subject {
 /* The leaves. */
 .badge.fact       { color: #93c880; border-color: #43602f; background: rgba(147, 200, 128, 0.07); }
 .badge.setting    { color: var(--ink-dim); border-style: dashed; }
+/* Document-shaped facts (D1) and the two ways a page's text was found. */
+.badge.document   { color: #93c880; border-color: #43602f; background: rgba(147, 200, 128, 0.07); }
+.badge.page        { color: #93c880; border-style: dashed; }
+.badge.pdf        { color: #8ab8dd; border-color: #2c4a66; }
+.badge.ocr        { color: #d9a662; border-color: #6b5127; }
+
+/* ------------------------------------------------------------ documents --- */
+
+.document-viewer {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.page-image {
+  max-width: min(70vw, 56rem);
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+.word-panel {
+  flex: 1 1 18rem;
+  min-width: 18rem;
+}
+.word-results table { width: 100%; }
 
 /* -------------------------------------------------------------- tables --- */
 

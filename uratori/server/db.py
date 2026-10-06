@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Sequence
 from typing import Any
 
 import asyncpg
@@ -88,6 +89,50 @@ create index if not exists run_log_tenant_idx on run_log (tenant_id, id desc);
 create table if not exists import_debt (
   tenant_id text primary key,
   at        timestamptz not null default now()
+);
+
+-- Document-shaped facts (`as document`, docs/documents.md, D1): one row per
+-- uploaded file, server-owned bookkeeping beside the fact itself. The fact
+-- row (kind=document kind, key=document_id) carries title/mime/sha256/
+-- pages/uploaded_at for any definition to read; this table exists so a
+-- dedupe lookup (`sha256 already seen for this kind?`) and an orphan sweep
+-- never have to decode a JSONB body to ask. `document_id` is the fact key:
+-- the first 16 hex characters of the file's sha256, so a re-upload of the
+-- same bytes is idempotent by construction.
+create table if not exists document (
+  tenant_id    text not null,
+  kind         text not null,
+  document_id  text not null,
+  sha256       text not null,
+  created_at   timestamptz not null default now(),
+  primary key (tenant_id, kind, document_id)
+);
+
+create index if not exists document_sha_idx on document (tenant_id, kind, sha256);
+
+-- The word layer: one row per word of one page, keyed generically by the
+-- page kind the host named (`as page of`) rather than a fixed name --
+-- `uratori/server/words.py` is the store this backs. Coordinates are
+-- page-normalised [0,1] in the rendered frame (CropBox and `/Rotate`
+-- applied, origin top-left, y down; `docs/http-api.md`'s coordinate
+-- contract), so a box drawn against them is correct at any render scale.
+-- Replace-set per (tenant, kind, key): a re-extraction or re-OCR deletes a
+-- page's rows and reinserts the new layer whole, never patches one word.
+create table if not exists document_page_words (
+  tenant_id  text not null,
+  kind       text not null,
+  key        text not null,
+  word_id    int not null,
+  text       text not null,
+  x0         double precision not null,
+  y0         double precision not null,
+  x1         double precision not null,
+  y1         double precision not null,
+  line_no    int not null,
+  block_no   int not null,
+  source     text not null check (source in ('pdf', 'ocr')),
+  confidence double precision,
+  primary key (tenant_id, kind, key, word_id)
 );
 """
 
@@ -693,13 +738,31 @@ async def fact_record(
 # ---------------------------------------------------------------- tenants --
 
 
-async def remove_tenant(pool: asyncpg.Pool[Any], tenant: str) -> tuple[int, int]:
-    """Every row a tenant owns, gone. Returns (facts, values) removed, because
-    a destructive route answering only "ok" would be the least useful true
-    thing it could say."""
+async def tenant_document_shas(pool: asyncpg.Pool[Any], tenant: str) -> list[str]:
+    """Every distinct sha256 a tenant's `document` rows name -- read before
+    `remove_tenant` deletes those rows, so the caller can unlink the tenant's
+    blobs (`BlobStore.delete`) after the database side is gone. Blobs are
+    tenant-namespaced, so this is every file `remove_tenant` is about to
+    orphan for this tenant alone."""
+    rows = await pool.fetch(
+        "select distinct sha256 from document where tenant_id = $1", tenant
+    )
+    return [row["sha256"] for row in rows]
+
+
+async def remove_tenant(pool: asyncpg.Pool[Any], tenant: str) -> tuple[int, int, int]:
+    """Every row a tenant owns, gone. Returns (facts, values, documents)
+    removed, because a destructive route answering only "ok" would be the
+    least useful true thing it could say. The blobs themselves are not this
+    function's job -- it has no `BlobStore` to delete through -- so a caller
+    that owns documents calls `tenant_document_shas` first and unlinks them
+    after this returns."""
     facts = await pool.fetchval("select count(*) from fact where tenant_id = $1", tenant)
     values = await pool.fetchval(
         "select count(*) from figure_value where tenant_id = $1", tenant
+    )
+    documents = await pool.fetchval(
+        "select count(*) from document where tenant_id = $1", tenant
     )
     for table, column in (
         ("fact", "tenant_id"),
@@ -710,6 +773,71 @@ async def remove_tenant(pool: asyncpg.Pool[Any], tenant: str) -> tuple[int, int]
         ("figure_value", "tenant_id"),
         ("run_log", "tenant_id"),
         ("import_debt", "tenant_id"),
+        ("document", "tenant_id"),
+        ("document_page_words", "tenant_id"),
     ):
         await pool.execute(f"delete from {table} where {column} = $1", tenant)
-    return int(facts or 0), int(values or 0)
+    return int(facts or 0), int(values or 0), int(documents or 0)
+
+
+# --------------------------------------------------------------- documents --
+
+
+async def document_by_sha(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    kind: str,
+    sha256: str,
+) -> str | None:
+    """The `document_id` already holding this tenant's copy of these bytes
+    under this kind, or `None` -- the dedupe check an upload makes before
+    doing any parsing: a re-upload of the same file is `written: 0`, and
+    this is cheaper than decoding every fact body of the kind to find out."""
+    row = await conn.fetchrow(
+        "select document_id from document where tenant_id = $1 and kind = $2 and sha256 = $3",
+        tenant,
+        kind,
+        sha256,
+    )
+    return row["document_id"] if row is not None else None
+
+
+async def record_document(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    kind: str,
+    document_id: str,
+    sha256: str,
+) -> None:
+    """Record a newly ingested document. Called in the same transaction as
+    its fact and page rows -- `on conflict do nothing` because the dedupe
+    check above already means this is only reached for bytes not seen
+    before, and a concurrent duplicate upload racing it should lose quietly
+    rather than with a constraint-violation 500."""
+    await conn.execute(
+        "insert into document (tenant_id, kind, document_id, sha256) values ($1, $2, $3, $4) "
+        "on conflict (tenant_id, kind, document_id) do nothing",
+        tenant,
+        kind,
+        document_id,
+        sha256,
+    )
+
+
+async def delete_documents(
+    conn: asyncpg.Pool | asyncpg.Connection | asyncpg.pool.PoolConnectionProxy,
+    tenant: str,
+    kind: str,
+    document_ids: Sequence[str],
+) -> None:
+    """Drop this tenant's bookkeeping rows for these document ids -- called
+    beside the fact and word-layer deletes a document delete makes, in the
+    same transaction."""
+    if not document_ids:
+        return
+    await conn.execute(
+        "delete from document where tenant_id = $1 and kind = $2 and document_id = any($3)",
+        tenant,
+        kind,
+        list(document_ids),
+    )
