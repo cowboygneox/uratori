@@ -88,6 +88,8 @@ config files.
 | `URATORI_BLOB_DIR` | unset | Where uploaded files live, content-addressed and tenant-namespaced ([Documents](documents.md), D1). Required the moment a document-shaped fact (`fact <kind> as document:`) is declared -- a clear 409 names this variable otherwise. Local disk, mounted as a persistent volume ([docker-compose.yml](../docker-compose.yml) gives it one); never Postgres, so the database stays small and a page render never pulls a file through it. |
 | `URATORI_DOCUMENT_MAX_BYTES` | `52428800` (50 MB) | The largest file `POST /tenants/{t}/documents/{kind}` accepts; a larger upload is a 422, not a slow 500. |
 | `URATORI_UI_DOCUMENTS` | follows `URATORI_UI` AND the token | Grants the built-in UI's document viewer (page images, word-layer search) at `/ui/api/.../documents/...`. Unset, it is on exactly when the UI itself is on AND `URATORI_TOKEN` is unset -- an `<img src>` cannot carry a bearer token, so page images stay behind the authenticated API alone wherever a token protects it. Same spellings and the same "junk refuses to boot" rule as `URATORI_UI_EDIT`; the authenticated API always serves the same routes to hosts, regardless of this setting. |
+| `URATORI_AUDIT_PROVIDER` | unset | Which model answers an `audit` declaration's blind reading ([Audits and PHI egress](#audits-and-phi-egress)): `fake` (deterministic, no network -- tests and demos) or `claude` (the Anthropic SDK, real model calls). Unset, the worker task never starts a single call: every page a library declares an `audit` over compiles and stores the word `unaudited` for ever, and the declaration page says why. Anything else refuses to boot. |
+| `ANTHROPIC_API_KEY` | unset | Read by the Anthropic SDK itself (never by uratori) when `URATORI_AUDIT_PROVIDER=claude`. Standard Anthropic credential resolution applies; see the SDK's own docs for the alternatives (an OAuth profile, workload identity federation). |
 
 ## Documents and OCR
 
@@ -108,6 +110,50 @@ to be that large.
 See [Documents](documents.md) for the shape (`as document` / `as page of`)
 and [the HTTP API](http-api.md) for the upload, read, render and delete
 routes.
+
+## Audits and PHI egress
+
+An `audit` declaration (`language.md`) is a second, model-backed reader
+over a page -- the one place in this product a page's actual pixels and
+text leave the box, by design: a blind second opinion needs to look at the
+page the way the first reader (the deterministic `extract`) could not.
+**With `URATORI_AUDIT_PROVIDER` unset, none of this runs.** No worker
+starts, no page is ever rendered for a model, and every `audit` plan's
+pages sit at `unaudited` for ever -- compiling an `audit` declaration costs
+nothing extra unless this variable names a provider.
+
+**`URATORI_AUDIT_PROVIDER=fake`** runs `uratori.audit.fake.FakeAuditProvider`:
+deterministic, local, no network call of any kind -- it scans the page's
+own already-extracted word layer with simple pattern rules. Nothing leaves
+the process. This is what the test suite and `examples/records/` run
+under; it is not a real second reader and must not be mistaken for one in
+a production deployment.
+
+**`URATORI_AUDIT_PROVIDER=claude`** runs `uratori.audit.claude.ClaudeAuditProvider`,
+behind the `audit` extra (`.[server,documents,audit]`; the published image
+installs it unconditionally, the env var is the real gate). For every page
+in an audit's scope with no current reading, the worker sends the
+Anthropic API a text prompt (built from the verified fields' names, types,
+units and `#` prose -- D6's blind-reading rule: never the extract's
+alternatives or its current value) and, when the page renders, that page's
+own image as a base64 PNG. **That page image, and the page's transcribed
+word text, are sent to Anthropic's API** -- the one network egress point
+anywhere in this deployment that a page's content leaves the operator's
+own infrastructure.
+
+For a deployment handling PHI or other regulated data, that egress is the
+operator's own compliance surface, not something this software can arrange
+on its behalf: a Business Associate Agreement (or the equivalent for your
+regulatory regime) and the data-retention terms of whichever Anthropic
+account `ANTHROPIC_API_KEY` belongs to are between the operator and
+Anthropic. `URATORI_AUDIT_PROVIDER` unset, or set to `fake`, is the way to
+run this product with a hard guarantee that no page content reaches a
+model at all; set it to `claude` only once that agreement is in place.
+
+The reading itself -- the prompt as sent and the model's raw response -- is
+stored (`audit_reading`), in Postgres, beside everything else this server
+keeps; it is not re-sent anywhere once the call returns, and `DELETE
+/tenants/{t}/documents/{kind}/{id}` removes it with the page.
 
 ## The database
 

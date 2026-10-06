@@ -51,6 +51,15 @@ documents = [
     # at import time, not just at request time.
     "python-multipart>=0.0.12",
 ]
+audit = [
+    # `audit`'s real provider (documents-plan-v3, D6): the Anthropic SDK,
+    # imported lazily inside `uratori/audit/claude.py` so a deployment that
+    # never sets `URATORI_AUDIT_PROVIDER=claude` pays nothing for it. The
+    # fake provider (`uratori/audit/fake.py`, selected by
+    # `URATORI_AUDIT_PROVIDER=fake`) and `unaudited` (no env var set) both
+    # need none of this.
+    "anthropic>=0.81",
+]
 dev = [
     "pytest>=8.3",
     # 0.26 introduced `asyncio_default_test_loop_scope`, which the pytest
@@ -122,13 +131,14 @@ init_forbid_extra = true
 module = ["pypdfium2", "pytesseract", "reportlab.*"]
 ignore_missing_imports = true
 
-# `anthropic` ships its own types, but is not a dependency of this project
-# at any tier -- `examples/records/author.py` is a development tool, never
-# run by the server (documents-plan-v3, D4), and imports it lazily, inside
-# the one function that calls out to it, for whoever runs the script to
-# install themselves. Treated as untyped here only because it is absent
-# from this checked environment by design, not because its own types are
-# missing.
+# `anthropic` ships its own types; this override exists because it is an
+# *optional* dependency (the `audit` extra, documents-plan-v3 D6; also used
+# by `examples/records/author.py`, a development tool never run by the
+# server) that this checked environment may not have installed -- never
+# because its own types are missing. Both callers import it lazily, inside
+# the one function/class that calls out to it, so a deployment that never
+# sets `URATORI_AUDIT_PROVIDER=claude` and never runs the authoring script
+# pays nothing for it.
 [[tool.mypy.overrides]]
 module = ["anthropic"]
 ignore_missing_imports = true

@@ -29,6 +29,7 @@ Design decisions a reader should not have to rediscover:
 
 
 import asyncio
+import contextlib
 import hmac
 import json
 import logging
@@ -64,6 +65,7 @@ from ..verify import FactError
 from ..windows import WindowError, WindowSpec, expand_window_args
 from . import db
 from . import ui as builtin_ui
+from .audit_worker import provider_from_env, run_worker_loop
 from .blobs import BlobStore, FilesystemBlobStore
 from .contract import (
     Ack,
@@ -277,9 +279,27 @@ def create_app(
                 len(library.readings) if library else 0,
             )
         app.state.uratori = state
+        # The audit worker (documents-plan-v3, D6): one task, started here
+        # like every other long-lived piece of server state, reading
+        # `state.world` fresh on every sweep so a redeployed definition (a
+        # new auditor, a changed one) is picked up without a restart.
+        # `provider_from_env` returns `None` with no env var set, and the
+        # declaration page is what then says why every page stays
+        # `unaudited` -- there is no 409 and no log spam for the common
+        # case of a deployment that never configured one.
+        worker_provider = provider_from_env()
+        worker_task = (
+            asyncio.create_task(run_worker_loop(state, lambda: state.world, worker_provider))
+            if worker_provider is not None
+            else None
+        )
         try:
             yield
         finally:
+            if worker_task is not None:
+                worker_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await worker_task
             await pool.close()
 
     app = FastAPI(title="uratori", version=resolved_version, lifespan=lifespan)
@@ -565,7 +585,26 @@ def create_app(
         definition, or (with `full`) rebuild everything from what is stored."""
         world, library = ready(s)
         async with s.lock_for(tenant):
-            full = body.full or await db.deferred(s.pool, tenant)
+            if body.audit:
+                if body.audit is True:
+                    names = list(library.audits)
+                else:
+                    if body.audit not in library.audits:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=f'no audit named "{body.audit}". Declared: '
+                            f'{", ".join(sorted(library.audits)) or "none"}.',
+                        )
+                    names = [body.audit]
+                for name in names:
+                    await db.discard_audit_readings(s.pool, tenant, name)
+            # A discarded reading leaves a stale verdict sitting in
+            # `figure_value` until something re-judges that page; forcing
+            # `full` here is what makes the re-audit verb immediately
+            # answer `unaudited` for every page it just cleared, rather
+            # than a stale "agrees" surviving until the worker's next
+            # sweep produces a fresh reading.
+            full = body.full or bool(body.audit) or await db.deferred(s.pool, tenant)
             serve = body.serve or s.hub.wants_everything(tenant)
             report = await run_pass(s, world, library, tenant, full=full, serve=serve)
             if full:
@@ -1029,6 +1068,12 @@ def create_app(
                     tenant, page_kind, page_keys
                 )
                 await PostgresProvenanceStore(connection).delete(tenant, kind, [document_id])
+                # `_remove_departed`'s own audit sweep (engine.py) removes a
+                # deleted page's *value*; the reading and findings it was
+                # judged from are server-owned storage the engine never
+                # sees, so they are cleared here, alongside the page's own
+                # facts and word layer, the same way provenance is.
+                await db.delete_audit_readings_for_pages(connection, tenant, page_keys)
                 await db.delete_documents(connection, tenant, kind, [document_id])
                 # Checked AFTER this row is gone, in the same transaction:
                 # blobs are keyed `(tenant, sha256)` alone, no kind, so two

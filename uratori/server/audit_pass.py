@@ -63,7 +63,7 @@ def _pages_from_moves(
     return pages
 
 
-def _dump_fields(fields: Sequence[FieldReading]) -> list[dict[str, Any]]:
+def dump_fields(fields: Sequence[FieldReading]) -> list[dict[str, Any]]:
     return [
         {
             "extract": f.extract,
@@ -95,7 +95,7 @@ def load_fields(parsed: Sequence[Mapping[str, Any]]) -> tuple[FieldReading, ...]
     )
 
 
-def _dump_finding(f: AuditFinding) -> dict[str, Any]:
+def dump_finding(f: AuditFinding) -> dict[str, Any]:
     return {
         "extract": f.extract,
         "field": f.field,
@@ -192,7 +192,7 @@ async def run_audits(
                 current_rows = rows_by_page.get(page_key, {})
                 value, members, findings = judge(reading, current_rows, verified_fields, words_by_id)
                 await db.replace_audit_findings(
-                    pool, tenant, audit.name, page_key, [_dump_finding(f) for f in findings]
+                    pool, tenant, audit.name, page_key, [dump_finding(f) for f in findings]
                 )
             report = await facade.accept(tenant, audit.name, page_key, value, members, label)
             changes.extend(report.outcome.changes)
@@ -211,6 +211,8 @@ async def run_audits(
 
 
 __all__ = [
+    "dump_fields",
+    "dump_finding",
     "load_fields",
     "page_of",
     "run_audits",

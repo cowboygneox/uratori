@@ -271,6 +271,25 @@ create index if not exists audit_finding_lookup
 
 create index if not exists audit_finding_by_record
   on audit_finding (tenant_id, record) where record is not null;
+
+-- A claimed lease on a (tenant, audit, version, page) the worker is
+-- taking a reading for -- insert-on-conflict, expiring, so a restart or a
+-- replica neither loses nor double-pays the model call (documents-plan-v3
+-- D6's worker boundary, 5d). The work list is a query over
+-- audit_reading/audit_lease, never a durable queue: a lease that expires
+-- (the worker crashed mid-call) is simply claimable again by the next
+-- sweep.
+create table if not exists audit_lease (
+  tenant_id  text not null,
+  audit      text not null,
+  version    text not null,
+  page_key   text not null,
+  claimed_at timestamptz not null default now(),
+  expires_at timestamptz not null,
+  primary key (tenant_id, audit, version, page_key)
+);
+
+create index if not exists audit_lease_expiry on audit_lease (expires_at);
 """
 
 
@@ -973,6 +992,7 @@ async def remove_tenant(
         ("extract_failure", "tenant_id"),
         ("audit_reading", "tenant_id"),
         ("audit_finding", "tenant_id"),
+        ("audit_lease", "tenant_id"),
     ):
         await pool.execute(f"delete from {table} where {column} = $1", tenant)
     return (
@@ -1371,6 +1391,11 @@ async def delete_audit_readings_for_pages(
         tenant,
         list(page_keys),
     )
+    await conn.execute(
+        "delete from audit_lease where tenant_id = $1 and page_key = any($2::text[])",
+        tenant,
+        list(page_keys),
+    )
 
 
 async def replace_audit_findings(
@@ -1466,3 +1491,102 @@ async def audit_findings_citing(
         d["boxes"] = json.loads(d["boxes"])
         out.append(d)
     return out
+
+
+async def unread_pages(
+    pool: asyncpg.Pool[Any],
+    tenant: str,
+    audit: str,
+    version: str,
+    candidates: Sequence[tuple[str, str]],
+) -> list[str]:
+    """The worker's own work list: every candidate `(page_key, words_sha)`
+    with no current-version reading matching that `words_sha`, and no live
+    lease -- a query, not a queue, so a restart or a replica re-derives it
+    rather than losing or duplicating work (`documents-plan-v3` D6)."""
+    if not candidates:
+        return []
+    rows = await pool.fetch(
+        "select page_key, words_sha from audit_reading "
+        "where tenant_id = $1 and audit = $2 and version = $3 "
+        "and page_key = any($4::text[])",
+        tenant,
+        audit,
+        version,
+        [p for p, _ in candidates],
+    )
+    current = {r["page_key"]: r["words_sha"] for r in rows}
+    leased = await pool.fetch(
+        "select page_key from audit_lease where tenant_id = $1 and audit = $2 "
+        "and version = $3 and expires_at > now() and page_key = any($4::text[])",
+        tenant,
+        audit,
+        version,
+        [p for p, _ in candidates],
+    )
+    leased_keys = {r["page_key"] for r in leased}
+    return [
+        page_key
+        for page_key, words_sha in candidates
+        if current.get(page_key) != words_sha and page_key not in leased_keys
+    ]
+
+
+async def claim_audit_lease(
+    pool: asyncpg.Pool[Any],
+    tenant: str,
+    audit: str,
+    version: str,
+    page_key: str,
+    *,
+    ttl_seconds: float,
+) -> bool:
+    """Claim a page for this worker, or say no -- insert-on-conflict against
+    an expired or absent lease, so two workers (a restart racing the
+    process it is replacing, or two replicas) cannot both pay for the same
+    model call. Returns whether the claim was this call's."""
+    row = await pool.fetchrow(
+        "insert into audit_lease (tenant_id, audit, version, page_key, claimed_at, expires_at) "
+        "values ($1, $2, $3, $4, now(), now() + $5 * interval '1 second') "
+        "on conflict (tenant_id, audit, version, page_key) do update set "
+        "claimed_at = now(), expires_at = now() + $5 * interval '1 second' "
+        "where audit_lease.expires_at <= now() "
+        "returning 1",
+        tenant,
+        audit,
+        version,
+        page_key,
+        ttl_seconds,
+    )
+    return row is not None
+
+
+async def release_audit_lease(
+    pool: asyncpg.Pool[Any], tenant: str, audit: str, version: str, page_key: str
+) -> None:
+    await pool.execute(
+        "delete from audit_lease where tenant_id = $1 and audit = $2 and version = $3 "
+        "and page_key = $4",
+        tenant,
+        audit,
+        version,
+        page_key,
+    )
+
+
+async def discard_audit_readings(
+    pool: asyncpg.Pool[Any], tenant: str, audit: str
+) -> None:
+    """Every reading this audit holds for this tenant, under any version,
+    gone -- the re-audit operator verb (`POST /tenants/{t}/runs {"audit":
+    "<name>"}`): the worker takes every page again, at no cost to the
+    extract's own derived facts, which this never touches. Findings go
+    with their readings (`delete_audit_readings_for_pages` deletes both by
+    page; this deletes both by audit, since a re-audit is "take every page
+    again", not "this page is gone")."""
+    await pool.execute(
+        "delete from audit_finding where tenant_id = $1 and audit = $2", tenant, audit
+    )
+    await pool.execute(
+        "delete from audit_reading where tenant_id = $1 and audit = $2", tenant, audit
+    )

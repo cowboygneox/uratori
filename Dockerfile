@@ -27,7 +27,11 @@ COPY uratori/__init__.py ./uratori/__init__.py
 # text layer, python-multipart for the upload route's multipart body.
 # pypdfium2 bundles a PDFium build under its own licence; see
 # THIRD_PARTY_NOTICES.md, which this image carries alongside LICENSE.
-RUN pip install --prefix=/install ".[server,documents]"
+# `audit`: the Anthropic SDK, for the `audit` worker's real provider
+# (docs/setup.md). Carried in every image, not gated behind a build arg --
+# `URATORI_AUDIT_PROVIDER` unset at runtime is what actually turns the
+# worker off, and every page stays `unaudited`.
+RUN pip install --prefix=/install ".[server,documents,audit]"
 
 COPY uratori/ ./uratori/
 

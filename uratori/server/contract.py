@@ -344,6 +344,13 @@ class RunIn(BaseModel):
     serve: bool = True
     """See `FactsIn.serve`; the same lever on the fact-less pass."""
 
+    audit: bool | str = False
+    """The re-audit operator verb (documents-plan-v3, D6): `"<name>"`
+    discards that one auditor's readings for the tenant; `true` discards
+    every declared auditor's. Either way the worker takes the pages again
+    at the next sweep -- this clears cached readings, never the engine's
+    own pass, which still runs (honouring `full`) in the same request."""
+
 
 class ShownChange(BaseModel):
     """One movement, rendered at the instant it happened and never re-derived."""
