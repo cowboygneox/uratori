@@ -23,7 +23,12 @@ import pytest
 from uratori import Schema
 from uratori.server import create_app
 
-from .pdf_fixtures import blank_page_pdf, rotated_page_pdf, sample_bundle_pdf
+from .pdf_fixtures import (
+    blank_page_pdf,
+    rotated_page_pdf,
+    rotated_vitals_line_pdf,
+    sample_bundle_pdf,
+)
 
 WORLD = Schema(kinds=frozenset())
 
@@ -200,6 +205,22 @@ async def test_rotated_page_boxes_stay_in_bounds(docs: DocServer) -> None:
         f"/tenants/t1/documents/medical_record/{document_id}/pages/1.png"
     )
     assert png.status_code == 200
+
+
+def test_rotated_text_layer_keeps_one_content_line_as_one_line_id() -> None:
+    """`Wt: 82` is one line in the content stream of a `/Rotate 90` page --
+    rotation stacks the two words vertically in the *rendered* image, but
+    `Word.line` must describe the text's own layout (what a same-line
+    matcher, D4, would read together), not the rendered geometry. Pure
+    unit test against `ingest_pdf` directly: no server, no upload."""
+    from uratori.server.documents import ingest_pdf
+
+    out = ingest_pdf(rotated_vitals_line_pdf())
+    page = out.pages[0]
+    assert page.text_source == "pdf"
+    by_text = {w.text: w for w in page.words}
+    assert "Wt:" in by_text and "82" in by_text
+    assert by_text["Wt:"].line == by_text["82"].line
 
 
 async def test_a_blank_page_reports_no_text_source_and_no_words(docs: DocServer) -> None:

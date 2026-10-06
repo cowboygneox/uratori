@@ -83,6 +83,31 @@ def rotated_page_pdf() -> bytes:
     return out.getvalue()
 
 
+def rotated_vitals_line_pdf() -> bytes:
+    """One `/Rotate 90` page, one real text-layer line: `Wt: 82`. For the
+    line-grouping regression -- the two words sit on one line in the
+    content stream, and must still share one `line` id once ingested,
+    even though rotation stacks them vertically in the rendered image."""
+    import pypdfium2 as pdfium
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    c.drawString(72, 700, "Wt: 82")
+    c.showPage()
+    c.save()
+
+    doc = pdfium.PdfDocument(buf.getvalue())
+    try:
+        doc[0].set_rotation(90)
+        out = io.BytesIO()
+        doc.save(out)
+    finally:
+        doc.close()
+    return out.getvalue()
+
+
 def blank_page_pdf() -> bytes:
     """One page with no text layer and no image -- a genuinely blank page,
     which should ingest with `text_source == "none"` rather than crash OCR

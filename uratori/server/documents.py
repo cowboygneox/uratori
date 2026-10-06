@@ -211,13 +211,22 @@ class _RawBox:
     """A word's text and rendered-frame box, before the id and line/block
     it is assigned once every word on the page is known. Typed rather than
     a `dict[str, object]` so the float/int conversions below are checked,
-    not merely hoped for."""
+    not merely hoped for.
+
+    `base_y0`/`base_y1` are the *unrotated* visual frame's y-band (origin
+    top-left, y down, before `/Rotate` is applied) -- rotation-independent,
+    so two words on the same content-stream line always share a y-band
+    here regardless of the page's declared rotation. Used only for line
+    clustering (`_assign_lines`); `y0`/`y1` (and `x0`/`x1`) stay the
+    rendered-frame box every reader of a `Word` actually sees."""
 
     text: str
     x0: float
     y0: float
     x1: float
     y1: float
+    base_y0: float = 0.0
+    base_y1: float = 0.0
     line: int = 0
     block: int = 0
     confidence: float | None = None
@@ -242,16 +251,26 @@ def _pdf_text_words(page: object) -> list[_RawBox]:
     buf: list[str] = []
     xs: list[float] = []
     ys: list[float] = []
+    base_ys: list[float] = []
 
     def flush() -> None:
         if not buf:
             return
         words.append(
-            _RawBox(text="".join(buf), x0=min(xs), y0=min(ys), x1=max(xs), y1=max(ys))
+            _RawBox(
+                text="".join(buf),
+                x0=min(xs),
+                y0=min(ys),
+                x1=max(xs),
+                y1=max(ys),
+                base_y0=min(base_ys),
+                base_y1=max(base_ys),
+            )
         )
         buf.clear()
         xs.clear()
         ys.clear()
+        base_ys.clear()
 
     for i in range(count):
         char = text[i] if i < len(text) else ""
@@ -268,6 +287,12 @@ def _pdf_text_words(page: object) -> list[_RawBox]:
             rx, ry, cw, ch = _rendered_corner(px, py, w0, h0, rotation)
             xs.append(rx / cw)
             ys.append(ry / ch)
+            # The same corner's y in the UNROTATED visual frame (origin
+            # top-left, y down, before `/Rotate`) -- `_rendered_corner`'s
+            # own first step, repeated here rather than threaded out of it,
+            # so line clustering below groups by the text's own layout, not
+            # by what a rotation did to it.
+            base_ys.append((h0 - py) / h0)
         buf.append(char)
     flush()
     return words
@@ -282,27 +307,29 @@ def _assign_lines(words: Sequence[_RawBox]) -> list[int]:
     multi-column page is future work for the matcher vocabulary (D4), not
     this extraction step.
 
-    Clustered in the *rendered* frame, deliberately -- on a `/Rotate 90`
-    page, a content stream's horizontal line becomes a column of
-    vertically stacked words once rotated, and each lands as its own
-    "line" here. That is the rendered geometry a reader of the page image
-    actually sees, not a bug in this clustering; recovering the original
-    content-stream line grouping under a rotation is future work alongside
-    the multi-column case above, should a matcher ever need it."""
+    Clustered in the text's own (unrotated) frame -- `word.base_y0`/
+    `base_y1` -- deliberately, **not** the rendered `y0`/`y1`: on a
+    `/Rotate 90` page, a content-stream line that reads as one line of
+    text becomes a column of words once rotated into the rendered frame,
+    and clustering on the rendered box would hand every word of it its own
+    single-word "line". `Word.line`/`Word.block` describe the text's own
+    layout (which words a same-line matcher, D4, reads together), not a
+    property of how the page happens to be rotated for display -- the
+    rendered box is still what every box on the wire reports."""
     bands: list[tuple[float, float]] = []
     out: list[int] = []
     for word in words:
-        mid = (word.y0 + word.y1) / 2
-        height = max(word.y1 - word.y0, 1e-6)
+        mid = (word.base_y0 + word.base_y1) / 2
+        height = max(word.base_y1 - word.base_y0, 1e-6)
         placed = False
         for i, (lo, hi) in enumerate(bands):
             if lo - height / 2 <= mid <= hi + height / 2:
-                bands[i] = (min(lo, word.y0), max(hi, word.y1))
+                bands[i] = (min(lo, word.base_y0), max(hi, word.base_y1))
                 out.append(i)
                 placed = True
                 break
         if not placed:
-            bands.append((word.y0, word.y1))
+            bands.append((word.base_y0, word.base_y1))
             out.append(len(bands) - 1)
     return out
 
