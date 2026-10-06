@@ -117,6 +117,13 @@ async function loadWorld() {
     byName.set(d.name, d);
     byName.set(`${d.kind}:${d.name}`, d);
   }
+  // Keyed by `${edge.type}:${edge.name}`, never bare `edge.name`: an edge's
+  // `type` already names which of the two colliding declarations it means
+  // (review finding 2 -- a bare-name key merged "what reads the FACT
+  // `measurement`" and "what copies from the EXTRACT `measurement`" into
+  // one list, so either page showed the same list, and neither showed its
+  // own). Every edge is already typed (`Dependency.type`), so this costs
+  // nothing for the kinds that never collide either.
   usedBy = new Map();
   for (const declaration of world.declarations) {
     for (const edge of declaration.rests_on) {
@@ -124,8 +131,9 @@ async function loadWorld() {
       // declarations): its page must say who reads it, or the leaves every
       // trace bottoms out on would all claim nobody does.
       if (edge.type === 'fact' && !byName.has(edge.name)) continue;
-      if (!usedBy.has(edge.name)) usedBy.set(edge.name, []);
-      usedBy.get(edge.name).push(declaration.name);
+      const key = `${edge.type}:${edge.name}`;
+      if (!usedBy.has(key)) usedBy.set(key, []);
+      usedBy.get(key).push({ name: declaration.name, kind: declaration.kind });
     }
   }
   return answer;
@@ -427,8 +435,15 @@ async function declarationPane(declaration, name, params) {
           ? el('span', { class: 'badge' }, `many — up to ${declaration.many_up_to}`)
           : null,
         world.editable
-          ? el('a', { class: 'tb-edit', href: `#/edit/?at=${encodeURIComponent(declaration.name)}` },
-              'edit source')
+          // `kind` rides along so the editor jumps to the right header: an
+          // extract and the fact it targets both match `at=<name>` (review
+          // finding 2's third site), and without the kind the jump landed
+          // on whichever of the two the source happens to print first.
+          ? el('a', {
+              class: 'tb-edit',
+              href: `#/edit/?at=${encodeURIComponent(declaration.name)}`
+                + `&kind=${encodeURIComponent(declaration.kind)}`,
+            }, 'edit source')
           : null),
       declaration.doc
         ? el('div', { class: 'tb-doc' }, el('p', { class: 'prose' }, declaration.doc))
@@ -512,12 +527,20 @@ async function declarationPane(declaration, name, params) {
     }
   }
 
-  const dependants = usedBy.get(name) || [];
+  // Keyed by this declaration's OWN kind, not just its name: an extract and
+  // the fact it targets have two distinct dependant sets (review finding
+  // 2) -- who reads the fact's records is not who copies from the
+  // extract. Each dependant carries its own kind too, so its link lands on
+  // the one it actually is rather than whichever bare name resolves to.
+  const dependants = usedBy.get(`${declaration.kind}:${declaration.name}`) || [];
   parts.push(el('h2', {}, 'Used by'),
     dependants.length
       ? el('p', {}, dependants.map((other, i) => [
           i ? ', ' : null,
-          el('a', { class: 'mono', href: `#/definitions/${encodeURIComponent(other)}` }, other),
+          el('a', {
+            class: 'mono',
+            href: defHash(other.name, { kind: other.kind === 'extract' ? 'extract' : null }),
+          }, other.name),
         ]))
       : el('p', { class: 'faint' }, 'Nothing in the library reads this.'));
 
@@ -1581,7 +1604,11 @@ function moverLinks(kind) {
     // one unlabelled list read as the same sort of thing, and they are not.
     el('ul', { class: 'movers' }, movers.map((declaration) =>
       el('li', {}, el('a', {
-        class: 'mono', href: `#/definitions/${encodeURIComponent(declaration.name)}`,
+        class: 'mono',
+        // `declaration` is already resolved and typed -- the record page's
+        // own "used by" (review finding 2's second site), so the qualifier
+        // costs nothing extra and is never wrong the way a bare lookup can be.
+        href: defHash(declaration.name, { kind: declaration.kind === 'extract' ? 'extract' : null }),
       }, declaration.name), ' ',
         el('span', { class: `badge ${declaration.kind}` }, declaration.kind)))));
 }
@@ -3112,8 +3139,16 @@ async function editorView(params) {
 
     const at = params.get('at');
     if (at) {
+      // `kind`, when the link carries one, narrows the keyword to search
+      // for: an extract and the fact it targets share a name
+      // (documents-plan-v3, D4), so matching every keyword at once (the
+      // no-`kind` fallback, for a link made before this existed) jumps to
+      // whichever header the source happens to print first, not
+      // necessarily the one the reader clicked from (review finding 2).
+      const atKind = params.get('kind');
+      const keywords = atKind ? [atKind === 'summary' ? 'summarise' : atKind] : FIG_DECLS;
       const pattern = new RegExp(
-        `^(?:${FIG_DECLS.join('|')})\\s+${at.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+        `^(?:${keywords.join('|')})\\s+${at.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
       const found = input.value.split('\n').findIndex((line) => pattern.test(line));
       if (found !== -1) caretTo(lineOffset(found + 1), found + 1);
     }

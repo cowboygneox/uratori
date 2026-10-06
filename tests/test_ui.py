@@ -4656,3 +4656,62 @@ async def test_the_extract_declaration_page_carries_fields_edges_and_failures(
         # An unknown extract name is a 404, not a 500 or a bare empty page.
         missing = await http.get("/ui/api/tenants/t1/extracts/no_such_extract/status")
         assert missing.status_code == 404
+
+
+async def test_used_by_and_deep_links_are_qualified_by_kind_for_a_colliding_name(
+    pg_dsn: str, tmp_path: Path
+) -> None:
+    """Review finding 2 (/tmp/pkg23-review/review.md): the `byName`
+    collision fix (package 3d) qualified the roster and the `extract`-typed
+    `rests_on` edges with `?kind=`, but not `usedBy` (keyed by bare name,
+    merging what reads the fact `measurement` with what copies from the
+    extract `measurement` into one list) or the "Used by" / record-page
+    "A change to these records can move" / editor deep-link hrefs built
+    from it. There is no browser in this suite to click the link, so this
+    pins the fix the only way available here: the served `app.js` must no
+    longer build any of those three from a bare name alone.
+    """
+    from .test_extract_server import SOURCE, WORLD
+
+    async with serve(pg_dsn, blob_dir=str(tmp_path / "blobs")) as http:
+        put = await http.put("/schema", json=WORLD.to_document())
+        assert put.status_code == 200, put.text
+        put = await http.put("/definitions", json={"source": SOURCE})
+        assert put.status_code == 200, put.text
+
+        # The server side of the fix: `measurement`'s extract edges are
+        # typed `extract`/`filter`/`fact`, never bare -- `usedBy` on the
+        # client has the type to key on for every edge, with nothing
+        # server-side left to add.
+        world = (await http.get("/ui/api/world")).json()
+        measurement_extract = next(
+            d for d in world["declarations"]
+            if d["name"] == "measurement" and d["kind"] == "extract"
+        )
+        assert ("extract", "page_identity") in {
+            (e["type"], e["name"]) for e in measurement_extract["rests_on"]
+        }
+
+        script = (await http.get("/ui/app.js")).text
+
+        # `usedBy` keyed by the edge's own type, not bare `edge.name` --
+        # the fix that gives the fact `measurement` and the extract
+        # `measurement` two distinct dependant sets instead of one merged
+        # list under one key.
+        assert "`${edge.type}:${edge.name}`" in script
+        assert "usedBy.get(`${declaration.kind}:${declaration.name}`)" in script
+
+        # The "Used by" list's own links carry the dependant's kind, read
+        # off the stored object -- not a bare name handed back to
+        # `byName.get` with no qualifier, the exact shape that let a click
+        # land on the wrong one of two colliding declarations.
+        assert "other.kind === 'extract' ? 'extract' : null" in script
+
+        # The record page's "A change to these records can move" list
+        # (`moverLinks`) and the editor's `?at=` deep link both resolve a
+        # declaration object directly (never a bare-name re-lookup), so
+        # qualifying them is a read of a field already in hand -- confirm
+        # both actually do it.
+        assert script.count("declaration.kind === 'extract' ? 'extract' : null") >= 2
+        assert "&kind=${encodeURIComponent(declaration.kind)}" in script
+        assert "params.get('kind')" in script  # the editor reads it back
