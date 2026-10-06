@@ -131,6 +131,7 @@ container, `localhost` is the container.
 | [HTTP & websocket API](docs/http-api.md) | Every route and frame, with request and response shapes. |
 | [The definition language](docs/language.md) | Writing `.fig`: facts, groups, filters, measures, figures, readings, projections, summaries, bundles. |
 | [The NFL example](examples/nfl/) | A loadable showcase: the whole play-by-play era in one tenant -- every play a fact, bucketed by season, game number and weekday -- every construct the language has in one library. |
+| [The records example](examples/records/) | A patient's uploaded chart: synthetic PDFs in, a BMI trace out, every value walked back to a page and its boxes -- `extract`, documents, and the authoring loop that writes one. |
 | [The built-in UI](docs/ui.md) | The investigation surface at `/ui/`: definitions as written, dependency traces, facts, and the activity log. |
 
 ## The rules it inherits

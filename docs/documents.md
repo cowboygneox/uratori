@@ -10,10 +10,19 @@ blob store, never inside it.
 
 This page covers the shape: what `fact <kind> as document:` and `fact <kind>
 as page of <kind>` declare, and why. See [the language guide](language.md#as-document--as-page-of----a-fact-shape-the-language-knows)
-for how the shape sits inside `fact` as a whole, and [the HTTP
-API](http-api.md) for the routes that fill it: uploading a file, reading its
-pages, rendering a page as an image, and reading the word layer a page's
-text was found at.
+for how the shape sits inside `fact` as a whole, [the language guide's
+`extract` section](language.md#extract----records-read-off-a-page) for how
+a page's own words become ordinary facts, and [the HTTP API](http-api.md)
+for the routes that fill it: uploading a file, reading its pages, rendering
+a page as an image, and reading the word layer a page's text was found at.
+
+[**`examples/records/`**](../examples/records/) is the worked version of
+everything on this page: a synthetic, years-long chart, the two extracts
+that read its pages, and the BMI figures that turn the result into a
+series with every value traced back to a page and its boxes -- including
+the authoring loop (`examples/records/author.py`) that writes an
+extract's alternatives by reading what a declaration's own failures say
+is missing.
 
 ## The shape
 
