@@ -29,6 +29,7 @@ from .blobs import BlobStore
 from .contract import RunOut, ShownChange, schema_out
 from .documents import RenderCache
 from .hub import Hub
+from .provenance import PostgresProvenanceStore, ProvenanceStore
 from .words import WordStore
 
 log = logging.getLogger("uratori.server")
@@ -64,6 +65,7 @@ class State:
         render_cache: RenderCache | None = None,
         blob_dir: str | None = None,
         max_upload_bytes: int = 50 * 1024 * 1024,
+        provenance_store: ProvenanceStore | None = None,
     ) -> None:
         self.pool = pool
         self.token = token
@@ -75,6 +77,12 @@ class State:
         self.blob_store = blob_store
         self.word_store = word_store
         self.render_cache = render_cache
+        self.provenance_store: ProvenanceStore = provenance_store or PostgresProvenanceStore(pool)
+        """Needs only `pool` (`document_provenance` is a plain server table,
+        D2) -- unlike `blob_store`/`word_store`, never gated behind
+        `URATORI_BLOB_DIR`: a tenant with no documents feature simply never
+        has a page to cite, and the facts route's own write-time validation
+        is what actually refuses a citation naming one."""
         self.blob_dir = blob_dir
         """Set only to say whether `URATORI_BLOB_DIR` was configured --
         `blob_store`/`render_cache` are `None` exactly when this is, and the

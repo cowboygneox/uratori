@@ -350,6 +350,7 @@ Request fields, all optional:
 | `writes` | `{kind: {key: record}}` | Records as the provider shows them now. Arbitrary JSON in a schema-taught world; verified against the declaration in a fact-taught one. |
 | `stamps` | `{kind: {key: instant}}` | The provider's own updated-at instant per record, ISO 8601, where one exists. Sparse. |
 | `deletes` | `{kind: [key]}` | Keys gone from the world. |
+| `provenance` | `{kind: {key: {field: citation}}}` | Where a written field's value came from -- a page, and the words on it. See [Provenance](#provenance-in-the-writes) below. Sparse, and coupled to `writes`. |
 | `full` | bool | Force a full pass: reindex and recompute everything rather than only what moved. The right call after a destructive change whose scope the warm path cannot see. Default `false`. |
 | `defer` | bool | Write the batch and run **no pass**. For bulk imports: a pass per batch reads buckets every earlier batch already filled, so an import's cost grows with the square of its size. Verification still gates the batch whole. The caller owes the close -- `POST /tenants/{t}/runs {"full": true}` -- because until it runs, the tenant's stored answers describe the world as it stood before the deferred batches. The engine remembers the debt: the tenant's **next pass, whatever shape its caller asked for** -- a warm run, an ordinary push -- runs full and settles it, so a forgotten close costs one expensive pass rather than stale values served as current for ever. Contradicts `full`, and the pair is refused (`422`) rather than one silently winning. Default `false`. |
 
@@ -387,6 +388,64 @@ below) is a `422` whole, naming the documents routes instead -- those kinds
 move only through `POST`/`GET`/`DELETE /tenants/{tenant}/documents/{kind}`,
 which keep a document's bytes, its pages, its word layer and its facts in
 step.
+
+### Provenance in the writes
+
+Where a field's value came from -- a page, and the words on it -- entered
+beside the write it attests, never in the record body (a definition can
+never read it; D2 of the documents plan). Coupled to the body write it names:
+
+```json
+{
+  "writes": {
+    "measurement": {"m1": {"patient_id": "p1", "weight_kg": 82}}
+  },
+  "provenance": {
+    "measurement": {
+      "m1": {"weight_kg": {"page": "a1b2c3d4e5f6a7b8/p0001", "words": [12, 13]}}
+    }
+  }
+}
+```
+
+`provenance` is `{kind: {key: {field: citation}}}`. A citation is one of:
+
+| Shape | Meaning |
+|---|---|
+| `{"page": key, "words": [id, …]}` | The ordinary case: ids off that page's own word layer (`GET .../pages/{n}/words`). The server derives each word's box and the printed text from the word table itself -- "the extractor pointed at these words", checkable by eye. |
+| `{"page": key, "boxes": [[x0, y0, x1, y1], …]}` | The fallback, for a value nothing in the word layer anchors (a tick-box, handwriting OCR missed). Stored and served `anchored: false` -- "region asserted, not matched to page text" -- with no printed text, because there are no cited words to read one off. |
+
+Exactly one of `words`/`boxes`; neither or both is a `422`. Every box is
+page-normalised `[0,1]` in the rendered frame (see
+[the coordinate frame](#the-coordinate-frame-stated-once), below).
+
+Rules, enforced whole, by kind/key/field, before anything is written:
+
+- **The field must be in this same batch's `writes`.** A citation for a
+  `(kind, key)` the batch is not also writing is refused -- provenance is
+  coupled to the body write, not a door of its own.
+- **The field must be declared, and its path may cross only `one` blocks.**
+  A path through a `many` block (a repeating position is not a stable place
+  to point a box at) is refused, the same rule a measure's `field_path`
+  already follows.
+- **The page must be a held page fact of a declared page kind in this
+  tenant**, and every cited word id must exist in that page's word layer.
+- **Replace-set per `(kind, key)`, and only for an admitted write.** A batch
+  that names `(kind, key)` replaces every provenance row that record held,
+  wholesale -- a batch that says nothing about a key it writes leaves that
+  key's provenance exactly as it was. "Admitted" is the stale-write guard's
+  own question: a write the guard refuses (an older stamp than what is
+  stored) must not carry a fresh citation for a value that was never
+  written. Landed in the same transaction as the body, so the two can never
+  observe each other half-done.
+- Deleted with the record: a `deletes` batch, a document delete, and
+  `DELETE /tenants/{tenant}` (below) all remove a record's provenance along
+  with it.
+
+Read back on `GET /tenants/{tenant}/evidence/{name}` (each `EvidenceMember`
+carries `sources`, when the figure reads a field directly) and on the
+record itself through the built-in UI's API, under `/ui/api` -- see
+[`Source`](#source-and-box) and [UI](ui.md).
 
 **A batch is verified before anything lands.** A *write* against a kind the
 world does not declare is a `422` in either mode -- new behaviour from the
@@ -806,7 +865,7 @@ curl -s -X DELETE "$BASE/tenants/t1" -H "$AUTH"
 ```
 
 ```json
-{"facts_removed": 4, "values_removed": 2, "documents_removed": 1}
+{"facts_removed": 4, "values_removed": 2, "documents_removed": 1, "provenance_removed": 3}
 ```
 
 The counts are the response because "ok" is the least useful true thing a

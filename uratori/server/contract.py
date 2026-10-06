@@ -221,6 +221,22 @@ class LibraryOut(BaseModel):
     and the hash a committed artifact reviews tiles by."""
 
 
+class ProvenanceCiteIn(BaseModel):
+    """One field's citation, in a `FactsIn.provenance` map.
+
+    The ordinary case names word ids off the page's own word layer
+    (`GET .../documents/{kind}/{id}/pages/{n}/words`); the server derives
+    their boxes and the printed text from the word table itself. `boxes` is
+    the fallback for a value nothing in the word layer anchors -- a tick-box,
+    handwriting OCR missed -- stored and rendered `anchored: false`. Exactly
+    one of `words`/`boxes` must be given; neither or both is a 422
+    (documents-plan-v3, D2)."""
+
+    page: str
+    words: list[int] | None = None
+    boxes: list[list[float]] | None = None
+
+
 class FactsIn(BaseModel):
     """One batch of fact movement, as the host saw it.
 
@@ -233,6 +249,15 @@ class FactsIn(BaseModel):
 
     writes: dict[str, dict[str, dict[str, Any]]] = Field(default_factory=dict)
     """kind -> key -> record."""
+
+    provenance: dict[str, dict[str, dict[str, ProvenanceCiteIn]]] = Field(default_factory=dict)
+    """kind -> key -> field -> citation (documents-plan-v3, D2). Coupled to
+    `writes`: a citation names a field this same batch is writing, and lands
+    -- replacing every row that (kind, key) held, wholesale -- only when the
+    stale-write guard admits that key's write. A key this map does not
+    name keeps whatever provenance it already held; naming a key with an
+    empty field map clears it. Verified and 422'd whole, by kind/key/field,
+    before anything is written."""
 
     stamps: dict[str, dict[str, str]] = Field(default_factory=dict)
     """kind -> key -> the provider's own updated-at instant, ISO, where one
@@ -351,6 +376,7 @@ class TenantRemoved(BaseModel):
     facts_removed: int
     values_removed: int
     documents_removed: int = 0
+    provenance_removed: int = 0
 
 
 class SubscribeEntry(BaseModel):

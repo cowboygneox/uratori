@@ -106,6 +106,12 @@ from .documents import (
     words_sha_of,
 )
 from .hub import Client, Entry
+from .provenance import (
+    PostgresProvenanceStore,
+    ProvenanceError,
+    ProvenanceRow,
+    validate_and_build,
+)
 from .runtime import (
     State,
     World,
@@ -432,6 +438,23 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(refusal)) from refusal
         except FactError as refusal:
             raise HTTPException(status_code=422, detail=str(refusal)) from refusal
+
+        # Parsed and verified before anything is written, same as the body:
+        # a citation naming a field this batch's write does not carry, a
+        # page not held, or a word id the page's layer does not have 422s
+        # the whole batch (documents-plan-v3, D2). Needs the documents
+        # runtime only because a citation needs a page to resolve against --
+        # a tenant with no `provenance` in this batch never reaches it.
+        provenance_rows: dict[tuple[str, str], list[ProvenanceRow]] = {}
+        if body.provenance:
+            _blobs, word_store, _cache = documents_ready(s)
+            try:
+                provenance_rows = await validate_and_build(
+                    s.pool, word_store, library, tenant, body.writes, body.provenance
+                )
+            except ProvenanceError as refusal:
+                raise HTTPException(status_code=422, detail=str(refusal)) from refusal
+
         async with s.lock_for(tenant):
             # One transaction for the whole mutation: verification is the
             # first line of defence, but a value it missed (or a database
@@ -441,19 +464,38 @@ def create_app(
             # population as a quarantined record.
             async with s.pool.acquire() as connection, connection.transaction():
                 facts = PostgresFactStore(connection)
+                provenance_store = PostgresProvenanceStore(connection)
                 for kind, keys in body.deletes.items():
                     await facts.delete(tenant, kind, keys)
+                    await provenance_store.delete(tenant, kind, keys)
                 moved: dict[str, list[str]] = {}
                 written = 0
                 for kind, records in body.writes.items():
                     if not records:
                         continue
+                    # Read before the write, not after (`admitted_keys`'s own
+                    # docstring): the guard's comparison is against the
+                    # *pre-write* stamp, and provenance must land only for
+                    # the keys the guard actually admitted -- a stale write
+                    # that the body refused must not carry a fresh box for a
+                    # value that was never stored.
+                    admitted = set(
+                        await facts.admitted_keys(
+                            tenant, kind, records, stamps=body.stamps.get(kind)
+                        )
+                    )
                     changed = await facts.upsert(
                         tenant, kind, records, stamps=body.stamps.get(kind)
                     )
                     written += len(changed)
                     if changed:
                         moved[kind] = changed
+                    for key in records:
+                        if key not in admitted:
+                            continue
+                        cited = provenance_rows.get((kind, key))
+                        if cited is not None:
+                            await provenance_store.replace(tenant, kind, key, cited)
             if body.defer:
                 # The batch is landed and verified; the pass is the caller's
                 # to run. No results are re-served because nothing recomputed
@@ -956,6 +998,15 @@ def create_app(
                 await facts.delete(tenant, page_kind, page_keys)
                 await facts.delete(tenant, kind, [document_id])
                 await PostgresWordStore(connection).delete(tenant, page_kind, page_keys)
+                # Document and page kinds are refused from facts-route
+                # writes entirely (`refuse_document_kind_writes`), so
+                # neither ever holds provenance of its own today -- this is
+                # defensive, matching "deleted with the record" literally
+                # against the day a derived kind (D4) is keyed as a page.
+                await PostgresProvenanceStore(connection).delete(
+                    tenant, page_kind, page_keys
+                )
+                await PostgresProvenanceStore(connection).delete(tenant, kind, [document_id])
                 await db.delete_documents(connection, tenant, kind, [document_id])
                 # Checked AFTER this row is gone, in the same transaction:
                 # blobs are keyed `(tenant, sha256)` alone, no kind, so two
@@ -1069,12 +1120,15 @@ def create_app(
             # blobs are tenant-namespaced, so every sha256 this tenant's
             # `document` rows hold is a file only this delete can orphan.
             shas = await db.tenant_document_shas(s.pool, tenant)
-            facts, values, documents = await db.remove_tenant(s.pool, tenant)
+            facts, values, documents, provenance = await db.remove_tenant(s.pool, tenant)
             if s.blob_store is not None:
                 for sha in shas:
                     await s.blob_store.delete(tenant, sha)
         return TenantRemoved(
-            facts_removed=facts, values_removed=values, documents_removed=documents
+            facts_removed=facts,
+            values_removed=values,
+            documents_removed=documents,
+            provenance_removed=provenance,
         )
 
     # ------------------------------------------------------------- socket --

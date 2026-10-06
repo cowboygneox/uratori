@@ -134,6 +134,45 @@ create table if not exists document_page_words (
   confidence double precision,
   primary key (tenant_id, kind, key, word_id)
 );
+
+-- Provenance (documents-plan-v3, D2): sibling metadata beside a record, never
+-- in its body and never readable by a definition. One row per (kind, key,
+-- field) a write's `provenance` map cited. Replace-set per (tenant, kind,
+-- key): a write that is admitted by the stale-write guard (`uratori/server/
+-- provenance.py`) replaces every row this record held wholesale, so a row
+-- never outlives the body write that attested its value, and a batch with no
+-- `provenance` entry for a key leaves that key's rows untouched. `value` is
+-- the field's value *as attested*, read at write time -- a field whose
+-- current value later disagrees with it is a finding the read path renders,
+-- never silently repaired here. `word_ids`/`boxes` are both page-normalised
+-- to the rendered frame (`docs/http-api.md`); `boxes` is populated either way
+-- -- derived from the cited words' own boxes, or, for the no-text-layer
+-- fallback, exactly the caller's own boxes (`anchored = false` then).
+-- `matcher`/`reproducible` exist from the start for D4/D6 (a deterministic
+-- matcher or a model-backed one); a host write through the facts route
+-- leaves both at their defaults (null, true).
+create table if not exists document_provenance (
+  tenant_id    text not null,
+  kind         text not null,
+  key          text not null,
+  field        text not null,
+  page_key     text not null,
+  word_ids     int[] not null default '{}',
+  boxes        jsonb not null,
+  printed      text,
+  value        jsonb,
+  anchored     boolean not null default true,
+  extractor    text,
+  parser       text,
+  matcher      jsonb,
+  reproducible boolean not null default true,
+  at           timestamptz not null default now(),
+  primary key (tenant_id, kind, key, field)
+);
+
+-- No separate index for (tenant_id, kind, key): the primary key above is a
+-- composite btree on exactly those three columns plus `field`, so a lookup
+-- by record (every field a record holds) already uses it as a prefix scan.
 """
 
 
@@ -735,6 +774,29 @@ async def fact_record(
     }
 
 
+async def held_page_kind(
+    pool: asyncpg.Pool[Any], tenant: str, page_kinds: Sequence[str], page_key: str
+) -> str | None:
+    """Which of this tenant's declared page kinds holds a page fact under
+    this key -- the provenance write path's "is this page held" check
+    (documents-plan-v3, D2). Candidates are tried in a fixed order (sorted
+    by name) so two document kinds that happen to share a page key
+    (identical bytes uploaded under both -- `document_sha_referenced`'s own
+    scenario) resolve the same way on every call rather than racing; a known
+    limitation of a citation shape that names the page but not its kind,
+    recorded in the package report rather than hidden."""
+    for kind in sorted(page_kinds):
+        found = await pool.fetchval(
+            "select 1 from fact where tenant_id = $1 and kind = $2 and key = $3",
+            tenant,
+            kind,
+            page_key,
+        )
+        if found:
+            return kind
+    return None
+
+
 # ---------------------------------------------------------------- tenants --
 
 
@@ -750,19 +812,22 @@ async def tenant_document_shas(pool: asyncpg.Pool[Any], tenant: str) -> list[str
     return [row["sha256"] for row in rows]
 
 
-async def remove_tenant(pool: asyncpg.Pool[Any], tenant: str) -> tuple[int, int, int]:
-    """Every row a tenant owns, gone. Returns (facts, values, documents)
-    removed, because a destructive route answering only "ok" would be the
-    least useful true thing it could say. The blobs themselves are not this
-    function's job -- it has no `BlobStore` to delete through -- so a caller
-    that owns documents calls `tenant_document_shas` first and unlinks them
-    after this returns."""
+async def remove_tenant(pool: asyncpg.Pool[Any], tenant: str) -> tuple[int, int, int, int]:
+    """Every row a tenant owns, gone. Returns (facts, values, documents,
+    provenance) removed, because a destructive route answering only "ok"
+    would be the least useful true thing it could say. The blobs themselves
+    are not this function's job -- it has no `BlobStore` to delete through --
+    so a caller that owns documents calls `tenant_document_shas` first and
+    unlinks them after this returns."""
     facts = await pool.fetchval("select count(*) from fact where tenant_id = $1", tenant)
     values = await pool.fetchval(
         "select count(*) from figure_value where tenant_id = $1", tenant
     )
     documents = await pool.fetchval(
         "select count(*) from document where tenant_id = $1", tenant
+    )
+    provenance = await pool.fetchval(
+        "select count(*) from document_provenance where tenant_id = $1", tenant
     )
     for table, column in (
         ("fact", "tenant_id"),
@@ -775,9 +840,10 @@ async def remove_tenant(pool: asyncpg.Pool[Any], tenant: str) -> tuple[int, int,
         ("import_debt", "tenant_id"),
         ("document", "tenant_id"),
         ("document_page_words", "tenant_id"),
+        ("document_provenance", "tenant_id"),
     ):
         await pool.execute(f"delete from {table} where {column} = $1", tenant)
-    return int(facts or 0), int(values or 0), int(documents or 0)
+    return int(facts or 0), int(values or 0), int(documents or 0), int(provenance or 0)
 
 
 # --------------------------------------------------------------- documents --

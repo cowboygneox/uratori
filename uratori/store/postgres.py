@@ -660,6 +660,53 @@ class PostgresFactStore:
                 moved.append(key)
         return moved
 
+    async def admitted_keys(
+        self,
+        tenant: str,
+        kind: str,
+        records: Mapping[str, Mapping[str, Any]],
+        stamps: Mapping[str, str] | None = None,
+    ) -> list[str]:
+        """Which of `records`' keys `upsert` would admit -- moved, or written
+        with no visible change because the value already matched and the
+        stamp was not stale (documents-plan-v3, D2).
+
+        `upsert` only reports a key as *moved* when its value actually
+        changes, by design (a reconcile must not recompute the whole
+        engine). Provenance needs a wider question: whether the stale-write
+        guard let this write through *at all*, because a row the guard
+        refused must keep whatever provenance it already held, exactly as
+        its body keeps its old value -- and a row the guard let through with
+        an unchanged value is still a fresh attestation of that value.
+
+        The guard's own comparison is `fact.source_stamp is null or
+        excluded.source_stamp is null or excluded.source_stamp >=
+        fact.source_stamp` -- read here in Python against the *pre-write*
+        stamp, because that is the comparison `upsert`'s own `WHERE` makes.
+        Call this before `upsert` in the same transaction; calling it after
+        would compare a moved key's stamp against the value `upsert` itself
+        just wrote, which is always true and answers nothing.
+        """
+        if not records:
+            return []
+        held = dict(stamps or {})
+        rows = await self._pool.fetch(
+            "select key, source_stamp from fact "
+            "where tenant_id = $1 and kind = $2 and key = any($3::text[])",
+            tenant,
+            kind,
+            list(records),
+        )
+        old_stamps = {r["key"]: r["source_stamp"] for r in rows}
+        out: list[str] = []
+        for key in records:
+            old = old_stamps.get(key)
+            new = _instant(held.get(key))
+            stale = old is not None and new is not None and new < old
+            if not stale:
+                out.append(key)
+        return out
+
     async def delete(self, tenant: str, kind: str, keys: Sequence[str]) -> None:
         if not keys:
             return

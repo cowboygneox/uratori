@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from dataclasses import replace as dc_replace
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,13 @@ import pytest
 
 from uratori.server.blobs import BlobStore as BlobStoreType
 from uratori.server.blobs import FilesystemBlobStore, MemoryBlobStore
+from uratori.server.provenance import (
+    MemoryProvenanceStore,
+    PostgresProvenanceStore,
+    ProvenanceRow,
+    StoredBox,
+)
+from uratori.server.provenance import ProvenanceStore as ProvenanceStoreType
 from uratori.server.words import MemoryWordStore, PostgresWordStore, Word
 from uratori.server.words import WordStore as WordStoreType
 from uratori.store import EngineStore, MemoryEngineStore, Pointer
@@ -633,3 +641,160 @@ async def test_words_are_tenant_and_kind_scoped(word_store: WordStoreType) -> No
     assert [w.text for w in a] == ["a-word"]
     assert [w.text for w in b] == ["b-word"]
     assert [w.text for w in other_kind] == ["invoice-word"]
+
+
+# `ProvenanceStore` (`uratori/server/provenance.py`, documents-plan-v3 D2):
+# sibling metadata beside a record, never in it. Same parity discipline --
+# the memory and Postgres twins must agree on replace-set semantics, bulk
+# reads and the delete paths a record delete, a document delete and a
+# tenant removal each make.
+
+
+@pytest.fixture(params=["memory", "postgres"])
+def provenance_store(
+    request: pytest.FixtureRequest, pg_pool: asyncpg.Pool[Any]
+) -> ProvenanceStoreType:
+    if request.param == "memory":
+        return MemoryProvenanceStore()
+    return PostgresProvenanceStore(pg_pool)
+
+
+def _prov_row(field: str, page: str = "d1/p0001", value: Any = 82) -> ProvenanceRow:
+    return ProvenanceRow(
+        field=field,
+        page_key=page,
+        word_ids=(1, 2),
+        boxes=(StoredBox(0.1, 0.2, 0.15, 0.25), StoredBox(0.16, 0.2, 0.2, 0.25)),
+        printed="82 kg",
+        value=value,
+        anchored=True,
+    )
+
+
+async def test_replace_is_a_whole_record_replace_set(
+    provenance_store: ProvenanceStoreType,
+) -> None:
+    """Replacing a record's rows under a new citation leaves no trace of
+    the old ones -- a batch that re-attests a record replaces wholesale,
+    never merges field by field."""
+    tenant = str(uuid.uuid4())
+    await provenance_store.replace(tenant, "measurement", "m1", [_prov_row("weight_kg")])
+    assert [r.field for r in await provenance_store.for_record(tenant, "measurement", "m1")] == [
+        "weight_kg"
+    ]
+
+    await provenance_store.replace(tenant, "measurement", "m1", [_prov_row("height_cm", value=180)])
+    held = await provenance_store.for_record(tenant, "measurement", "m1")
+    assert [r.field for r in held] == ["height_cm"]
+    assert held[0].value == 180
+    assert held[0].printed == "82 kg"
+    assert held[0].boxes == (StoredBox(0.1, 0.2, 0.15, 0.25), StoredBox(0.16, 0.2, 0.2, 0.25))
+    assert held[0].word_ids == (1, 2)
+
+
+async def test_replace_with_an_empty_list_clears_a_records_rows(
+    provenance_store: ProvenanceStoreType,
+) -> None:
+    tenant = str(uuid.uuid4())
+    await provenance_store.replace(tenant, "measurement", "m1", [_prov_row("weight_kg")])
+    await provenance_store.replace(tenant, "measurement", "m1", [])
+    assert await provenance_store.for_record(tenant, "measurement", "m1") == []
+
+
+async def test_for_many_groups_by_key_and_skips_records_with_none(
+    provenance_store: ProvenanceStoreType,
+) -> None:
+    tenant = str(uuid.uuid4())
+    await provenance_store.replace(tenant, "measurement", "m1", [_prov_row("weight_kg")])
+    await provenance_store.replace(tenant, "measurement", "m2", [_prov_row("weight_kg", value=90)])
+    grouped = await provenance_store.for_many(tenant, "measurement", ["m1", "m2", "m3"])
+    assert set(grouped) == {"m1", "m2"}
+    assert grouped["m2"][0].value == 90
+
+
+async def test_delete_drops_only_the_named_records(
+    provenance_store: ProvenanceStoreType,
+) -> None:
+    tenant = str(uuid.uuid4())
+    await provenance_store.replace(tenant, "measurement", "m1", [_prov_row("weight_kg")])
+    await provenance_store.replace(tenant, "measurement", "m2", [_prov_row("weight_kg")])
+    await provenance_store.delete(tenant, "measurement", ["m1"])
+    assert await provenance_store.for_record(tenant, "measurement", "m1") == []
+    assert await provenance_store.for_record(tenant, "measurement", "m2") != []
+
+
+async def test_delete_tenant_drops_everything_and_counts_it(
+    provenance_store: ProvenanceStoreType,
+) -> None:
+    tenant = str(uuid.uuid4())
+    other = str(uuid.uuid4())
+    await provenance_store.replace(tenant, "measurement", "m1", [_prov_row("weight_kg")])
+    await provenance_store.replace(tenant, "measurement", "m2", [_prov_row("height_cm")])
+    await provenance_store.replace(other, "measurement", "m1", [_prov_row("weight_kg")])
+
+    removed = await provenance_store.delete_tenant(tenant)
+    assert removed == 2
+    assert await provenance_store.for_record(tenant, "measurement", "m1") == []
+    assert await provenance_store.for_record(other, "measurement", "m1") != []
+
+
+async def test_a_boxes_fallback_row_round_trips_unanchored(
+    provenance_store: ProvenanceStoreType,
+) -> None:
+    tenant = str(uuid.uuid4())
+    row = ProvenanceRow(
+        field="signed",
+        page_key="d1/p0003",
+        word_ids=(),
+        boxes=(StoredBox(0.4, 0.5, 0.6, 0.55),),
+        printed=None,
+        value=True,
+        anchored=False,
+    )
+    await provenance_store.replace(tenant, "medical_record_page", "d1/p0003", [row])
+    held = await provenance_store.for_record(tenant, "medical_record_page", "d1/p0003")
+    assert len(held) == 1
+    assert held[0].at != "", "both twins stamp `at` on write, Postgres via now(), memory to match"
+    assert dc_replace(held[0], at="") == row
+
+
+# `PostgresFactStore.admitted_keys` (documents-plan-v3 D2): the stamp
+# guard's own question, asked without writing, so provenance can be
+# replaced only for the keys `upsert` actually admits. Postgres-only --
+# there is no in-memory `FactStore` twin with stamp semantics to compare
+# against (`MemoryFactStore.put`/`drop` leave change detection to the
+# caller, by design; see its own docstring).
+
+
+async def test_admitted_keys_excludes_only_the_stale_ones(pg_pool: Any) -> None:
+    tenant = str(uuid.uuid4())
+    facts = PostgresFactStore(pg_pool)
+
+    # A brand-new key is always admitted -- there is nothing to be stale
+    # against.
+    admitted = await facts.admitted_keys(
+        tenant, "shop_order", {"o1": {"status": "placed"}}, stamps={"o1": "2026-08-24T12:00:00Z"}
+    )
+    assert admitted == ["o1"]
+    await facts.upsert(
+        tenant, "shop_order", {"o1": {"status": "placed"}}, stamps={"o1": "2026-08-24T12:00:00Z"}
+    )
+
+    # Called BEFORE the write, as its own docstring requires: a stale
+    # stamp is excluded even though the value also changed.
+    admitted = await facts.admitted_keys(
+        tenant, "shop_order", {"o1": {"status": "riding"}}, stamps={"o1": "2026-08-24T11:00:00Z"}
+    )
+    assert admitted == []
+
+    # A newer stamp is admitted even when the value happens to be
+    # identical to what is already stored -- "moved or identical-and-not-
+    # stale" (D2), not "moved".
+    admitted = await facts.admitted_keys(
+        tenant, "shop_order", {"o1": {"status": "placed"}}, stamps={"o1": "2026-08-24T13:00:00Z"}
+    )
+    assert admitted == ["o1"]
+
+    # No stamp on either side: nothing to compare, so it is admitted.
+    admitted = await facts.admitted_keys(tenant, "shop_order", {"o2": {"status": "new"}})
+    assert admitted == ["o2"]
