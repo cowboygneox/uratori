@@ -228,6 +228,11 @@ h2.subject {
 /* The leaves. */
 .badge.fact       { color: #93c880; border-color: #43602f; background: rgba(147, 200, 128, 0.07); }
 .badge.setting    { color: var(--ink-dim); border-style: dashed; }
+/* Writes a leaf, rather than being one -- deterministic patterns over a
+   page's own words (documents-plan-v3, D4), never versioned the way a fact
+   is, so it keeps its own warm hue beside `fact`'s green rather than
+   borrowing it. */
+.badge.extract    { color: #d98aa6; border-color: #6b2c43; background: rgba(217, 138, 166, 0.07); }
 /* Document-shaped facts (D1) and the two ways a page's text was found. */
 .badge.document   { color: #93c880; border-color: #43602f; background: rgba(147, 200, 128, 0.07); }
 .badge.page        { color: #93c880; border-style: dashed; }

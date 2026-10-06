@@ -106,7 +106,17 @@ async function loadWorld() {
   const answer = await get('world');
   if (!answer.ok) return answer;
   world = answer.body;
-  byName = new Map(world.declarations.map((d) => [d.name, d]));
+  // Keyed by name AND by `kind:name` -- an extract is named bare, after the
+  // fact kind it targets (documents-plan-v3, D4), so the two always
+  // collide on the plain key and the later one in the list wins it. The
+  // qualified key is how a link that already knows which one it means
+  // (the roster, an extract edge) reaches the one it meant; the plain key
+  // stays the default for every other kind, which never collides.
+  byName = new Map();
+  for (const d of world.declarations) {
+    byName.set(d.name, d);
+    byName.set(`${d.kind}:${d.name}`, d);
+  }
   usedBy = new Map();
   for (const declaration of world.declarations) {
     for (const edge of declaration.rests_on) {
@@ -189,14 +199,14 @@ async function render() {
 
 // -------------------------------------------------------- definitions --
 
-const KIND_ORDER = ['bundle', 'figure', 'reading', 'projection', 'summary', 'group', 'filter', 'measure', 'fact'];
+const KIND_ORDER = ['bundle', 'figure', 'reading', 'projection', 'summary', 'group', 'filter', 'measure', 'fact', 'extract'];
 
 function namespaceOf(name) {
   const dot = name.indexOf('.');
   return dot === -1 ? name : name.slice(0, dot);
 }
 
-function roster(selected) {
+function roster(selected, selectedKind) {
   const list = el('div', {});
   const fill = (filter) => {
     list.replaceChildren();
@@ -216,8 +226,14 @@ function roster(selected) {
         // The name is its own span so it may ellipsise; the stamp keeps the
         // row's right edge whatever the name's length.
         list.append(el('a', {
-          href: `#/definitions/${encodeURIComponent(declaration.name)}`,
-          class: declaration.name === selected ? 'here' : '',
+          href: defHash(declaration.name, {
+            kind: declaration.kind === 'extract' ? 'extract' : null,
+          }),
+          // An extract shares its name with the fact it targets
+          // (documents-plan-v3, D4); `selectedKind` says which of the two
+          // rows is actually open, so only that one gets the marker.
+          class: declaration.name === selected
+            && (!selectedKind || declaration.kind === selectedKind) ? 'here' : '',
           title: declaration.name, // the ellipsis needs a recovery path
         }, el('span', { class: 'name mono' },
             declaration.name.slice(group.length + 1) || declaration.name),
@@ -243,18 +259,28 @@ function roster(selected) {
   return holder;
 }
 
+// `kind` disambiguates the one case two declarations share a name: an
+// extract is named bare, after the fact kind it targets (documents-plan-v3,
+// D4). Every other kind's name is unique, so the plain lookup is still the
+// right default when no `kind` rides the link.
+function resolveDeclaration(name, kind) {
+  return (kind && byName.get(`${kind}:${name}`)) || byName.get(name);
+}
+
 async function definitionsView(name, params) {
   // A definition link that names a subject is a link to one value, and a
   // host deep-linking `#/definitions/<figure>?subject=<id>` from its own
   // screen means that value's worksheet, not the figure's whole roster.
   const subject = params.get('subject');
-  if (name && subject && (byName.get(name) || {}).kind === 'figure') {
+  const kind = params.get('kind');
+  const declaration = name ? resolveDeclaration(name, kind) : null;
+  if (name && subject && declaration && declaration.kind === 'figure') {
     return workView(name, subject);
   }
-  const pane = name ? await declarationPane(name, params) : [libraryPlate()];
+  const pane = name ? await declarationPane(declaration, name, params) : [libraryPlate()];
   // Pane before roster: a keyboard should reach the content in a few tabs,
   // not after all 75 roster links. The stylesheet places the roster left.
-  return [el('div', { class: 'split' }, el('div', { class: 'pane' }, pane), roster(name))];
+  return [el('div', { class: 'split' }, el('div', { class: 'pane' }, pane), roster(name, kind))];
 }
 
 // The landing pane's title block: what this deployment holds, at a glance.
@@ -325,7 +351,14 @@ function edgeLine(edge) {
   if (edge.type === 'fact') return leafLine(edge);
   return el('li', {},
     el('span', { class: `badge ${edge.type}` }, edge.type), ' ',
-    el('a', { class: 'mono', href: `#/definitions/${encodeURIComponent(edge.name)}` }, edge.name),
+    el('a', {
+      class: 'mono',
+      // `extract` is the one edge type that can name a declaration sharing
+      // its name with a fact (documents-plan-v3, D4); qualify it so the
+      // link lands on the extract's own page, not whichever one `byName`
+      // would otherwise pick.
+      href: defHash(edge.name, { kind: edge.type === 'extract' ? 'extract' : null }),
+    }, edge.name),
     byName.has(edge.name) ? null : el('span', { class: 'leaf' }, ' — not in the library?'));
 }
 
@@ -365,8 +398,7 @@ function unavailable(state) {
     state.detail || 'the server gave no further sentence.');
 }
 
-async function declarationPane(name, params) {
-  const declaration = byName.get(name);
+async function declarationPane(declaration, name, params) {
   if (!declaration) {
     return [el('div', { class: 'notice problem' },
       'No declaration called ', el('span', { class: 'mono' }, name),
@@ -388,6 +420,11 @@ async function declarationPane(name, params) {
         // to parse a group clause to find out which.
         declaration.grain
           ? el('span', { class: 'badge' }, `by ${declaration.grain}`)
+          : null,
+        // An extract's `many by row`: one record per matching text row,
+        // up to the declared ceiling, rather than at most one per page.
+        declaration.many
+          ? el('span', { class: 'badge' }, `many — up to ${declaration.many_up_to}`)
           : null,
         world.editable
           ? el('a', { class: 'tb-edit', href: `#/edit/?at=${encodeURIComponent(declaration.name)}` },
@@ -484,6 +521,30 @@ async function declarationPane(name, params) {
         ]))
       : el('p', { class: 'faint' }, 'Nothing in the library reads this.'));
 
+  // An extract's fields, each with the matcher that reads it -- the table
+  // beside the raw source, because a reader comparing a field's
+  // alternatives across twenty fields wants a column, not the paragraph
+  // above to re-parse each time (documents-plan-v3, D4).
+  if (declaration.kind === 'extract' && (declaration.extract_fields || []).length) {
+    parts.push(el('h2', {}, 'Fields'),
+      el('table', { class: 'ledger' },
+        el('tr', {},
+          el('th', {}, 'field'), el('th', {}, 'matcher'),
+          el('th', {}, 'alternatives'), el('th', {}, 'units')),
+        declaration.extract_fields.map((f) => el('tr', {},
+          el('td', { class: 'mono' }, f.name),
+          el('td', {},
+            f.matcher === 'copy'
+              ? ['copy of ', el('span', { class: 'mono' }, f.copy_of)]
+              : f.matcher),
+          el('td', {}, f.alternatives.length
+            ? f.alternatives.join(', ')
+            : el('span', { class: 'faint' }, '—')),
+          el('td', {}, f.units.length
+            ? f.units.join(' or ')
+            : el('span', { class: 'faint' }, '—'))))));
+  }
+
   if (declaration.kind === 'fact') {
     parts.push(el('h2', {}, 'Records — tenant ',
       el('span', { class: 'verbatim' }, tenant() || '?')));
@@ -497,6 +558,10 @@ async function declarationPane(name, params) {
     parts.push(el('h2', {}, 'Measurements — tenant ',
       el('span', { class: 'verbatim' }, tenant() || '?')));
     parts.push(await measuredSection(declaration, params));
+  } else if (declaration.kind === 'extract') {
+    parts.push(el('h2', {}, 'Extracted records — tenant ',
+      el('span', { class: 'verbatim' }, tenant() || '?')));
+    parts.push(await extractStatusSection(declaration));
   } else {
     // The tenant id rides in a verbatim span: the label style uppercases,
     // and a case-mangled identifier on this page would be a small lie.
@@ -701,6 +766,49 @@ async function measuredSection(declaration, params) {
             el('td', { class: 'mono num' },
               record.display ?? el('span', { class: 'faint' }, '— no measurement')))))
       : el('p', { class: 'faint' }, 'No records past this cursor.'));
+}
+
+// An extract's own tenant data: how many records it currently produces, how
+// many source pages came through clean, and the sentence for each that did
+// not (documents-plan-v3, D4). The produced count's own kind is the
+// extract's name -- `fact_kind` here, same as a `fact` declaration's own
+// Records section -- so the door onward is the Facts tab, not another
+// definitions page.
+async function extractStatusSection(declaration) {
+  if (!tenant()) return el('p', { class: 'faint' }, 'No tenant to ask.');
+  const answer = await get(
+    `tenants/${encodeURIComponent(tenant())}/extracts/${encodeURIComponent(declaration.name)}/status`);
+  if (!answer.ok) return problem(answer, 'Could not read the extract’s status:');
+  const status = answer.body;
+  const blocks = [
+    el('p', { class: 'dim' },
+      el('span', { class: 'mono' }, status.extract), ' @ ',
+      el('span', { class: 'mono' }, status.version), ' — ',
+      `${status.produced} `, el('span', { class: 'mono' }, declaration.fact_kind),
+      ' records, ', `${status.pages_done} pages done, ${status.pages_failed} failed. `,
+      el('a', { href: `#/facts/${encodeURIComponent(declaration.fact_kind)}` },
+        'Browse the records →')),
+  ];
+  if (status.failures.length) {
+    blocks.push(el('table', { class: 'ledger' },
+      el('tr', {},
+        el('th', {}, 'record'), el('th', {}, 'field'), el('th', {}, 'reason'), el('th', {}, 'page')),
+      status.failures.map((f) => el('tr', {},
+        el('td', { class: 'mono' }, f.subject),
+        el('td', { class: 'mono' }, f.field ?? el('span', { class: 'faint' }, '—')),
+        el('td', {}, f.reason),
+        el('td', {},
+          f.document_kind
+            ? el('a', {
+                class: 'mono',
+                href: `#/document/${encodeURIComponent(f.document_kind)}`
+                  + `/${encodeURIComponent(f.document_id)}/${f.page_number}`,
+              }, `page ${f.page_number}`)
+            : el('span', { class: 'mono' }, f.page_key))))));
+  } else {
+    blocks.push(el('p', { class: 'faint' }, 'No failures at this version.'));
+  }
+  return el('div', {}, blocks);
 }
 
 async function answerSection(declaration) {
@@ -2277,7 +2385,10 @@ async function activityView(params) {
 // rather than served because they are compile-time constants of the engine
 // build this page shipped inside -- the world-dependent lists (kinds, fields,
 // declared names) DO arrive from the server, on /ui/api/source.
-const FIG_DECLS = ['fact', 'group', 'filter', 'measure', 'figure', 'reading', 'projection', 'summarise', 'bundle'];
+const FIG_DECLS = [
+  'fact', 'group', 'filter', 'measure', 'figure', 'reading', 'projection', 'summarise',
+  'bundle', 'extract',
+];
 const FIG_SECTIONS = {
   fact: ['name', 'url', 'one', 'many'],
   figure: ['display', 'unit', 'depends', 'combine', 'calculate', 'band'],
@@ -2301,6 +2412,12 @@ const FIG_WORDS = new Set([
   'max', 'min',
   // A span's own words, the clip, and the overdue carry.
   'until', 'excluding', 'gone', 'carrying', 'overdue',
+  // An extract's own vocabulary (documents-plan-v3, D4): its matchers
+  // (`number after`, `date after`, `text after`, `if page contains`),
+  // `many by row up to N`, and the printed-unit table a `number after`
+  // field may name.
+  'after', 'any', 'contains', 'page', 'row', 'up', 'to',
+  'kg', 'lb', 'cm', 'ft_in',
   ...FIG_UNITS, ...FIG_FACT_TYPES, ...FIG_FIELD_TYPES,
   // Every grain, singular and plural, and the selective rule's vocabulary.
   // The coarse three were missing before spans arrived: `by week` rendered

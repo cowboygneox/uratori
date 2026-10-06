@@ -49,7 +49,23 @@ from ..engine.project import format_value
 from ..engine.serve import _citing_spaces, _label_of, serve_figure
 from ..engine.serve import availability as figure_availability
 from ..facade import DEFAULT_TRAILING
-from ..lang.ast import ByAge, ByComposite, ByField, FigureUnit, IndexBy, IndexField
+from ..lang.ast import (
+    ByAge,
+    ByComposite,
+    ByField,
+    DateAfter,
+    ExtractField,
+    FieldCopy,
+    FigureUnit,
+    IndexBy,
+    IndexField,
+    NumberAfter,
+    SetExpr,
+    SetIndex,
+    SetOp,
+    TextAfter,
+    WordLadder,
+)
 from ..lang.lex import DefinitionError, lex
 from ..lang.plan import (
     CompiledFactField,
@@ -75,7 +91,12 @@ from ..store.postgres import PostgresEngineStore, PostgresFactStore
 from ..windows import WindowError, expand_window_args, window_token
 from . import db
 from .documents import document_kinds, page_key, render_page_png
-from .provenance import decorate_evidence, sources_for_members, sources_for_record
+from .provenance import (
+    decorate_evidence,
+    resolve_page,
+    sources_for_members,
+    sources_for_record,
+)
 from .runtime import (
     State,
     World,
@@ -103,7 +124,16 @@ whatever lands beside these; two known names cannot."""
 
 
 DeclarationKind = Literal[
-    "fact", "group", "filter", "measure", "figure", "reading", "projection", "summary", "bundle"
+    "fact",
+    "group",
+    "filter",
+    "measure",
+    "figure",
+    "reading",
+    "projection",
+    "summary",
+    "bundle",
+    "extract",
 ]
 
 DependencyType = Literal[
@@ -115,6 +145,7 @@ DependencyType = Literal[
     "reading",
     "projection",
     "summary",
+    "extract",
 ]
 
 
@@ -141,6 +172,23 @@ class BundleSlot(BaseModel):
     kind: Literal["figure", "reading", "projection", "summary"]
     name: str
     windows: list[str] | None = None
+
+
+class ExtractFieldOut(BaseModel):
+    """One field of an extract's target record, the way its matcher reads
+    it -- the declaration page's own table beside the raw source, because a
+    reader comparing a field's alternatives across twenty fields wants a
+    column, not a paragraph to re-parse each time (documents-plan-v3, D4).
+
+    `copy_of` is set only for a `copy` matcher (`patient_id =
+    page_identity.patient_id`): the other extract and field it reads, spelt
+    `<extract>.<field>`; every other matcher leaves it `None`."""
+
+    name: str
+    matcher: Literal["number after", "date after", "text after", "if page contains", "copy"]
+    alternatives: list[str] = []
+    units: list[str] = []
+    copy_of: str | None = None
 
 
 class DeclarationOut(BaseModel):
@@ -180,6 +228,18 @@ class DeclarationOut(BaseModel):
     slots: list[BundleSlot] | None = None
     """Only for a bundle: the slot-to-member table, in declaration order --
     the composition the review hash covers, beside the hash itself."""
+
+    many: bool | None = None
+    many_up_to: int | None = None
+    """Only for an extract: `many by row [up to N]` -- one record per
+    matching text row rather than at most one per page, and the ceiling its
+    zero-padded row keys pad to. `many_up_to` is `None` exactly when `many`
+    is not True (documents-plan-v3, D4)."""
+
+    extract_fields: list[ExtractFieldOut] = []
+    """Only for an extract: its target record's fields, each with the
+    matcher that reads it -- the table the declaration page draws beside
+    the source text."""
 
 
 class WorldOut(BaseModel):
@@ -574,6 +634,47 @@ class MeasuredPageOut(BaseModel):
     records: list[MeasuredRecordOut]
     more: bool
     total: int
+
+
+class ExtractFailureUiOut(BaseModel):
+    """One subject an extract could not read, for the declaration page's
+    own failure list (documents-plan-v3, D4) -- the unauthenticated twin of
+    `app.py`'s `ExtractFailureOut`, with the page resolved to a document
+    viewer link instead of the word layer: the authoring loop reads the
+    authenticated route for that, and this page exists so a reader can see
+    at a glance which pages still need a declaration fix."""
+
+    subject: str
+    field: str | None
+    reason: str
+    page_key: str
+    document_kind: str | None = None
+    document_id: str | None = None
+    page_number: int | None = None
+    """Set together, and only when the cited page is still held -- `None`
+    for all three states "the page was deleted since this failure was
+    recorded", the same honesty a dangling citation gets everywhere else."""
+
+
+class ExtractStatusOut(BaseModel):
+    """The extract declaration page's own tenant data: how many records it
+    currently produces, how many source pages came through clean, and the
+    sentence for each that did not (documents-plan-v3, D4)."""
+
+    extract: str
+    version: str
+    produced: int
+    """Records currently stored under the target fact kind."""
+
+    pages_done: int
+    """Distinct source pages behind at least one of those records."""
+
+    pages_failed: int
+    """Distinct source pages with a failure at this extract's current
+    version -- a page may be both (a `many by row` extract can produce some
+    rows and fail others on the same page)."""
+
+    failures: list[ExtractFailureUiOut] = []
 
 
 class FiledOut(BaseModel):
@@ -2057,6 +2158,56 @@ def router(frame_ancestors: str, *, edit: bool = False, documents: bool = False)
             total=total,
         )
 
+    # ------------------------------------------------------------ extracts --
+
+    @ui.get(
+        "/ui/api/tenants/{tenant}/extracts/{name}/status",
+        response_model=ExtractStatusOut,
+        include_in_schema=False,
+    )
+    async def extract_status(tenant: str, name: str, request: Request) -> ExtractStatusOut:
+        """The extract declaration page's own tenant data: produced record
+        count, pages done/failed, and each failure's sentence
+        (documents-plan-v3, D4). The unauthenticated twin of `app.py`'s
+        `GET /tenants/{t}/extracts/{name}/failures` -- that route sits
+        behind `auth`, and `/ui/api` is unauthenticated by design
+        (`docs/ui.md`, Security posture), so the declaration page needs its
+        own door onto the same rows."""
+        s = _state(request)
+        _world, library = ready(s)
+        plan = library.extracts.get(name)
+        if plan is None:
+            raise HTTPException(status_code=404, detail=f'no extract named "{name}"')
+        produced = await db.count_kind(s.pool, tenant, plan.name)
+        pages_done = await db.extract_pages_done(s.pool, tenant, plan.name)
+        rows = await db.extract_failures(s.pool, tenant, name, plan.version)
+        failures: list[ExtractFailureUiOut] = []
+        pages_failed: set[str] = set()
+        for row in rows:
+            subject = str(row["subject"])
+            page = subject.split("#r", 1)[0]
+            pages_failed.add(page)
+            resolved = await resolve_page(s.pool, tenant, library, page)
+            failures.append(
+                ExtractFailureUiOut(
+                    subject=subject,
+                    field=row["field"],
+                    reason=str(row["reason"]),
+                    page_key=page,
+                    document_kind=resolved.document_kind if resolved else None,
+                    document_id=resolved.document_id if resolved else None,
+                    page_number=resolved.number if resolved else None,
+                )
+            )
+        return ExtractStatusOut(
+            extract=name,
+            version=plan.version,
+            produced=produced,
+            pages_done=pages_done,
+            pages_failed=len(pages_failed),
+            failures=failures,
+        )
+
     # ----------------------------------------------------------- activity --
 
     @ui.get("/ui/api/tenants/{tenant}/activity", response_model=ActivityOut, include_in_schema=False)
@@ -2530,6 +2681,32 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
             )
         )
 
+    # Extracts right after facts: an extract is named bare, after the fact
+    # kind it targets (D4), so the two always share a name and a reader who
+    # just read the fact's own page is reading the next entry for "how does
+    # this get written". `kind="extract"` disambiguates the lookup the same
+    # way `_HEADER_BY_KIND` disambiguates `declaration_source`/
+    # `declaration_prose` (`lang/source.py`) -- the one case two declaration
+    # kinds deliberately share a name.
+    for name, extract in library.extracts.items():
+        edges = [Dependency(type="fact", name=extract.source)]
+        edges += _over_edges(library, extract.over)
+        edges += [Dependency(type="extract", name=copied) for copied in extract.copies]
+        out.append(
+            DeclarationOut(
+                name=name,
+                kind="extract",
+                version=extract.version,
+                doc=declaration_prose(library, name, "extract"),
+                source=declaration_source(library, name, "extract"),
+                fact_kind=name,
+                many=extract.many,
+                many_up_to=extract.many_up_to,
+                extract_fields=_extract_field_rows(extract.fields),
+                rests_on=_dedup(edges),
+            )
+        )
+
     for name, index in library.indexes.items():
         edges = [Dependency(type="fact", name=index.kind)]
         if index.id_space != index.kind:
@@ -2956,6 +3133,77 @@ def _grouping_edge(library: Library, name: str) -> Dependency:
     return Dependency(
         type=_grouping_kind(held) if held is not None else "group", name=name
     )
+
+
+def _over_edges(library: Library, expr: SetExpr | None) -> list[Dependency]:
+    """The groups/filters an extract's `over` names, as dependency edges.
+
+    Always `SetIndex` nodes: a bare name (`SetRef`) is refused at check
+    time (`lang/check.py:_check_extract_over`, D4.2 -- an extract has no
+    `depends` block to define one in), so this never needs to walk further
+    than the index itself."""
+    if expr is None:
+        return []
+    if isinstance(expr, SetOp):
+        return _over_edges(library, expr.left) + _over_edges(library, expr.right)
+    if isinstance(expr, SetIndex):
+        return [_grouping_edge(library, expr.index)]
+    return []  # SetRef: refused at check time for an extract's `over`
+
+
+def _extract_field_rows(fields: tuple[ExtractField, ...]) -> list[ExtractFieldOut]:
+    """Each field of an extract's target record, the way its matcher reads
+    it -- see `ExtractFieldOut`."""
+    rows: list[ExtractFieldOut] = []
+    for field in fields:
+        matcher = field.matcher
+        if isinstance(matcher, NumberAfter):
+            rows.append(
+                ExtractFieldOut(
+                    name=field.name,
+                    matcher="number after",
+                    alternatives=list(matcher.alternatives),
+                    units=list(matcher.units),
+                )
+            )
+        elif isinstance(matcher, DateAfter):
+            rows.append(
+                ExtractFieldOut(
+                    name=field.name,
+                    matcher="date after",
+                    alternatives=list(matcher.alternatives),
+                )
+            )
+        elif isinstance(matcher, TextAfter):
+            rows.append(
+                ExtractFieldOut(
+                    name=field.name,
+                    matcher="text after",
+                    alternatives=list(matcher.alternatives),
+                )
+            )
+        elif isinstance(matcher, WordLadder):
+            rows.append(
+                ExtractFieldOut(
+                    name=field.name,
+                    matcher="if page contains",
+                    alternatives=[
+                        f"{rung.word}: {alt}"
+                        for rung in matcher.rungs
+                        for alt in rung.alternatives
+                    ],
+                )
+            )
+        else:
+            assert isinstance(matcher, FieldCopy)
+            rows.append(
+                ExtractFieldOut(
+                    name=field.name,
+                    matcher="copy",
+                    copy_of=f"{matcher.extract}.{matcher.field}",
+                )
+            )
+    return rows
 
 
 def _spec_clipped(spec: IndexBy) -> bool:

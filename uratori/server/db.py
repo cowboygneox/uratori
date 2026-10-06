@@ -792,6 +792,23 @@ async def count_kind(pool: asyncpg.Pool[Any], tenant: str, kind: str) -> int:
     )
 
 
+async def extract_pages_done(pool: asyncpg.Pool[Any], tenant: str, kind: str) -> int:
+    """Distinct source pages behind this extract's current records -- the
+    built-in `page` field (documents-plan-v3, D4) names the page every row
+    was read from, so counting its distinct values counts pages with at
+    least one surviving record without re-deriving anything the runner
+    already decided."""
+    return int(
+        await pool.fetchval(
+            "select count(distinct value->>'page') from fact "
+            "where tenant_id = $1 and kind = $2",
+            tenant,
+            kind,
+        )
+        or 0
+    )
+
+
 async def fact_record(
     pool: asyncpg.Pool[Any], tenant: str, kind: str, key: str
 ) -> dict[str, Any] | None:

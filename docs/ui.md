@@ -42,6 +42,24 @@ product's end users; a host builds its own screens against the
   slot name by the same code that kind gets standalone, each with its own
   `name @ version` provenance, because the bundle's hash is review-only and
   cites nothing.
+- **An `extract`'s page** (documents-plan-v3, D4) is named bare, after the
+  fact kind it targets -- by design the one case two declarations share a
+  name, so the roster carries both rows and a link from either names which
+  one it means (`?kind=extract`); open either and the page still answers
+  **moved by**/**built from**/**used by** the same way every other kind's
+  does -- built from its source page kind, the groups and filters it is
+  gated `over`, and the extracts it copies fields from; used by whatever
+  reads the fact kind it writes, which is the same list the fact's own page
+  shows. Beside the source text, a table lists each target field with the
+  matcher that reads it -- `number after`, `date after`, `text after`,
+  `if page contains`, or `copy of <extract>.<field>` -- and its declared
+  alternatives and units, so a reader comparing a dozen fields does not
+  re-parse the declaration's prose for each one. The tenant data is three
+  numbers and a list, never a re-derivation of the engine's own pass:
+  records currently produced (linking on to the target kind's own Facts
+  page), source pages done, and pages failed, each failure naming the
+  record, the field it failed on (absent for "no row matched this page at
+  all"), the reason, and a link to the page itself.
 - **Facts.** Per kind, what the server holds -- a kind the schema declares
   but nobody has pushed appears at zero, because "nothing collected" is a
   finding. Records page by key, search over key and record text, and each row

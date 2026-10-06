@@ -27,6 +27,7 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import asyncpg
@@ -4523,3 +4524,135 @@ async def test_a_spread_divisor_is_counted_by_the_bucket_keys_subject_not_member
             "whether the account is a member of any bucket (it never is: "
             "only campaigns are)"
         )
+
+
+# --------------------------------------------------------------- extracts --
+
+
+def _unreadable_weight_pdf() -> bytes:
+    """One vitals page with a date (so the `many by row` anchor matches)
+    but a weight with no printed unit -- `weight_kg` declares two
+    (`kg or lb`), so the matcher refuses to guess and the whole row's
+    record aborts (documents-plan-v3, D4, "field absence vs. hard
+    failure"). A deliberately bespoke page, built the same way
+    `tests/test_extract_server.py`'s `vitals_pdf` is, because that
+    fixture's own rows always print a unit."""
+    import io
+
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    c.drawString(72, 700, "Patient Chart")
+    c.drawString(72, 680, "VITAL SIGNS")
+    c.drawString(72, 660, "MRN: 004412")
+    c.drawString(72, 640, "Date: 2024-03-01  Wt: 82  Ht: 178 cm")
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+async def test_the_extract_declaration_page_carries_fields_edges_and_failures(
+    pg_dsn: str, tmp_path: Path
+) -> None:
+    """The declaration page for an `extract` (documents-plan-v3, D4),
+    flagged as unbuilt in package 3's own report: the world payload
+    enumerates it beside the fact it targets -- sharing that fact's name by
+    design, `kind` disambiguating the two -- with its matcher table and its
+    dependency edges, and its own tenant-data route answers the
+    produced/done/failed counts and each failure's sentence."""
+    from .test_extract_server import SOURCE, WORLD, vitals_pdf
+
+    async with serve(pg_dsn, blob_dir=str(tmp_path / "blobs")) as http:
+        put = await http.put("/schema", json=WORLD.to_document())
+        assert put.status_code == 200, put.text
+        put = await http.put("/definitions", json={"source": SOURCE})
+        assert put.status_code == 200, put.text
+
+        world = (await http.get("/ui/api/world")).json()
+        declarations = world["declarations"]
+        facts = [
+            d for d in declarations if d["name"] == "measurement" and d["kind"] == "fact"
+        ]
+        extracts = [
+            d for d in declarations if d["name"] == "measurement" and d["kind"] == "extract"
+        ]
+        # Both declarations are enumerated under their shared name -- the
+        # UI's own routing disambiguates by `kind`, never by dropping one.
+        assert len(facts) == 1
+        assert len(extracts) == 1
+        [extract] = extracts
+
+        by_field = {f["name"]: f for f in extract["extract_fields"]}
+        assert by_field["weight_kg"]["matcher"] == "number after"
+        assert set(by_field["weight_kg"]["alternatives"]) == {
+            "Weight:", "Wt:", "Wt", "WEIGHT",
+        }
+        assert set(by_field["weight_kg"]["units"]) == {"kg", "lb"}
+        assert by_field["patient_id"]["matcher"] == "copy"
+        assert by_field["patient_id"]["copy_of"] == "page_identity.patient_id"
+        assert extract["many"] is True
+        assert extract["many_up_to"] == 5
+
+        # Built from its source page kind (a fact, so it rides `moved_by`
+        # rather than the non-fact "Built from" half), the filter it is
+        # gated `over`, and the extract it copies `patient_id` from.
+        rests = {(e["type"], e["name"]) for e in extract["rests_on"]}
+        assert ("fact", "medical_record_page") in rests
+        assert ("filter", "page_class.vitals") in rests
+        assert ("extract", "page_identity") in rests
+        moved_by = {(e["type"], e["name"]) for e in extract["moved_by"]}
+        assert ("fact", "medical_record_page") in moved_by
+
+        # No tenant data yet: nothing has been uploaded.
+        status = (
+            await http.get("/ui/api/tenants/t1/extracts/measurement/status")
+        ).json()
+        assert status == {
+            "extract": "measurement",
+            "version": extract["version"],
+            "produced": 0,
+            "pages_done": 0,
+            "pages_failed": 0,
+            "failures": [],
+        }
+
+        # A clean two-page chart: both pages produce a `measurement` row.
+        good_pdf = vitals_pdf(
+            [("2024-01-02", "80", "178"), ("2024-06-01", "82", None)]
+        )
+        up = await http.post(
+            "/tenants/t1/documents/medical_record",
+            files={"file": ("good.pdf", good_pdf, "application/pdf")},
+        )
+        assert up.status_code == 200, up.text
+
+        # A second document whose one page has a date (so the `many by
+        # row` anchor matches) but an unreadable weight -- a genuine
+        # failure, not just a page out of `over`'s scope.
+        bad_pdf = _unreadable_weight_pdf()
+        up = await http.post(
+            "/tenants/t1/documents/medical_record",
+            files={"file": ("bad.pdf", bad_pdf, "application/pdf")},
+        )
+        assert up.status_code == 200, up.text
+        bad_id = up.json()["id"]
+
+        status = (
+            await http.get("/ui/api/tenants/t1/extracts/measurement/status")
+        ).json()
+        assert status["extract"] == "measurement"
+        assert status["produced"] == 2
+        assert status["pages_done"] == 2
+        assert status["pages_failed"] == 1
+        [failure] = status["failures"]
+        assert failure["field"] == "weight_kg"
+        assert failure["page_key"] == f"{bad_id}/p0001"
+        assert failure["document_kind"] == "medical_record"
+        assert failure["document_id"] == bad_id
+        assert failure["page_number"] == 1
+
+        # An unknown extract name is a 404, not a 500 or a bare empty page.
+        missing = await http.get("/ui/api/tenants/t1/extracts/no_such_extract/status")
+        assert missing.status_code == 404
