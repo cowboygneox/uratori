@@ -70,6 +70,21 @@ def vitals_pdf(weight_kg: str) -> bytes:
     return buf.getvalue()
 
 
+def blank_pdf() -> bytes:
+    """A page with nothing the `measurement` extract's patterns can match --
+    the recall-gap case D6 exists to catch."""
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    c.drawString(72, 700, "Patient Chart")
+    c.drawString(72, 680, "No vitals recorded this visit.")
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
 @dataclass
 class AuditServer:
     http: httpx.AsyncClient
@@ -333,3 +348,67 @@ async def test_deleting_the_page_removes_its_audit_value(audit_server: AuditServ
     assert delete.status_code == 200, delete.text
 
     assert await _audit_value(audit_server, page_key) is None
+
+
+async def test_a_page_with_nothing_to_match_is_unaudited_after_a_warm_pass(
+    audit_server: AuditServer,
+) -> None:
+    """Finding A (review F1): a page whose verified extract produces zero
+    rows never lands in `moved`/`vanished` (those are keyed by the
+    extract's own output kind, never the page kind), so the ordinary,
+    non-full upload pass must not skip the page's audit roster -- rule 3
+    says `unaudited` is owed the moment the pass touches the page, not
+    only after the next explicit full pass."""
+    http = audit_server.http
+    before = set(await _fact_rows(http, "medical_record_page"))
+    up = await http.post(
+        "/tenants/t1/documents/medical_record",
+        files={"file": ("blank.pdf", blank_pdf(), "application/pdf")},
+    )
+    assert up.status_code == 200, up.text
+    assert up.json()["run"]["changed"] >= 0
+    pages = await _fact_rows(http, "medical_record_page")
+    new_pages = set(pages) - before
+    assert len(new_pages) == 1
+    page_key = next(iter(new_pages))
+
+    # The upload route's own pass is a warm one (no `full`); nothing else
+    # runs a pass here.
+    assert await _audit_value(audit_server, page_key) == "unaudited"
+
+
+async def test_redefining_an_audit_gives_every_page_a_row_on_the_next_warm_pass(
+    audit_server: AuditServer,
+) -> None:
+    """Finding A (review F1), second half: redefining an audit (a new
+    version, same pages in scope) must not leave the new version's row
+    absent until an operator happens to run a `full` pass -- the next
+    warm pass must roster every page the audit covers."""
+    http = audit_server.http
+    _document_id, page_key = await _upload(http, "82")
+    assert await _audit_value(audit_server, page_key) == "unaudited"
+
+    redefined = SOURCE.replace('model "fake-v1"', 'model "fake-v2"')
+    put = await http.put("/definitions", json={"source": redefined})
+    assert put.status_code == 200, put.text
+    new_version = put.json()["audits"][0]["version"]
+    assert new_version != audit_server.audit_version
+
+    run = await http.post("/tenants/t1/runs", json={})
+    assert run.status_code == 200, run.text
+
+    connection = await asyncpg.connect(
+        audit_server.pg_dsn, server_settings={"search_path": audit_server.schema}
+    )
+    try:
+        row = await connection.fetchrow(
+            "select value from figure_value where tenant_id = 't1' and name = $1 "
+            "and version = $2 and subject_id = $3",
+            "medical_record_page.vitals_audit",
+            new_version,
+            page_key,
+        )
+    finally:
+        await connection.close()
+    assert row is not None, "no row for the redefined audit's version after a warm pass"
+    assert json.loads(row["value"]) == "unaudited"

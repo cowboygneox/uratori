@@ -250,17 +250,29 @@ async def run_extracts(
     deleted: Mapping[str, Sequence[str]],
     full: bool,
     now_ms: float,
-) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+) -> tuple[dict[str, list[str]], dict[str, list[str]], dict[str, list[str]]]:
     """Run every extract, in copy order, over the pages it needs to; return
     the moved and vanished derived keys the caller merges into `written`/
-    `deleted` before `facade.run`. Empty when the library declares none."""
+    `deleted` before `facade.run`, plus a third mapping -- `touched` --
+    naming every page (keyed by page *kind*, `plan.source`, never the
+    extract's own output kind) this call actually ran the runner over,
+    whether or not it produced a record.
+
+    `moved`/`vanished` alone under-report this: a page the extractor finds
+    nothing on moves no derived key, so it never appears in either dict,
+    even though the pass genuinely visited it. `run_audits` needs the
+    visit itself, not just its output, to keep every page in an audit's
+    scope rostered on the warm path (documents-plan-v3 D6, rule 3/4) --
+    see `uratori.server.audit_pass._pages_from_moves`. Empty when the
+    library declares no extract."""
     if not library.extracts:
-        return {}, {}
+        return {}, {}, {}
 
     facts = PostgresFactStore(connection)
     provenance_store = PostgresProvenanceStore(connection)
     moved: dict[str, list[str]] = {}
     vanished: dict[str, list[str]] = {}
+    touched: dict[str, set[str]] = {}
 
     for name in _extract_order(library):
         plan = library.extracts[name]
@@ -326,6 +338,8 @@ async def run_extracts(
             moved.setdefault(plan.name, []).extend(sorted(page_moved))
         if page_vanished:
             vanished.setdefault(plan.name, []).extend(sorted(page_vanished))
+        if deleted_pages or stale:
+            touched.setdefault(plan.source, set()).update(deleted_pages | stale)
 
         # `figure_pointer.version` is a foreign key into `figure_definition`
         # (`uratori/store/postgres.py`'s `SCHEMA_SQL`) -- the engine's own
@@ -359,4 +373,4 @@ async def run_extracts(
     for kind, keys in retired_vanished.items():
         vanished.setdefault(kind, []).extend(keys)
 
-    return moved, vanished
+    return moved, vanished, {kind: sorted(keys) for kind, keys in touched.items()}

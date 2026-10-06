@@ -319,11 +319,12 @@ async def run_pass(
     merged_deleted = {k: list(v) for k, v in (deleted or {}).items()}
     extract_moved: Mapping[str, Sequence[str]] = {}
     extract_vanished: Mapping[str, Sequence[str]] = {}
+    extract_touched: Mapping[str, Sequence[str]] = {}
     if library.extracts:
         _blobs, word_store, _cache = documents_ready(s)
         engine_store = PostgresEngineStore(s.pool)
         async with s.pool.acquire() as connection, connection.transaction():
-            moved, vanished = await run_extracts(
+            moved, vanished, touched = await run_extracts(
                 connection,
                 engine_store,
                 word_store,
@@ -336,6 +337,7 @@ async def run_pass(
             )
         extract_moved = moved
         extract_vanished = vanished
+        extract_touched = touched
         for kind, keys in moved.items():
             merged_written[kind] = sorted(set(merged_written.get(kind, ())) | set(keys))
             written_opened = True
@@ -370,6 +372,7 @@ async def run_pass(
             facade,
             moved=extract_moved,
             vanished=extract_vanished,
+            touched=extract_touched,
             full=full,
         )
         if audit_report is not None:

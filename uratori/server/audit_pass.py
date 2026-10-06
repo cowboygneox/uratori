@@ -23,6 +23,7 @@ from ..facade import RunReport, Uratori
 from ..lang.ast import NumberAfter
 from ..lang.plan import AuditPlan, Library
 from ..store import FactSource
+from ..store.postgres import PostgresEngineStore
 from . import db
 from .words import WordStore
 
@@ -52,14 +53,24 @@ def verified_fields_of(library: Library, audit: AuditPlan) -> dict[tuple[str, st
 
 
 def _pages_from_moves(
-    audit: AuditPlan, moved: Mapping[str, Sequence[str]], vanished: Mapping[str, Sequence[str]]
+    audit: AuditPlan,
+    moved: Mapping[str, Sequence[str]],
+    vanished: Mapping[str, Sequence[str]],
+    touched: Mapping[str, Sequence[str]],
 ) -> set[str]:
+    """Every page this pass's extract pre-pass gives this audit reason to
+    (re-)judge: a page whose verified extract moved or vanished a record,
+    plus every page the pre-pass actually ran the runner over
+    (`touched`, keyed by page kind -- `uratori.server.extract_pass.
+    run_extracts`'s third return). The second half is load-bearing (review
+    finding A/F1): a page the extractor visited and found nothing on moves
+    no derived key, so `moved`/`vanished` alone would silently drop it from
+    the roster, the exact cheap-path narrowing rule 4 forbids."""
     pages: set[str] = set()
     for extract_name in audit.verifies:
         for key in (*moved.get(extract_name, ()), *vanished.get(extract_name, ())):
             pages.add(page_of(key))
-    for key in moved.get(audit.scope, ()):
-        pages.add(key)
+    pages.update(touched.get(audit.scope, ()))
     return pages
 
 
@@ -137,6 +148,7 @@ async def run_audits(
     *,
     moved: Mapping[str, Sequence[str]],
     vanished: Mapping[str, Sequence[str]],
+    touched: Mapping[str, Sequence[str]],
     full: bool,
 ) -> RunReport | None:
     """Judge (or mark `unaudited`) every page an audit needs to answer for,
@@ -148,7 +160,8 @@ async def run_audits(
     of them reaches this time. `full` widens every audit's scope to its
     whole page roster (a full pass recomputes everything, the same
     escalation `facade.execute` already makes for a figure); the warm path
-    narrows to the pages `moved`/`vanished` actually touched.
+    narrows to the pages `moved`/`vanished`/`touched` actually reached this
+    pass (see `_pages_from_moves`).
     """
     if not library.audits:
         return None
@@ -156,12 +169,24 @@ async def run_audits(
     changes: list[Change] = []
     results: list[Any] = []
     reached: set[str] = set()
+    engine_store = PostgresEngineStore(pool)
 
     for audit in library.audits.values():
         if full:
             pages = {row.key for row in await facts.of_kind(tenant, audit.scope)}
         else:
-            pages = _pages_from_moves(audit, moved, vanished)
+            # A redefined (or brand new) audit's version has never judged
+            # a page yet -- no row anywhere under (name, version). Rule
+            # 3/4: the first warm pass this version sees must roster the
+            # audit's whole scope itself, the same escalation a cold
+            # extract pointer gets (`extract_pass._stale_pages`), rather
+            # than leaving the new version's rows absent until an operator
+            # happens to run an explicit `full` pass (review finding A/F1).
+            existing = await engine_store.values(tenant, audit.name, audit.version)
+            if not existing:
+                pages = {row.key for row in await facts.of_kind(tenant, audit.scope)}
+            else:
+                pages = _pages_from_moves(audit, moved, vanished, touched)
         if not pages:
             continue
         alive = {row.key for row in await facts.of_kind(tenant, audit.scope)}
