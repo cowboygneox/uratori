@@ -174,7 +174,14 @@ def judge(
     for fr in reading.fields:
         by_extract.setdefault(fr.extract, []).append(fr)
 
-    for extract_name, field_readings in by_extract.items():
+    # Every verified extract that has current rows must be visited even
+    # when the reading never mentions it at all (not even `by_extract`
+    # has an entry), not only extracts the reading happened to answer --
+    # see the unpaired-row handling below.
+    all_extract_names = sorted(set(by_extract) | set(current_rows))
+
+    for extract_name in all_extract_names:
+        field_readings = by_extract.get(extract_name, ())
         rows = current_rows.get(extract_name, ())
         by_row = _group_by_row(field_readings)
         pairing = _pair_rows(extract_name, by_row, rows, verified_fields, words_by_id)
@@ -193,6 +200,53 @@ def judge(
                     members.add(finding.record)
                 elif finding.verdict in ("missed", "absent"):
                     members.add(reading.page_key)
+
+        # Finding B (review F2): an extract row no reading row claimed at
+        # all -- the model reported fewer rows than the extractor
+        # produced, i.e. it skipped the row outright rather than saying
+        # "not on this page" about it. `pairing` only ever holds rows a
+        # reading row was matched to, so this is invisible to the loop
+        # above unless handled separately; left alone, the row (and every
+        # field on it) never gets a finding and the page can verdict
+        # `agrees` while a whole extracted row sits unreviewed -- the
+        # opposite of what an auditor is for. D6's vocabulary has no word
+        # for "the reader skipped this row"; conceptually it is exactly
+        # the "not_on_page" case for every verified field of the row (the
+        # reader said nothing, which is no different from saying nothing
+        # was there), so it is judged by the identical rule `_judge_field`
+        # already uses for `not_on_page`: `disagrees` when the extract has
+        # a value here ("the extract has a value the reader found no
+        # trace of"), `absent` when it does not.
+        claimed = {key for key, _ in pairing.values()}
+        extract_fields = sorted(
+            {field for (name, field) in verified_fields if name == extract_name}
+        )
+        for record_key, record_body in rows:
+            if record_key in claimed:
+                continue
+            for field in extract_fields:
+                extracted = record_body.get(field)
+                verdict: Verdict = "absent" if extracted is None else "disagrees"
+                finding = AuditFinding(
+                    extract=extract_name,
+                    field=field,
+                    record=record_key,
+                    row=-1,
+                    verdict=verdict,
+                    seen=None,
+                    extracted=_coerce_value(extracted),
+                    words=(),
+                    boxes=(),
+                    anchored=True,
+                    seen_text=None,
+                    note=None
+                    if extracted is None
+                    else "the reader reported no row at all for this record",
+                )
+                findings.append(finding)
+                if _RANK[finding.verdict] > _RANK[worst]:
+                    worst = finding.verdict
+                members.add(record_key)
 
     if not findings:
         # A reading that answered no field at all (every verified extract's

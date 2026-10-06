@@ -238,3 +238,37 @@ def test_many_by_row_pairs_reading_rows_to_extract_rows_by_value() -> None:
     assert set(members) == {"doc1/p0001#r01", "doc1/p0001#r02"}
     by_row = {f.row: f.record for f in findings}
     assert by_row == {0: "doc1/p0001#r02", 1: "doc1/p0001#r01"}
+
+
+def test_an_extract_row_the_reader_never_mentions_still_gets_a_finding() -> None:
+    """Finding B (review F2): the extractor produced two rows; the reader's
+    response covers only one of them -- not "not on this page", just
+    silence, as a model that undercounts rows always leaves. `judge`'s
+    outer loop used to iterate only the reading's own row indices, so the
+    second extract row got no entry in `pairing`, no finding, and was
+    invisible to the verdict -- a page could come back `agrees` while an
+    entire extracted row sat unreviewed. Every extract row must now
+    produce a finding, and the page must not verdict `agrees`."""
+    fields = {("measurement", "weight_kg"): VerifiedField(type="number", units=("kg",))}
+    r = reading(
+        # The model reports only the first row; the second gets no
+        # FieldReading at all, not even `status="not_on_page"`.
+        FieldReading(extract="measurement", field="weight_kg", row=0, status="seen", words=(1, 2)),
+    )
+    rows = {
+        "measurement": [
+            ("doc1/p0001#r01", {"weight_kg": 82.0}),
+            ("doc1/p0001#r02", {"weight_kg": 90.0}),
+        ]
+    }
+    verdict, members, findings = judge(r, rows, fields, WORDS)
+    assert verdict != "agrees"
+    assert len(findings) == 2
+    by_record = {f.record: f for f in findings}
+    assert set(by_record) == {"doc1/p0001#r01", "doc1/p0001#r02"}
+    assert by_record["doc1/p0001#r01"].verdict == "agrees"
+    # The unmentioned row: the extract has a value the reader found no
+    # trace of at all -- D6's vocabulary word for that is `disagrees`.
+    assert by_record["doc1/p0001#r02"].verdict == "disagrees"
+    assert by_record["doc1/p0001#r02"].extracted == 90.0
+    assert "doc1/p0001#r02" in members
