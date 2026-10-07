@@ -42,17 +42,21 @@ product's end users; a host builds its own screens against the
   slot name by the same code that kind gets standalone, each with its own
   `name @ version` provenance, because the bundle's hash is review-only and
   cites nothing.
-- **An `extract`'s page** (documents-plan-v3, D4) is named bare, after the
-  fact kind it targets -- by design the one case two declarations share a
-  name, so the roster carries both rows and a link from either names which
-  one it means (`?kind=extract`); open either and the page still answers
-  **moved by**/**built from**/**used by** the same way every other kind's
-  does -- built from its source page kind, the groups and filters it is
-  gated `over`, and the extracts it copies fields from; used by whatever
-  reads the fact kind it writes, which is the same list the fact's own page
-  shows. Beside the source text, a table lists each target field with the
-  matcher that reads it -- `number after`, `date after`, `text after`,
-  `if page contains`, or `copy of <extract>.<field>` -- and its declared
+- **An `extract`'s page** (documents-plan-v3, D4.4) is named bare, after
+  the record kind it defines -- its own one row, since a `fact <name>:`
+  beside it is refused (`?kind=extract` just lets a link that already
+  knows it wants an extract skip trying every header pattern in turn);
+  open it and the page answers **moved by**/**built from**/**used by**
+  the same way every other kind's does -- built from its source page
+  kind, the groups and filters it is gated `over`, and the extracts it
+  copies fields from; used by the union of whatever copies one of its
+  fields and whatever reads its records as a fact kind (a group, filter
+  or figure), since both land on this one page now that there is no
+  second page for the fact half to answer "used by" on its own. Beside
+  the source text, a table lists each target field with its **type** --
+  inferred from the matcher, never written out a second time -- and the
+  matcher itself: `number after`, `date after`, `text after`, `if page
+  contains`, or `copy of <extract>.<field>` -- and its declared
   alternatives and units, so a reader comparing a dozen fields does not
   re-parse the declaration's prose for each one. The tenant data is three
   numbers and a list, never a re-derivation of the engine's own pass:

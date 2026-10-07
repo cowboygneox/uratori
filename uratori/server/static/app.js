@@ -107,24 +107,29 @@ async function loadWorld() {
   const answer = await get('world');
   if (!answer.ok) return answer;
   world = answer.body;
-  // Keyed by name AND by `kind:name` -- an extract is named bare, after the
-  // fact kind it targets (documents-plan-v3, D4), so the two always
-  // collide on the plain key and the later one in the list wins it. The
-  // qualified key is how a link that already knows which one it means
-  // (the roster, an extract edge) reaches the one it meant; the plain key
-  // stays the default for every other kind, which never collides.
+  // Keyed by name AND by `kind:name`. An extract's name is also the name
+  // of the synthesized fact it defines (`library.facts` carries one, same
+  // name, for every extract -- documents-plan-v3, D4.4), but there is only
+  // ever one declaration page for it (the facts loop on the server skips
+  // it), so the plain key is unambiguous. The qualified key just lets a
+  // caller that already knows which kind it wants (the roster, an audit
+  // link) ask for it without a plain-name lookup.
   byName = new Map();
   for (const d of world.declarations) {
     byName.set(d.name, d);
     byName.set(`${d.kind}:${d.name}`, d);
   }
-  // Keyed by `${edge.type}:${edge.name}`, never bare `edge.name`: an edge's
-  // `type` already names which of the two colliding declarations it means
-  // (review finding 2 -- a bare-name key merged "what reads the FACT
-  // `measurement`" and "what copies from the EXTRACT `measurement`" into
-  // one list, so either page showed the same list, and neither showed its
-  // own). Every edge is already typed (`Dependency.type`), so this costs
-  // nothing for the kinds that never collide either.
+  // Keyed by `${edge.type}:${edge.name}`, never bare `edge.name`: a "fact"
+  // edge (reading the kind's records -- a group, filter or figure) and an
+  // "extract" edge (copying one of its fields) are different uses of the
+  // same kind, so they go in different buckets even when both name an
+  // extract-defined kind (review finding 2 -- a bare-name key merged "what
+  // reads the FACT `measurement`" and "what copies from the EXTRACT
+  // `measurement`" into one list). An extract's own page reunites the two
+  // buckets for its own "Used by" list, below, since it is the one page
+  // for both kinds of reader now that a bare `fact <name>:` beside it is
+  // refused. Every edge is already typed (`Dependency.type`), so this
+  // costs nothing for the kinds that never split either.
   usedBy = new Map();
   for (const declaration of world.declarations) {
     for (const edge of declaration.rests_on) {
@@ -307,9 +312,11 @@ function roster(selected, selectedKind) {
           href: defHash(declaration.name, {
             kind: declaration.kind === 'extract' ? 'extract' : null,
           }),
-          // An extract shares its name with the fact it targets
-          // (documents-plan-v3, D4); `selectedKind` says which of the two
-          // rows is actually open, so only that one gets the marker.
+          // `selectedKind` is the kind an explicit `?kind=` named (an
+          // extract link, say); no two rows share a plain name any more
+          // (documents-plan-v3, D4.4), but checking it anyway costs
+          // nothing and keeps a direct link marking the right row even if
+          // that ever stops being true.
           class: declaration.name === selected
             && (!selectedKind || declaration.kind === selectedKind) ? 'here' : '',
           title: declaration.name, // the ellipsis needs a recovery path
@@ -337,10 +344,10 @@ function roster(selected, selectedKind) {
   return holder;
 }
 
-// `kind` disambiguates the one case two declarations share a name: an
-// extract is named bare, after the fact kind it targets (documents-plan-v3,
-// D4). Every other kind's name is unique, so the plain lookup is still the
-// right default when no `kind` rides the link.
+// `kind` lets a link that already knows it wants an extract (or any other
+// kind) ask for it directly, without relying on the plain-name lookup --
+// which is still the right default when no `kind` rides the link, since
+// no two declarations share a plain name (documents-plan-v3, D4.4).
 function resolveDeclaration(name, kind) {
   return (kind && byName.get(`${kind}:${name}`)) || byName.get(name);
 }
@@ -510,10 +517,11 @@ async function declarationPane(declaration, name, params) {
           ? el('span', { class: 'faint' }, `verifies ${declaration.verifies.join(', ')}`)
           : null,
         world.editable
-          // `kind` rides along so the editor jumps to the right header: an
-          // extract and the fact it targets both match `at=<name>` (review
-          // finding 2's third site), and without the kind the jump landed
-          // on whichever of the two the source happens to print first.
+          // `kind` rides along so the editor jumps to the right header
+          // when more than one declaration's header pattern could match
+          // `at=<name>` -- harmless for a kind like `extract` that no
+          // longer shares its name with anything (documents-plan-v3,
+          // D4.4), and still correct if that ever changes.
           ? el('a', {
               class: 'tb-edit',
               href: `#/edit/?at=${encodeURIComponent(declaration.name)}`
@@ -602,12 +610,23 @@ async function declarationPane(declaration, name, params) {
     }
   }
 
-  // Keyed by this declaration's OWN kind, not just its name: an extract and
-  // the fact it targets have two distinct dependant sets (review finding
-  // 2) -- who reads the fact's records is not who copies from the
-  // extract. Each dependant carries its own kind too, so its link lands on
-  // the one it actually is rather than whichever bare name resolves to.
-  const dependants = usedBy.get(`${declaration.kind}:${declaration.name}`) || [];
+  // Keyed by this declaration's OWN kind, not just its name -- except an
+  // extract, which is the one page for its kind now that a bare `fact
+  // <name>:` beside it is refused: a reader who arrived via a "fact" edge
+  // (a group/filter/figure over the kind's records) and one who arrived
+  // via an "extract" edge (a copy of one of its fields) both belong here,
+  // so the two buckets are unioned, de-duplicated by `kind:name` (review
+  // finding 2's split still keeps them apart for every OTHER page, which
+  // is what the split was for). Each dependant carries its own kind too,
+  // so its link lands on the one it actually is rather than whichever
+  // bare name resolves to.
+  const dependants = declaration.kind === 'extract'
+    ? [...new Map(
+        [...(usedBy.get(`extract:${declaration.name}`) || []),
+         ...(usedBy.get(`fact:${declaration.name}`) || [])]
+          .map((other) => [`${other.kind}:${other.name}`, other]),
+      ).values()]
+    : (usedBy.get(`${declaration.kind}:${declaration.name}`) || []);
   parts.push(el('h2', {}, 'Used by'),
     dependants.length
       ? el('p', {}, dependants.map((other, i) => [
@@ -619,18 +638,21 @@ async function declarationPane(declaration, name, params) {
         ]))
       : el('p', { class: 'faint' }, 'Nothing in the library reads this.'));
 
-  // An extract's fields, each with the matcher that reads it -- the table
-  // beside the raw source, because a reader comparing a field's
-  // alternatives across twenty fields wants a column, not the paragraph
-  // above to re-parse each time (documents-plan-v3, D4).
+  // An extract's fields, each with the type the checker inferred from its
+  // own matcher (never written separately -- there is no `fact` left to
+  // write it in) and the matcher that reads it -- the table beside the
+  // raw source, because a reader comparing a field's alternatives across
+  // twenty fields wants a column, not the paragraph above to re-parse
+  // each time (documents-plan-v3, D4).
   if (declaration.kind === 'extract' && (declaration.extract_fields || []).length) {
     parts.push(el('h2', {}, 'Fields'),
       el('table', { class: 'ledger' },
         el('tr', {},
-          el('th', {}, 'field'), el('th', {}, 'matcher'),
+          el('th', {}, 'field'), el('th', {}, 'type'), el('th', {}, 'matcher'),
           el('th', {}, 'alternatives'), el('th', {}, 'units')),
         declaration.extract_fields.map((f) => el('tr', {},
           el('td', { class: 'mono' }, f.name),
+          el('td', { class: 'mono' }, f.type),
           el('td', {},
             f.matcher === 'copy'
               ? ['copy of ', el('span', { class: 'mono' }, f.copy_of)]
@@ -3476,11 +3498,10 @@ async function editorView(params) {
     const at = params.get('at');
     if (at) {
       // `kind`, when the link carries one, narrows the keyword to search
-      // for: an extract and the fact it targets share a name
-      // (documents-plan-v3, D4), so matching every keyword at once (the
-      // no-`kind` fallback, for a link made before this existed) jumps to
-      // whichever header the source happens to print first, not
-      // necessarily the one the reader clicked from (review finding 2).
+      // for -- harmless now that no two declarations share a plain name
+      // (documents-plan-v3, D4.4), and still what saves a no-`kind` link
+      // (made before this existed) from jumping to whichever header the
+      // source happens to print first, should a name ever collide again.
       const atKind = params.get('kind');
       const keywords = atKind ? [atKind === 'summary' ? 'summarise' : atKind] : FIG_DECLS;
       const pattern = new RegExp(

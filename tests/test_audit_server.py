@@ -40,11 +40,6 @@ fact medical_record as document:
 # One page of one.
 fact medical_record_page as page of medical_record
 
-# One set of vitals read off one page.
-fact measurement:
-    page as text
-    weight_kg as number
-
 # Vitals read off one page.
 extract measurement from medical_record_page:
     weight_kg = number after any of ["Weight:", "Wt:"] in kg

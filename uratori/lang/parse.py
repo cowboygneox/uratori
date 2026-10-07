@@ -175,7 +175,9 @@ def _explained(decl: Decl, lines: list[str]) -> Decl:
     host's own, and a derived kind nobody can read dead-ends the trace a
     reader is making exactly where a document extract is supposed to
     explain itself -- "the identifier printed in its header", not a bare
-    field name.) A fact is refused too -- it is the schema a reader
+    field name. An extract's fields may carry a run of their own too, at
+    the field's indent, read by the audit worker exactly like a fact
+    field's prose is.) A fact is refused too -- it is the schema a reader
     tracing a number lands on, and a schema nobody can read dead-ends the
     trace exactly where it was meant to bottom out. Its fields may carry a
     run of their own, at the field's indent, attached the same way.
@@ -217,6 +219,8 @@ def _explained(decl: Decl, lines: list[str]) -> Decl:
             decl.line,
             0,
         )
+    if isinstance(decl, ExtractDecl):
+        return replace(decl, doc=prose, fields=_extract_field_docs(decl.fields, lines))
     return replace(decl, doc=prose)
 
 
@@ -235,6 +239,18 @@ def _field_docs(fields: tuple[FactField, ...], lines: list[str]) -> tuple[FactFi
         )
         for f in fields
     )
+
+
+def _extract_field_docs(
+    fields: tuple[ExtractField, ...], lines: list[str]
+) -> tuple[ExtractField, ...]:
+    """An extract field's `#` run, at the field's own indent -- the same
+    attachment `_field_docs` gives a fact field, so the audit worker's
+    `fields_to_read` (`server/audit_worker.py`) can read it the same way
+    regardless of which kind of declaration wrote the field. Optional: a
+    field with no comment above it simply keeps `doc=""`.
+    """
+    return tuple(replace(f, doc=prose_above(lines, f.line, indented=True)) for f in fields)
 
 
 class _Parser:

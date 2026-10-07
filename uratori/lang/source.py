@@ -67,11 +67,11 @@ _HEADER_BY_KIND = {
     "projection": r"^projection\s+{name}\s*:",
     "summary": r"^summarise\s+{name}\s+over\s",
     "bundle": r"^bundle\s+{name}\s*:",
-    # `extract` is named bare, after the fact it targets (D4) -- the one
-    # case two declaration kinds deliberately share a name, so a lookup
-    # with no `kind` would find whichever header sorts first in the
-    # source and silently serve the wrong one's prose or formula. Every
-    # extract call site passes `kind="extract"`.
+    # `extract` defines its own record kind (D4) and is the one
+    # declaration carrying that name -- `kind="extract"` just lets a
+    # caller that already knows it wants an extract's header skip trying
+    # every pattern in the alternation in turn. Every extract call site
+    # passes it.
     "extract": r"^extract\s+{name}\s+from\s+\w+\s*:",
     "audit": r"^audit\s+{name}\s*:",
 }
@@ -102,10 +102,9 @@ def _locate(
     about which lines belong to which -- at which point a paragraph is either
     printed under both headings or under neither.
 
-    `kind` disambiguates the one case two declarations may share a name:
-    an `extract` and the `fact` it targets. Every other caller leaves it
-    unset and matches whichever header the name resolves to, exactly as
-    before `extract` existed.
+    `kind` lets a caller that already knows a name is an extract's skip
+    trying every header pattern in turn. Every other caller leaves it
+    unset and matches whichever header the name resolves to.
     """
     lines = _lines(library.source)
     headers = _HEADERS if kind is None else (_HEADER_BY_KIND[kind],)

@@ -1,10 +1,20 @@
 """`extract` -- deterministic patterns over one page, in the language.
 
-A document is a fact; an extract *calculates* records from one, the way a
-figure calculates a value, never a model at run time (documents-plan-v3,
-D4). These tests pin the checker's claims about it:
+An extract *calculates* records from a page, the way a figure calculates a
+value, never a model at run time (documents-plan-v3, D4) -- and an extract
+now defines its own record kind (D4.4): there is no separate `fact
+<name>:` to write or to check matchers against, and declaring one beside
+an extract of the same name is refused. These tests pin the checker's
+claims about it:
 
-- **The target is a declared fact, and exactly one extract may produce it.**
+- **An extract defines its own record kind.** Declaring a `fact` of the
+  same name beside it is refused, and exactly one extract may define any
+  given kind.
+- **Each field's type is inferred from its matcher** -- `number after` ->
+  number, `date after` -> moment, `text after`/a word ladder -> text, a
+  copy -> the copied field's own type, resolved through a chain of copies.
+- **Every extract-defined kind always carries `page as text`**, whether or
+  not the declaration writes it itself.
 - **`over` takes declared predicate/presence filters only**, over the
   source kind or a non-`many` extract of the same source -- never a group,
   never a bucket-scoped set, because the runner evaluates it fresh on one
@@ -12,9 +22,8 @@ D4). These tests pin the checker's claims about it:
 - **A derived kind's `keyed as` claim is verified, not trusted** -- the
   opposite of an ordinary fact's, where the checker has no way to check.
 - **Copies between extracts form a DAG.** A cycle is refused; a copy from
-  a `many` extract is refused; a copy's type must match the field it
-  writes.
-- **Matchers are typed against the target fact's declared field types.**
+  a `many` extract is refused; a copy of a field the source extract does
+  not write is refused -- except `.page`, which every extract carries.
 - **The version is fully deterministic**: it moves on a matcher change and
   stays put across a prose edit, like every other definition's.
 
@@ -42,32 +51,14 @@ fact medical_record as document:
 fact medical_record_page as page of medical_record
 
 # Who a page says it is about: the identifier printed in its header.
-fact page_identity:
-    patient_id as text
-
-# Read once, from the printed identifier.
 extract page_identity from medical_record_page:
     patient_id = text after any of ["MRN:", "Patient ID:"]
-
-# What kind of page this is.
-fact page_class:
-    type as text
 
 # A page is "vitals" if it says so anywhere on it.
 extract page_class from medical_record_page:
     type = "vitals" if page contains any of ["VITAL SIGNS", "Vitals", "Wt:"]
 
 filter page_class.vitals keyed as medical_record_page where type == "vitals"
-"""
-
-MEASUREMENT_FACT = """
-# One set of vitals read off one page.
-fact measurement:
-    patient_id as text
-    page as text
-    measured_at as moment
-    weight_kg as number
-    height_cm as number
 """
 
 MEASUREMENT_EXTRACT = """
@@ -81,7 +72,7 @@ extract measurement from medical_record_page:
     height_cm   = number after any of ["Height:", "Ht:", "Ht", "HEIGHT"] in cm or in or ft_in
 """
 
-SOURCE = DOCUMENT_SOURCE + MEASUREMENT_FACT + MEASUREMENT_EXTRACT
+SOURCE = DOCUMENT_SOURCE + MEASUREMENT_EXTRACT
 
 
 def compile_taught(source: str) -> object:
@@ -104,7 +95,7 @@ def test_the_documents_example_compiles() -> None:
     assert set(library.extracts) == {"page_identity", "page_class", "measurement"}
 
 
-def test_an_extract_is_named_like_the_fact_it_targets() -> None:
+def test_an_extract_is_named_after_the_kind_it_defines() -> None:
     library = compile_taught(SOURCE)
     plan = library.extracts["measurement"]
     assert plan.name == "measurement"
@@ -121,7 +112,6 @@ def test_many_by_row_carries_its_declared_ceiling() -> None:
 def test_many_by_row_defaults_its_ceiling_when_none_is_written() -> None:
     library = compile_taught(
         DOCUMENT_SOURCE
-        + MEASUREMENT_FACT
         + """
 # Vitals, with no stated ceiling.
 extract measurement from medical_record_page:
@@ -156,22 +146,114 @@ group page_identity.by_patient keyed as medical_record_page from patient_id
     assert library.indexes["page_identity.by_patient"].id_space == "medical_record_page"
 
 
+# ------------------------------------------------------- field inference --
+
+
+def test_a_number_after_matcher_infers_number() -> None:
+    library = compile_taught(SOURCE)
+    fields = {f.name: f.type for f in library.facts["measurement"].fields}
+    assert fields["weight_kg"] == "number"
+
+
+def test_a_date_after_matcher_infers_moment() -> None:
+    library = compile_taught(SOURCE)
+    fields = {f.name: f.type for f in library.facts["measurement"].fields}
+    assert fields["measured_at"] == "moment"
+
+
+def test_a_text_after_matcher_infers_text() -> None:
+    library = compile_taught(SOURCE)
+    fields = {f.name: f.type for f in library.facts["page_identity"].fields}
+    assert fields["patient_id"] == "text"
+
+
+def test_a_word_ladder_infers_text() -> None:
+    library = compile_taught(SOURCE)
+    fields = {f.name: f.type for f in library.facts["page_class"].fields}
+    assert fields["type"] == "text"
+
+
+def test_a_copy_infers_the_copied_fields_type() -> None:
+    library = compile_taught(SOURCE)
+    fields = {f.name: f.type for f in library.facts["measurement"].fields}
+    assert fields["patient_id"] == "text"
+
+
+def test_a_chained_copy_resolves_through_every_link() -> None:
+    library = compile_taught(
+        DOCUMENT_SOURCE
+        + """
+# One hop from page_identity.
+extract relay from medical_record_page:
+    patient_id = page_identity.patient_id
+
+# A second hop, from relay rather than page_identity directly.
+extract relay_again from medical_record_page:
+    patient_id = relay.patient_id
+"""
+    )
+    fields = {f.name: f.type for f in library.facts["relay_again"].fields}
+    assert fields["patient_id"] == "text"
+
+
+def test_a_copy_of_the_built_in_page_field_infers_text() -> None:
+    library = compile_taught(
+        DOCUMENT_SOURCE
+        + """
+# Copies the source page's own built-in field.
+extract carries_page from medical_record_page:
+    identity_page = page_identity.page
+"""
+    )
+    fields = {f.name: f.type for f in library.facts["carries_page"].fields}
+    assert fields["identity_page"] == "text"
+
+
+def test_page_is_always_present_on_the_synthesized_kind() -> None:
+    """Every extract-defined kind carries `page as text`, whether or not
+    the declaration mentions it -- set by the engine, never written."""
+    library = compile_taught(DOCUMENT_SOURCE)
+    for name in ("page_identity", "page_class"):
+        fields = {f.name: f.type for f in library.facts[name].fields}
+        assert fields["page"] == "text"
+
+
 # -------------------------------------------------------------- refusals --
 
 
-def test_an_extract_with_no_matching_fact_is_refused() -> None:
+def test_a_fact_declared_beside_its_extract_is_refused() -> None:
     refuses(
         DOCUMENT_SOURCE
         + """
-# No matching fact declared anywhere.
-extract vitals_only from medical_record_page:
-    type = text after any of ["Type:"]
+# A record kind, declared twice.
+fact measurement:
+    weight_kg as number
+
+# The extract that would otherwise define it on its own.
+extract measurement from medical_record_page:
+    weight_kg = number after any of ["Weight:"] in kg
 """,
-        "names no fact",
+        "defines the record kind measurement itself",
+        "delete `fact measurement:`",
+    )
+
+
+def test_two_extracts_may_not_define_the_same_kind() -> None:
+    refuses(
+        DOCUMENT_SOURCE
+        + """
+# A second extract for a kind one already defines.
+extract page_identity from medical_record_page:
+    patient_id = text after any of ["Patient ID:"]
+""",
+        "is already an extract",
     )
 
 
 def test_an_extract_may_not_target_a_document_shaped_kind() -> None:
+    """`medical_record_page` is already a declared page fact -- naming an
+    extract after it hits the same "defines the kind itself" refusal a
+    `fact`-beside-`extract` collision does."""
     refuses(
         DOCUMENT_SOURCE
         + """
@@ -179,19 +261,7 @@ def test_an_extract_may_not_target_a_document_shaped_kind() -> None:
 extract medical_record_page from medical_record_page:
     patient_id = text after any of ["MRN:"]
 """,
-        "server-authored structure",
-    )
-
-
-def test_two_extracts_may_not_target_the_same_fact() -> None:
-    refuses(
-        DOCUMENT_SOURCE
-        + """
-# A second extract for a fact one already produces.
-extract page_identity from medical_record_page:
-    patient_id = text after any of ["Patient ID:"]
-""",
-        "already produced by another extract",
+        "defines the record kind medical_record_page itself",
     )
 
 
@@ -199,9 +269,6 @@ def test_an_extracts_source_must_be_a_fact_kind() -> None:
     refuses(
         DOCUMENT_SOURCE
         + """
-# No such thing.
-fact vitals:
-    type as text
 # Reads a source that was never declared.
 extract vitals from nope:
     type = text after any of ["Type:"]
@@ -217,9 +284,7 @@ def test_an_extracts_source_must_be_a_page_kind() -> None:
 # Not a page.
 fact plain:
     ref as text
-# A different target.
-fact elsewhere:
-    ref as text
+
 # Reads an ordinary fact, not a page.
 extract elsewhere from plain:
     ref = text after any of ["Ref:"]
@@ -233,7 +298,6 @@ def test_many_by_row_needs_an_anchor_field() -> None:
     nothing to anchor a row to a line."""
     refuses(
         DOCUMENT_SOURCE
-        + MEASUREMENT_FACT
         + """
 # No field reads the page's own words -- only a copy.
 extract measurement from medical_record_page:
@@ -244,78 +308,10 @@ extract measurement from medical_record_page:
     )
 
 
-def test_a_number_matcher_against_a_text_field_is_refused() -> None:
-    refuses(
-        DOCUMENT_SOURCE
-        + """
-# Wrong type on purpose.
-fact mistyped:
-    weight_kg as text
-
-# A number matcher against a text field.
-extract mistyped from medical_record_page:
-    weight_kg = number after any of ["Weight:"] in kg
-""",
-        "reads a number",
-    )
-
-
-def test_a_date_matcher_against_a_number_field_is_refused() -> None:
-    refuses(
-        DOCUMENT_SOURCE
-        + """
-# Wrong type on purpose.
-fact mistyped:
-    measured_at as number
-
-# A date matcher against a number field.
-extract mistyped from medical_record_page:
-    measured_at = date after any of ["Date:"]
-""",
-        "reads a date",
-    )
-
-
-def test_a_text_matcher_against_a_moment_field_is_refused() -> None:
-    refuses(
-        DOCUMENT_SOURCE
-        + """
-# Wrong type on purpose.
-fact mistyped:
-    patient_id as moment
-
-# A text matcher against a moment field.
-extract mistyped from medical_record_page:
-    patient_id = text after any of ["MRN:"]
-""",
-        "reads text",
-    )
-
-
-def test_a_word_ladder_against_a_number_field_is_refused() -> None:
-    refuses(
-        DOCUMENT_SOURCE
-        + """
-# Wrong type on purpose.
-fact mistyped:
-    type as number
-
-# A classification ladder against a number field.
-extract mistyped from medical_record_page:
-    type = "vitals" if page contains any of ["Wt:"]
-""",
-        "answers a word",
-    )
-
-
 def test_an_undeclared_unit_lists_the_vocabulary() -> None:
     refuses(
         DOCUMENT_SOURCE
         + """
-# A weight.
-fact mistyped:
-    weight_kg as number
-
 # A unit this engine does not know how to convert.
 extract mistyped from medical_record_page:
     weight_kg = number after any of ["Weight:"] in stone
@@ -324,27 +320,9 @@ extract mistyped from medical_record_page:
     )
 
 
-def test_a_field_not_declared_on_the_target_fact_is_refused() -> None:
-    refuses(
-        DOCUMENT_SOURCE
-        + """
-# One field only.
-fact narrow:
-    patient_id as text
-
-# Writes a field the fact never declared.
-extract narrow from medical_record_page:
-    patient_id = text after any of ["MRN:"]
-    extra = text after any of ["X:"]
-""",
-        "does not declare",
-    )
-
-
 def test_writing_the_built_in_page_field_is_refused() -> None:
     refuses(
         DOCUMENT_SOURCE
-        + MEASUREMENT_FACT
         + """
 # Tries to write the built-in field itself.
 extract measurement from medical_record_page:
@@ -358,31 +336,10 @@ extract measurement from medical_record_page:
     )
 
 
-def test_a_page_field_declared_as_the_wrong_type_is_refused() -> None:
-    refuses(
-        DOCUMENT_SOURCE
-        + """
-# A "page" field of the wrong type.
-fact mistyped:
-    patient_id as text
-    page as number
-
-# Never reaches the mismatched field -- the fact itself is refused.
-extract mistyped from medical_record_page:
-    patient_id = text after any of ["MRN:"]
-""",
-        "the built-in `page` field",
-    )
-
-
 def test_an_extract_with_no_fields_is_refused() -> None:
     refuses(
         DOCUMENT_SOURCE
         + """
-# A target with nothing to write.
-fact empty_target:
-    patient_id as text
-
 # No fields at all.
 extract empty_target from medical_record_page:
 """,
@@ -394,10 +351,6 @@ def test_an_extract_needs_an_explanation() -> None:
     refuses(
         DOCUMENT_SOURCE
         + """
-# A target fact.
-fact unexplained:
-    patient_id as text
-
 extract unexplained from medical_record_page:
     patient_id = text after any of ["MRN:"]
 """,
@@ -409,10 +362,6 @@ def test_a_copy_from_an_undeclared_extract_is_refused() -> None:
     refuses(
         DOCUMENT_SOURCE
         + """
-# A copier.
-fact copier:
-    patient_id as text
-
 # Copies from an extract that was never declared.
 extract copier from medical_record_page:
     patient_id = nonexistent.patient_id
@@ -423,14 +372,8 @@ extract copier from medical_record_page:
 
 def test_a_copy_from_a_many_extract_is_refused() -> None:
     refuses(
-        DOCUMENT_SOURCE
-        + MEASUREMENT_FACT
-        + MEASUREMENT_EXTRACT
+        SOURCE
         + """
-# A copier.
-fact copier:
-    weight_kg as number
-
 # Copies from a `many by row` extract -- which row?
 extract copier from medical_record_page:
     weight_kg = measurement.weight_kg
@@ -450,10 +393,6 @@ fact other_doc as document:
 # Its page kind.
 fact other_page as page of other_doc
 
-# A copier reading the wrong source.
-fact copier:
-    patient_id as text
-
 # Copies from an extract of a different source page kind.
 extract copier from other_page:
     patient_id = page_identity.patient_id
@@ -462,42 +401,32 @@ extract copier from other_page:
     )
 
 
-def test_a_copy_with_the_wrong_declared_type_is_refused() -> None:
+def test_a_copy_of_a_field_the_source_does_not_write_is_refused() -> None:
     refuses(
         DOCUMENT_SOURCE
         + """
-# A number, copying a text field.
-fact copier:
-    patient_id as number
-
-# The copy's type does not match what it copies.
+# page_identity writes patient_id only.
 extract copier from medical_record_page:
-    patient_id = page_identity.patient_id
+    nope = page_identity.nope
 """,
-        "and fact copier declares",
+        "does not write",
     )
 
 
 def test_a_copy_cycle_is_refused() -> None:
     refuses(
         """
-# A
-fact page_identity:
-    patient_id as text
-# B
-fact page_class:
-    type as text
+# doc
+fact medical_record as document:
+    name title
+# page
+fact medical_record_page as page of medical_record
 # extract A, copying from B
 extract page_identity from medical_record_page:
     patient_id = page_class.patient_id
 # extract B, copying from A
 extract page_class from medical_record_page:
     type = page_identity.type
-# doc
-fact medical_record as document:
-    name title
-# page
-fact medical_record_page as page of medical_record
 """,
         "cycle is refused",
     )
@@ -508,10 +437,6 @@ def test_over_may_not_name_a_group() -> None:
         DOCUMENT_SOURCE
         + """
 group page_class.by_type from type
-
-# Gated by a group rather than a filter.
-fact gated:
-    patient_id as text
 
 # `over` taking a group instead of a filter.
 extract gated from medical_record_page:
@@ -526,10 +451,6 @@ def test_over_may_not_be_scoped_to_a_subject() -> None:
     refuses(
         DOCUMENT_SOURCE
         + """
-# An extract has no subject to scope `over` to.
-fact gated:
-    patient_id as text
-
 # `over` scoped to a subject, which an extract has none of.
 extract gated from medical_record_page:
     over page_class.vitals:{medical_record_page}
@@ -553,10 +474,6 @@ fact other_thing:
     flag as flag
 filter other_thing.on where flag == true
 
-# Gated by a filter over an unrelated kind.
-fact gated:
-    patient_id as text
-
 # `over` naming a filter of a kind that is neither the source nor an
 # extract of it.
 extract gated from medical_record_page:
@@ -579,13 +496,33 @@ filter page_identity.named keyed as page_class where patient_id is set
 
 def test_keyed_as_is_refused_over_a_many_extracts_kind() -> None:
     refuses(
-        DOCUMENT_SOURCE
-        + MEASUREMENT_FACT
-        + MEASUREMENT_EXTRACT
+        SOURCE
         + """
 filter measurement.any keyed as medical_record_page where weight_kg is set
 """,
         "many by row` extract",
+    )
+
+
+def test_a_filter_over_an_extract_field_type_checks() -> None:
+    """`weight_kg is set` resolves against the synthesized kind's own
+    inferred field -- the same path a filter over an ordinary fact takes."""
+    library = compile_taught(
+        SOURCE
+        + """
+filter measurement.weighed where weight_kg is set
+"""
+    )
+    assert "measurement.weighed" in library.indexes
+
+
+def test_a_filter_naming_an_undeclared_extract_field_is_refused() -> None:
+    refuses(
+        SOURCE
+        + """
+filter measurement.nonsense where not_a_field is set
+""",
+        "not a field of measurement",
     )
 
 

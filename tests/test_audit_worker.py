@@ -19,10 +19,10 @@ import asyncpg
 import httpx
 import pytest
 
-from uratori import Schema
+from uratori import Schema, compile_source
 from uratori.audit.fake import FakeAnswer, FakeAuditProvider
 from uratori.server import create_app, db
-from uratori.server.audit_worker import run_worker_sweep
+from uratori.server.audit_worker import fields_to_read, run_worker_sweep
 from uratori.server.runtime import State, World
 
 WORLD = Schema(kinds=frozenset())
@@ -34,11 +34,6 @@ fact medical_record as document:
 
 # One page of one.
 fact medical_record_page as page of medical_record
-
-# One set of vitals read off one page.
-fact measurement:
-    page as text
-    weight_kg as number
 
 # Vitals read off one page.
 extract measurement from medical_record_page:
@@ -423,3 +418,70 @@ async def test_a_dependent_auditor_waits_for_its_bindings_own_reading(
         page_key,
     )
     assert dependent_reading is None
+
+
+# ---------------------------------------------------------- field prose --
+
+
+def test_a_fields_own_prose_reaches_fields_to_read() -> None:
+    """D4.4: a `#` run above an extract's field line is the field's own
+    explanation now, with no separate `fact` to carry it -- read by the
+    audit worker exactly where the old fact field's prose was read from
+    (`fields_to_read`'s `decl.doc`, now the synthesized fact's field)."""
+    library = compile_source(
+        """
+# A patient's uploaded records, one file at a time.
+fact medical_record as document:
+    name title
+
+# One page of one.
+fact medical_record_page as page of medical_record
+
+# Vitals read off one page.
+extract measurement from medical_record_page:
+    # Printed in kilograms or pounds; converted to kg either way.
+    weight_kg = number after any of ["Weight:", "Wt:"] in kg or lb
+
+# A second reader over the vitals on each page.
+audit medical_record_page.vitals_audit:
+    verifies measurement
+    model "fake-v1"
+    display "{medical_record_page} {value}"
+""",
+        WORLD,
+    )
+    audit = library.audits["medical_record_page.vitals_audit"]
+    [field] = fields_to_read(library, audit)
+    assert field.extract == "measurement"
+    assert field.field == "weight_kg"
+    assert field.type == "number"
+    assert field.prose == "Printed in kilograms or pounds; converted to kg either way."
+
+
+def test_a_field_with_no_comment_above_it_has_empty_prose() -> None:
+    """Prose is optional per field -- a field nobody explained carries an
+    empty string, never `None` or a fallback borrowed from elsewhere."""
+    library = compile_source(
+        """
+# A patient's uploaded records, one file at a time.
+fact medical_record as document:
+    name title
+
+# One page of one.
+fact medical_record_page as page of medical_record
+
+# Vitals read off one page.
+extract measurement from medical_record_page:
+    weight_kg = number after any of ["Weight:", "Wt:"] in kg
+
+# A second reader over the vitals on each page.
+audit medical_record_page.vitals_audit:
+    verifies measurement
+    model "fake-v1"
+    display "{medical_record_page} {value}"
+""",
+        WORLD,
+    )
+    audit = library.audits["medical_record_page.vitals_audit"]
+    [field] = fields_to_read(library, audit)
+    assert field.prose == ""

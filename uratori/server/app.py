@@ -1747,14 +1747,14 @@ def _library_out(library: Library) -> LibraryOut:
         # Spelled out rather than **kwargs, so pydantic-mypy's init guard
         # reaches every call site: routed through Any, a misspelled field
         # here was silently dropped at runtime and invisible to the checker.
-        # `kind=` for `extract` and `audit`: `extract` is the one declaration
-        # kind that may share a name with another (the `fact` it targets,
-        # D4), so a plain name lookup would silently resolve to whichever
-        # header sorts first in the source; `audit` never collides (its own
-        # namespace, D6), but passing it costs nothing and keeps one rule
-        # ("the kinds `_HEADER_BY_KIND` knows, pass their own name") rather
-        # than two. Every other kind passes no kind, exactly as before
-        # `extract` existed.
+        # `kind=` for `extract` and `audit`: passing it lets the lookup
+        # skip trying every header pattern in `_HEADER_BY_KIND` in turn
+        # rather than needing it to resolve a collision -- `extract` no
+        # longer shares its name with a separately declared `fact` (D4.4),
+        # and `audit` never did (its own namespace, D6). Costs nothing
+        # either way, and keeps one rule ("the kinds `_HEADER_BY_KIND`
+        # knows, pass their own name") rather than two. Every other kind
+        # passes no kind, exactly as before `extract` existed.
         source_kind = declaration if declaration in ("extract", "audit") else None
         return DeclarationOut(
             name=name,

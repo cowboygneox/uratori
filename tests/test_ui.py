@@ -4556,10 +4556,10 @@ def _unreadable_weight_pdf() -> bytes:
 async def test_the_extract_declaration_page_carries_fields_edges_and_failures(
     pg_dsn: str, tmp_path: Path
 ) -> None:
-    """The declaration page for an `extract` (documents-plan-v3, D4),
-    flagged as unbuilt in package 3's own report: the world payload
-    enumerates it beside the fact it targets -- sharing that fact's name by
-    design, `kind` disambiguating the two -- with its matcher table and its
+    """The declaration page for an `extract` (documents-plan-v3, D4.4): the
+    world payload enumerates it under the kind it defines -- its own one
+    row, since a `fact` of the same name beside it is refused -- with its
+    matcher table (now carrying each field's inferred type) and its
     dependency edges, and its own tenant-data route answers the
     produced/done/failed counts and each failure's sentence."""
     from .test_extract_server import SOURCE, WORLD, vitals_pdf
@@ -4578,19 +4578,20 @@ async def test_the_extract_declaration_page_carries_fields_edges_and_failures(
         extracts = [
             d for d in declarations if d["name"] == "measurement" and d["kind"] == "extract"
         ]
-        # Both declarations are enumerated under their shared name -- the
-        # UI's own routing disambiguates by `kind`, never by dropping one.
-        assert len(facts) == 1
+        # No separate fact row: the extract is the kind's one declaration.
+        assert len(facts) == 0
         assert len(extracts) == 1
         [extract] = extracts
 
         by_field = {f["name"]: f for f in extract["extract_fields"]}
         assert by_field["weight_kg"]["matcher"] == "number after"
+        assert by_field["weight_kg"]["type"] == "number"
         assert set(by_field["weight_kg"]["alternatives"]) == {
             "Weight:", "Wt:", "Wt", "WEIGHT",
         }
         assert set(by_field["weight_kg"]["units"]) == {"kg", "lb"}
         assert by_field["patient_id"]["matcher"] == "copy"
+        assert by_field["patient_id"]["type"] == "text"
         assert by_field["patient_id"]["copy_of"] == "page_identity.patient_id"
         assert extract["many"] is True
         assert extract["many_up_to"] == 5
@@ -4656,6 +4657,36 @@ async def test_the_extract_declaration_page_carries_fields_edges_and_failures(
         # An unknown extract name is a 404, not a 500 or a bare empty page.
         missing = await http.get("/ui/api/tenants/t1/extracts/no_such_extract/status")
         assert missing.status_code == 404
+
+
+async def test_named_declarations_report_an_extract_defined_kind_as_extract(
+    pg_dsn: str, tmp_path: Path
+) -> None:
+    """D4.4: `_named` (the teach-review diff's own lookup, also served bare
+    by `/ui/api/source`) reports an extract-defined kind's one declaration
+    as `"extract"` -- never a second `"fact"` entry for the synthesized
+    fact `library.facts` carries alongside it."""
+    from .test_extract_server import SOURCE, WORLD
+
+    async with serve(pg_dsn, blob_dir=str(tmp_path / "blobs")) as http:
+        put = await http.put("/schema", json=WORLD.to_document())
+        assert put.status_code == 200, put.text
+        put = await http.put("/definitions", json={"source": SOURCE})
+        assert put.status_code == 200, put.text
+
+        page = (await http.get("/ui/api/source")).json()
+        named = {d["name"]: d["kind"] for d in page["declarations"]}
+        assert named["page_identity"] == "extract"
+        assert named["page_class"] == "extract"
+        assert named["measurement"] == "extract"
+        assert "fact" not in {
+            named[n] for n in ("page_identity", "page_class", "measurement")
+        }
+        # The real facts -- document and page shapes, and the host-written
+        # roster -- still report as "fact".
+        assert named["medical_record"] == "fact"
+        assert named["medical_record_page"] == "fact"
+        assert named["patient"] == "fact"
 
 
 async def test_the_audit_declaration_page_carries_counts_and_findings(

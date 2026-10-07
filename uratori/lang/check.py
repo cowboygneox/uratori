@@ -209,6 +209,12 @@ class _Checker:
         for d in self._decls:
             if isinstance(d, ExtractDecl):
                 self._extract_prescan(d)
+        # Synthesize a fact for every extract, before `_world()` needs
+        # `self.facts` to compute `self._kinds` -- an extract defines its
+        # own record kind now, with no `fact X:` to compile it from, so
+        # this is the one place that shape comes from. Field types are
+        # inferred from each field's matcher, not written out.
+        self._synthesize_extract_facts()
         self._world()
         self._id_spaces()
         for d in self._decls:
@@ -493,26 +499,18 @@ class _Checker:
         The full check -- matcher types, `over`, the version hash -- runs
         later, once `self.indexes` and every other extract's own plan exist.
         """
-        target = self.facts.get(d.name)
-        if target is None:
+        if d.name in self.facts:
             raise CheckError(
-                f'extract {d.name} names no fact: declare `fact {d.name}: ...` so '
-                "there is a shape for its records to verify against.",
+                f"extract {d.name} defines the record kind {d.name} itself -- "
+                f"delete `fact {d.name}:`; its fields and their types come from "
+                "the extract's matchers.",
                 d.line,
             )
-        if target.shape is not None:
-            raise CheckError(
-                f'extract {d.name} targets "{d.name}", which is declared "as '
-                f'{target.shape}" -- a document or page kind is server-authored '
-                "structure, not a pattern read off a page.",
-                d.line,
-            )
-        if d.name in self._extract_sources:
-            raise CheckError(
-                f"fact {d.name} is already produced by another extract. A derived "
-                "kind may not be the target of two extracts.",
-                d.line,
-            )
+        # Claims the name in the one namespace every declaration shares
+        # (same as `_fact_decl` does for a fact): a second extract, or any
+        # other declaration, naming `d.name` is refused here rather than
+        # by a collision discovered only once both have synthesized facts.
+        self._claim(d.name, "extract", d.line)
         source = self.facts.get(d.source)
         if source is None:
             raise CheckError(
@@ -537,6 +535,102 @@ class _Checker:
                 d.line,
             )
         self._extract_sources[d.name] = (d.source, d.many)
+
+    def _synthesize_extract_facts(self) -> None:
+        """A `CompiledFact` for every extract, keyed by the same name --
+        the record kind it defines, with no `fact X:` left to compile it
+        from (D4.4): the checker is now the only place that shape comes
+        from. Each field's type is inferred from its matcher; `page` is
+        appended last, always text, whether or not the extract wrote one
+        of its own (refused separately in `_extract`, below, with the
+        author's own field list -- this method never looks at duplicate
+        names, only at what type to report for each one).
+
+        Resolves every extract's fields at once rather than walking the
+        source in order, because a copy may name an extract declared
+        later in the file -- `fields_of` recurses on demand and caches, so
+        the order copies happen to resolve in does not matter. A cycle in
+        the copy graph is refused here, with the same message `_extracts`
+        gives it later over the full plans, because unchecked recursion
+        through a cycle would never terminate -- this is the earlier of
+        the two places that same walk has to stop.
+        """
+        decls: dict[str, ExtractDecl] = {
+            d.name: d for d in self._decls if isinstance(d, ExtractDecl)
+        }
+        resolved: dict[str, tuple[CompiledFactField, ...]] = {}
+
+        def fields_of(name: str, chain: tuple[str, ...]) -> tuple[CompiledFactField, ...]:
+            cached = resolved.get(name)
+            if cached is not None:
+                return cached
+            if name in chain:
+                path = " -> ".join((*chain, name))
+                raise CheckError(
+                    f"extract {name} copies from itself through {path}: copies "
+                    "form a DAG, and a cycle is refused.",
+                    decls[name].line,
+                )
+            d = decls[name]
+            built: list[CompiledFactField] = []
+            wrote_page = False
+            for f in d.fields:
+                wrote_page = wrote_page or f.name == "page"
+                built.append(
+                    CompiledFactField(
+                        name=f.name, type=field_type(f, (*chain, name)), doc=f.doc
+                    )
+                )
+            if not wrote_page:
+                built.append(CompiledFactField(name="page", type="text"))
+            result = tuple(built)
+            resolved[name] = result
+            return result
+
+        def field_type(f: ExtractField, chain: tuple[str, ...]) -> str:
+            matcher = f.matcher
+            if isinstance(matcher, NumberAfter):
+                return "number"
+            if isinstance(matcher, DateAfter):
+                return "moment"
+            if isinstance(matcher, (TextAfter, WordLadder)):
+                return "text"
+            if isinstance(matcher, FieldCopy):
+                if matcher.field == "page":
+                    return "text"
+                if matcher.extract not in decls:
+                    # `_check_extract_matcher` refuses "not a declared
+                    # extract" once the full check runs over the actual
+                    # plans; a placeholder here only lets synthesis finish
+                    # so that is the refusal the author sees, not a
+                    # `KeyError` out of this method.
+                    return "text"
+                for cf in fields_of(matcher.extract, chain):
+                    if cf.name == matcher.field:
+                        return cf.type or "text"
+                # Not written there either -- `_check_extract_matcher`
+                # refuses this by name, with the full field list, once
+                # the full check runs.
+                return "text"
+            assert_never(matcher)
+
+        for name, d in decls.items():
+            fields = fields_of(name, ())
+            self.facts[name] = CompiledFact(
+                name=name,
+                fields=fields,
+                doc=d.doc,
+                shape=None,
+                page_of=None,
+                version=version_of(
+                    {
+                        "name": name,
+                        "fields": _fact_field_hash(fields),
+                        "shape": None,
+                        "page_of": None,
+                    }
+                ),
+            )
 
     def _extracts(self) -> None:
         """Every extract, in copy-dependency order -- a field that copies
@@ -572,21 +666,8 @@ class _Checker:
             self._extract(decls[name])
 
     def _extract(self, d: ExtractDecl) -> None:
-        target = self.facts[d.name]
-        declared = {f.name: f for f in target.fields}
-
         if d.over is not None:
             self._check_extract_over(d, d.over)
-
-        if "page" in declared and declared["page"].type != "text":
-            held_type = declared["page"].type
-            raise CheckError(
-                f'fact {d.name} declares "page" as '
-                f'{"a nested record" if held_type is None else held_type}, and the '
-                "built-in `page` field (the source page's own key, set by the "
-                "engine) is text.",
-                d.line,
-            )
 
         copies: list[str] = []
         fields_hash: list[object] = []
@@ -598,24 +679,7 @@ class _Checker:
                     "by a matcher.",
                     field.line,
                 )
-            decl_field = declared.get(field.name)
-            if decl_field is None:
-                raise CheckError(
-                    f'extract {d.name} writes "{field.name}", which fact {d.name} '
-                    f'does not declare. Declared: '
-                    f'{", ".join(sorted(declared)) or "nothing"}.',
-                    field.line,
-                )
-            if decl_field.type is None:
-                raise CheckError(
-                    f'extract {d.name} writes "{field.name}", and fact {d.name} '
-                    "declares it as a nested record -- an extract may only write "
-                    "scalar fields.",
-                    field.line,
-                )
-            matcher_kind, matcher_hash = self._check_extract_matcher(
-                d, field, decl_field, copies
-            )
+            matcher_kind, matcher_hash = self._check_extract_matcher(d, field, copies)
             fields_hash.append(
                 {"name": field.name, "kind": matcher_kind, "matcher": matcher_hash}
             )
@@ -697,17 +761,15 @@ class _Checker:
         self,
         d: ExtractDecl,
         field: ExtractField,
-        decl_field: CompiledFactField,
         copies: list[str],
     ) -> tuple[str, object]:
+        """Structural checks only -- a field's *type* is never checked
+        against anything here, because inference is where it came from in
+        the first place (`_synthesize_extract_facts`): there is no second
+        declaration left for it to disagree with.
+        """
         matcher = field.matcher
         if isinstance(matcher, NumberAfter):
-            if decl_field.type != "number":
-                raise CheckError(
-                    f'extract {d.name}.{field.name} reads a number, and fact '
-                    f'{d.name} declares "{field.name}" as {decl_field.type}.',
-                    field.line,
-                )
             for unit in matcher.units:
                 if unit not in UNIT_TABLE:
                     raise CheckError(
@@ -721,28 +783,10 @@ class _Checker:
                 "units": list(matcher.units),
             }
         if isinstance(matcher, DateAfter):
-            if decl_field.type != "moment":
-                raise CheckError(
-                    f'extract {d.name}.{field.name} reads a date, and fact '
-                    f'{d.name} declares "{field.name}" as {decl_field.type}.',
-                    field.line,
-                )
             return "date_after", {"alternatives": list(matcher.alternatives)}
         if isinstance(matcher, TextAfter):
-            if decl_field.type != "text":
-                raise CheckError(
-                    f'extract {d.name}.{field.name} reads text, and fact {d.name} '
-                    f'declares "{field.name}" as {decl_field.type}.',
-                    field.line,
-                )
             return "text_after", {"alternatives": list(matcher.alternatives)}
         if isinstance(matcher, WordLadder):
-            if decl_field.type != "text":
-                raise CheckError(
-                    f'extract {d.name}.{field.name} answers a word, and fact '
-                    f'{d.name} declares "{field.name}" as {decl_field.type}.',
-                    field.line,
-                )
             for rung in matcher.rungs:
                 if not rung.alternatives:
                     raise CheckError(
@@ -787,9 +831,11 @@ class _Checker:
                     "which has not been checked yet.",
                     field.line,
                 )
-            if matcher.field == "page":
-                copied_type: str | None = "text"
-            else:
+            # `page` is the one field every extract carries without writing
+            # it, so copying it skips the "does this extract write that
+            # field" check below -- every other field must actually be
+            # among what `matcher.extract` writes.
+            if matcher.field != "page":
                 copied_written = {f.name for f in copied_plan.fields}
                 if matcher.field not in copied_written:
                     raise CheckError(
@@ -799,17 +845,6 @@ class _Checker:
                         f'{", ".join(sorted(copied_written)) or "nothing"}.',
                         field.line,
                     )
-                copied_fact = self.facts[matcher.extract]
-                copied_type = {f.name: f.type for f in copied_fact.fields}.get(
-                    matcher.field
-                )
-            if copied_type != decl_field.type:
-                raise CheckError(
-                    f'extract {d.name}.{field.name} copies '
-                    f'"{matcher.extract}.{matcher.field}" ({copied_type}), and '
-                    f'fact {d.name} declares "{field.name}" as {decl_field.type}.',
-                    field.line,
-                )
             copies.append(matcher.extract)
             return "copy", {"extract": matcher.extract, "field": matcher.field}
         assert_never(matcher)

@@ -49,30 +49,16 @@ fact medical_record as document:
 fact medical_record_page as page of medical_record
 
 # Who a page says it is about: the identifier printed in its header.
-fact page_identity:
-    patient_id as text
-
 # Read once, from the printed identifier.
 extract page_identity from medical_record_page:
     patient_id = text after any of ["MRN:", "Patient ID:"]
 
-# What kind of page this is.
-fact page_class:
-    type as text
-
-# A page is "vitals" if it says so anywhere on it.
+# What kind of page this is. A page is "vitals" if it says so anywhere on
+# it.
 extract page_class from medical_record_page:
     type = "vitals" if page contains any of ["VITAL SIGNS", "Vitals", "Wt:"]
 
 filter page_class.vitals keyed as medical_record_page where type == "vitals"
-
-# One set of vitals read off one page.
-fact measurement:
-    patient_id as text
-    page as text
-    measured_at as moment
-    height_cm as number
-    weight_kg as number
 
 # Vitals read off one page: as many rows as the page carries.
 extract measurement from medical_record_page:
@@ -432,11 +418,7 @@ fact medical_record as document:
 # Its one page kind.
 fact medical_record_page as page of medical_record
 
-# What kind of page this is.
-fact page_class:
-    type as text
-
-# A page is "vitals" if it says so.
+# What kind of page this is. A page is "vitals" if it says so.
 extract page_class from medical_record_page:
     type = "vitals" if page contains any of ["Wt:"]
 
@@ -520,14 +502,60 @@ extract measurement from medical_record_page:
     measured_at = date after any of ["Date:", "Visit date", "DOS"]
     weight_kg   = number after any of ["Weight:", "Wt:", "Wt", "WEIGHT"] in kg or lb
     height_cm   = number after any of ["Height:", "Ht:", "Ht", "HEIGHT"] in cm or in or ft_in
+
+# Who vitals are tracked for -- see the module docstring: nothing in D4/D5
+# populates this roster today, so the test writes it directly.
+fact patient:
+    mrn as text
+
+group measurement.by_patient_day from (patient_id, measured_at by day in "UTC")
+filter measurement.weighed where weight_kg is set
+filter measurement.heighted where height_cm is set
+
+# The height in force each day: the latest one measured, carried across the
+# days nobody measured it.
+figure patient.height bucketed:
+    display "{patient} height"
+    unit decimal
+    depends:
+        measured = measurement.by_patient_day:{patient} & measurement.heighted
+    calculate:
+        latest(measurement.height_cm over measured) carried forward
+
+# Weight on each day one was taken.
+figure patient.weight bucketed:
+    display "{patient} weight"
+    unit decimal
+    depends:
+        weighed = measurement.by_patient_day:{patient} & measurement.weighed
+    calculate:
+        latest(measurement.weight_kg over weighed)
+
+# Body-mass index on each day, from that day's weight and the height in
+# force.
+figure patient.bmi bucketed:
+    display "{patient} BMI"
+    unit decimal
+    calculate:
+        patient.weight:{bucket} / ((patient.height:{bucket} / 100) * (patient.height:{bucket} / 100))
 """
 
-# The fact kind stays declared -- a host could still write it by hand --
-# only the `extract` that used to produce it is gone, which is retirement
-# as D4 describes it: "an extract removed from the definitions has its
-# derived records deleted at the next pass, as a retired grouping's rows
-# are."
-RETIRED_SOURCE = SOURCE.replace(_RETIRED_EXTRACT_BLOCK, "\n")
+# Retiring `measurement` must retire every declaration that reads it too,
+# not just swap out its `extract`: under D4.4 the kind lives only inside
+# the extract that defines it, so there is no `fact measurement:` left
+# standing once the extract is gone for a group, filter or figure to
+# type-check against -- unlike the old fact-plus-extract shape, where the
+# fact stayed declared (and so did everything reading it) while only the
+# extract's own production stopped. `patient` stays declared, since the
+# test still writes it directly through the facts route; nothing else in
+# this tail survives the retirement.
+_RETIRED_REPLACEMENT = """
+# Who vitals are tracked for -- see the module docstring: nothing in D4/D5
+# populates this roster today, so the test writes it directly.
+fact patient:
+    mrn as text
+"""
+RETIRED_SOURCE = SOURCE.replace(_RETIRED_EXTRACT_BLOCK, _RETIRED_REPLACEMENT)
 assert RETIRED_SOURCE != SOURCE, "the block to strip must match the source exactly"
 
 

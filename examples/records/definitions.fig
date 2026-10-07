@@ -21,43 +21,30 @@ fact medical_record_page as page of medical_record
 # Who a page says it is about -- the identifier a chart's own system
 # prints, never a name. Names collide and are mistyped; a medical record
 # number does not, which is the entire reason this is its own extract
-# rather than a guess folded into `measurement` below.
-fact page_identity:
-    patient_id as text
-
-# Read once, from the printed identifier; every other extract on this page
-# trusts it rather than re-reading the page for itself.
+# rather than a guess folded into `measurement` below. Read once, from
+# the printed identifier; every other extract on this page trusts it
+# rather than re-reading the page for itself.
 extract page_identity from medical_record_page:
     patient_id = text after any of ["MRN:", "Patient ID:"]
 
 # What a page is, read from its own words rather than asserted by a
-# provider -- a scanned bundle has no folder structure to trust.
-fact page_class:
-    type as text
-
-# A page is "vitals" if it says so anywhere on it -- a ladder, first
-# match wins, searched over the whole page rather than one line, because
-# the trigger word and the vitals themselves are rarely on the same line.
+# provider -- a scanned bundle has no folder structure to trust. A page
+# is "vitals" if it says so anywhere on it -- a ladder, first match wins,
+# searched over the whole page rather than one line, because the trigger
+# word and the vitals themselves are rarely on the same line.
 extract page_class from medical_record_page:
     type = "vitals" if page contains any of ["VITAL SIGNS", "Vitals", "Wt:"]
 
 filter page_class.vitals keyed as medical_record_page where type == "vitals"
 
 # One set of vitals read off one page -- a record per page, or per row on
-# a flowsheet (`many by row`, below).
-fact measurement:
-    patient_id as text
-    page as text
-    measured_at as moment
-    weight_kg as number
-    height_cm as number
-
-# Every spelling this bundle's templates actually print for weight and
-# height -- authored by reading a sample of pages and listing what each
-# one says (D4's authoring loop). `author.py` is that loop's second half:
-# handed the failures this first draft left on a bundle it had not seen
-# yet, it proposes the alternative or matcher to add, over the page
-# words that broke it, never a guess made without them.
+# a flowsheet (`many by row`, below). Every spelling this bundle's
+# templates actually print for weight and height -- authored by reading
+# a sample of pages and listing what each one says (D4's authoring
+# loop). `author.py` is that loop's second half: handed the failures
+# this first draft left on a bundle it had not seen yet, it proposes the
+# alternative or matcher to add, over the page words that broke it,
+# never a guess made without them.
 extract measurement from medical_record_page:
     over page_class.vitals
     many by row up to 5
@@ -110,9 +97,10 @@ figure patient.bmi bucketed:
         patient.weight:{bucket} / ((patient.height:{bucket} / 100) * (patient.height:{bucket} / 100))
 
 # A second reader over the vitals each page prints (documents-plan-v3,
-# D6) -- told which fields `measurement` declares (name, type, unit,
-# this comment), never its alternatives or its current value. Run under
-# the fake provider in this example and its tests
+# D6) -- told which fields `measurement` declares (name, type, unit, and
+# each field's own `#` prose, when it has one), never its alternatives
+# or its current value. Run under the fake provider in this example and
+# its tests
 # (`URATORI_AUDIT_PROVIDER=fake`); a real deployment sets it to "claude"
 # and reads `docs/setup.md`'s "Audits and PHI egress" first.
 audit medical_record_page.vitals_audit:

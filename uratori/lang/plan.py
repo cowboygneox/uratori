@@ -109,15 +109,18 @@ class CompiledIndex:
 @dataclass(frozen=True)
 class ExtractPlan:
     """`extract measurement from medical_record_page:` -- deterministic
-    patterns over one page's word layer, producing records of a declared
-    kind. Computed by the server's documents runtime, never by the engine
-    (`uratori.facade.Uratori` refuses construction over a library that
-    carries one): a derived record is to a figure exactly what a host
-    record is, written through the same verified upsert before the pass
-    that reads it.
+    patterns over one page's word layer, producing records of the kind
+    this declaration itself defines. Computed by the server's documents
+    runtime, never by the engine (`uratori.facade.Uratori` refuses
+    construction over a library that carries one): a derived record is to
+    a figure exactly what a host record is, written through the same
+    verified upsert before the pass that reads it.
 
-    Named like the fact it targets -- `name` is the target kind, the same
-    bare name `fact <name>:` declares, never a second identifier.
+    `name` is the kind this extract defines -- the checker synthesizes a
+    `CompiledFact` of that same name into `Library.facts` (its fields'
+    types inferred from `fields`' matchers), so every downstream reader of
+    a fact kind -- an index, a figure's `depends`, the write boundary --
+    finds it there unchanged.
     """
 
     name: str

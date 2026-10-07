@@ -622,6 +622,13 @@ tag the runner switches on."""
 class ExtractField:
     name: str
     matcher: ExtractMatcher
+    doc: str = ""
+    """The `#` run directly above the field line, at the field's own
+    indent -- the audit worker's `fields_to_read` reads it exactly like a
+    fact field's prose (`_field_docs` in `lang/parse.py`), because this
+    field's declaration now carries both what it is and how it is read.
+    Optional: a field with no comment above it simply has none."""
+
     line: int = 0
 
 
@@ -631,16 +638,24 @@ class ExtractDecl:
     one page, by deterministic pattern, never a scalar and never a model at
     run time.
 
-    Named bare, after the `fact` kind it produces -- the same name, not a
-    second one: a derived record is to a figure exactly what a host record
-    is, so it is cited as `measurement`, not as some other identifier the
-    extract carries. A fact of that name must already be declared; this
-    declaration is refused if none is, or if another extract already
-    targets it (a derived kind is the target of exactly one extract).
+    Named bare -- this declaration defines its own record kind, the way a
+    `fact <name>:` defines one, not a second identifier pointing at one
+    declared elsewhere: a `fact measurement:` beside this is refused (one
+    record kind, one declaration of it, never two disagreeing about its
+    shape). Each field's type is inferred from its matcher (`number after`
+    -> number, `date after` -> moment, `text after` and a word ladder ->
+    text, a copy -> the copied field's own inferred type, resolved through
+    a chain of copies), never written out, because the matcher already
+    says it once. A derived record is to a figure exactly what a host
+    record is -- cited as `measurement`, grouped, filtered and read like
+    any other fact kind -- and a derived kind may be the target of
+    **exactly one** extract (checked by `_claim`, the one namespace every
+    declaration shares).
     """
 
     name: str
-    """The target fact kind -- bare, shared with `fact <name>:` above it."""
+    """The record kind this extract defines -- bare, the same name the
+    checker's synthesized `CompiledFact` carries into `Library.facts`."""
 
     source: str
     """The page-shaped fact kind this reads -- `as page of <document kind>`."""
@@ -688,8 +703,8 @@ class AuditDecl:
     `documents-plan-v3` D6.
 
     Named like a figure -- `<page kind>.<name>`, its own name, claimed in
-    the one namespace every rendered declaration shares -- never like an
-    extract, which borrows the name of the fact it produces: an audit
+    the one namespace every rendered declaration shares -- never bare like
+    an extract, which is named after the record kind it defines: an audit
     produces no fact at all.
     """
 

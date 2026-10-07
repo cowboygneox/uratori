@@ -68,6 +68,7 @@ from ..lang.ast import (
 )
 from ..lang.lex import DefinitionError, lex
 from ..lang.plan import (
+    CompiledFact,
     CompiledFactField,
     CompiledIndex,
     CompiledMeasure,
@@ -184,9 +185,15 @@ class ExtractFieldOut(BaseModel):
 
     `copy_of` is set only for a `copy` matcher (`patient_id =
     page_identity.patient_id`): the other extract and field it reads, spelt
-    `<extract>.<field>`; every other matcher leaves it `None`."""
+    `<extract>.<field>`; every other matcher leaves it `None`.
+
+    `type` is never written by the host -- it is what the checker inferred
+    from this very matcher (`number after` -> number, and so on), carried
+    here from the synthesized fact (`library.facts[extract.name]`) so a
+    reader sees the same answer the Facts tab would show for this kind."""
 
     name: str
+    type: str
     matcher: Literal["number after", "date after", "text after", "if page contains", "copy"]
     alternatives: list[str] = []
     units: list[str] = []
@@ -2847,8 +2854,15 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
     # Facts first: they are the leaves every trace bottoms out on, and a
     # fact-taught world whose schema was invisible here would dead-end the
     # exact reader the catalogue exists for. Schema-taught worlds have no
-    # entries -- their kinds have no declaration to show.
+    # entries -- their kinds have no declaration to show. A name that is
+    # also in `library.extracts` is skipped here: `library.facts` carries
+    # a synthesized fact for every extract (D4.4), and the extract's own
+    # entry below is that kind's one row -- a reader never sees "fact
+    # measurement" and "extract measurement" as two different pages for
+    # one kind.
     for name, fact in library.facts.items():
+        if name in library.extracts:
+            continue
         out.append(
             DeclarationOut(
                 name=name,
@@ -2861,13 +2875,11 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
             )
         )
 
-    # Extracts right after facts: an extract is named bare, after the fact
-    # kind it targets (D4), so the two always share a name and a reader who
-    # just read the fact's own page is reading the next entry for "how does
-    # this get written". `kind="extract"` disambiguates the lookup the same
-    # way `_HEADER_BY_KIND` disambiguates `declaration_source`/
-    # `declaration_prose` (`lang/source.py`) -- the one case two declaration
-    # kinds deliberately share a name.
+    # Extracts right after facts: an extract defines its own record kind,
+    # so a reader who just read the last fact's page is reading the next
+    # entry for "how does this kind get written". `kind="extract"` is
+    # still passed to the source/prose lookup so it never has to try every
+    # header pattern in the alternation in turn (`lang/source.py`).
     for name, extract in library.extracts.items():
         edges = [Dependency(type="fact", name=extract.source)]
         edges += _over_edges(library, extract.over)
@@ -2882,7 +2894,7 @@ def _declarations(library: Library, schema: Schema) -> list[DeclarationOut]:
                 fact_kind=name,
                 many=extract.many,
                 many_up_to=extract.many_up_to,
-                extract_fields=_extract_field_rows(extract.fields),
+                extract_fields=_extract_field_rows(extract.fields, library.facts[name]),
                 rests_on=_dedup(edges),
             )
         )
@@ -3174,7 +3186,16 @@ def _named(library: Library | None) -> dict[str, tuple[DeclarationKind, str | No
         return {}
     held: dict[str, tuple[DeclarationKind, str | None]] = {}
     for name, fact in library.facts.items():
+        # A name also in `library.extracts` is an extract-defined kind,
+        # not a declared fact -- reported below as "extract", the
+        # declaration a save actually diffs against. `library.facts`
+        # carries a synthesized entry for it too (D4.4), which this loop
+        # would otherwise report as a phantom "fact" that never changes.
+        if name in library.extracts:
+            continue
         held[name] = ("fact", fact.version)
+    for name, extract in library.extracts.items():
+        held[name] = ("extract", extract.version)
     for name, index in library.indexes.items():
         held[name] = (_grouping_kind(index), None)
     for name in library.measures:
@@ -3355,16 +3376,23 @@ def _over_edges(library: Library, expr: SetExpr | None) -> list[Dependency]:
     return []  # SetRef: refused at check time for an extract's `over`
 
 
-def _extract_field_rows(fields: tuple[ExtractField, ...]) -> list[ExtractFieldOut]:
+def _extract_field_rows(
+    fields: tuple[ExtractField, ...], fact: CompiledFact
+) -> list[ExtractFieldOut]:
     """Each field of an extract's target record, the way its matcher reads
-    it -- see `ExtractFieldOut`."""
+    it, and the type the checker inferred for it from that same matcher
+    (`fact` is the synthesized kind, `library.facts[extract.name]`) --
+    see `ExtractFieldOut`."""
+    types = {f.name: f.type for f in fact.fields}
     rows: list[ExtractFieldOut] = []
     for field in fields:
         matcher = field.matcher
+        field_type = types.get(field.name) or "text"
         if isinstance(matcher, NumberAfter):
             rows.append(
                 ExtractFieldOut(
                     name=field.name,
+                    type=field_type,
                     matcher="number after",
                     alternatives=list(matcher.alternatives),
                     units=list(matcher.units),
@@ -3374,6 +3402,7 @@ def _extract_field_rows(fields: tuple[ExtractField, ...]) -> list[ExtractFieldOu
             rows.append(
                 ExtractFieldOut(
                     name=field.name,
+                    type=field_type,
                     matcher="date after",
                     alternatives=list(matcher.alternatives),
                 )
@@ -3382,6 +3411,7 @@ def _extract_field_rows(fields: tuple[ExtractField, ...]) -> list[ExtractFieldOu
             rows.append(
                 ExtractFieldOut(
                     name=field.name,
+                    type=field_type,
                     matcher="text after",
                     alternatives=list(matcher.alternatives),
                 )
@@ -3390,6 +3420,7 @@ def _extract_field_rows(fields: tuple[ExtractField, ...]) -> list[ExtractFieldOu
             rows.append(
                 ExtractFieldOut(
                     name=field.name,
+                    type=field_type,
                     matcher="if page contains",
                     alternatives=[
                         f"{rung.word}: {alt}"
@@ -3403,6 +3434,7 @@ def _extract_field_rows(fields: tuple[ExtractField, ...]) -> list[ExtractFieldOu
             rows.append(
                 ExtractFieldOut(
                     name=field.name,
+                    type=field_type,
                     matcher="copy",
                     copy_of=f"{matcher.extract}.{matcher.field}",
                 )

@@ -1069,8 +1069,8 @@ nothing.
 ## `extract`
 
 `extract` declarations (`docs/language.md`, "`extract` -- records read off
-a page") produce ordinary facts of their declared kind, written by a
-server pre-pass before every pass runs -- the facts route, `POST
+a page") produce ordinary facts of the kind they themselves define,
+written by a server pre-pass before every pass runs -- the facts route, `POST
 /tenants/{tenant}/runs`, and every documents route above all trigger it.
 The facts route refuses a direct write or delete against an extract's
 target kind (422, naming the extract), the same as a document or page

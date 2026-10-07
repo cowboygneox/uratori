@@ -196,7 +196,7 @@ a real constraint on naming, better stated than discovered.
 | `projection` | one row per record | nothing |
 | `summarise` | one row about a whole population | nothing |
 | `bundle` | which answers travel together in one request | nothing -- it composes |
-| `extract` | records read off a page, by deterministic pattern | ordinary facts, of a declared kind |
+| `extract` | records read off a page, by deterministic pattern | ordinary facts, of the kind it defines |
 
 Only a **figure** stores anything, and that single fact decides which
 constructs may read a clock: a stored value computed from `now` is stale the
@@ -744,30 +744,15 @@ fact medical_record as document:
 fact medical_record_page as page of medical_record
 
 # Who a page says it is about: the identifier printed in its header.
-fact page_identity:
-    patient_id as text
-
-# Read once, from the printed identifier; every other extract below trusts it.
 extract page_identity from medical_record_page:
     patient_id = text after any of ["MRN:", "Patient ID:"]
 
-# What kind of page this is.
-fact page_class:
-    type as text
-
-# A page is "vitals" if it says so anywhere on it.
+# What kind of page this is. A page is "vitals" if it says so anywhere
+# on it.
 extract page_class from medical_record_page:
     type = "vitals" if page contains any of ["VITAL SIGNS", "Vitals", "Wt:"]
 
 filter page_class.vitals keyed as medical_record_page where type == "vitals"
-
-# One set of vitals read off one page.
-fact measurement:
-    patient_id as text
-    page as text
-    measured_at as moment
-    weight_kg as number
-    height_cm as number
 
 # Vitals read off one page: as many rows as the page carries.
 extract measurement from medical_record_page:
@@ -782,14 +767,18 @@ extract measurement from medical_record_page:
 (The language has no line continuation -- every field is one line, even a
 long one; the worked prose above wraps for the page, the source does not.)
 
-An extract is named **bare, after the fact kind it produces** -- `extract
-measurement from medical_record_page:` targets a `fact measurement:`
-declared elsewhere in the source, the same name, not a second identifier. A
-derived record is to a figure exactly what a host record is: it is cited
-as `measurement`, grouped, filtered and read like any other fact, and shown
-on the Facts tab beside records a host pushed. Declaring the target fact is
-required -- `extract <name>` with no matching `fact <name>:` is refused --
-and a derived kind may be the target of **exactly one** extract.
+An extract is named **bare**, and it defines its own record kind -- there is
+no separate `fact measurement:` to write, and declaring one beside `extract
+measurement from medical_record_page:` is refused (a record kind declared
+twice is two declarations that could silently disagree about its shape). A
+field's type is never written out; it is inferred from the matcher that
+reads it (the next section), the same way a calculation's unit comes from
+its arithmetic rather than a second line restating it. A derived record is
+to a figure exactly what a host record is: it is cited as `measurement`,
+grouped, filtered and read like any other fact, and shown on the Facts tab
+beside records a host pushed. A derived kind may be the target of
+**exactly one** extract, and its name may not collide with any other
+declaration's, checked the same way every other name in the language is.
 
 ### The source, and `over`
 
@@ -814,23 +803,25 @@ pass, gated into (or out of) `measurement`.
   printed unit to decide the conversion -- "82" beside no unit is not a
   weight, and reading one anyway would be a guess wearing a number's
   clothes; that page is a failure, not a guess. A single declared unit
-  needs none printed -- the field's own unit is the answer.
+  needs none printed -- the field's own unit is the answer. The field's
+  type is **number**.
 - **`date after any of [...]`**: the first date-shaped token following any
   alternative, on the same line, by an explicit grammar (ISO `2024-03-02`,
   US `03/04/2024`, `Mar 4, 2024`). A day/month reading the grammar cannot
   resolve (`03/04/2024` with nothing to disambiguate) is a failure, never
-  a guess at which one is meant.
+  a guess at which one is meant. The field's type is **moment**.
 - **`text after any of [...]`**: the first word-shaped token following any
   alternative, trimmed. An identifier, not prose: a value carrying `@`
   (the composite-key separator the bucketer itself refuses) or a control
   character is a failure, never a record -- unchecked, one OCR misread
-  would raise in every pass for the tenant.
+  would raise in every pass for the tenant. The field's type is **text**.
 - **`"<word>" if page contains any of [...]`**, chained into a ladder (one
   rung per line, `otherwise "<word>"` optional): first match wins, searched
   over the whole page rather than one line -- this is what `page_class`
   above is. A page matching no rung and no `otherwise` simply fails this
   field; the honest answer for a page nobody has taught the extract to
-  classify yet is "not read", never a guessed default.
+  classify yet is "not read", never a guessed default. The field's type
+  is **text**.
 - **`<field> = <other extract>.<field>`**: a copy of another extract's
   field, read off the *same page*. Copies are the one thing an extract may
   read besides the page's own words. They form a graph the checker orders
@@ -840,7 +831,10 @@ pass, gated into (or out of) `measurement`.
   matcher re-extracts everything that copies it. `patient_id` is not
   declared with its own matcher anywhere in `measurement` above; it is
   read once, by `page_identity`, and carried by every extract that trusts
-  it.
+  it. The field's type is **whatever the copied field's own type is** --
+  resolved through a chain of copies when the copied field is itself a
+  copy -- and copying `<other>.page` (the built-in field below) is always
+  **text**.
 
 Every matcher's alternatives and (for `number after`) units are hashed
 into the extract's version, along with a `MATCHER_VERSION` constant (the
@@ -849,7 +843,10 @@ versions of the fixed conversion table and date grammar -- so "the same
 version over the same word layer produces the same records, byte for
 byte" is actually true, and a change to *how* a line is read forks a
 version exactly as a change to *what* it looks for does. The `#` prose
-above the declaration is never hashed, like everywhere else.
+above the declaration is never hashed, like everywhere else -- and a
+field may carry a `#` run of its own, directly above its line, the same
+way a `fact`'s field does: optional, never hashed, and what an `audit`
+verifying this field is told of it (D6, below), word for word.
 
 ### `many by row`, and keys
 
@@ -876,12 +873,13 @@ defaults to a ceiling of 20.
 
 ### The built-in `page` field
 
-Every extract's target fact may declare a field named `page` -- `page as
-text` -- and every record this extract produces carries it, set by the
-**engine**, never by a matcher: the source page's own key (`page = source`
-of the record). A field this extract itself tries to write with a matcher
-line of its own is refused; `page` is read-only, the way `document_id` and
-the rest of a page's own shape fields are.
+Every extract-defined kind carries a field named `page` -- **text**,
+always, whether or not the declaration mentions it -- and every record
+this extract produces carries it, set by the **engine**, never by a
+matcher: the source page's own key (`page = source` of the record). A
+field this extract itself tries to write with a matcher line of its own
+is refused; `page` is read-only, the way `document_id` and the rest of a
+page's own shape fields are.
 
 ### Failures, not guesses -- and absence is still not an error
 
@@ -952,20 +950,9 @@ fact medical_record as document:
 fact medical_record_page as page of medical_record
 
 # Who a page says it is about: the identifier printed in its header.
-fact page_identity:
-    patient_id as text
-
 # Read once, from the printed identifier.
 extract page_identity from medical_record_page:
     patient_id = text after any of ["MRN:", "Patient ID:"]
-
-# One set of vitals read off one page.
-fact measurement:
-    patient_id as text
-    page as text
-    measured_at as moment
-    weight_kg as number
-    height_cm as number
 
 # Vitals read off one page.
 extract measurement from medical_record_page:
@@ -985,9 +972,8 @@ audit medical_record_page.vitals_audit:
 ```
 
 Named like a figure -- `<page kind>.<name>`, claimed in the one namespace
-every rendered declaration shares -- never like an extract, which
-deliberately borrows the name of the fact it produces: an audit produces
-no fact at all.
+every rendered declaration shares -- never bare like an extract, which is
+named after the record kind it defines: an audit produces no fact at all.
 
 ### The reading is taken once; the verdict is judged every pass
 
@@ -1084,13 +1070,6 @@ fact medical_record as document:
 
 # One page of one.
 fact medical_record_page as page of medical_record
-
-# One set of vitals read off one page.
-fact measurement:
-    patient_id as text
-    page as text
-    measured_at as moment
-    weight_kg as number
 
 # Vitals read off one page.
 extract measurement from medical_record_page:
